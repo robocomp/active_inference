@@ -73,3 +73,11 @@ target_include_directories(size_likelihood_test PRIVATE ../src ../../common ../.
 target_compile_options(size_likelihood_test PRIVATE -O2)
 target_link_libraries(size_likelihood_test PRIVATE Eigen3::Eigen)
 add_test(NAME size_likelihood_test COMMAND size_likelihood_test)
+
+# The class factor of existence (spec 2026-11-14 countable class existence §3, §9): class_factor_step, apply_class_step and the
+# product p_exists() = occupancy x class. Run: ./class_factor_test
+add_executable(class_factor_test class_factor_test.cpp ../src/countable_belief.cpp)
+target_include_directories(class_factor_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(class_factor_test PRIVATE -O2)
+target_link_libraries(class_factor_test PRIVATE Eigen3::Eigen)
+add_test(NAME class_factor_test COMMAND class_factor_test)

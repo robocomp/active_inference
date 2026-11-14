@@ -353,23 +353,19 @@ struct CountableConfig
     // ── "Is this really a bed?" plausibility filter + soft singleton (model-evidence mis-detection reject) ─
     // A YOLO "bed" mis-detection (e.g. a ~70 cm elongated cabinet) contradicts the bed shape priors
     // (square-ish footprint, tall) → poorly explained by the bed model → high free energy. Rather than a hard
-    // `if (H<1) reject`, a CONTINUOUS plausibility score (aspect·size·height·fit) + a bounded plaus_evidence
-    // accumulator gates BIRTH (scales the tracker's birth evidence) and drives EXISTENCE decay (implausible →
-    // negative existence log-odds → removed by the existence debounce). A SOFT singleton (a kitchen has ~one
-    // bed) lets a stronger-evidence bed inhibit weaker duplicates. All continuous, all bounded, no cuts.
+    // `if (H<1) reject`, the candidate's class probability gates BIRTH (scales the tracker's birth evidence) and the
+    // fitted shape's class evidence Λ is the CLASS factor of existence (existence = occupancy × class; own log-odds,
+    // own debounce, apply_class_factor). A SOFT singleton (a kitchen has ~one bed) lets a sibling with more class
+    // evidence inhibit weaker duplicates. All continuous, all bounded, no cuts.
     bool  countable_filter_enabled   = true;    // master switch for the whole plausibility filter
     float plaus_aspect_scale      = 0.15f;   // aspect_ok = exp(−(|w−h|/(w+h)/scale)²): ~1 square, →0 elongated
     float plaus_size_scale        = 0.15f;   // size_ok  = exp(−((w−fp)²+(h−fp)²)/(2·scale²)); fp = AI2PriorFootprintM
-    float plaus_alt_size_scale    = 0.60f;   // the ALTERNATIVE ("other furniture") footprint std (m) the bed
-                                             // hypothesis is scored against in countable_log_evidence_ratio
     float plaus_height_min        = 1.20f;   // height_ok logistic centre (m): →1 tall, →0 below ~1 m ("70 cm improbable")
     float plaus_height_soft       = 0.15f;   // height_ok logistic softness (m)
     float plaus_fe_ref            = 2.0f;    // "healthy bed fit" FE reference — NEEDS LIVE TUNING (≈ a good bed's mean_energy)
     float plaus_fe_scale          = 1.0f;    // fit_ok = exp(−max(0, FE−FeRef)/FeScale)
-    float plaus_clamp             = 8.0f;    // ±bound on the plaus_evidence accumulator (bounded memory: one bad frame can't kill a real bed)
     float plaus_height_prior_gain = 2000.0f; // short-height prior precision (1/m²) per (deficit/soft) below HeightPlausibleMin; 0 = OFF
-    float plaus_to_existence_gain = 1.5f;    // how strongly tanh(plaus_evidence) pushes the existence log-odds per cycle
-    float singleton_inhibition    = 1.0f;    // mutual-inhibition weight: a STRONGER bed subtracts this·P(exists) from a weaker one's existence L
+    float singleton_inhibition    = 1.0f;    // mutual-inhibition weight: a sibling with MORE class evidence subtracts this·P(exists) from a weaker one's class L
     bool  countable_filter_log       = false;   // log per-instance plausibility / evidence / existence-delta each cycle
 
     // ── RT-edge covariance upload ─────────────────────────────────────────────────────────────────

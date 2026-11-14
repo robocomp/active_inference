@@ -294,8 +294,6 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "aspect = |w−h|/(w+h); aspect_ok = exp(−(aspect/scale)²) → 1 square");
     out.plaus_size_scale        = getf("Model.SizeScale", 0.15f,
             "size_ok = exp(−((w−fp)²+(h−fp)²)/(2·scale²)), fp = prior_footprint_m");
-    out.plaus_alt_size_scale    = getf("Model.AltSizeScale", 0.60f,
-            "alternative footprint std (m) around prior_footprint_m");
     out.plaus_height_min        = getf("Model.HeightPlausibleMin", 1.20f,
             "logistic centre (m): height_ok ≈ 0.5 here, →1 tall, →0 below ~1 m");
     out.plaus_height_soft       = getf("Model.HeightSoft", 0.15f,
@@ -304,12 +302,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "'healthy bed fit' free-energy reference (NEEDS LIVE TUNING)");
     out.plaus_fe_scale          = getf("Model.FeScale", 1.0f,
             "fit_ok = exp(−max(0, FE−fe_ref)/fe_scale)");
-    out.plaus_clamp             = getf("Model.PlausClamp", 8.0f,
-            "±bound on the plaus_evidence accumulator (bounded memory: one bad frame can't kill a real bed)");
     out.plaus_height_prior_gain = getf("Model.PlausHeightPriorGain", 2000.0f,
             "precision (1/m²) per unit (deficit/soft) below plaus_height_min");
-    out.plaus_to_existence_gain = getf("Model.PlausToExistenceGain", 1.5f,
-            "how strongly tanh(plaus_evidence) pushes the existence log-odds per cycle");
     out.singleton_inhibition    = getf("Model.SingletonInhibition", 1.0f,
             "mutual-inhibition weight: a STRONGER bed subtracts this·P(exists) from a weaker one's existence L");
     out.countable_filter_log       = getb("Concept.FilterLog", false,
@@ -540,7 +534,6 @@ bool verify_countable_manifest(const CountableConfig& out, const std::string& pa
     chk("prior.attachment.no_cross_precision", out.ai2_wall_no_cross_precision,"wall no-cross");
     chk("prior.identity.aspect_scale",         out.plaus_aspect_scale,         "identity aspect");
     chk("prior.identity.size_scale",           out.plaus_size_scale,           "identity size");
-    chk("prior.identity.alt_size_scale",       out.plaus_alt_size_scale,       "identity alternative");
     chk("prior.identity.height_min_m",         out.plaus_height_min,           "identity height centre");
     chk("prior.identity.height_soft_m",        out.plaus_height_soft,          "identity height softness");
     chk("prior.clearance.gain_nats",           out.ai2_door_clearance_gain,    "door clearance prior");

@@ -19,6 +19,7 @@
 
 #include "countable_model.h"        // CountableModel / CountableState
 #include "countable_belief.h"       // AI2 full-covariance belief (COUNTABLE.md)
+#include "countable_class_evidence.h"   // class factor + existence_product
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/existence_belief/existence_belief.h"
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)   // per-instance existence log-odds (removal)
@@ -159,20 +160,18 @@ struct CountableInstance
     // its senior's returns as evidence that IT exists. See exclusion.h for the measured door/bed collision.
     rc::exclusion::Seniority exclusion;
 
-    // ── "Is this really a bed?" plausibility filter (model-evidence mis-detection reject) ──────────
-    // last_plausibility = this cycle's shape LOG-EVIDENCE RATIO log[p(θ|bed)/p(θ|other furniture)] (nats,
-    // 0 = the two hypotheses are indifferent); plaus_evidence is its bounded sequential-Bayes accumulator
-    // (clamped ±PlausClamp): a settled bed sits strongly positive, a mis-detection (elongated/short) drives it
-    // negative → existence decay. One bad frame cannot flip a settled sign; it can still RECANT over many frames.
-    // plaus_debounce is the dedicated debounce for the plausibility+singleton removal path (independent of
-    // the sensor-existence streak). plaus_seen_frames pins the accumulator to MEASURED cycles: it stores the
-    // matched_frames value already folded in, so a frozen belief (no fresh mask / gated update) contributes
-    // NOTHING instead of re-adding the same static shape term until it saturates the clamp — the repetition
-    // defect that deleted well-fitted beds with zero new data. See [[bed-table-geometry-churn]].
-    float last_plausibility = 0.0f;
-    float plaus_evidence     = 0.0f;
-    rc::exist::RemovalDebounce plaus_debounce;   // same policy as the sensor debounce (see lifecycle)
-    int   plaus_seen_frames   = -1;
+    // ── CLASS FACTOR of existence (spec 2026-11-14 countable class existence) ──────────────────────────
+    // existence = occupancy x class. `existence` above is OCCUPANCY ("something is there"); class_belief is "that
+    // something is this class", with its own log-odds L_cls (same ±Model.ExistenceLogOddsMax) that starts at
+    // logit(π_cls) and moves only with the shape evidence Λ of MEASURED cycles (class_seen_frames pins it: a frozen
+    // belief re-judged is the same evidence counted N times). class_debounce is its own removal streak, driven by
+    // the SAME RemovalPolicy as the occupancy one; the class factor removes only what its own evidence argued against.
+    // class_lambda = the last Λ (nats), for logs.
+    rc::exist::ExistenceBelief class_belief;
+    rc::exist::RemovalDebounce class_debounce;
+    float class_lambda       = 0.0f;
+    int   class_seen_frames  = -1;
+    float p_exists() const { return rc::countable::existence_product(existence, class_belief); }   // the product
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
     // CANNOT resolve the bed (far / peripheral / edge-on) does NOT vote removal — it raises this decayed
     // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification arms the epistemic planner

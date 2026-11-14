@@ -11,6 +11,7 @@
 #include <cmath>
 #include <numbers>
 #include <vector>
+#include "../../common/existence_belief/existence_belief.h"   // ExistenceBelief, RemovalDebounce, decide_removal
 
 namespace rc::countable
 {
@@ -116,4 +117,48 @@ inline float robust_z_extent(const std::vector<Eigen::Vector3f>& pts)      // q0
 
 inline float class_probability(float L) { return 1.0f / (1.0f + std::exp(-L)); }
 inline float logit(float p) { return std::log(p / (1.0f - p)); }
+
+// ── The class factor of existence ───────────────────────────────────────────────────────────────────────────────
+// existence = occupancy x class. L_cls is its own log-odds, starting at logit(π_cls) and moved ONLY by the shape
+// evidence Λ of measured cycles; it removes an instance only on that evidence (never on the occupancy channels').
+struct ClassStep { float L_cls = 0.0f; bool argued_against = false; };
+
+// One step for every fitted instance. Singleton: a sibling with MORE shape evidence inhibits this one by its own
+// existence probability (p_product = the other instances' occupancy x class), a soft mutual exclusion, no gate:
+//   L_cls,i = logit(p_label_true) + Λ_i − inhibition·Σ_{j≠i} p_j·[Λ_j > Λ_i];  argued_against = (Λ_i − singleton_i) < 0.
+inline std::vector<ClassStep> class_factor_step(const std::vector<float>& lambda, const std::vector<float>& p_product,
+                                                float p_label_true, float inhibition)
+{
+    std::vector<ClassStep> out(lambda.size());
+    for (std::size_t i = 0; i < lambda.size(); ++i)
+    {
+        float singleton = 0.0f;
+        for (std::size_t j = 0; j < lambda.size(); ++j)
+            if (j != i and lambda[j] > lambda[i]) singleton += (j < p_product.size() ? p_product[j] : 0.5f);
+        singleton *= inhibition;
+        out[i].L_cls          = logit(p_label_true) + lambda[i] - singleton;
+        out[i].argued_against = (lambda[i] - singleton) < 0.0f;
+    }
+    return out;
+}
+
+// The worker-side application to ONE instance's class fields. An unmeasured cycle (no geometric update, or gated)
+// changes nothing: the same shape said again is not new evidence. Measured: L_cls := step.L_cls and the debounce
+// advances only when the class has itself argued against the object (and the instance is past its warm-up), through
+// the SAME RemovalPolicy as the occupancy debounce. Returns "remove".
+inline bool apply_class_step(rc::exist::ExistenceBelief& class_belief, rc::exist::RemovalDebounce& class_debounce,
+                             float& class_lambda, bool measured, bool warm, float lambda, const ClassStep& step,
+                             const rc::exist::RemovalPolicy& policy)
+{
+    if (not measured) return false;
+    class_lambda = lambda;
+    class_belief.set(step.L_cls);
+    return rc::exist::decide_removal(class_belief, class_debounce, policy, (warm and step.argued_against) ? 1.0f : 0.0f).remove;
+}
+
+// p(exists) = p(occupied) · p(is this class): the two factors are independent questions about one object.
+inline float existence_product(const rc::exist::ExistenceBelief& occupancy, const rc::exist::ExistenceBelief& class_belief)
+{
+    return occupancy.p_exists() * class_belief.p_exists();
+}
 }

@@ -171,10 +171,6 @@ struct CountableBeliefParams
     float plaus_height_soft       = 0.15f;   // logistic softness (m) of the height_ok falloff
     float plaus_fe_ref            = 2.0f;    // "healthy bed fit" free-energy reference (NEEDS LIVE TUNING)
     float plaus_fe_scale          = 1.0f;    // fit_ok = exp(−max(0, FE−fe_ref)/fe_scale)
-    // The ALTERNATIVE hypothesis "some other furniture-shaped box", against which the bed hypothesis is
-    // scored (countable_log_evidence_ratio). Broad on footprint size and uninformative on aspect/height, so it is
-    // the bed hypothesis's tightness that earns the positive evidence — not an arbitrary 0.5 boundary.
-    float plaus_alt_size_scale    = 0.60f;   // alternative footprint std (m) around prior_footprint_m
     // Short-height PRIOR (accumulate_extra): a one-sided GN factor nudging H up when H < plaus_height_min, with
     // precision GROWING as H falls further below (λ = gain·(deficit/soft)). Continuous covariance, NOT a clamp:
     // fitting a 70 cm cloud as a bed then fights this prior → worse fit → lower plausibility. 0 = OFF.
@@ -488,27 +484,10 @@ public:
     // static overload is pure (self_test / birth-candidate use); the member evaluates the current state.
     static float countable_plausibility(const CountableBeliefState& s, float fe, const CountableBeliefParams& p);
     float countable_plausibility(float fe) const { return countable_plausibility(state_, fe, params_); }
-    // Shape LOG-EVIDENCE RATIO (nats): log p(θ | bed) − log p(θ | other furniture), using NORMALISED
-    // densities for both hypotheses. This — not `plausibility − 0.5` — is the quantity that may be summed into
-    // an existence log-odds: countable_plausibility is an UN-normalised product of exponentials whose 0.5 level is
-    // arbitrary, so a perfectly ordinary 0.77×0.63×1.52 bed scored 0.30 and was driven to deletion. Positive
-    // ⇒ the bed hypothesis explains this shape better than generic furniture. See [[bed-table-geometry-churn]].
-    static float countable_log_evidence_ratio(const CountableBeliefState& s, const CountableBeliefParams& p);
-    float countable_log_evidence_ratio() const { return countable_log_evidence_ratio(state_, params_); }
     // Birth-candidate plausibility from a raw mask cloud (BEFORE any fit): footprint aspect + size from the
     // 2-D principal extents, and a rough height from the cloud z-range. Scales the tracker's birth evidence so
     // an elongated/short candidate never accumulates enough to birth. fit term = 1 (no fit yet). Pure/static.
     static float candidate_plausibility(const std::vector<Eigen::Vector3f>& pts, const CountableBeliefParams& p);
-    // Soft SINGLETON inhibition (a kitchen has ~one bed). Given every instance's accumulated plausibility
-    // evidence + existence probability, returns each instance's per-cycle existence-logodds delta:
-    //   shape_i   = gain·tanh(plaus_evidence_i / clamp)                       (+ support / − decay by shape)
-    //   penalty_i = inhibition·Σ_{j≠i} p_exists_j·[plaus_evidence_j > plaus_evidence_i]   (stronger inhibit weaker)
-    //   delta_i   = shape_i − penalty_i
-    // SOFT + bounded: a genuinely strongly-supported second bed survives; the weaker mis-detection decays.
-    static std::vector<float> singleton_existence_deltas(const std::vector<float>& plaus_evidence,
-                                                         const std::vector<float>& p_exists,
-                                                         float gain, float inhibition, float clamp);
-
     // ── Verification ──────────────────────────────────────────────────────────
     static bool self_test();
 

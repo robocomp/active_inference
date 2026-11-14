@@ -259,11 +259,11 @@ void SpecificWorker::run_instance_tracker()
                 const float s = m / (m + std::max(1e-3f, cfg_.birth_fusion_mass_ref));   // half-saturated at ref
                 dv.birth_evidence = 1.0f + cfg_.birth_fusion_gain * s;
             }
-            // BIRTH GATE — "is this really a bed?" on the raw candidate cloud. Scale the per-frame birth
-            // evidence by the candidate footprint/height plausibility (aspect + size + z-range height), so an
-            // ELONGATED or SHORT candidate (the mis-detection, e.g. a 70 cm cabinet) accumulates slowly / never
-            // births, while a bed-shaped one births normally. Continuous (∈(0,1]), not a gate. See
-            // CountableBelief::candidate_plausibility.
+            // BIRTH GATE — "is this really a bed?" on the raw candidate cloud. Scale the per-frame birth evidence
+            // by the candidate's CLASS PROBABILITY: logit(π_cls) + the class evidence of the cloud's robust height
+            // (z quantile 0.97 − 0.03), two-sided against "some other furniture". So a 70 cm cabinet or a 1.9 m
+            // blackboard cloud accumulates slowly / never births, while a bed-shaped one births normally. It is a
+            // probability (max ≈ 0.92, not 1), not a gate. See CountableBelief::candidate_plausibility.
             if (cfg_.countable_filter_enabled)
             {
                 const auto cloud = slice_cloud(pkt, i);
@@ -460,7 +460,7 @@ void SpecificWorker::run_instance_tracker()
         // multiplier, but re-run on the union — where the z-range finally spans the object instead of one
         // partial view, so it stops penalising real beds — and read as a DECISION. A refused birth never
         // reaches DSR; without this the mis-detection is created and must be retracted later by
-        // apply_countable_filter, and in this agent `res.deaths` is ignored so that is the only way back out.
+        // apply_class_factor, and in this agent `res.deaths` is ignored so that is the only way back out.
         if (burst and cfg_.countable_filter_enabled and cfg_.birth_admit_plausibility > 0.0f)
         {
             const float plaus = rc::CountableBelief::candidate_plausibility(burst->pts, plaus_p);
@@ -530,16 +530,16 @@ void SpecificWorker::run_instance_tracker()
 }
 
 
-// ─── "Is this really a bed?" soft singleton + plausibility→existence retire ────────────────────
+// ─── The class factor of existence: "is this really a <class>?" ────────────────────────────────────
 
-// Fold each bed's accumulated shape-plausibility evidence (Part 1) AND a soft SINGLETON inhibition (a
-// kitchen has ~one bed — a stronger-evidence bed inhibits weaker duplicates) into its existence
-// log-odds each cycle, then retire the instances the combined evidence drives below the removal boundary
-// (debounced). Everything is continuous + bounded: a genuine, strongly-supported second bed survives; the
-// weaker mis-detection (elongated/short cabinet mislabelled "bed") decays and is removed. The worker
-// owns this because the singleton term needs to see ALL instances at once. See CountableBelief::
-// singleton_existence_deltas / countable_log_evidence_ratio. Runs regardless of the sensor-existence channel.
-void SpecificWorker::apply_countable_filter()
+// existence = occupancy x class (spec 2026-11-14 countable class existence). The occupancy channels (sensor
+// debounce, out-of-view HOLD) are untouched; this is the OTHER factor. Each fitted instance's likelihood-only
+// (H, w, h) summary is scored against the class prior as Λ (nats, rc::countable::class_log_evidence), L_cls =
+// logit(π_cls) + Λ − singleton, and the class factor removes an instance only on its own evidence, through the same
+// RemovalPolicy and debounce as occupancy. The worker owns it because the singleton term needs ALL instances at
+// once (a stronger sibling, by Λ, inhibits a weaker one by its own existence probability). Nothing is accumulated:
+// L_cls is re-derived from the belief's summary on every MEASURED cycle, and an unmeasured cycle changes nothing.
+void SpecificWorker::apply_class_factor()
 {
     if (not cfg_.countable_filter_enabled)
         return;
@@ -547,115 +547,64 @@ void SpecificWorker::apply_countable_filter()
     if (insts.empty())
         return;
 
-    // Snapshot (stable order) the accumulated plausibility evidence + current existence probability per instance.
+    rc::CountableBeliefParams cp;   // only the class prior is read from it
+    cp.prior_footprint_m = cfg_.ai2_prior_footprint_m;   cp.prior_depth_m        = cfg_.ai2_prior_depth_m;
+    cp.prior_height_m    = cfg_.ai2_prior_height_m;      cp.prior_height_std     = cfg_.ai2_prior_height_std;
+    cp.prior_footprint_std = cfg_.ai2_prior_footprint_std;
+    cp.headboard_h_m     = cfg_.ai2_headboard_h_m;       cp.class_p_label_true   = cfg_.class_p_label_true;
+    const auto prior = cp.class_shape_prior();
+
+    // Judge the CURRENT fitted shape, but ONLY on a cycle that actually MEASURED it: matched_frames advances solely
+    // inside run_inference, so comparing it with class_seen_frames admits exactly the cycles that took a geometric
+    // update. Re-scoring a frozen belief every cycle is the SAME evidence counted N times (it deleted well-fitted
+    // beds with no sensor evidence at all, [[chair-flip-acc-repetition-defect]]). A diverged mis-detection that
+    // coasts out of view sits until it is looked at; the silhouette channel HOLDs out of the FoV and raises
+    // wants_verification, the designed answer: send the robot to LOOK, never delete what it has not seen.
     std::vector<std::uint64_t> ids;
-    std::vector<float>         pe, px;
-    ids.reserve(insts.size()); pe.reserve(insts.size()); px.reserve(insts.size());
+    std::vector<float>         lambda, p_product;
+    std::vector<char>          measured;
     for (auto& [id, inst] : insts)
     {
         if (not inst.ai2_initialized) continue;   // only fitted instances participate (shape evidence is meaningful)
-        // Judge the CURRENT fitted shape, but ONLY on a cycle that actually MEASURED it — matched_frames advances
-        // solely inside run_inference, so comparing against plaus_seen_frames admits exactly the cycles that took
-        // a geometric update. Re-scoring a frozen belief every cycle is not sequential Bayes, it is the SAME
-        // evidence counted N times: it drove the accumulator to −clamp on an unchanged shape and deleted
-        // well-fitted beds with no sensor evidence at all (live: L falling 1.1/cycle while sndet=socc=sfree=0).
-        // Same defect class as [[chair-flip-acc-repetition-defect]].
-        //
-        // The increment is the shape LOG-EVIDENCE RATIO vs "other furniture" (nats), clamped per cycle to
-        // ±plaus_clamp so a single frame can at most cancel a settled accumulator, never invert it.
-        //
-        // TRADE-OFF this replaces: the old every-cycle rule also kept decaying a mis-detection that had diverged
-        // to a cabinet shape and then coasted OUT OF FoV, so it could never be immortal. That decay is gone — but
-        // it was decay without observation, the same thing that killed real beds. A diverged mis-detection now
-        // sits frozen until looked at, and one measured frame is enough (its LLR ≈ −17 saturates the accumulator
-        // immediately). Meanwhile the silhouette channel HOLDs out-of-FoV and raises wants_verification, which is
-        // the designed answer: send the robot to LOOK, never delete what it has not seen.
-        if (inst.matched_frames != inst.plaus_seen_frames and not inst.dbg_gated)
+        const bool m = (inst.matched_frames != inst.class_seen_frames and not inst.dbg_gated);
+        inst.class_belief.set_max(cfg_.existence_logodds_max);
+        inst.existence.set_max(cfg_.existence_logodds_max);
+        float lam = inst.class_lambda;            // unmeasured: the last Λ (it still ranks siblings)
+        if (m)
         {
-            inst.plaus_seen_frames = inst.matched_frames;
-            inst.last_plausibility = inst.ai2_belief.countable_log_evidence_ratio();
-            const float step = std::clamp(inst.last_plausibility, -cfg_.plaus_clamp, cfg_.plaus_clamp);
-            inst.plaus_evidence = std::clamp(inst.plaus_evidence + step, -cfg_.plaus_clamp, cfg_.plaus_clamp);
+            inst.class_seen_frames = inst.matched_frames;
+            lam = rc::countable::class_log_evidence(inst.ai2_belief.size_likelihood(), prior, cfg_.class_alt_std_m);
         }
-        ids.push_back(id);
-        pe.push_back(inst.plaus_evidence);
-        px.push_back(inst.existence.p_exists());
+        ids.push_back(id); lambda.push_back(lam); p_product.push_back(inst.p_exists()); measured.push_back(m);
     }
     if (ids.empty())
         return;
 
-    // Per-instance existence-logodds delta = shape support (tanh of plaus_evidence) − singleton inhibition.
-    const auto deltas = rc::CountableBelief::singleton_existence_deltas(
-        pe, px, cfg_.plaus_to_existence_gain, cfg_.singleton_inhibition, cfg_.plaus_clamp);
+    const auto steps = rc::countable::class_factor_step(lambda, p_product, cfg_.class_p_label_true, cfg_.singleton_inhibition);
 
-    // The SAME policy the sensor debounce uses (rc::exist::RemovalPolicy) — see the note at the debounce below.
-    rc::exist::RemovalPolicy plaus_policy;
-    plaus_policy.logodds_max   = cfg_.existence_logodds_max;
-    plaus_policy.removal_prob  = cfg_.existence_removal_prob;
-    plaus_policy.remove_frames = static_cast<float>(cfg_.existence_remove_frames);
+    // The SAME policy the occupancy debounce uses (rc::exist::RemovalPolicy): a second, weaker streak on the same
+    // kind of belief would fire first and silently mask any fix applied to the first (existence_belief.h).
+    rc::exist::RemovalPolicy policy;
+    policy.logodds_max   = cfg_.existence_logodds_max;
+    policy.removal_prob  = cfg_.existence_removal_prob;
+    policy.remove_frames = static_cast<float>(cfg_.existence_remove_frames);
 
     std::vector<std::uint64_t> doomed;
     for (std::size_t k = 0; k < ids.size(); ++k)
     {
-        auto it = insts.find(ids[k]);
+        const auto it = insts.find(ids[k]);
         if (it == insts.end()) continue;
         auto& inst = it->second;
-        inst.existence.set_max(cfg_.existence_logodds_max);
-        bool plaus_doomed = false;
-        // ★Apply the shape/singleton delta ONLY on a cycle that actually measured this instance. I gated the
-        // ACCUMULATOR to measured cycles earlier but left the DELTA firing every cycle, so a frozen
-        // plaus_evidence kept pushing the existence log-odds at a constant rate with no new evidence — the same
-        // repetition-is-not-independence defect, one level up. Live: with the belief frozen (gated=1, npts=0)
-        // and BOTH sensor channels silent (sfree_eff≈0, lfree_eff=0), ex_L still fell a steady −0.65/cycle from
-        // +1.41 to the −4 clamp and the bed was removed. Whatever the shape says, saying it again on a frame
-        // that observed nothing is not evidence. Same rule as CREATE, UPDATE and the sensor REMOVE channels.
-        // ★THE DEBOUNCE OBEYS THE SAME RULE AS THE DELTA. It used to advance on ANY cycle where the decision
-        // said remove, so once L was below the boundary — however it got there, including from the sensor
-        // channel — this streak ran to RemoveFrames on cycles that measured NOTHING and deleted the bed.
-        // That also made it the weaker of the two authorities: it would fire before the sensor streak
-        // (which now accumulates p_detect), so fixing that one alone would have changed almost nothing here.
-        // Advancing only on a MEASURED, ungated cycle is the same "saying it again on a frame that observed
-        // nothing is not evidence" rule the comment above states for the delta.
-        const bool measured = (inst.matched_frames == inst.plaus_seen_frames and not inst.dbg_gated);
-        if (measured)
-        {
-            inst.existence.set(inst.existence.logodds() + deltas[k]);   // clamped by L_max
-
-            // Removal debounce (dedicated streak, independent of the sensor-existence streak). A freshly-born
-            // instance is given the SAME warmup grace as the belief aging (matched_frames_before_aging) so a
-            // young genuine bed is never retired before it has accrued its own shape evidence.
-            //
-            // ★IT TESTS THE SAME L AS THE SENSOR DEBOUNCE, SO IT MUST USE THE SAME POLICY. existence_belief.h
-            // names this exact hazard: a second, weaker streak on the same belief "fires first and silently
-            // masks any fix applied here". Hand-written, it counted CYCLES against a fixed RemoveFrames while
-            // the sensor path counted LOOKS against a confidence-scaled requirement — so the weaker one
-            // decided. Routed through rc::exist::decide_removal it inherits both rules.
-            //
-            // ★★AND A CHANNEL MAY ONLY EXECUTE A REMOVAL IT HAS ARGUED FOR. `deltas[k] < 0` is this channel's
-            // own evidence AGAINST the object this cycle — bad shape, or out-competed by a stronger sibling.
-            // Without that condition the debounce merely watched L, which any OTHER channel may have driven
-            // down, and deleted on a case it never made.
-            //
-            // That is not hypothetical. hood_concept set PlausToExistenceGain = 0.0 on 2026-08-11 because an
-            // identity prior may not vote on a hypothesis it does not model — which correctly zeroed
-            // deltas[k], and left this debounce untouched, because the only guard on the whole path is
-            // CountableFilterEnabled. So the filter kept its trigger after losing its vote: the LiDAR free-space
-            // carve walked L to the clamp and THIS counter did the killing, 15 cycles later, every time.
-            // Measured over one 1.5 h run: 18 births and 18 deaths, and on every single one the SENSOR
-            // debounce stood at 3.1-5.4 of the 15 it needs — it never fired once. Turning a channel's gain to
-            // zero must silence it completely, and now does.
-            const bool warm   = inst.matched_frames >= cfg_.matched_frames_before_aging;
-            const bool argued = deltas[k] < 0.0f;
-            plaus_doomed = rc::exist::decide_removal(inst.existence, inst.plaus_debounce, plaus_policy,
-                                                     (warm and argued) ? 1.0f : 0.0f).remove;
-        }
-
-        if (cfg_.countable_filter_log)
-            std::print("[{}-filter] {} plaus_ev={:.2f} llr={:+.2f} ΔL={:+.2f} L={:.2f} p={:.2f} streak={:.1f}\n",
-                       cfg_.concept_class, inst.node_name, inst.plaus_evidence, inst.last_plausibility, deltas[k],
-                       inst.existence.logodds(), inst.existence.p_exists(), inst.plaus_debounce.streak);
-
-        if (plaus_doomed)
+        // A freshly-born instance gets the belief's warm-up grace, so a young genuine one is never retired before it
+        // has accrued its own shape evidence. A channel may only EXECUTE a removal it has ARGUED for (argued_against).
+        const bool warm = inst.matched_frames >= cfg_.matched_frames_before_aging;
+        const bool doom = rc::countable::apply_class_step(inst.class_belief, inst.class_debounce, inst.class_lambda,
+                                                          measured[k] != 0, warm, lambda[k], steps[k], policy);
+        if (measured[k] and cfg_.countable_filter_log)
+            std::print("[{}-class] {} occL={:.2f} clsL={:.2f} Λ={:+.2f} p={:.2f} streak={:.1f}\n",
+                       cfg_.concept_class, inst.node_name, inst.existence.logodds(), inst.class_belief.logodds(),
+                       inst.class_lambda, inst.p_exists(), inst.class_debounce.streak);
+        if (doom)
             doomed.push_back(ids[k]);
     }
 
@@ -663,8 +612,8 @@ void SpecificWorker::apply_countable_filter()
     ev_g_.removals_cum += static_cast<long>(doomed.size());
     for (const std::uint64_t id : doomed)
     {
-        std::print("{}: [{}-filter] removing id={} — implausible as a {} "
-                   "(elongated/short/out-competed by a stronger one)\n", cfg_.agent_name, cfg_.concept_class, id, cfg_.concept_class);
+        std::print("{}: [{}-class] removing id={} — its shape is argued against as a {} "
+                   "(or it is out-competed by a stronger one)\n", cfg_.agent_name, cfg_.concept_class, id, cfg_.concept_class);
         retire_instance(id);
     }
 }

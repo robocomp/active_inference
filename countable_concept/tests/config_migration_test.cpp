@@ -132,6 +132,10 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
     const std::set<std::string> excluded = {word + "Model.HeadboardHeightM", word + "Model.HeadboardThickM"};
     // keys born after the migration base (class existence, spec 2026-11-14), not renames of an old one
     std::set<std::string> produced = {"Concept.Class", "Model.ClassAltStdM", "Model.BirthHeightNoiseM", "Model.BirthHeightOutlierFrac"};
+    // keys removed by the class factor (spec 2026-11-14 countable class existence): the plaus_evidence accumulator's
+    // clamp, its tanh gain into the existence log-odds, and the shape LLR's alternative footprint (class_log_evidence
+    // reads the manifest's class prior and Model.ClassAltStdM instead). Present in the old config, ABSENT in the new.
+    const std::set<std::string> removed = {"Model.PlausClamp", "Model.PlausToExistenceGain", "Model.AltSizeScale"};
     int moved = 0, same = 0, renamed = 0;
     for (const auto& [ok, ov] : old_v)
     {
@@ -139,6 +143,11 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
         if (const auto it = km.find(ok); it != km.end()) { nk = it->second; ++renamed; }
         CHECK(not (ok.starts_with(word + "Model.") or ok.starts_with(word + "Concept.")) or km.contains(ok));
         produced.insert(nk);
+        if (removed.contains(nk))
+        {
+            if (new_v.contains(nk)) { std::printf("  %s: %s is still in the config (removed by the class factor)\n", obj.c_str(), nk.c_str()); ++bad; }
+            continue;
+        }
         if (excluded.contains(ok))
         {
             if (new_v.contains(nk)) { std::printf("  %s: %s is still in the config (the manifest holds it)\n", obj.c_str(), nk.c_str()); ++bad; }

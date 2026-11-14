@@ -383,6 +383,7 @@ bool CountableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_
     inst.model = CountableModel(init_state, make_model_params());
     inst.affordance.init(G_, node.id(), node.name(), cfg_.concept_class);
     inst.subtype = cfg_.concept_class;
+    inst.class_belief = rc::exist::ExistenceBelief(rc::countable::logit(cfg_.class_p_label_true), cfg_.existence_logodds_max);   // L_cls starts at logit(π_cls)
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("{}: created instance for node '{}' id={}\n", cfg_.agent_name, node.name(), node.id());
@@ -762,7 +763,6 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.plaus_height_soft       = cfg_.plaus_height_soft;
         p.plaus_fe_ref            = cfg_.plaus_fe_ref;
         p.plaus_fe_scale          = cfg_.plaus_fe_scale;
-        p.plaus_alt_size_scale    = cfg_.plaus_alt_size_scale;
         p.plaus_height_prior_gain = cfg_.countable_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
         inst.ai2_belief = CountableBelief(s0, p);
         inst.ai2_initialized = true;
@@ -1195,7 +1195,7 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << "roi_fill,roi_fill_h,roi_fill_v,roi_valid,det_alive,frames_since_det,"
                  // What the NBV actually proposed (lags the state columns by one cycle; see the instance).
                  // nbv_vfov=0 ⇒ the sensor model was incomplete and NO proposal was made that cycle.
-                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn\n";
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn,p_occ,p_cls\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1225,7 +1225,7 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
              << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
              << inst.ai2_belief.dbg_moment_ext_major() << ',' << inst.ai2_belief.dbg_moment_ext_minor() << ','
              << inst.ai2_belief.dbg_moment_phi() << ',' << inst.ai2_belief.dbg_moment_pts() << ','
-             << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','
+             << inst.existence.logodds() << ',' << inst.p_exists() << ','   // p_exists = the PRODUCT; p_occ, p_cls at the end
              << inst.dbg_ex_lidar_occ << ',' << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_free_eff << ',' << inst.dbg_ex_lidar_n << ','
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
              << inst.existence_debounce.streak << ','
@@ -1246,7 +1246,8 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
              // cycle. It was computed and shown nowhere — the whole peripheral channel was
              // invisible in every agent's log, which is why 'is it producing anything?' could
              // not be answered offline for cabinet/hood, the two it exists for.
-             << ',' << ricoh_dets_ << ',' << ricoh_attention_ << '\n';
+             << ',' << ricoh_dets_ << ',' << ricoh_attention_
+             << ',' << inst.existence.p_exists() << ',' << inst.class_belief.p_exists() << '\n';
     ai2_csv_.flush();
 }
 

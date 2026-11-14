@@ -400,7 +400,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
         e.central_frac  = inst->dbg_ex_central;
         e.in_fov_frac   = (inst->dbg_ex_sil_ntotal > 0)   // ★a FRACTION, not a probed/not-probed flag:
                         ? static_cast<float>(inst->dbg_ex_sil_ndet) / inst->dbg_ex_sil_ntotal : 0.0f;
-        e.exist_logodds = inst->existence.logodds();
+        e.exist_logodds = rc::countable::logit(inst->p_exists());   // the PRODUCT (occupancy x class)
     }
     phantom_log_.write(e);
 }
@@ -528,11 +528,11 @@ void SpecificWorker::compute()
             });
     }
 
-    // "Is this really a bed?" soft SINGLETON + plausibility→existence decay → retire mis-detections. The
+    // The CLASS factor of existence (existence = occupancy x class): soft SINGLETON + shape evidence → retire mis-detections. The
     // worker sees ALL instances, so mutual inhibition + the removal decision live here (not in the fitter). It
-    // reuses each instance's existence log-odds + a dedicated debounce, so it works whether or not the
+    // owns each instance's class log-odds + a dedicated debounce, so it works whether or not the
     // sensor-existence channel above is enabled. Continuous/bounded; a genuine second bed survives.
-    apply_countable_filter();
+    apply_class_factor();
 
     // ── Evidence monitor: global counters + throttled snapshot push ──
     ev_g_.instances    = static_cast<int>(fitter_->instances().size());

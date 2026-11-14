@@ -66,7 +66,7 @@ void SpecificWorker::refresh_belief_strip()
     rc::dash::fill_strip(belief_strip_, fitter_->instances(), *G,
         [](rc::BeliefStripRow& r, const auto& inst)
         {
-            r.p_exists = inst.existence.p_exists();
+            r.p_exists = inst.p_exists();   // the PRODUCT: occupancy x class
             rc::dash::fill_certainty(r, inst.ai2_belief.covariance_reported(), rc::kCountableDofs);
         });
 }

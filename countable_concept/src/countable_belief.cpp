@@ -1011,48 +1011,6 @@ float CountableBelief::countable_plausibility(const CountableBeliefState& s, flo
     return std::clamp(aspect_ok * size_ok * height_ok, 0.0f, 1.0f);
 }
 
-// Shape log-evidence ratio (nats): log p(θ | bed) − log p(θ | other furniture). Three independent shape
-// features, each contributing the log-ratio of two NORMALISED densities — so the evidence comes from how much
-// more sharply the bed hypothesis predicts this shape, and a feature that discriminates nothing contributes 0:
-//
-//   aspect  bed: half-normal on |w−h|/(w+h), scale plaus_aspect_scale     alt: uniform on [0,1] (density 1)
-//   size    bed: N(prior_footprint_m, plaus_size_scale²) on (w,h)         alt: same mean, plaus_alt_size_scale²
-//   height  bed: P(tall | H) = the height_ok logistic                     alt: indifferent (1/2)
-//
-// A genuine wide bed (0.77×0.63×1.52) scores ≈ +4 nats; a 1.20×0.40×0.70 cabinet ≈ −17. Under the old
-// `plausibility − 0.5` rule those were −0.20 and −0.47 — both negative, so the real bed was deleted too.
-float CountableBelief::countable_log_evidence_ratio(const CountableBeliefState& s,
-                                                    const CountableBeliefParams& p)
-{
-    constexpr float kSqrtPi = 1.7724539f;   // √π
-
-    // (a) ASPECT. exp(−(a/as)²) is a half-normal with σ = as/√2, whose normaliser is 2/(as·√π); the alternative
-    //     is uniform over the unit interval the aspect lives in, so its log-density is 0.
-    const float as       = std::max(1e-4f, p.plaus_aspect_scale);
-    const float sum_wh   = std::max(1e-4f, s.w + s.h);
-    const float aspect   = std::abs(std::abs(s.w - s.h) / sum_wh
-                                   - std::abs(p.prior_footprint_m - p.depth_mean())
-                                     / std::max(1e-4f, p.prior_footprint_m + p.depth_mean()));   // 0 = the class's own aspect
-    const float llr_aspect = std::log(2.0f / (as * kSqrtPi)) - (aspect / as) * (aspect / as);
-
-    // (b) FOOTPRINT SIZE. Two isotropic 2-D Gaussians about the same mean: the log-ratio of their normalisers
-    //     (2·log(σ_alt/σ_countable)) is the evidence a TIGHT prior earns for a shape that actually sits near it.
-    const float ss  = std::max(1e-4f, p.plaus_size_scale);
-    const float sa  = std::max(ss,    p.plaus_alt_size_scale);              // the alternative is never tighter
-    const float dw  = s.w - p.prior_footprint_m, dh = s.h - p.depth_mean();
-    const float d2  = dw * dw + dh * dh;
-    const float llr_size = 2.0f * std::log(sa / ss) - d2 / (2.0f * ss * ss) + d2 / (2.0f * sa * sa);
-
-    // (c) HEIGHT. height_ok = P(tall | H); the alternative is indifferent about height (1/2). Being TALL is
-    //     therefore weak evidence (≈ +0.69 at most) while being SHORT is decisive against — which is the real
-    //     discriminator, since the mis-detections this filter exists to kill are ~70 cm cabinets.
-    const float hsoft     = std::max(1e-4f, p.plaus_height_soft);
-    const float height_ok = 1.0f / (1.0f + std::exp(-(s.H - p.plaus_height_min) / hsoft));
-    const float llr_height = std::log(std::max(1e-6f, 2.0f * height_ok));
-
-    return llr_aspect + llr_size + llr_height;
-}
-
 // Birth-candidate plausibility = P(this cloud is a <class>) on the SAME scale as the class evidence of the fit:
 //   logit(π_cls) + Λ_height, with Λ_height = birth_height_log_evidence(robust z-extent of the cloud).
 // π_cls is the manifest's label reliability; Λ_height scores the cloud's height as a density under "this class"
@@ -1070,27 +1028,6 @@ float CountableBelief::candidate_plausibility(const std::vector<Eigen::Vector3f>
     return class_probability(logit(p.class_p_label_true) +
                              birth_height_log_evidence(robust_z_extent(pts), p.class_shape_prior(), p.birth_height_noise_m,
                                                        p.birth_height_outlier_frac, p.class_alt_std_m));
-}
-
-// Soft singleton inhibition deltas (see the header). Bounded per-instance existence-logodds increments:
-// stronger-plausibility beds inhibit weaker ones; a bed's own accumulated plausibility supports it.
-std::vector<float> CountableBelief::singleton_existence_deltas(const std::vector<float>& plaus_evidence,
-                                                                  const std::vector<float>& p_exists,
-                                                                  float gain, float inhibition, float clamp)
-{
-    const std::size_t n = plaus_evidence.size();
-    std::vector<float> out(n, 0.0f);
-    const float cl = std::max(1e-3f, clamp);
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const float shape_i = gain * std::tanh(plaus_evidence[i] / cl);        // + support / − decay by shape
-        float penalty_i = 0.0f;
-        for (std::size_t j = 0; j < n; ++j)
-            if (j != i and plaus_evidence[j] > plaus_evidence[i])              // only STRONGER beds inhibit
-                penalty_i += (j < p_exists.size() ? p_exists[j] : 0.5f);
-        out[i] = shape_i - inhibition * penalty_i;
-    }
-    return out;
 }
 
 // ─── Verification ────────────────────────────────────────────────────────────────────────────────
@@ -1286,58 +1223,8 @@ bool CountableBelief::self_test()
                 ok_front ? "PASS" : "FAIL", door_bearing(bd), kHalfPi,
                 sigma_yaw_undecided, sigma_yaw_settled, bd.front_confidence());
 
-    // ── (d) SHAPE LOG-EVIDENCE RATIO: beds score positive, the elongated/short mis-detection negative ──
-    // `ordinary` is the REGRESSION case: a perfectly real, slightly wide bed observed live. Under the old
-    // `plausibility − 0.5` rule it scored 0.30 (⇒ −0.20 per cycle) and was accumulated to deletion; the LLR
-    // against an explicit "other furniture" alternative must place it clearly on the bed side.
-    const CountableBeliefState proper{0.0f, 0.0f, 1.75f, 0.60f, 0.60f, 0.0f};   // square + tall
-    const CountableBeliefState ordinary{0.0f, 0.0f, 1.52f, 0.77f, 0.63f, 0.0f}; // a real, slightly wide bed
-    const CountableBeliefState wrongish{0.0f, 0.0f, 0.70f, 1.20f, 0.40f, 0.0f}; // elongated + short (the mis-detection)
-    const float llr_proper   = countable_log_evidence_ratio(proper,   P);
-    const float llr_ordinary = countable_log_evidence_ratio(ordinary, P);
-    const float llr_wrong    = countable_log_evidence_ratio(wrongish, P);
-    const bool ok_plaus = llr_proper > 2.0f and llr_ordinary > 0.0f and llr_wrong < -2.0f;
-    std::printf("CountableBelief::self_test [shape-LLR]          %s  proper=%+.2f ordinary=%+.2f wrongish=%+.2f\n",
-                ok_plaus ? "PASS" : "FAIL", llr_proper, llr_ordinary, llr_wrong);
-
-    // ── (e) plaus_evidence sign convergence (bounded accumulator) + single-bad-frame robustness ─────────
-    // Mirror the worker's accumulator (apply_countable_filter): evidence += clamp(LLR, ±PlausClamp), itself
-    // clamped to ±PlausClamp. Only MEASURED cycles accumulate — the loop count below is measured frames.
-    constexpr float kClamp = 8.0f;
-    const auto step_of = [&](const CountableBeliefState& st)
-    { return std::clamp(countable_log_evidence_ratio(st, P), -kClamp, kClamp); };
-    const auto accumulate = [&](const CountableBeliefState& st, int frames, float ev0) {
-        float ev = ev0;
-        const float st_step = step_of(st);
-        for (int i = 0; i < frames; ++i) ev = std::clamp(ev + st_step, -kClamp, kClamp);
-        return ev;
-    };
-    const float ev_proper   = accumulate(proper,   40, 0.0f);   // proper frames → strongly positive
-    const float ev_ordinary = accumulate(ordinary, 40, 0.0f);   // an ordinary real bed must NOT go negative
-    const float ev_wrong    = accumulate(wrongish, 40, 0.0f);   // short/elongated frames → strongly negative
-    // One bad frame must NOT flip a settled-positive bed (the per-cycle clamp caps it at the accumulator
-    // bound, so a saturated +8 can at worst fall to 0 — never to −8).
-    const float ev_after_bad = std::clamp(accumulate(proper, 40, 0.0f) + step_of(wrongish), -kClamp, kClamp);
-    const bool ok_evidence = ev_proper > 2.0f and ev_ordinary > 2.0f and ev_wrong < -2.0f and ev_after_bad >= 0.0f;
-    std::printf("CountableBelief::self_test [plaus-evidence]     %s  ev_proper=%.2f ev_ordinary=%.2f ev_wrong=%.2f ev_after_bad=%.2f\n",
-                ok_evidence ? "PASS" : "FAIL", ev_proper, ev_ordinary, ev_wrong, ev_after_bad);
-
-    // ── (f) SOFT SINGLETON: a strong (proper) + a weak (elongated) bed → weak decays, strong survives ─
-    // Two instances: i=0 strong (plaus_evidence>0), i=1 weak (plaus_evidence<0), both currently P(exists)≈0.9.
-    std::vector<float> pe{ 6.0f, -3.0f }, px{ 0.9f, 0.9f };
-    float L0 = 0.0f, L1 = 0.0f;   // existence log-odds, folded each cycle by the singleton+shape deltas
-    for (int c = 0; c < 40; ++c)
-    {
-        const auto d = singleton_existence_deltas(pe, px, /*gain=*/1.5f, /*inhibition=*/1.0f, kClamp);
-        L0 = std::clamp(L0 + d[0], -4.0f, 4.0f);
-        L1 = std::clamp(L1 + d[1], -4.0f, 4.0f);
-        px[0] = 1.0f / (1.0f + std::exp(-L0)); px[1] = 1.0f / (1.0f + std::exp(-L1));
-    }
-    // removal boundary (existence_removal_prob≈0.12 ⇒ L < log(0.12/0.88) ≈ −1.99).
-    const float remove_L = std::log(0.12f / 0.88f);
-    const bool ok_singleton = L1 < remove_L and L0 > 0.0f and pe[0] > 0.0f;
-    std::printf("CountableBelief::self_test [singleton]          %s  L_strong=%.2f L_weak=%.2f (removeL=%.2f)\n",
-                ok_singleton ? "PASS" : "FAIL", L0, L1, remove_L);
+    // (d)-(f), the shape LLR / its accumulator / the singleton deltas, are gone: the class factor is class_log_evidence
+    // + class_factor_step (countable_class_evidence.h), tested by class_evidence_test and class_factor_test.
 
     // ── (g) SHORT-HEIGHT PRIOR: fitting a 70 cm cloud yields a HIGHER FE than a 1.7 m cloud (same footprint) ─
     // The one-sided height prior pulls H up toward plaus_height_min, so a genuinely-short cloud fits worse (its
@@ -1475,7 +1362,7 @@ bool CountableBelief::self_test()
     }
 
         return ok and ok_wall and ok_free and ok_nocross and ok_front and
-               ok_plaus and ok_evidence and ok_singleton and ok_height and ok_explain and ok_lock and ok_vol;
+               ok_height and ok_explain and ok_lock and ok_vol;
     }
 }
 

@@ -167,7 +167,7 @@ private:
     // Physical-exclusion invariant: two beds cannot share space. Collapse any pair of instances whose
     // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.
     void merge_overlapping_instances();
-    void apply_countable_filter();    // "is this really a bed?" soft singleton + plausibility→existence retire
+    void apply_class_factor();        // the class factor of existence: soft singleton + "is this really a <class>?" retire
 
     // ── Presence protocol ────────────────────────────────────────────────────
     void waiting_enter();

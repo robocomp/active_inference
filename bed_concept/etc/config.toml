@@ -99,25 +99,17 @@ AI2TopNoFloatPrecision = 10000.0 # firm two-sided anchor pinning H → observed 
 AI2TopNoFloatMarginM = 0.02     # upward allowance (m) added to the observed top as the anchor target
 AI2TopOversegSigmaPerM = 2.0    # R inflation (σ per m) for points ABOVE the robust top — fades the mask over-segmentation junk tail so it can't ratchet H up. 0 = OFF
 # "IS THIS REALLY A BED?" model-evidence mis-detection filter (rejects e.g. a 70 cm elongated cabinet
-# mislabelled "bed"). Continuous plausibility (aspect·size·height·fit) + a bounded plaus_evidence
-# accumulator → gates BIRTH and drives EXISTENCE decay; a SOFT singleton lets a stronger bed inhibit weaker
+# mislabelled "bed"). Continuous plausibility (aspect·size·height·fit) gates BIRTH; the class evidence Λ (manifest [prior.class] +
+# these size priors) is the CLASS factor of existence (existence = occupancy × class); a SOFT singleton lets a stronger bed inhibit weaker
 # duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: Concept.FilterEnabled.
 AspectScale = 0.15          # aspect_ok = exp(−(|w−h|/(w+h)/scale)²): ~1 square-ish footprint, →0 elongated
 SizeScale = 0.3   # bed (Webots threerooms-piso); was 0.15 — size_ok  = exp(−((w−0.60)²+(h−0.60)²)/(2·scale²)): footprint near the standard 0.60×0.60
-AltSizeScale = 1   # bed (Webots threerooms-piso); was 0.60 — the ALTERNATIVE hypothesis ("some other furniture-shaped box") footprint std (m).
-                            # The filter scores log[p(θ|bed)/p(θ|other)] with BOTH densities normalised, so the
-                            # evidence is how much more sharply the bed prior predicts this shape. Raise → the
-                            # alternative gets broader → the bed hypothesis earns MORE evidence per measured
-                            # frame. (Replaces the old `plausibility − 0.5` rule, whose 0.5 boundary was arbitrary
-                            # for an un-normalised likelihood and scored a real 0.77×0.63 bed at 0.30 → deleted.)
 HeightPlausibleMin = 0.35   # bed (Webots threerooms-piso); was 1.20 — height_ok logistic centre (m): →1 tall, →0 below ~1 m ("a 70 cm bed is improbable")
 HeightSoft = 0.1   # bed (Webots threerooms-piso); was 0.15 — height_ok logistic softness (m)
 FeRef = 2.0                 # "healthy bed fit" FE reference — NEEDS LIVE TUNING (≈ a good bed's mean_energy)
 FeScale = 1.0               # fit_ok = exp(−max(0, FE−FeRef)/FeScale): a poor data fit lowers plausibility
-PlausClamp = 8.0            # ± bound on the plaus_evidence accumulator (bounded memory: one bad frame can't kill a real bed; can still RECANT)
 PlausHeightPriorGain = 2000.0 # short-height prior precision (1/m²) per (deficit/HeightSoft) below HeightPlausibleMin; nudges H up so a 70 cm cloud fits worse; 0 = OFF
-PlausToExistenceGain = 1.5  # how strongly tanh(plaus_evidence) pushes the existence log-odds per cycle (support/decay)
-SingletonInhibition = 1.0   # mutual-inhibition: a STRONGER bed subtracts this·P(exists) from a weaker one's existence L (soft, bounded)
+SingletonInhibition = 1.0   # mutual-inhibition: a STRONGER bed subtracts this·P(exists) from a weaker one's class L (soft, bounded)
 # WALL-FLUSH + WALL-PARALLEL factor (a bed's back face rests against a room wall; ported from cabinet_concept).
 # Precision = marginal of a {flush, free-standing} mixture keyed on the back-to-wall gap ⇒ decays CONTINUOUSLY to 0
 # for a genuine mid-room bed (no proximity gate). 0 = OFF.
@@ -370,7 +362,7 @@ DetectionAliveMaxFrames = 40 # cycles without a fresh mask before detection_aliv
 MatchedFramesBeforeAging = 5 # a barely-born belief (fewer matched frames) is not aged by a stale no-mask cycle
 CentralRegionFrac = 0.25    # central image box [f,1-f]²; a detectable sample inside counts toward p_detect (removal)
 FilterEnabled = true  # master switch for the "is this really a bed?" plausibility filter (see [Model] Aspect/Size/Height/Fe* keys)
-FilterLog = false     # log per-instance plausibility / plaus_evidence / existence ΔL + the birth-candidate scores
+FilterLog = false     # log per-instance class evidence Λ, occupancy L, class L, p + the birth-candidate scores
 # Appearance-based FRONT (door) detection + yaw resolver. A square-ish, wall-flush bed is yaw-ambiguous; the
 # door is an APPEARANCE feature (handle + seams = strong vertical lines). Project the FITTED box into the live ZED
 # RGB, score vertical-edge energy per face, fold the winner's bearing into the belief's door-mode resolver. Works
