@@ -137,6 +137,78 @@ axr.text(0.05, 0.55, r"marginal" "\n" r"$p(o)$", fontsize=8, transform=axr.trans
 fig.savefig(OUT / "d1_gaussian_ops.pdf", bbox_inches="tight"); plt.close(fig)
 print(f"gaussian ops: posterior s | o=2.6 = {post_m:.3f} +- {np.sqrt(post_v):.3f}")
 
+# 6b. marginalisation only: the same joint and its two shadows, no observation, no conditional.
+fig = plt.figure(figsize=(7.2, 4.6))
+gs = fig.add_gridspec(2, 2, width_ratios=(4, 1.2), height_ratios=(1.2, 4), wspace=0.05, hspace=0.05)
+ax = fig.add_subplot(gs[1, 0]); axt = fig.add_subplot(gs[0, 0], sharex=ax); axr = fig.add_subplot(gs[1, 1], sharey=ax)
+ax.contourf(X, Y, Z, levels=7, cmap="Blues", alpha=0.85)
+ax.set_xlabel(r"$s$: distance to the wall (m)"); ax.set_ylabel(r"$o$: range reading (m)")
+ax.text(0.6, 3.25, r"joint $p(s,o)$", fontsize=14, color="#2E6DB4")
+ax.annotate("", xy=(3.55, 2.0), xytext=(2.75, 2.0), arrowprops=dict(arrowstyle="-|>", color="#2E8B57", lw=2))
+ax.text(2.78, 2.12, r"add along $s$", fontsize=13, color="#2E8B57")
+axt.fill_between(g, npdf(g, mu_s, sd_s ** 2), color="#2E6DB4", alpha=0.3)
+axt.text(0.5, 0.45, r"$p(s)$", fontsize=14, color="#2E6DB4"); axt.axis("off")
+axr.fill_betweenx(g, npdf(g, mu_s, S[1, 1]), color="#2E8B57", alpha=0.3)
+axr.text(0.0, 3.5, r"$p(o)=\int p(s,o)\,ds$", fontsize=13, color="#2E8B57"); axr.axis("off")
+fig.savefig(OUT / "d1_gaussian_marg.pdf", bbox_inches="tight"); plt.close(fig)
+
+# 6c. conditioning only: the slice of the joint at o = 2.6 has area p(o = 2.6) (that is marginalisation);
+#     dividing by that area raises every height by the same factor and makes the area 1.
+p_o = npdf(o_star, mu_s, S[1, 1])
+Dsl = np.stack([g - mu[0], np.full_like(g, o_star) - mu[1]], -1)
+slice_ = np.exp(-0.5 * np.einsum("...i,ij,...j", Dsl, np.linalg.inv(S), Dsl)) / (2 * np.pi * np.sqrt(np.linalg.det(S)))
+cond = slice_ / p_o
+pk = g[np.argmax(cond)]
+fig = plt.figure(figsize=(7.2, 5.2))
+gs = fig.add_gridspec(2, 2, width_ratios=(4, 1.2), height_ratios=(2.2, 4), wspace=0.05, hspace=0.05)
+ax = fig.add_subplot(gs[1, 0]); axt = fig.add_subplot(gs[0, 0], sharex=ax); axr = fig.add_subplot(gs[1, 1], sharey=ax)
+ax.contourf(X, Y, Z, levels=7, cmap="Blues", alpha=0.85)
+ax.axhline(o_star, color="crimson", lw=1.6, ls="--")
+ax.text(0.5, o_star + 0.07, r"observe $o=2.6$", color="crimson", fontsize=14)
+ax.set_xlabel(r"$s$: distance to the wall (m)"); ax.set_ylabel(r"$o$: range reading (m)")
+axt.fill_between(g, cond, color="crimson", alpha=0.25); axt.plot(g, cond, color="crimson", lw=1.5)
+axt.fill_between(g, slice_, color="0.55", alpha=0.6)
+axt.annotate("", xy=(pk, cond.max() * 0.97), xytext=(pk, slice_.max() * 1.03),
+             arrowprops=dict(arrowstyle="-|>", color="crimson", lw=1.6))
+axt.text(pk + 0.07, 0.5 * (slice_.max() + cond.max()), rf"$\div\,{p_o:.2f}$", color="crimson", fontsize=15, va="center")
+axt.text(0.45, cond.max() * 0.12, rf"grey: the slice, area ${p_o:.2f}$", fontsize=14, color="0.3")
+axt.text(0.45, cond.max() * 0.62, r"red: $p(s\mid o{=}2.6)$, area $1$", fontsize=14, color="crimson")
+axt.set_ylim(0, cond.max() * 1.08); axt.axis("off")
+axr.fill_betweenx(g, npdf(g, mu_s, S[1, 1]), color="#2E8B57", alpha=0.3)
+axr.plot([0, p_o], [o_star, o_star], color="crimson", lw=1.6)
+axr.text(0.12, 3.3, r"$p(o)$", fontsize=14, color="#2E8B57")
+axr.text(0.02, o_star + 0.12, f"{p_o:.2f} = area\nof the slice", fontsize=13, color="crimson", va="bottom"); axr.axis("off")
+fig.savefig(OUT / "d1_gaussian_cond.pdf", bbox_inches="tight"); plt.close(fig)
+print(f"conditioning: p(o=2.6) = {p_o:.3f}")
+
+# 6d. factorisation, continuous: the same joint built two ways, as 2-D images over (s, o).
+#     Row 1: p(s) (vertical stripes) x p(o|s) (the sensor band o = s +- 0.2) = p(s,o).
+#     Row 2: p(o) (horizontal stripes) x p(s|o) (a band of another tilt)   = the same p(s,o).
+k_so = S[0, 1] / S[1, 1]; v_so = S[0, 0] - S[0, 1] ** 2 / S[1, 1]
+P_s = npdf(X, mu_s, sd_s ** 2)
+P_o_s = npdf(Y, X, sd_o ** 2)
+P_o = npdf(Y, mu_s, S[1, 1])
+P_s_o = npdf(X, mu_s + k_so * (Y - mu_s), v_so)
+rows = [(P_s, r"$p(s)$", "Blues", P_o_s, r"$p(o\mid s)$"), (P_o, r"$p(o)$", "Greens", P_s_o, r"$p(s\mid o)$")]
+fig, axes = plt.subplots(2, 3, figsize=(8.4, 5.4), sharex=True, sharey=True)
+for r, (A, ta, ca, B, tb) in enumerate(rows):
+    for c, (M, t, cmap) in enumerate([(A, ta, ca), (B, tb, "Reds"), (A * B, r"$p(s,o)$", "Blues")]):
+        a_ = axes[r, c]
+        a_.imshow(M, origin="lower", extent=(g[0], g[-1], g[0], g[-1]), cmap=cmap, aspect="equal")
+        a_.set_title(t, fontsize=16)
+        a_.set_xticks([1, 2, 3]); a_.set_yticks([1, 2, 3]); a_.tick_params(labelsize=12)
+    fig.text(0.355, 0.73 - 0.455 * r, r"$\times$", fontsize=24, ha="center", va="center")
+    fig.text(0.655, 0.73 - 0.455 * r, r"$=$", fontsize=22, ha="center", va="center")
+for a_ in axes[1]: a_.set_xlabel(r"$s$ (m)", fontsize=13)
+for a_ in axes[:, 0]: a_.set_ylabel(r"$o$ (m)", fontsize=13)
+axes[0, 1].annotate("", xy=(1.0, 3.4), xytext=(1.0, 0.55), arrowprops=dict(arrowstyle="<->", color="0.2", lw=1.5))
+axes[0, 1].text(1.12, 2.6, "each\ncolumn\nadds to 1", fontsize=11, color="0.2")
+axes[1, 1].annotate("", xy=(3.5, 1.0), xytext=(0.5, 1.0), arrowprops=dict(arrowstyle="<->", color="0.2", lw=1.5))
+axes[1, 1].text(1.9, 0.6, "each row adds to 1", fontsize=11, color="0.2")
+fig.subplots_adjust(wspace=0.35, hspace=0.3)
+fig.savefig(OUT / "d1_gaussian_fact.pdf", bbox_inches="tight"); plt.close(fig)
+print("max |row1 - row2| =", float(np.abs(P_s * P_o_s - P_o * P_s_o).max()))
+
 COOL, ACCENT, GOOD, MUTED = "#2E6DB4", "#C0392B", "#2E8B57", "#7A7A7A"
 
 # 7. Bayes as the three operations, same numbers as block 6. One shared y-scale, so the last step
@@ -194,5 +266,40 @@ for j, (k, name) in enumerate(((14.0, "sharp bowl"), (2.0, "flat bowl"))):
     bot.text(0.98, 0.72, f"$\\Sigma = {1 / k:.2f}$", transform=bot.transAxes, ha="right", fontsize=9)
 axes[0, 0].set_ylabel(r"$-\ln p(o,s)$", fontsize=9); axes[1, 0].set_ylabel(r"$q(s)$", fontsize=9)
 fig.tight_layout(h_pad=0.4); fig.savefig(OUT / "d1_laplace.pdf"); plt.close(fig)
+
+# 10. the continuous joint as a surface: the same p(s, o) as block 6, drawn so that VOLUME is
+#     probability. One patch of (s, o) is lifted out; its volume is printed and shown on the slide.
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401,E402
+gc = np.linspace(0.4, 3.6, 70)
+Xc, Yc = np.meshgrid(gc, gc)
+Dc = np.stack([Xc - mu[0], Yc - mu[1]], -1)
+dens = lambda D_: np.exp(-0.5 * np.einsum("...i,ij,...j", D_, np.linalg.inv(S), D_)) / (2 * np.pi * np.sqrt(np.linalg.det(S)))
+Zc = dens(Dc)
+s0, s1, o0, o1 = 2.0, 2.5, 2.0, 2.5                      # the patch: a square on the ridge (0.23; avoids numbers used elsewhere)
+gp_s, gp_o = np.linspace(s0, s1, 40), np.linspace(o0, o1, 40)
+Xp, Yp = np.meshgrid(gp_s, gp_o)
+Zp = dens(np.stack([Xp - mu[0], Yp - mu[1]], -1))
+p_patch = Zp.mean() * (s1 - s0) * (o1 - o0)
+fig = plt.figure(figsize=(6.0, 4.6))
+ax = fig.add_subplot(projection="3d")
+# ONE surface, the patch coloured in place: matplotlib does not depth-sort two surfaces.
+cen_s, cen_o = 0.5 * (Xc[:-1, :-1] + Xc[1:, 1:]), 0.5 * (Yc[:-1, :-1] + Yc[1:, 1:])
+in_patch = (cen_s >= s0) & (cen_s <= s1) & (cen_o >= o0) & (cen_o <= o1)
+fc = plt.cm.Blues(0.25 + 0.7 * Zc[:-1, :-1] / Zc.max())
+fc[in_patch] = matplotlib.colors.to_rgba("#E08E0B")
+ax.plot_surface(Xc, Yc, Zc, facecolors=fc, linewidth=0, antialiased=False, rstride=1, cstride=1, shade=False)
+for xa, ya, xb, yb in [(s0, o0, s1, o0), (s1, o0, s1, o1), (s1, o1, s0, o1), (s0, o1, s0, o0)]:
+    t = np.linspace(0, 1, 30)
+    ax.plot(xa + t * (xb - xa), ya + t * (yb - ya), np.zeros_like(t), color="#E08E0B", lw=1.4)
+for xe, ye in [(s0, o0), (s1, o0), (s1, o1)]:
+    ax.plot([xe, xe], [ye, ye], [0, dens(np.array([xe - mu[0], ye - mu[1]]))], color="#E08E0B", lw=1.0, ls=":")
+ax.set_xlabel(r"$s$: distance to the wall (m)", labelpad=6)
+ax.set_ylabel(r"$o$: range reading (m)", labelpad=6)
+ax.set_zlabel(r"$p(s,o)$", labelpad=2)
+ax.contour(Xc, Yc, Zc, levels=4, zdir="z", offset=0, colors=COOL, linewidths=0.8)
+ax.set_zticks([]); ax.view_init(elev=30, azim=-40)
+ax.xaxis.pane.fill = ax.yaxis.pane.fill = ax.zaxis.pane.fill = False
+fig.savefig(OUT / "d1_joint_continuous.pdf", bbox_inches="tight"); plt.close(fig)
+print(f"continuous joint: P(s in [{s0},{s1}], o in [{o0},{o1}]) = {p_patch:.3f}")
 
 print("day 1 figures written")

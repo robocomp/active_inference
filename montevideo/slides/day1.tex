@@ -29,16 +29,13 @@
 \tikzset{mv/.style={draw, circle, inner sep=0pt, minimum size=0.62cm, fill=cool!12, font=\scriptsize},
          ma/.style={-{Stealth}, thick}}
 
+\colorlet{cross}{cool!50!good!85!black}   % s-with-o terms: between the colour of s and of o
+\definecolor{prob}{HTML}{E08E0B}          % a probability read off a picture (area / volume)
+
 \begin{document}
 
 \maketitle
 
-% The idea in 46 s (Spanish captions): click once in pympress to start; it loops.
-\begin{frame}[plain,noframenumbering]
-  \begin{tikzpicture}[remember picture, overlay]
-    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, loop, showcontrols=false]{\includegraphics[width=\paperwidth]{inferencia_activa_poster.png}}{media/InferenciaActiva.mp4}};
-  \end{tikzpicture}
-\end{frame}
 
 % =================================================================================================
 \section{The challenge}
@@ -60,14 +57,14 @@
   \centering
   \begin{tikzpicture}[
       stage/.style={draw=cool, very thick, rounded corners=4pt, fill=cool!8, align=center,
-                    minimum width=3.3cm, minimum height=1.1cm, font=\small},
+                    minimum width=3.3cm, minimum height=1.25cm, font=\small},
       day/.style={font=\scriptsize\bfseries, text=accent},
       arr/.style={-{Stealth[length=3mm]}, thick, color=muted}]
-    \node[stage] (room) at (90:2.6)   {estimate the room};
-    \node[stage] (loc)  at (18:3.6)   {localise, and learn\\one's own body};
-    \node[stage] (obj)  at (-54:3.0)  {concepts fill\\the room};
-    \node[stage] (door) at (-126:3.0) {find the door\\and cross it};
-    \node[stage] (mem)  at (162:3.6)  {new room;\\remember the link};
+    \node[stage] (room) at (90:2.6)   {estimate the room\\[1pt] {\scriptsize\color{muted}walls, from LiDAR}};
+    \node[stage] (loc)  at (18:3.6)   {localise, learn the body\\[1pt] {\scriptsize\color{muted}pose, wheels, from LiDAR vs room}};
+    \node[stage] (obj)  at (-54:3.0)  {concepts fill the room\\[1pt] {\scriptsize\color{muted}objects, from masks, LiDAR}};
+    \node[stage] (door) at (-126:3.0) {find the door, cross it\\[1pt] {\scriptsize\color{muted}door, open?, from free space}};
+    \node[stage] (mem)  at (162:3.6)  {new room, remember\\[1pt] {\scriptsize\color{muted}links, from all of it again}};
     \draw[arr] (room) to[bend left=15] (loc);
     \draw[arr] (loc)  to[bend left=15] (obj);
     \draw[arr] (obj)  to[bend left=15] (door);
@@ -75,34 +72,14 @@
     \draw[arr] (mem)  to[bend left=15] (room);
     \node[day, above=1pt of room] {Day 3};
     \node[day, right=1pt of loc]  {Days 3--4};
-    \node[day, below=1pt of obj]  {Days 2--3};
+    \node[day, below=1pt of obj]  {Day 3};
     \node[day, below=1pt of door] {Day 4};
-    \node[day, left=1pt of mem]   {Day 5};
-    \node[align=center, font=\small] at (0,0) {Day 1: the currency\\Day 2: the machine\\that pays it};
+    \node[day, left=1pt of mem]   {Day 2};
+    \node[align=center] at (0,0) {every stage is a belief\\[2pt] \alert{one} quantity to lower\\{\scriptsize (this afternoon)}};
   \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{Every stage is a belief}
-  \footnotesize
-  \begin{tabular}{@{}l l l c@{}}
-    \toprule
-    stage & what is unknown (latent) & what supplies the evidence & day \\
-    \midrule
-    estimate the room   & walls, corners, the polygon            & LiDAR returns                     & 3 \\
-    localise            & the robot's pose in that room          & LiDAR against the believed room   & 3 \\
-    learn the body      & wheel scale, gyro bias, sensor mounts  & the localiser's corrections       & 4 \\
-    concepts            & which objects exist, where, what shape & camera masks, LiDAR               & 2--3 \\
-    door                & where it is, whether it is open        & the room's boundary, free space   & 4 \\
-    new room + memory   & a second polygon; how rooms connect    & all of the above, again           & 5 \\
-    \bottomrule
-  \end{tabular}
-
-  \vspace{1.2em}
-  One generative model over all of it, and \alert{one} quantity that every stage minimises:
-  perception lowers it by changing beliefs, action by changing the data.
-\end{frame}
-
-\begin{frame}{The toy version you will build, one stage a day}
+\begin{frame}{The toy version you will build}
   \centering
   \includegraphics[width=0.78\textwidth]{toyworld.png}
 
@@ -111,34 +88,46 @@
 \end{frame}
 
 \begin{frame}{How this course is built}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      Each session runs through three steps:
-      \begin{enumerate}
-        \item the \textbf{theory}, derived rather than asserted;
-        \item the \textbf{code}, one stage of the cycle, in the lab;
-        \item the \textbf{measurements} that showed when the equations were wrong.
-      \end{enumerate}
-      \vspace{0.5em}
-      The third step is not optional. Most of what the thesis learned, it learned there.
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{The thread through all five days}
-        Averaging removes \alert{independent} error.\\
-        It does not remove \alert{shared} error.
-      \end{block}
-      \centering
-      \begin{tikzpicture}[x=0.17cm, y=2.5cm]
-        \draw[-{Stealth}, muted] (0,0) -- (33,0) node[below left, font=\scriptsize, text=black] {measurements averaged};
-        \draw[-{Stealth}, muted] (0,0) -- (0,1.08) node[above, font=\scriptsize, text=black] {error left};
-        \draw[accent, densely dashed] (0,0.36) -- (32,0.36);
-        \draw[cool, very thick, domain=1:32, samples=60] plot (\x, {1/sqrt(\x)});
-        \draw[accent, very thick, domain=1:32, samples=60] plot (\x, {sqrt(0.87/\x + 0.13)});
-        \node[font=\scriptsize, text=black, above left] at (32,0.42) {shared: a floor};
-        \node[font=\scriptsize, text=black, above] at (24,0.02) {independent: $\to 0$};
-      \end{tikzpicture}
-    \end{column}
-  \end{columns}
+  \centering
+  \begin{tikzpicture}[
+      stp/.style={draw=cool, very thick, rounded corners=5pt, fill=cool!6,
+                   minimum width=3.6cm, minimum height=2.7cm},
+      ttl/.style={font=\small\bfseries, text=cool!80!black},
+      cpn/.style={font=\scriptsize, text=black!75, align=center},
+      fwd/.style={-{Stealth[length=3mm]}, very thick, color=muted},
+      back/.style={-{Stealth[length=3mm]}, very thick, color=accent}]
+    % the three boxes
+    \foreach \x/\n in {0/th, 5/co, 10/me} \node[stp] (\n) at (\x,0) {};
+    \node[ttl, below=3pt of th.north] {1 \;theory};
+    \node[ttl, below=3pt of co.north] {2 \;code};
+    \node[ttl, below=3pt of me.north] {3 \;measurement};
+    % 1: a derivation, line by line
+    \node[font=\scriptsize, align=left] at (0,0.05)
+      {\color{muted}$p(\ \cdot\ ) = \ldots$\\[1pt]
+       \color{muted}$\Rightarrow\; \ldots$\\[1pt]
+       \color{muted}$\Rightarrow\; \ldots$};
+    % 2: a terminal running one stage of the cycle
+    \fill[black!80, rounded corners=2pt] (3.75,-0.75) rectangle (6.25,0.75);
+    \foreach \y/\w in {0.5/1.9, 0.22/1.4, -0.06/2.1, -0.34/1.1} \fill[good!70] (3.95,\y) rectangle ++(\w,0.1);
+    \fill[white] (3.95,-0.6) rectangle ++(0.12,0.12);
+    % 3: the prediction (line) against the data (dots), which leave it
+    \draw[muted] (8.85,-0.8) -- (11.15,-0.8);  \draw[muted] (8.85,-0.8) -- (8.85,0.8);
+    \draw[cool, thick] (8.85,-0.65) -- (11.1,0.15);
+    \foreach \px/\py in {9.1/-0.55, 9.45/-0.4, 9.8/-0.25, 10.15/0.05, 10.5/0.35, 10.85/0.62}
+      \fill[accent] (\px,\py) circle (1.6pt);
+    % what each step produces
+    \node[cpn, below=3pt of th.south] {derived,\\not asserted};
+    \node[cpn, below=3pt of co.south] {one stage of the cycle,\\in the lab};
+    \node[cpn, below=3pt of me.south] {where the equations\\were wrong};
+    % the loop
+    \draw[fwd] (th) -- (co);
+    \draw[fwd] (co) -- (me);
+    \draw[back] (me.north) -- ++(0,0.45) -| node[above, pos=0.25, font=\scriptsize, text=accent]
+      {back to the model} (th.north);
+  \end{tikzpicture}
+
+  \vspace{0.9em}
+  \lesson{The third step is not optional: most of what the thesis learned, it learned there.}
 \end{frame}
 
 % =================================================================================================
@@ -146,45 +135,64 @@
 % =================================================================================================
 
 \begin{frame}{What the robot is uncertain about}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \begin{tabular}{@{}l l@{}}
-        \toprule
-        deterministic & $y = f(x)$: one outcome \\
-        random        & $y = f(x) + \varepsilon$: many outcomes \\
-        \midrule
-        discrete      & a door is open \emph{or} closed \\
-        continuous    & a wall is $4.013\ldots$ m away \\
-        \bottomrule
-      \end{tabular}
-
-      \vspace{1em}
-      Everything the robot does not know is a \textbf{random variable}, and what it believes about
-      it is a \textbf{probability distribution}: a table for discrete variables, a density for
-      continuous ones.
-    \end{column}
-    \begin{column}{0.46\textwidth}
       \centering
-      \begin{tikzpicture}[lab/.style={font=\scriptsize}]
+      \begin{tikzpicture}[scale=1.35, lab/.style={font=\small}]
         \draw[very thick, muted] (0,0) rectangle (4.6,3.0);
         \coordinate (r) at (1.5,1.1);
         \foreach \px/\py in {4.6/2.1, 4.6/0.4, 3.0/3.0, 0.7/3.0, 0/1.8, 2.6/0} {
-          \draw[cool!50] (r) -- (\px,\py);
-          \fill[cool] (\px,\py) circle (1.6pt);
+          \draw[good!50] (r) -- (\px,\py);
+          \fill[good!80!black] (\px,\py) circle (1.6pt);
         }
-        \fill[muted!40, draw=black] (r) circle (6pt);
-        \draw[-{Stealth}, very thick, good] (r) -- ++(40:1.05) node[right, lab, text=black] {$v_{\text{adv}}$};
-        \draw[-{Stealth}, very thick, good] (r) -- ++(130:0.8) node[left, lab, text=black] {$v_{\text{side}}$};
-        \draw[-{Stealth}, very thick, good] ($(r)+(-65:0.42)$) arc (-65:20:0.42);
+        \fill[cool!35, draw=cool!70!black] (r) circle (6pt);
+        \draw[-{Stealth}, very thick, black!75] (r) -- ++(40:1.05) node[right, lab, text=black] {$v_{\text{adv}}$};
+        \draw[-{Stealth}, very thick, black!75] (r) -- ++(130:0.8) node[left, lab, text=black] {$v_{\text{side}}$};
+        \draw[-{Stealth}, very thick, black!75] ($(r)+(-65:0.42)$) arc (-65:20:0.42);
         \node[lab, right] at ($(r)+(-30:0.42)$) {$\omega$};
-        \node[lab, below left, fill=white, inner sep=1pt, xshift=-5pt] at (r) {$x,y,\theta$};
-        \draw[{Stealth}-{Stealth}, muted] (0,-0.2) -- node[below, lab, text=black] {$w$} (4.6,-0.2);
-        \draw[{Stealth}-{Stealth}, muted] (4.8,0) -- node[right, lab, text=black] {$d$} (4.8,3.0);
-        \node[lab, cool, above] at (3.75,3.0) {$o$: returns $p_1\ldots p_N$};
+        \node[lab, below left, fill=white, inner sep=1pt, xshift=-5pt] at (r) {\color{cool!80!black}$x,y,\theta$};
+        \draw[{Stealth}-{Stealth}, cool] (0,-0.2) -- node[below, lab, text=cool!80!black] {$w$} (4.6,-0.2);
+        \draw[{Stealth}-{Stealth}, cool] (4.8,0) -- node[right, lab, text=cool!80!black] {$d$} (4.8,3.0);
+        \node[lab, text=good!70!black, above] at (3.75,3.0) {$o$: returns $z_1\ldots z_N$};
       \end{tikzpicture}\\[0.2em]
       \small
-      {\color{muted}$s$: pose and room}\quad {\color{cool}$o$: scan}\quad {\color{good}$a$: command}
-      \[ p(s, o, a) \]
+      {\color{cool!80!black}$s$: pose and room ($x,y,\theta,w,d$)}\quad {\color{good!70!black}$o$: scan}\quad {\color{black!75}$a$: command ($v,\omega$)}
+
+  \vfill
+  \centering Every unknown is a \textbf{random variable}; a belief is its \textbf{distribution}.
+\end{frame}
+
+\begin{frame}{A belief over a discrete variable: one number per value}
+  \begin{center}\large $R$: which room am I in? \qquad $p(R)$\end{center}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.15cm, y=3.6cm, lab/.style={font=\small}]
+        \draw[muted] (-0.2,0) -- (3.2,0);
+        \foreach \i/\r/\p/\col in {0/room 1/0.70/cool!75, 1/room 2/0.20/cool!45, 2/room 3/0.10/cool!20} {
+          \fill[\col] (\i+0.15,0) rectangle (\i+0.85,\p);
+          \node[lab, above] at (\i+0.5,\p) {\p};
+          \node[lab, below] at (\i+0.5,0) {\r};
+        }
+        \draw[|-|, black!70, thick] (3.45,0) -- node[right, lab, text=black, align=left] {stacked:\\$0.70+0.20+0.10$\\$=1$} (3.45,1);
+        \fill[cool!75] (3.2,0) rectangle (3.4,0.70);
+        \fill[cool!45] (3.2,0.70) rectangle (3.4,0.90);
+        \fill[cool!20] (3.2,0.90) rectangle (3.4,1);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.55cm, y=2.2cm, lab/.style={font=\small}]
+        \foreach \ox/\ttl/\a/\b/\c in {0/sure/0.96/0.02/0.02, 4.6/unsure/0.34/0.33/0.33} {
+          \begin{scope}[shift={(\ox,0)}]
+            \draw[muted] (-0.2,0) -- (3.2,0);
+            \foreach \i/\p/\col in {0/\a/cool!75, 1/\b/cool!45, 2/\c/cool!20} \fill[\col] (\i+0.15,0) rectangle (\i+0.85,\p);
+            \node[lab, font=\small\bfseries] at (1.5,1.15) {\ttl};
+            \foreach \i in {1,2,3} \node[lab, below, font=\scriptsize] at (\i-0.5,0) {\i};
+          \end{scope}
+        }
+      \end{tikzpicture}
+
+      \vspace{0.6em}
+      \small how spread the numbers are is \textbf{how uncertain} the belief is
     \end{column}
   \end{columns}
 \end{frame}
@@ -207,7 +215,7 @@
     \end{column}
     \begin{column}{0.52\textwidth}
       \centering
-      \begin{tikzpicture}[scale=0.95, lab/.style={font=\scriptsize}]
+      \begin{tikzpicture}[scale=1.55, lab/.style={font=\small}]
         \mosaicbyO{accent!30}{muted!25}{accent!30}{muted!25}
         \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
         \node[lab] at (2.256,1.14) {0.56}; \node[lab, right] at (3.2,2.34) {0.03};
@@ -215,13 +223,16 @@
         \node[lab, left] at (0,1.61) {open}; \node[lab, left] at (0,0.41) {closed};
       \end{tikzpicture}\\[0.4em]
       \raggedright
-      The same \textbf{joint} $p(D,O)$, drawn so that \emph{area is probability}. Everything this
-      week is \alert{three operations} on it: summing, slicing, and multiplying back.
+      The same \textbf{joint} $p(D,O)$, drawn so that \emph{area is probability}.
     \end{column}
   \end{columns}
+
+  \vspace{0.8em}
+  \centering Everything this week is \alert{three operations} on it: summing, slicing, and multiplying back.
 \end{frame}
 
-\begin{frame}{Marginalisation: sum out what you do not care about}
+\begin{frame}{Marginalisation: the belief about one variable, summing over the others}
+  \begin{center}\large $\displaystyle p(O) = \sum_{D} p(D, O)$\end{center}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
       \centering
@@ -234,33 +245,11 @@
         $p(O)$              & 0.41 & 0.59 & 1 \\
       \end{tabular}
 
-      \vspace{0.3em}
-      \small
-      $p(O{=}\text{gap})\ = 0.27 + 0.14 = 0.41$\\
-      $p(O{=}\text{wall}) = 0.03 + 0.56 = 0.59$
-
-      \vspace{0.2em}
-      % continuous: a joint blob over (s, o), squashed onto the o axis
-      \begin{tikzpicture}[x=1cm, y=0.78cm, lab/.style={font=\scriptsize}]
-        \draw[-{Stealth[length=1.5mm]}, muted] (0,0) -- (2.4,0) node[below, lab, text=black] {$s$};
-        \draw[-{Stealth[length=1.5mm]}, muted] (0,0) -- (0,1.7) node[left, lab, text=black] {$o$};
-        \foreach \r/\o in {0.75/15, 0.5/30, 0.25/50}
-          \fill[cool!\o, rotate around={30:(1.2,0.8)}] (1.2,0.8) ellipse ({\r*1.3} and {\r*0.75});
-        \node[lab, text=cool] at (1.2,1.55) {$p(s,o)$};
-        \draw[-{Stealth[length=2mm]}, thick, muted] (2.25,0.8) -- (2.85,0.8);
-        \draw[muted] (3.0,0) -- (3.0,1.6);
-        \draw[good!70!black, very thick, domain=0:1.6, samples=40, smooth]
-          plot ({3.0 + 0.7*exp(-((\x-0.8)^2)/(2*0.33^2))}, \x);
-        \node[lab, right, text=good!70!black, align=left] at (3.7,0.8) {$p(o)$};
-        \node[lab, below, align=center] at (2.6,-0.35) {sum along $s$: an integral, \alert{the expensive one}};
-      \end{tikzpicture}
     \end{column}
     \begin{column}{0.48\textwidth}
       \centering
-      \[ p(o) = \sum_{d} p(d, o) \qquad p(o) = \int p(s, o)\,\mathrm{d}s \]
-      \vspace{-0.4em}
       % discrete: each column of the joint collapses into one cell of the margin
-      \begin{tikzpicture}[scale=0.95, lab/.style={font=\scriptsize}]
+      \begin{tikzpicture}[scale=1.2, lab/.style={font=\small}]
         \mosaicbyO{accent!30}{muted!25}{accent!30}{muted!25}
         \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
         \node[lab] at (2.256,1.14) {0.56}; \node[lab, right] at (3.2,2.34) {0.03};
@@ -278,315 +267,274 @@
         \draw[muted, |-|] (0,-1.3) -- (3.2,-1.3)
           node[midway, below=1pt, lab, text=black] {two numbers, one per value of $O$; together 1};
       \end{tikzpicture}
-
-      \vspace{0.3em}
-      \raggedright\small A marginal answers a question about one variable, honest about every value
-      the other one might take. $p(o)$ is \emph{one} of its numbers.
     \end{column}
   \end{columns}
+
 \end{frame}
 
-\begin{frame}{Conditioning: keep the slice you observed, renormalise}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \centering
-      \renewcommand{\arraystretch}{1.3}
-      \begin{tabular}{@{}l|>{\columncolor{accent!12}}c c@{}}
-                            & gap  & wall \\ \hline
-        open                & 0.27 & 0.03 \\
-        closed              & 0.14 & 0.56 \\ \hline
-        $p(O)$              & 0.41 & 0.59 \\
-      \end{tabular}
-
-      \vspace{0.8em}
-      \[ p(\text{open}\given\text{gap}) = \frac{0.27}{0.41} = 0.66 \]
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \[ p(s\given o) = \frac{p(s, o)}{p(o)} \]
-      \centering
-      \begin{tikzpicture}[scale=0.72, lab/.style={font=\scriptsize}]
-        \mosaicbyO{accent!30}{muted!25}{muted!8}{muted!8}
-        \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
-        \node[lab, muted, align=center] at (2.256,1.14) {did not\\happen};
-        \draw[-{Stealth}, thick] (3.35,1.2) -- node[above, lab, align=center] {$\div\,0.41$} (4.65,1.2);
-        \begin{scope}[shift={(4.8,0)}]
-          \fill[accent!30, draw=white, very thick] (0,0.82) rectangle (1.9,2.4);
-          \fill[muted!25, draw=white, very thick] (0,0) rectangle (1.9,0.82);
-          \node[lab] at (0.95,1.61) {0.66}; \node[lab] at (0.95,0.41) {0.34};
-        \end{scope}
-      \end{tikzpicture}\\[0.5em]
-      \raggedright\small
-      Before looking, open with probability $0.30$; after a gap, $0.66$; after a wall,
-      $0.03/0.59 = 0.05$. \alert{Conditioning is how evidence enters a belief.}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{Factorisation: the product rule}
-  Turn the conditioning formula around: \quad
-  $p(s, o) \;=\; p(o\given s)\,p(s) \;=\; p(s\given o)\,p(o)$\par
-  \vspace{0.4em}
+% The marginal frame's picture with both marginals; the gap column stretched to width 1.
+\begin{frame}{Conditioning: how evidence enters a belief}
+  \begin{center}\large $\displaystyle p(D\given O) \mathrel{:=} \frac{p(D, O)}{p(O)}$\end{center}
   \centering
-  \begin{tikzpicture}[scale=0.8, lab/.style={font=\scriptsize}, cell/.style={font=\scriptsize, text=black!70},
-                      ttl/.style={font=\small, align=center}]
-    % ---- left: rows first (D), then O inside each row
-    \mosaicbyD{accent!30}{muted!25}{muted!25}{muted!25}
-    \node[lab, font=\scriptsize\bfseries] at (1.44,2.04) {0.27};
-    \node[cell] at (0.32,0.84) {0.14};  \node[cell] at (1.92,0.84) {0.56};
-    \node[lab, right] at (3.25,0.84) {closed};
-    \node[lab, right] at (3.25,2.04) {open};
+  \begin{tikzpicture}[scale=1.15, lab/.style={font=\small}, tgt/.style={draw=accent, very thick}]
+    % the joint, as in the marginal frame
+    \mosaicbyO{accent!30}{muted!25}{accent!30}{muted!25}
+    \draw[tgt] (0,0.82) rectangle (1.312,2.4);
+    \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
+    \node[lab] at (2.256,1.14) {0.56}; \node[lab, right] at (3.2,2.34) {0.03};
+    \node[lab, above] at (0.656,2.4) {gap}; \node[lab, above] at (2.256,2.4) {wall};
+    \node[lab, left] at (0,1.61) {open}; \node[lab, left] at (0,0.41) {closed};
+    % marginal of D, to the right
+    \fill[accent!30, draw=white, very thick] (3.95,1.68) rectangle (4.35,2.4);
+    \fill[muted!25, draw=white, very thick] (3.95,0) rectangle (4.35,1.68);
+    \draw[cool, thick] (3.95,0) rectangle (4.35,2.4);
+    \node[lab, right] at (4.35,2.04) {0.30}; \node[lab, right] at (4.35,0.84) {0.70};
+    \node[lab, text=cool] at (4.15,-0.525) {$p(D)$};
+    % marginal of O, below
+    \fill[good!25, draw=white, very thick] (0,-0.75) rectangle (1.312,-0.3);
+    \fill[good!40, draw=white, very thick] (1.312,-0.75) rectangle (3.2,-0.3);
+    \node[lab] at (0.656,-0.525) {0.41}; \node[lab] at (2.256,-0.525) {0.59};
+    \node[lab, left, text=good!60!black] at (0,-0.525) {$p(O)$};
+    % the gap column, stretched to width 1: its two cells now add to 1
+    \draw[-{Stealth[length=2.5mm]}, very thick, good] (0.656,2.75) to[out=30, in=150]
+      node[above, lab, text=good!70!black] {$O=\text{gap}$: \ $\div\,0.41$} (8.05,2.55);
+    \begin{scope}[shift={(6.45,0)}]
+      \fill[accent!30, draw=white, very thick] (0,0.82) rectangle (3.2,2.4);
+      \fill[muted!25, draw=white, very thick] (0,0) rectangle (3.2,0.82);
+      \draw[tgt] (0,0.82) rectangle (3.2,2.4);
+      \node[lab] at (1.6,1.61) {$p(\text{open}\given\text{gap}) = 0.66$};
+      \node[lab] at (1.6,0.41) {$p(\text{closed}\given\text{gap}) = 0.34$};
+      \draw[|-|, muted] (0,-0.3) -- node[below, lab, text=black] {width 1} (3.2,-0.3);
+    \end{scope}
+  \end{tikzpicture}
+
+  \vfill
+  $p(\text{open}\given\text{gap})$ is the \alert{0.27} box rescaled, $0.27/0.41$, so that with
+  $p(\text{closed}\given\text{gap})$ it adds to 1.
+\end{frame}
+
+\begin{frame}{Factorisation: express the joint as factors}
+  \begin{center}\large $p(D, O) \;=\; p(O\given D)\,p(D) \;=\; p(D\given O)\,p(O)$\end{center}
+  \vfill
+  \centering
+  \begin{tikzpicture}[x=1.05cm, y=1.45cm, lab/.style={font=\small}, ttl/.style={font=\small, align=center},
+                      tgt/.style={draw=accent, very thick}]
+    % ---- left: rows first (D), then O inside each row. Colours as in the marginal frame: open pink, closed grey.
+    \mosaicbyD{accent!30}{muted!25}{accent!30}{muted!25}
+    \draw[tgt] (0,1.68) rectangle (2.88,2.4);
+    \node[lab] at (1.44,2.04) {0.27};  \node[lab, right] at (3.2,2.04) {0.03};
+    \node[lab] at (0.32,0.84) {0.14};  \node[lab] at (1.92,0.84) {0.56};
+    \node[lab, below] at (0.32,0) {gap}; \node[lab, below] at (1.92,0) {wall};
+    \node[lab, right] at (3.85,0.84) {closed};
+    \node[lab, right] at (3.85,2.04) {open};
     \draw[|-|, thick, accent] (0,2.55) -- node[above, lab] {$p(\text{gap}\given\text{open})=0.9$} (2.88,2.55);
     \draw[|-|, thick, cool] (-0.15,1.68) -- node[left, lab, align=right] {$p(\text{open})$\\$=0.30$} (-0.15,2.4);
-    \node[ttl] at (1.6,3.3) {\textbf{first $D$, then $O$}: \ $p(o\given s)\,p(s)$};
-    \node[ttl] at (1.6,-1.05) {$0.30 \times 0.9 = \alert{0.27}$};
-    % ---- right: columns first (O), then D inside each column
+    \node[ttl] at (1.6,3.05) {\textbf{first $D$, then $O$}: \ $p(O\given D)\,p(D)$};
+    \node[ttl] at (1.6,-0.75) {$0.30 \times 0.9 = \alert{0.27}$};
+    % ---- right: columns first (O), then D inside each column: exactly the marginal frame's picture
     \begin{scope}[shift={(7.6,0)}]
-      \mosaicbyO{accent!30}{muted!25}{muted!25}{muted!25}
-      \node[lab, font=\scriptsize\bfseries] at (0.656,1.61) {0.27};
-      \node[cell] at (0.656,0.41) {0.14};  \node[cell] at (2.256,1.14) {0.56};
-      \node[cell, right] at (3.2,2.34) {0.03};
-      \node[lab, above] at (2.256,2.45) {wall};
-      \node[lab, above] at (0.656,2.45) {gap};
-      \draw[|-|, thick, cool] (0,-0.15) -- node[below, lab, fill=white, inner sep=1pt] {$p(\text{gap})=0.41$} (1.312,-0.15);
+      \mosaicbyO{accent!30}{muted!25}{accent!30}{muted!25}
+      \draw[tgt] (0,0.82) rectangle (1.312,2.4);
+      \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
+      \node[lab] at (2.256,1.14) {0.56}; \node[lab, right] at (3.2,2.34) {0.03};
+      \node[lab, above] at (0.656,2.4) {gap}; \node[lab, above] at (2.256,2.4) {wall};
+      \node[lab, right] at (3.2,0.41) {closed};  \node[lab, right] at (3.2,1.61) {open};
+      \draw[|-|, thick, good!70!black] (0,-0.15) -- node[below, lab, fill=white, inner sep=1pt, text=good!70!black] {$p(\text{gap})=0.41$} (1.312,-0.15);
       \draw[|-|, thick, accent] (-0.15,0.82) -- node[left, lab, align=right] {$p(\text{open}\given\text{gap})$\\$=0.66$} (-0.15,2.4);
-      \node[ttl] at (1.6,3.3) {\textbf{first $O$, then $D$}: \ $p(s\given o)\,p(o)$};
-      \node[ttl] at (1.6,-1.05) {$0.41 \times 0.66 = \alert{0.27}$};
+      \node[ttl] at (1.6,3.05) {\textbf{first $O$, then $D$}: \ $p(D\given O)\,p(O)$};
+      \node[ttl] at (1.6,-0.75) {$0.41 \times 0.66 = \alert{0.27}$};
     \end{scope}
     \node[font=\Large, text=muted] at (5.4,1.2) {$=$};
   \end{tikzpicture}
-
-  \vspace{0.1em}
-  \begin{columns}[c]
-    \begin{column}{0.48\textwidth}
-      \small Two different rectangles, \alert{the same area}: the same cell of the joint.
-      {\color{cool}Blue}: the first factor, {\color{accent}red}: the second.
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \small Set them equal, divide by $p(o)$: \
-      $p(s\given o) = \dfrac{p(o\given s)\,p(s)}{p(o)}$\\[0.2em]
-      \alert{Bayes' rule is not an extra axiom}: it is the product rule written twice.
-    \end{column}
-  \end{columns}
+  \vfill
 \end{frame}
 
-\begin{frame}{The same operations on continuous variables}
+\begin{frame}{A belief over a continuous variable: a density}
+  \begin{center}\large $s$: how far is the wall? \qquad $p(s)$\end{center}
   \begin{columns}[c]
-    \begin{column}{0.56\textwidth}
-      \centering
-      \includegraphics[width=\textwidth]{d1_gaussian_ops.pdf}
-    \end{column}
-    \begin{column}{0.42\textwidth}
-      \small
-      $s$: distance to a wall, prior $\N(2,\,0.5^2)$.\\
-      $o$: its range reading, $o\given s \sim \N(s,\,0.2^2)$.
-      \begin{itemize}
-        \item The \textbf{joint} is the tilted ellipse: readings track distances.
-        \item A \textbf{marginal} is the shadow the joint casts on one axis.
-        \item A \textbf{conditional} is one horizontal cut through it, rescaled to area 1.
-      \end{itemize}
-      Reading $o = 2.6$ moves the belief from $2.00 \pm 0.50$ to $2.52 \pm 0.19$ m.
-    \end{column}
-  \end{columns}
-  \src{figures/make\_day1.py, block 6}
-\end{frame}
-
-\begin{frame}{The Gaussian: the bell of continuous variables}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \textbf{One variable} $s$\\[0.2em]
-      \centering
-      \begin{tikzpicture}[x=0.75cm, y=1.85cm, lab/.style={font=\scriptsize}]
-        \fill[cool!15, domain=-1:1, samples=30, smooth] plot (\x, {exp(-\x*\x/2)}) -- (1,0) -- (-1,0) -- cycle;
-        \draw[-{Stealth[length=1.5mm]}, muted] (-3.3,0) -- (3.4,0) node[below, lab, text=black] {$s$};
-        \draw[cool!70!black, very thick, domain=-3.2:3.2, samples=60, smooth] plot (\x, {exp(-\x*\x/2)});
-        \draw[muted, densely dashed] (0,0) -- (0,1.08) node[above, lab, text=black] {$\mu$: the centre};
-        \draw[{Stealth[length=1.3mm]}-{Stealth[length=1.3mm]}, accent, thick] (0,0.607) -- node[above, lab, text=accent] {$\sigma$} (1,0.607);
-        \node[lab, text=cool!70!black] at (0,0.25) {68\%};
-        \node[lab, below] at (-1,0) {$\mu{-}\sigma$}; \node[lab, below] at (1,0) {$\mu{+}\sigma$};
-      \end{tikzpicture}
-      \[ \N(s;\,\mu,\sigma^2) = \frac{1}{\sqrt{2\pi\sigma^2}}\,
-         \exp\!\Big(-\tfrac12\,\underbrace{\frac{(s-\mu)^2}{\sigma^2}}_{\text{distance}^2\text{ in }\sigma\text{'s}}\Big) \]
-      \raggedright\footnotesize
-      $\mu$: the mean. $\sigma^2$: the variance, $\sigma$ the spread. The front factor only makes the
-      area 1.
-    \end{column}
     \begin{column}{0.5\textwidth}
-      \textbf{Two variables} $x = \begin{bmatrix} s\\ o \end{bmatrix}$\\[0.2em]
       \centering
-      \begin{tikzpicture}[x=1cm, y=1cm, lab/.style={font=\scriptsize}]
-        \draw[-{Stealth[length=1.5mm]}, muted] (0,0) -- (3.2,0) node[below, lab, text=black] {$s$};
-        \draw[-{Stealth[length=1.5mm]}, muted] (0,0) -- (0,2.3) node[left, lab, text=black] {$o$};
-        \foreach \k/\c in {2/10, 1.4/20, 0.8/35}
-          \fill[cool!\c, rotate around={47.3:(1.6,1.1)}] (1.6,1.1) ellipse ({0.6*\k} and {0.115*\k});
-        \fill[black] (1.6,1.1) circle (1.4pt);
-        \node[lab, right] at (1.68,1.0) {$\mu = \begin{bmatrix}\mu_s\\ \mu_o\end{bmatrix}$};
-        \node[lab, text=cool!70!black, anchor=west] at (2.25,2.1) {equal height: ellipses};
+      \begin{tikzpicture}[x=0.8cm, y=2.6cm, lab/.style={font=\small}]
+        \fill[cool!15, domain=-3.2:3.2, samples=60, smooth] plot (\x, {exp(-\x*\x/2)}) -- (3.2,0) -- (-3.2,0) -- cycle;
+        \fill[prob!45, domain=-1:1, samples=30, smooth] plot (\x, {exp(-\x*\x/2)}) -- (1,0) -- (-1,0) -- cycle;
+        \draw[-{Stealth[length=1.5mm]}, muted] (-3.4,0) -- (3.6,0) node[below, lab, text=black] {$s$ (m)};
+        \foreach \u/\t in {-2/1, -1/1.5, 0/2, 1/2.5, 2/3} \node[lab, below] at (\u,0) {\t};
+        \draw[cool!70!black, very thick, domain=-3.2:3.2, samples=60, smooth] plot (\x, {exp(-\x*\x/2)});
+        \draw[muted, densely dashed] (0,0) -- (0,1.08) node[above, lab, text=black] {$\mu$: most likely};
+        \draw[{Stealth[length=1.5mm]}-{Stealth[length=1.5mm]}, accent, thick] (0,0.607) -- (1,0.607);
+        \node[lab, right, text=accent] at (1.15,0.68) {$\sigma$: spread};
+        \node[lab, text=prob!70!black] at (-0.5,0.3) {0.68};
+        \node[lab, text=cool!70!black, align=center] at (-2.5,0.55) {total\\area $1$};
+        \node[lab, text=cool!70!black, anchor=west] at (1.55,0.25) {Gaussian};
       \end{tikzpicture}
-      \[ \N(x;\,\mu,\Sigma) \propto
-         \exp\!\Big(-\tfrac12\,\underbrace{(x-\mu)^{\!\top}\,\Sigma^{-1}\,(x-\mu)}_{\text{the same distance}^2}\Big) \]
-      \raggedright\footnotesize
-      The same formula: the number $\sigma^2$ becomes a $2\times2$ matrix $\Sigma$, the
-      \textbf{covariance}, and dividing by it becomes multiplying by its inverse $\Sigma^{-1}$.
-      The ellipses' size and tilt are $\Sigma$.
+
+      \vspace{0.5em}
+      {\small $\mu = 2$ m, $\sigma = 0.5$ m: \ \textcolor{prob!70!black}{$P(1.5 < s < 2.5) = 0.68$}}\\[0.4em]
+      $\N(s;\,\mu,\sigma^2) = \dfrac{1}{\sqrt{2\pi\sigma^2}}\,e^{-\frac12 (s-\mu)^2/\sigma^2}$
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.32cm, y=1.5cm, lab/.style={font=\small}]
+        \foreach \ox/\ttl/\sg in {0/sure/0.45, 8.6/unsure/1.6} {
+          \begin{scope}[shift={(\ox,0)}]
+            \draw[muted] (-3.6,0) -- (3.6,0);
+            \fill[cool!20, domain=-3.5:3.5, samples=80, smooth] plot (\x, {0.45/\sg*exp(-\x*\x/(2*\sg*\sg))}) -- (3.5,0) -- (-3.5,0) -- cycle;
+            \draw[cool!70!black, thick, domain=-3.5:3.5, samples=80, smooth] plot (\x, {0.45/\sg*exp(-\x*\x/(2*\sg*\sg))});
+            \node[lab, font=\small\bfseries] at (0,1.2) {\ttl};
+          \end{scope}
+        }
+      \end{tikzpicture}
+
+      \vspace{0.6em}
+      \small a Gaussian belief is \textbf{two numbers}, $\mu$ and $\sigma$
     \end{column}
   \end{columns}
+\end{frame}
+
+\begin{frame}{The joint of continuous variables: a surface}
+  $s$: distance to a wall. $o$: the LiDAR's range reading of it.
+  \begin{columns}[c]
+    \begin{column}{0.42\textwidth}
+      \centering
+      \[ p(s,o) \]
+      \vspace{-0.4em}
+      {\small a number for every pair $(s,o)$: a \textbf{density}}\\[1.2em]
+      \[ \iint p(s,o)\,ds\,do = 1 \]
+      {\small the whole volume is 1}
+    \end{column}
+    \begin{column}{0.55\textwidth}
+      \centering
+      \includegraphics[height=0.74\textheight]{d1_joint_continuous.pdf}
+    \end{column}
+  \end{columns}
+
+  \vfill
+  \centering Area became \textbf{volume}: the \textcolor{prob!85!black}{orange} patch, $s,o \in [2.0,\,2.5]$ m, holds probability \textcolor{prob!85!black}{\textbf{0.23}}.
+\end{frame}
+
+\begin{frame}{Marginalisation: the belief about one variable, integrating over the others}
+  \begin{center}\large $\displaystyle p(o) = \int p(s, o)\,ds$\end{center}
+  \centering
+  \includegraphics[height=0.72\textheight]{d1_gaussian_marg.pdf}
 \end{frame}
 
 \begin{frame}{The covariance matrix: what each number means}
+  \vfill
+  \centering
+  {\Large $\Sigma = \begin{bmatrix}
+      \textcolor{cool}{\Sigma_{ss}} & \textcolor{cross}{\Sigma_{so}}\\
+      \textcolor{cross}{\Sigma_{os}} & \textcolor{good!70!black}{\Sigma_{oo}}
+    \end{bmatrix}$}
+  \qquad
+  \begin{tabular}{@{}l@{}}
+    \textcolor{cool}{$\Sigma_{ss}$}: how spread $s$ is\\[0.3em]
+    \textcolor{good!70!black}{$\Sigma_{oo}$}: how spread $o$ is\\[0.3em]
+    \textcolor{cross}{$\Sigma_{so}$}: do $s$ and $o$ move together?
+  \end{tabular}
+
+  \vspace{1.5em}
+  \begin{tikzpicture}[lab/.style={font=\small}]
+    \foreach \x/\ang/\t in {0/0/{$\Sigma_{so}=0$}, 3.4/45/{$\Sigma_{so}>0$}, 6.8/-45/{$\Sigma_{so}<0$}} {
+      \draw[-{Stealth[length=1.3mm]}, muted] (\x-1.1,-1) -- (\x+1.1,-1) node[below, lab, text=black] {$s$};
+      \draw[-{Stealth[length=1.3mm]}, muted] (\x-1.1,-1) -- (\x-1.1,1) node[left, lab, text=black] {$o$};
+      \fill[cool!25, rotate around={\ang:(\x,0)}] (\x,0) ellipse (0.9 and 0.32);
+      \node[lab, text=cross] at (\x,-1.45) {\t};
+    }
+  \end{tikzpicture}
+  \vfill
+\end{frame}
+
+\begin{frame}{The wall's covariance, built from its model}
+  \vfill
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
-      \[
-        \Sigma = \begin{bmatrix}
-          \textcolor{cool}{\Sigma_{ss}} & \textcolor{accent}{\Sigma_{so}}\\
-          \textcolor{accent}{\Sigma_{os}} & \textcolor{good!70!black}{\Sigma_{oo}}
-        \end{bmatrix}
-      \]
-      \small
-      \begin{itemize}
-        \item \textcolor{cool}{$\Sigma_{ss}=\mathrm{E}[(s-\mu_s)^2]$}: the variance of $s$ alone.
-        \item \textcolor{good!70!black}{$\Sigma_{oo}=\mathrm{E}[(o-\mu_o)^2]$}: the variance of $o$ alone.
-        \item \textcolor{accent}{$\Sigma_{so}=\Sigma_{os}=\mathrm{E}[(s-\mu_s)(o-\mu_o)]$}: do they move
-              together? It tilts the ellipse.
-      \end{itemize}
-      \centering
-      \begin{tikzpicture}[lab/.style={font=\scriptsize}]
-        \foreach \x/\ang/\t in {0/0/{$\Sigma_{so}=0$}, 2.1/45/{$\Sigma_{so}>0$}, 4.2/-45/{$\Sigma_{so}<0$}} {
-          \draw[muted] (\x-0.75,-0.6) -- (\x+0.75,-0.6); \draw[muted] (\x-0.75,-0.6) -- (\x-0.75,0.6);
-          \fill[cool!25, rotate around={\ang:(\x,0)}] (\x,0) ellipse (0.6 and 0.25);
-          \node[lab, below] at (\x,-0.62) {\t};
-        }
-      \end{tikzpicture}
+      \textbf{prior}, the belief before any reading:\\[0.2em]
+      \quad \textcolor{cool}{$s \sim \N(2,\ 0.5^2)$}\\[0.8em]
+      \textbf{sensor}: the reading is the distance plus noise\\[0.2em]
+      \quad \textcolor{good!70!black}{$o = s + \text{noise}$}, \ noise $\sim \N(0,\ 0.2^2)$
     \end{column}
     \begin{column}{0.48\textwidth}
-      \textbf{The wall, built from its model}\\[0.3em]
-      \small
-      $s$: distance to the wall, $s \sim \N(2,\,0.5^2)$.\\
-      $o = s + \text{noise}$, the noise $\sim \N(0,\,0.2^2)$.
-      \[
-        \Sigma = \begin{bmatrix}
-          \textcolor{cool}{0.25} & \textcolor{accent}{0.25}\\
-          \textcolor{accent}{0.25} & \textcolor{good!70!black}{0.29}
-        \end{bmatrix}
-      \]
-      \vspace{-0.6em}
-      \begin{itemize}\small
-        \item \textcolor{cool}{0.25}: the prior, $0.5^2$.
-        \item \textcolor{good!70!black}{0.29}: the reading spreads more, $0.25 + 0.2^2$.
-        \item \textcolor{accent}{0.25}: the reading follows the distance; the noise adds nothing to
-              it. Hence the tilted ellipse of the slide before.
-      \end{itemize}
+      \centering
+      {\Large $\Sigma = \begin{bmatrix}
+          \textcolor{cool}{0.25} & \textcolor{cross}{0.25}\\
+          \textcolor{cross}{0.25} & \textcolor{good!70!black}{0.29}
+        \end{bmatrix}$}\\[1em]
+      \raggedright\small
+      \textcolor{cool}{0.25} $= 0.5^2$\\
+      \textcolor{good!70!black}{0.29} $= 0.5^2 + 0.2^2$: the reading spreads more\\
+      \textcolor{cross}{0.25}: the reading follows the distance
     \end{column}
   \end{columns}
+  \vfill
 \end{frame}
 
 \begin{frame}{Marginalising a Gaussian: cross out the row and column}
-  \begin{columns}[c]
-    \begin{column}{0.46\textwidth}
-      \centering
-      % the wall joint, x = s, y = o in metres; its shadow on the s axis is the marginal
-      \begin{tikzpicture}[x=1.3cm, y=1.3cm, lab/.style={font=\scriptsize}]
-        \begin{scope}[shift={(-0.8,-0.8)}]
-          \draw[-{Stealth[length=1.5mm]}, muted] (0.8,0.8) -- (3.3,0.8) node[below, lab, text=black] {$s$};
-          \draw[-{Stealth[length=1.5mm]}, muted] (0.8,0.8) -- (0.8,3.2) node[left, lab, text=black] {$o$};
-          \fill[cool!10, rotate around={47.3:(2,2)}] (2,2) ellipse (1.443 and 0.277);
-          \fill[cool!22, rotate around={47.3:(2,2)}] (2,2) ellipse (0.722 and 0.139);
-          \node[lab, text=cool] at (1.25,2.95) {$p(s,o)$};
-          \draw[-{Stealth[length=2mm]}, thick, good!70!black] (2.55,2.4) -- (2.55,0.95);
-          \node[lab, text=good!70!black, anchor=west, align=left] at (2.6,1.7) {add up\\along $o$};
-          \draw[muted] (0.8,0.05) -- (3.2,0.05);
-          \fill[good!20, domain=0.85:3.15, samples=50, smooth]
-            plot (\x, {0.05 + 0.55*exp(-((\x-2)^2)/(2*0.25))}) -- (3.15,0.05) -- (0.85,0.05) -- cycle;
-          \draw[good!70!black, very thick, domain=0.85:3.15, samples=50, smooth]
-            plot (\x, {0.05 + 0.55*exp(-((\x-2)^2)/(2*0.25))});
-          \draw[{Stealth[length=1.3mm]}-{Stealth[length=1.3mm]}, accent] (2,0.2) -- node[above=-1pt, lab, text=accent] {0.5} (2.5,0.2);
-          \node[lab, text=good!70!black, anchor=west] at (2.7,0.3) {$p(s)$: the shadow};
-        \end{scope}
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      \small
-      \setlength{\abovedisplayskip}{3pt}\setlength{\belowdisplayskip}{3pt}
-      $p(s) = \int p(s,o)\,\mathrm{d}o$: the shadow the ellipse casts on the $s$ axis.
-      \begin{enumerate}\setlength{\itemsep}{1pt}
-        \item The shadow of a Gaussian is a Gaussian: the exponent is quadratic in $(s,o)$, and
-              integrating $o$ out leaves one quadratic in $s$.
-        \item So its mean and variance fix it, and both are \emph{defined} with $s$ alone,
-              $\mu_s = \mathrm{E}[s]$ and $\Sigma_{ss} = \mathrm{E}[(s-\mu_s)^2]$: already in $\mu$, $\Sigma$.
-      \end{enumerate}
-      \[
-        \begin{bmatrix} \mu_s \\ \textcolor{muted}{\cancel{\mu_o}} \end{bmatrix}
-        \qquad
-        \begin{bmatrix} \textcolor{cool}{\Sigma_{ss}} & \textcolor{muted}{\cancel{\Sigma_{so}}}\\
-                        \textcolor{muted}{\cancel{\Sigma_{os}}} & \textcolor{muted}{\cancel{\Sigma_{oo}}} \end{bmatrix}
-        \quad\Longrightarrow\quad p(s) = \N(\mu_s,\ \textcolor{cool}{\Sigma_{ss}})
-      \]
-      Wall: $\N(2,\ \textcolor{cool}{0.25})$, spread 0.5 m: the prior we started from.\\[0.3em]
-      \alert{Marginalising, in covariance form, is crossing out}: the integral was done when the
-      entries were defined.
-    \end{column}
-  \end{columns}
+  \vfill
+  \centering
+  {\Large
+  \[
+    \begin{bmatrix} \textcolor{muted}{\cancel{\mu_s}} \\ \mu_o \end{bmatrix}
+    \qquad
+    \begin{bmatrix} \textcolor{muted}{\cancel{\Sigma_{ss}}} & \textcolor{muted}{\cancel{\Sigma_{so}}}\\
+                    \textcolor{muted}{\cancel{\Sigma_{os}}} & \textcolor{good!70!black}{\Sigma_{oo}} \end{bmatrix}
+    \quad\Longrightarrow\quad p(o) = \N(\mu_o,\ \textcolor{good!70!black}{\Sigma_{oo}})
+  \]}
+  \vspace{1.2em}
+  {\large the wall: \quad $\begin{bmatrix} \textcolor{muted}{\cancel{2}} \\ 2 \end{bmatrix}
+    \quad \begin{bmatrix} \textcolor{muted}{\cancel{0.25}} & \textcolor{muted}{\cancel{0.25}}\\
+                          \textcolor{muted}{\cancel{0.25}} & \textcolor{good!70!black}{0.29} \end{bmatrix}
+    \quad\Longrightarrow\quad p(o) = \N(2,\ \textcolor{good!70!black}{0.29})$}
+  \vfill
 \end{frame}
 
-\begin{frame}{For Gaussians, both operations are linear algebra}
-  \small The same wall, one matrix written two ways: each makes one operation
-  \textcolor{good!70!black}{\textbf{free}}.
-
+\begin{frame}{Conditioning: how evidence enters a belief}
+  \begin{center}\large $\displaystyle p(s\given o) \mathrel{:=} \frac{p(s, o)}{p(o)}$\end{center}
   \centering
-  \begin{tikzpicture}[x=1cm, y=0.8cm,
-      lab/.style={font=\scriptsize}, num/.style={font=\scriptsize, align=center},
-      free/.style={fill=good!10, draw=good!60, rounded corners=3pt},
-      cost/.style={fill=accent!8, draw=accent!60, rounded corners=3pt},
-      blk/.style={minimum size=0.36cm, inner sep=0, draw=white, line width=0.8pt}]
-    % ---------- column headers: what the operation looks like
-    \begin{scope}[shift={(3.9,3.55)}]
-      \draw[-{Stealth[length=1.2mm]}, muted] (-0.9,-0.7) -- (0.9,-0.7) node[below, lab, text=black] {$s$};
-      \draw[-{Stealth[length=1.2mm]}, muted] (-0.9,-0.7) -- (-0.9,0.6) node[left, lab, text=black] {$o$};
-      \fill[cool!20, rotate=45] (0,0) ellipse (0.62 and 0.2);
-      \draw[cool!60!black, thick] (-0.6,-0.62) -- (0.6,-0.62);
-      \draw[densely dotted, muted] (-0.42,-0.42) -- (-0.42,-0.62); \draw[densely dotted, muted] (0.42,0.42) -- (0.42,-0.62);
-      \node[lab, right, align=left] at (1.0,0.05) {\textbf{marginalise out $o$}\\the shadow on $s$};
-    \end{scope}
-    \begin{scope}[shift={(8.6,3.55)}]
-      \draw[-{Stealth[length=1.2mm]}, muted] (-0.9,-0.7) -- (0.9,-0.7) node[below, lab, text=black] {$s$};
-      \draw[-{Stealth[length=1.2mm]}, muted] (-0.9,-0.7) -- (-0.9,0.6) node[left, lab, text=black] {$o$};
-      \fill[cool!20, rotate=45] (0,0) ellipse (0.62 and 0.2);
-      \draw[accent, densely dashed] (-0.85,0.25) -- (0.8,0.25);
-      \draw[accent, line width=2pt] (0.02,0.25) -- (0.46,0.25);
-      \node[lab, right, align=left] at (1.0,0.05) {\textbf{condition on $o$}\\one cut through it};
-    \end{scope}
-    % ---------- row headers: the two forms, with the numbers
-    \node[num, anchor=west] at (-0.4,1.6) {\textbf{covariance} $\Sigma$\\[2pt]
-      $\begin{bmatrix} 0.25 & 0.25\\ 0.25 & 0.29 \end{bmatrix}$};
-    \node[num, anchor=west] at (-0.4,-0.25) {\textbf{precision} $\Lambda=\Sigma^{-1}$\\[2pt]
-      $\begin{bmatrix} 29 & -25\\ -25 & 25 \end{bmatrix}$};
-    % ---------- cells
-    % covariance x marginalise: keep the block
-    \draw[free] (2.55,0.85) rectangle (6.95,2.35);
-    \minimat{(2.95,1.78)}{good!60}{muted!20}
-    \node[num, anchor=west] at (3.5,1.6) {\textbf{keep} the $ss$ block\\$\Sigma_{ss}=0.25$};
-    % covariance x condition: Schur complement
-    \draw[cost] (7.25,0.85) rectangle (11.65,2.35);
-    \minimat{(7.65,1.78)}{accent!50}{accent!25}
-    \node[num, anchor=west] at (8.2,1.6) {\textbf{correct} it with the rest\\$0.25-\dfrac{0.25^2}{0.29}=0.035$};
-    % precision x marginalise: Schur complement
-    \draw[cost] (2.55,-1.0) rectangle (6.95,0.5);
-    \minimat{(2.95,-0.07)}{accent!50}{accent!25}
-    \node[num, anchor=west] at (3.5,-0.25) {\textbf{correct} it with the rest\\$29-\dfrac{25^2}{25}=4 \;\to\; \tfrac14 = 0.25$};
-    % precision x condition: keep the block
-    \draw[free] (7.25,-1.0) rectangle (11.65,0.5);
-    \minimat{(7.65,-0.07)}{good!60}{muted!20}
-    \node[num, anchor=west] at (8.2,-0.25) {\textbf{keep} the $ss$ block\\$\Lambda_{ss}=29 \;\to\; \tfrac1{29} = 0.035$};
-    % ---------- column footers: the answers agree
-    \node[lab] at (4.75,-1.4) {either way: $\sigma = \sqrt{0.25} = 0.50$ m};
-    \node[lab] at (9.45,-1.4) {either way: $\sigma = \sqrt{0.035} = 0.19$ m};
+  \includegraphics[height=0.76\textheight]{d1_gaussian_cond.pdf}
+\end{frame}
+
+\begin{frame}{Conditioning a Gaussian: shift the mean, shrink the variance}
+  \begin{center}\large
+    gain \ $k = \dfrac{\textcolor{cross}{\Sigma_{so}}}{\textcolor{good!70!black}{\Sigma_{oo}}} = \dfrac{\textcolor{cross}{0.25}}{\textcolor{good!70!black}{0.29}} = 0.86$\\[0.1em]
+    {\small\color{muted} how much the reading is trusted}
+  \end{center}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      {\large new $\mu = \mu + k\,(o-\mu)$}\\[0.3em]
+      $2 + 0.86\,(2.6-2) = \mathbf{2.52}$\\[0.2em]
+      {\small move 86\% of the way to the reading}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \centering
+      {\large new $\sigma^2 = (1-k)\,\sigma^2$}\\[0.3em]
+      $0.14 \times 0.25 = 0.035 = \mathbf{0.19}^2$\\[0.2em]
+      {\small keep 14\% of the variance}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.6em}
+  \centering
+  \begin{tikzpicture}[x=2.4cm, y=1.25cm, lab/.style={font=\small}]
+    \draw[-{Stealth[length=1.5mm]}, muted] (0.4,0) -- (3.7,0) node[below, lab, text=black] {$s$ (m)};
+    \foreach \t in {1,2,3} \node[lab, below] at (\t,0) {\t};
+    \fill[cool!20, domain=0.5:3.5, samples=60, smooth] plot (\x, {0.4*exp(-((\x-2)^2)/(2*0.25))}) -- (3.5,0) -- (0.5,0) -- cycle;
+    \draw[cool!70!black, thick, domain=0.5:3.5, samples=60, smooth] plot (\x, {0.4*exp(-((\x-2)^2)/(2*0.25))});
+    \fill[accent!25, domain=1.9:3.15, samples=60, smooth] plot (\x, {1.07*exp(-((\x-2.517)^2)/(2*0.0345))}) -- (3.15,0) -- (1.9,0) -- cycle;
+    \draw[accent, thick, domain=1.9:3.15, samples=60, smooth] plot (\x, {1.07*exp(-((\x-2.517)^2)/(2*0.0345))});
+    \draw[good!70!black, very thick] (2.6,-0.08) node[below, lab, text=good!70!black] {$o$} -- (2.6,1.3);
+    \draw[-{Stealth[length=2mm]}, very thick, accent] (2,1.4) -- node[above, lab, text=accent] {86\% of the way} (2.517,1.4);
+    \draw[muted, densely dotted] (2,0) -- (2,1.4);  \draw[good!70!black, densely dotted] (2.6,1.3) -- (2.6,1.4);
+    \node[lab, text=cool!70!black, anchor=east] at (1.6,0.45) {before: $2.00 \pm 0.50$};
+    \node[lab, text=accent, anchor=west] at (2.85,0.7) {after: $2.52 \pm 0.19$};
   \end{tikzpicture}
 
-  \raggedright
-  {\footnotesize \textcolor{accent}{Correct} = the Schur complement,
-  $\Sigma_{ss}-\Sigma_{so}\Sigma_{oo}^{-1}\Sigma_{os}$ or $\Lambda_{ss}-\Lambda_{so}\Lambda_{oo}^{-1}\Lambda_{os}$;
-  its cost is the inverse of the $oo$ block.\par}
-  \small The robot keeps its beliefs in \textbf{precision} form: a new reading is free; forgetting an
-  old pose (Days 2--5) is marginalising, and it pays a Schur complement.
+\end{frame}
+
+\begin{frame}{Factorisation: express the joint as factors}
+  \begin{center}\large $p(s, o) \;=\; p(o\given s)\,p(s) \;=\; p(s\given o)\,p(o)$\end{center}
+  \centering
+  \includegraphics[height=0.74\textheight]{d1_gaussian_fact.pdf}
 \end{frame}
 
 \begin{frame}{The chain rule: $N$ variables, $N$ factors}
@@ -818,6 +766,13 @@
 % =================================================================================================
 \section{Inference behind a sensory boundary}
 % =================================================================================================
+
+% The idea in 46 s (Spanish captions): click once in pympress to start; it loops.
+\begin{frame}[plain,noframenumbering]
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, loop, showcontrols=false]{\includegraphics[width=\paperwidth]{inferencia_activa_poster.png}}{media/InferenciaActiva.mp4}};
+  \end{tikzpicture}
+\end{frame}
 
 \begin{frame}{The agent never sees the state}
   \begin{columns}[c]
