@@ -1,6 +1,6 @@
 # Door memory through LTSM; refuted doors in a private phantom file
 
-**Status:** APPROVED 2026-11-13 (owner accepted the §8 proposals) — nothing built yet.
+**Status:** BUILT 2026-11-14 (Task 6 done)
 **Agents touched:** door_concept, ltsm_agent, cortex (new attribute types; the owner reinstalls).
 **Rules this serves:** agents talk only through memories (no hidden world memory in an agent); facts about the
 WORLD live in LTSM, facts about an agent's own SENSOR stay private to that agent (owner ruling 2026-11-13).

@@ -31,9 +31,8 @@ int main()
       ViewLedger led; const auto v = led.observe({3.f, 2.f}, {1.f, 2.f}, {1.f, 0.f}, 0.5f, 0.f, 1); led.add_actuation(v, 0.7f); led.recompute(v, false);
       r.ledger = led;
       A.upsert(r);
-      { std::ofstream f(tmp); write_identity_table(f, A.to_identity_rows()); }
-      PlaceTable B(false);
-      { std::ifstream f(tmp); B.load(parse_identity_table(f), 0.05f); }
+      PlaceTable B(false);   // 2026-11-14: the identity file no longer carries the row (ltsm's notes do); the table is fed directly
+      B.upsert(r);
       CHECK(B.rows().size() == 1);
       Eigen::Matrix2f c = Eigen::Matrix2f::Identity() * 0.0025f;
       PlaceRow* m = B.match("room_1", {1.01f, 2.f}, c, 3.f);
@@ -61,9 +60,6 @@ int main()
       if (m) { CHECK(m->removed_wall_ms.has_value()); CHECK(T.aged_L(*m, m->last_seen_wall_ms) == -3.f);
         const float e = -3.f * std::exp(-float(T.hazard_per_s()) * 600.f);
         CHECK(std::fabs(T.aged_L(*m, m->last_seen_wall_ms + 600'000) - e) < 1e-5f); CHECK(e > -3.f); }
-      std::ofstream f(tmp); write_identity_table(f, T.to_identity_rows()); f.close();
-      PlaceTable U(false); std::ifstream g(tmp); U.load(parse_identity_table(g), 0.05f);
-      CHECK(U.rows().size() == 1 and U.rows()[0].removed_wall_ms == std::optional<std::int64_t>(5'000'000));
     }
     { // rows_never_forgotten: 1000 upserts at 3 places give 3 rows
       PlaceTable T(false);
@@ -87,31 +83,16 @@ int main()
       PlaceRow* m = T.match("room_1", {0.45f, 0.f}, Eigen::Matrix2f::Identity() * 0.25f, 9.f);
       CHECK(m != nullptr and m->name == "door_2");
     }
-    { // old_row_loads_with_empty_ledger: a 19-column row from today's format
+    { // an old 19-column row still loads, as an IDENTITY (2026-11-14): name and place only, nothing restorable
       std::stringstream s(std::string("room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd\n")
                           + "room_1,door_5,1.5,2.5,0.1,0.9,2.0,0.2,1.8,,,,,,,,,123456,0.04\n");
       const auto P = parse_identity_table(s);
       CHECK(P.malformed == 0 and P.rows.size() == 1);
-      CHECK(P.rows[0].place_sd.has_value());
-      CHECK(not P.rows[0].ledger.has_value() and not P.rows[0].removed_ms.has_value());
+      CHECK(not P.rows[0].place_sd.has_value() and not P.rows[0].ledger.has_value() and not P.rows[0].removed_ms.has_value());
       PlaceTable T(false); T.load(P, 0.3f);
-      CHECK(T.rows().size() == 1);
-      if (T.rows().size() == 1)
-      {
-          const auto& r = T.rows()[0];
-          CHECK(r.ledger.views().empty()); CHECK(std::fabs(r.L_evidence - float(saturated_vision(1.8, 0.004))) < 1e-6f); CHECK(r.visit == 0);   // a pre-look-alike row: its L is the old raw sum, saturated once (spec §3.1b)
-          CHECK(r.last_seen_wall_ms == 123456); CHECK(not r.removed_wall_ms.has_value());
-          CHECK(std::fabs(r.width - 0.9f) < 1e-6f);
-      }
-      // a 4-column row too
+      CHECK(T.rows().size() == 1 and T.rows()[0].name == "door_5" and std::fabs(T.rows()[0].xy.x() - 1.5f) < 1e-6f);
       std::stringstream s4("room,name,ap_x,ap_y\nroom_1,door_6,0.5,0.5\n");
       PlaceTable T4(false); T4.load(parse_identity_table(s4), 0.3f); CHECK(T4.rows().size() == 1);
-    }
-    { // a corrupt ledger cell is dropped to an empty ledger; the row and its L stay
-      std::stringstream s(std::string("room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms\n")
-                          + "room_1,door_5,1.5,2.5,0.1,0.9,2.0,0.2,1.8,,,,,,,,,123456,0.04,VL1 zz,2,\n");
-      PlaceTable T(false); T.load(parse_identity_table(s), 0.3f);
-      CHECK(T.rows().size() == 1 and T.rows()[0].ledger.views().empty() and std::fabs(T.rows()[0].L_evidence - float(saturated_vision(1.8, 0.004))) < 1e-6f and T.rows()[0].visit == 2);
     }
     { // hazard_learns: 10 revisits, all found after 100 s, give a smaller lambda than the prior mean
       PlaceTable T(false); PlaceRow& r = T.upsert(row("door_1", 0.f, 0.f, 1.f));
@@ -132,10 +113,8 @@ int main()
       std::stringstream ss; write_identity_table(ss, rows, 5, T.hazard_state());
       const auto parsed = parse_identity_table(ss);
       CHECK(parsed.hazard.has_value() and parsed.malformed == 0 and parsed.rows.size() == 1);
-      CHECK(parsed.rows[0].sighted_ms.has_value() and *parsed.rows[0].sighted_ms == 987654321);
       PlaceTable U(false); U.load(parsed, 0.3f);
       CHECK(U.hazard_per_s() == T.hazard_per_s());                                   // bit-identical
-      CHECK(U.rows()[0].sighted_wall_ms == 987654321);
       U.load(parsed, 0.3f); CHECK(U.hazard_per_s() == T.hazard_per_s());              // loading twice is the same table (SET, not add)
       // an older file (no #hazard line) -> the Gamma prior alone
       std::stringstream old("room,name,ap_x,ap_y\nroom_1,door_6,0.5,0.5\n");
@@ -167,9 +146,6 @@ int main()
       T.upsert(a); T.upsert(b);
       const auto ids = T.to_identity_rows();
       CHECK(not ids[0].pose.has_value()); CHECK(ids[1].pose.has_value() and ids[1].pose->depth == 0.12f);
-      { std::ofstream f(tmp); write_identity_table(f, ids); }
-      PlaceTable U(false); { std::ifstream f(tmp); U.load(parse_identity_table(f), 0.05f); }
-      CHECK(U.rows().size() == 2 and U.rows()[0].depth == 0.f and U.rows()[1].depth == 0.12f);
     }
     std::filesystem::remove(tmp);
     std::printf(fails ? "test_place_table: %d FAILED\n" : "test_place_table: ALL PASS\n", fails);

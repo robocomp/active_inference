@@ -403,9 +403,6 @@ struct DoorConfig
     // ★DecisionLog: etc/door_decisions.bin ("DDEC" v1, decision_log.h) — every tracker/existence/φ/identity/room-switch/
     // affordance/anchor decision with its numbers, the reference the DoorCore replay must reproduce. Default OFF.
     bool  decision_log = false;
-    // ★RestoreFromLtsm: restore a recalled room's doors from the remembered_door notes ltsm posts (door_note_reader.h) instead of
-    // door_identities.csv. Default OFF while the A/B against the CSV path is open.
-    bool  restore_from_ltsm = false;
     // ★RecordInputs: write every compute() cycle's DoorCycleInput ("DCIN" v1, core/door_cycle_io.h) to
     // `record_inputs_path` — the tape the DoorCore replay runs over (input_snapshot.h). Default OFF. One file per run
     // (previous runs rotated beside it); at `record_max_mb` the recording STOPS (the run's start is what matters).

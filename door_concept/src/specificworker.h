@@ -215,8 +215,8 @@ private:
     //   (possibly) the same doorway and must never be compared by place. The un-keyed table mixed room_1 and room_2
     //   coordinates, grew to 14 rows for 3 doors and carried a 3.7e13 m row from a transform read mid-birth.
     // ★AND, SINCE 2026-10-20, THE POSE TO RESTORE IT (door_identity_table.h): yaw/size, the existence belief and the leaf
-    //   memory, so a room re-entered FROM MEMORY gets its remembered doors back (restore_remembered_doors). A 4-column
-    //   row (older table, or written at birth before the fit) is still an identity, just not restorable.
+    //   memory. SINCE 2026-11-14 THE FILE CARRIES IDENTITY ONLY (room, name, place): a room re-entered FROM MEMORY gets its
+    //   doors back from the remembered_door notes ltsm posts (step_restore_from_notes), never from this table.
     using DoorIdentity = rc::door::IdentityRow;
     std::string current_room_name() const;
     mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
@@ -289,8 +289,8 @@ private:
     //   crosses. ltsm retires the recall as soon as the room is live again — possibly before `current` reaches us — so
     //   the names are LATCHED every cycle and the latch is cleared at each switch. A room is a recall iff its name was
     //   announced by a recall since the previous switch. A fresh room never qualifies, whatever its name.
-    // A FRESH room (not a recall, incl. the first room resolved) strips its rows' restore data (strip_restorable): only
-    //   knowledge acquired since that room's fresh entry can come back. A recalled room's restore is DEFERRED until its
+    // A FRESH room (not a recall, incl. the first room resolved) restores nothing: its doors are earned from evidence.
+    //   A recalled room's restore is DEFERRED until its
     //   polygon is loaded (has_room_polygon), so the belief init associates the door with a wall, not the identity frame.
     std::unordered_set<std::string> recall_names_seen_;
     [[nodiscard]] bool recall_node_live(const std::string& room_name) const;
@@ -341,7 +341,6 @@ private:
     std::uint64_t doorway_seeded_room_ = 0;
     void publish_door_questions(bool open);
     void drop_looks(const char* why);
-    std::uint64_t pending_restore_room_ = 0;
     std::uint64_t recalled_room_id_ = 0;   ///< the room entered by an ltsm recall / accepted proposal (remembered looks only there)
     void latch_recall_names();
     void reseat_doors_after_adoption(std::uint64_t room_id, const rc::door::Rigid2& K_from_P);
@@ -368,7 +367,6 @@ private:
     void drop_phantom_room(const std::string& room_name);
     void step_phantom_save();
     void step_pending_restore();
-    void restore_remembered_doors(std::uint64_t new_room);
     void step_restore_from_notes();
     std::unordered_set<std::string> restore_failed_logged_;   ///< rows whose recreation failed (logged once, retried every cycle)
     std::vector<std::string> restore_rows(std::uint64_t new_room, std::span<const rc::door::IdentityRow> rows);

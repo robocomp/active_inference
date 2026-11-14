@@ -188,7 +188,6 @@ RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain
 # Interaction-anchor development instruments (final review I-4), both OFF by default. Neither flushes per row.
 AnchorFrameRecord = true    # 2026-11-01 ON: replay the corridor-stub anchor fit (pingpong32 leg 3). etc/anchor_frames.bin: every measured anchor cycle for tests/replay_anchor_frames (~17 KB/frame, ≤ 200 MB/run)
 DecisionLog = false         # etc/door_decisions.bin: binary per-cycle decision log (decision_log.h), the reference for the DoorCore replay
-RestoreFromLtsm = false     # restore a recalled room's doors from the remembered_door notes ltsm posts, not the CSV; spec docs/superpowers/specs/2026-11-13-door-memory-through-ltsm-design.md
 RecordInputs = false        # DoorCycleInput per compute() cycle (DCIN v1, input_snapshot.h): the tape the DoorCore replay runs over
 RecordInputsPath = "etc/door_inputs.bin"   # rotated per run (3 previous kept)
 RecordMaxMB = 12000         # at the cap recording STOPS (one log line); est. 2-8 MB/s ⇒ a full 40-min tour

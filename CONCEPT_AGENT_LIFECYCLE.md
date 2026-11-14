@@ -224,7 +224,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | chair | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* |
 | bottle | ✅ resurrects from ltom recall | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
 | cabinet | ✅ resurrects from ltom recall | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
+| door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ restores from ltsm `remembered_door` notes; refuted places in a private phantom file *(2026-11-14, Task 6)* | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
 | refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -303,7 +303,7 @@ both RESTORE a door that some earlier evidence already birthed, as a belief the 
    are per room), the new room's prior entered by the first update; role `BeingCrossed`, so no view can delete it. The robot's
    body went through the aperture, so the door's existence was established by the crossing itself; from the new side an open
    door is the one thing the tracker cannot re-detect.
-2. **Restored remembered doors** (`restore_remembered_doors`, `door_concept/src/door_identity_table.h`): on entering a
+2. **Restored remembered doors** *(2026-11-14: from ltsm's `remembered_door` notes via `step_restore_from_notes`; `etc/door_identities.csv` is identity only and no longer restores anything — the file-based description below is historical)* (`restore_rows`, `door_concept/src/door_identity_table.h`): on entering a
    room that is a RECALL — ltsm_agent announced it with a `recall_<room>` node (object_subtype `room_recall`) since
    the previous room switch — every door of that room in `etc/door_identities.csv` that has a remembered pose and is not a
    REMOVED row is recreated at its remembered room-frame pose, size and leaf memory, unless a door on that hole is already

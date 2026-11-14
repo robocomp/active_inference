@@ -169,8 +169,6 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "Record every measured interaction-anchor cycle to etc/anchor_frames.bin (replay_anchor_frames; ≤ 200 MB/run). Development instrument, default off");
     out.decision_log                  = getb("DoorConcept.DecisionLog", false,
             "Write etc/door_decisions.bin: the binary per-cycle decision log (decision_log.h) the DoorCore replay is checked against. Default off");
-    out.restore_from_ltsm             = getb("DoorConcept.RestoreFromLtsm", false,
-            "Restore a recalled room's doors from the remembered_door notes ltsm posts, not from the CSV. Default off (A/B pending)");
     out.record_inputs                 = getb("DoorConcept.RecordInputs", false,
             "Record every compute() cycle's DoorCycleInput (DCIN v1) for the DoorCore replay (input_snapshot.h). Default off");
     out.record_inputs_path            = gets("DoorConcept.RecordInputsPath", out.record_inputs_path,

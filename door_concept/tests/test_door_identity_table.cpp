@@ -45,39 +45,62 @@ int main()
 {
     std::setlocale(LC_ALL, "");   // the agent runs es_ES under Qt; from_chars must not care
 
-    // ── 1. Round trip: full rows, an identity-only row, and an exist-less row survive write → read exactly ──
+    // ── 1. The file is IDENTITY ONLY (2026-11-14): room, name, place survive write → read; nothing else is written ──
     {
         std::vector<IdentityRow> rows{full_row("room_1", "door_1", -0.5432f, 4.6101f)};
-        IdentityRow birth;  birth.room = "room_1"; birth.name = "door_2"; birth.xy = {0.59f, 2.54f};   // birth: no pose
+        IdentityRow birth;  birth.room = "room_1"; birth.name = "door_2"; birth.xy = {0.59f, 2.54f};
         rows.push_back(birth);
-        IdentityRow noexist = full_row("room_2", "door_3", 3.6f, 2.18f);
-        noexist.exist_logodds.reset(); noexist.leaf.reset();
-        rows.push_back(noexist);
         std::stringstream ss;
         write_identity_table(ss, rows);
         const std::string text = ss.str();
-        CHECK(text.find(',', 0) != std::string::npos);
         CHECK(text.starts_with(std::string(kIdentityHeader) + "\n"));
         CHECK(text.find("-0.5432") != std::string::npos);    // points, never comma decimals
         const auto p = parse_identity_table(ss);
         CHECK(not p.unkeyed_format);
         CHECK(p.malformed == 0);
-        CHECK(p.rows.size() == 3);
-        if (p.rows.size() == 3)
+        CHECK(p.rows.size() == 2);
+        if (p.rows.size() == 2)
         {
-            const auto& a = p.rows[0];
-            CHECK(a.room == "room_1" and a.name == "door_1");
-            CHECK(near(a.xy.x(), -0.5432f) and near(a.xy.y(), 4.6101f));
-            CHECK(a.pose.has_value() and near(a.pose->yaw, 3.10f) and near(a.pose->width, 0.95f)
-                  and near(a.pose->height, 2.13f) and near(a.pose->depth, 0.05f));
-            CHECK(a.exist_logodds.has_value() and near(*a.exist_logodds, 4.0f));
-            CHECK(a.seen_wall_ms.has_value() and *a.seen_wall_ms == kNowMs);   // Task D-C: the age, exactly (int64)
-            CHECK(a.leaf.has_value() and near(a.leaf->hinge_xy.x(), -0.09f) and near(a.leaf->open_dir.y(), -1.0f)
-                  and near(a.leaf->hinge_llr, 19.7f) and near(a.leaf->swing_llr, 9.3f)
-                  and near(a.leaf->phi, 0.031f) and near(a.leaf->phi_sigma, 0.12f));
-            CHECK(p.rows[1].name == "door_2" and not p.rows[1].pose.has_value() and not p.rows[1].exist_logodds
-                  and not p.rows[1].leaf);
-            CHECK(p.rows[2].pose.has_value() and not p.rows[2].exist_logodds and not p.rows[2].leaf);
+            CHECK(p.rows[0].room == "room_1" and p.rows[0].name == "door_1");
+            CHECK(near(p.rows[0].xy.x(), -0.5432f) and near(p.rows[0].xy.y(), 4.6101f));
+            CHECK(p.rows[1].name == "door_2" and near(p.rows[1].xy.y(), 2.54f));
+        }
+    }
+    // identity_table_writes_identity_only: a row carrying pose / leaf / existence / removed_ms writes none of those values, and reads
+    // back with every one of them absent; room, name and place intact.
+    {
+        IdentityRow r = full_row("room_1", "door_1", 0.25f, 1.5f);
+        r.removed_ms = 1'792'612'111'111; r.place_sd = 0.0371f; r.visit = 7; r.crossed = true;
+        r.ledger = "VL1 0"; r.sighted_ms = 1'792'612'222'222; r.exist_logodds = 3.8765f;
+        std::stringstream ss;
+        write_identity_table(ss, std::vector<IdentityRow>{r}, 12);
+        const std::string text = ss.str();
+        for (const char* v : {"3.1", "0.95", "2.13", "19.7", "9.3", "0.031", "-0.09", "4.61", "3.8765", "0.0371", "1792612111111",
+                              "1792612222222", "1792612380153", "VL1"})
+            CHECK(text.find(v) == std::string::npos);
+        CHECK(text == std::string(kIdentityHeader) + "\nroom_1,door_1,0.25,1.5\n#next_door,12\n");
+        const auto p = parse_identity_table(ss);
+        CHECK(p.rows.size() == 1 and p.malformed == 0 and p.next_door_index == 12);
+        if (p.rows.size() == 1)
+        {
+            const auto& b = p.rows[0];
+            CHECK(b.room == "room_1" and b.name == "door_1" and near(b.xy.x(), 0.25f) and near(b.xy.y(), 1.5f));
+            CHECK(not b.pose and not b.leaf and not b.exist_logodds and not b.exist_physical and not b.crossed and not b.seen_wall_ms
+                  and not b.place_sd and not b.ledger and not b.visit and not b.removed_ms and not b.sighted_ms);
+        }
+    }
+    // identity_table_reads_old_rows: a 25-column row of the old format still parses; name and place intact, the rest ignored.
+    {
+        std::stringstream old("room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms,sighted_ms,exist_physical,crossed\n"
+                             "room_1,door_3,0.88,2.65,-3.2,1.0,2.1,0.1,-4,0.1,0.2,0.3,0.4,5,6,0.7,0.8,1792632310409,0.04,VL1 0,2,1792632310409,1792632310409,0,1\n"
+                             "room_1,door_4,1.0,2.0,-3.2,1.0,2.1,0.1,-4,,,,,,,,\n");   // and a 17-column one
+        const auto p = parse_identity_table(old);
+        CHECK(p.malformed == 0 and p.rows.size() == 2);
+        if (p.rows.size() == 2)
+        {
+            CHECK(p.rows[0].room == "room_1" and p.rows[0].name == "door_3" and near(p.rows[0].xy.x(), 0.88f) and near(p.rows[0].xy.y(), 2.65f));
+            CHECK(not p.rows[0].pose and not p.rows[0].removed_ms and not p.rows[0].crossed);
+            CHECK(p.rows[1].name == "door_4" and near(p.rows[1].xy.y(), 2.0f) and not p.rows[1].exist_logodds);
         }
     }
 
@@ -210,39 +233,19 @@ int main()
         // no stamp (a 17-column row written before the column existed) => unknown age => no remembered evidence
         r.seen_wall_ms.reset();
         CHECK(std::fabs(T.restored_belief(core::PlaceTable::row_of(r, 0.1f, false), kNowMs).L()) < 1e-3f);
-        // a 17-column row parses (no seen_ms) and an 18-column one carries it; upsert carries the stamp with the belief
-        std::stringstream old17;
-        old17 << "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma\n"
-              << "room_1,door_5,0.88,2.65,-3.2,1.0,2.1,0.1,-4,,,,,,,,\n";
-        const auto p17 = parse_identity_table(old17);
-        CHECK(p17.malformed == 0 and p17.rows.size() == 1);
-        if (p17.rows.size() == 1)
-            CHECK(p17.rows[0].exist_logodds.has_value() and not p17.rows[0].seen_wall_ms.has_value());
+        // upsert carries the stamp with the belief
         std::vector<IdentityRow> t{full_row("room_1", "door_5", 0.88f, 2.65f)};
         auto w = full_row("", "door_5", 0.88f, 2.65f);
         w.exist_logodds = -4.0f; w.seen_wall_ms = kNowMs + 5000;
         upsert_row(t, "room_1", w, 1.45f, 0.02f);
         CHECK(t.size() == 1 and t[0].seen_wall_ms == kNowMs + 5000 and near(*t[0].exist_logodds, -4.0f));
-        // Task D-C round 2: the 19th column, place_sd — round trip; an 18-column row parses without it; upsert mixes it;
-        // a fresh entry strips it with the rest of the restore data
+        // Task D-C round 2: place_sd; upsert mixes it
         std::vector<IdentityRow> rt{full_row("room_1", "door_2", 0.55f, 2.54f)};
         rt[0].place_sd = 0.037f;
-        std::stringstream io;
-        write_identity_table(io, rt);
-        const auto back = parse_identity_table(io);
-        CHECK(back.malformed == 0 and back.rows.size() == 1);
-        if (back.rows.size() == 1) CHECK(back.rows[0].place_sd.has_value() and near(*back.rows[0].place_sd, 0.037f));
-        std::stringstream old18;
-        old18 << "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms\n"
-              << "room_1,door_2,0.55,2.54,-3.14,1.0,2.1,0.1,1,,,,,,,,,1792632310409\n";
-        const auto p18 = parse_identity_table(old18);
-        CHECK(p18.malformed == 0 and p18.rows.size() == 1);
-        if (p18.rows.size() == 1) CHECK(p18.rows[0].seen_wall_ms.has_value() and not p18.rows[0].place_sd.has_value());
         auto w2 = full_row("", "door_2", 0.55f, 2.54f);
         w2.place_sd = 0.137f;
         upsert_row(rt, "room_1", w2, 1.45f, 0.5f);
         CHECK(rt.size() == 1 and rt[0].place_sd.has_value() and near(*rt[0].place_sd, 0.087f));
-        CHECK(strip_restorable(rt, "room_1") == 1 and not rt[0].place_sd.has_value());
     }
 
     // 3h. Task 8/9: the row remembers the belief's EVIDENCE (carried + crossing + ledger), never the structural prior.
@@ -252,23 +255,16 @@ int main()
         CHECK(near(remembered_logodds(i), 1.5f));                   // the prior's -2 is not remembered
     }
 
-    // ── 4. Stale rows: a FRESH entry of room_1 strips its restore data; a later recall restores only doors seen since ──
+    // ── 4. A door fitted during a visit restores on a later recall (rows given to plan_restore as the notes' rows are) ──
     {
-        std::vector<IdentityRow> t{full_row("room_1", "door_1", -0.54f, 4.61f),    // an OLDER run's door_1
-                                   full_row("room_1", "door_6", 2.00f, -3.00f),    // an older run's phantom
-                                   full_row("room_2", "door_3", 3.60f, 2.18f)};
-        CHECK(strip_restorable(t, "room_1") == 2);
-        CHECK(not t[0].pose and not t[0].leaf and not t[0].exist_logodds and t[0].name == "door_1");   // name kept
-        CHECK(not t[1].pose and t[2].pose.has_value());                                                // other rooms untouched
-        // During this visit door_1 is seen and fitted: its row is rewritten with a pose (upsert by name).
-        std::erase_if(t, [](const IdentityRow& r) { return r.room == "room_1" and r.name == "door_1"; });
-        t.push_back(full_row("room_1", "door_1", -0.55f, 4.60f));
+        std::vector<IdentityRow> t{full_row("room_1", "door_1", -0.55f, 4.60f)};
+        IdentityRow phantom; phantom.room = "room_1"; phantom.name = "door_6"; phantom.xy = {2.0f, -3.0f};   // identity only
+        t.push_back(phantom);
         const auto d = plan_restore(t, "room_1", true, {}, radius);
         CHECK(d.restore.size() == 1 and d.restore[0].name == "door_1");
         bool phantom_skipped = false;
         for (const auto& s : d.skipped) phantom_skipped = phantom_skipped or (s.name == "door_6" and s.reason == SkipReason::NoPose);
         CHECK(phantom_skipped);
-        CHECK(strip_restorable(t, "room_9") == 0);
     }
 
     // ── 5. tourP4 sequence: fresh entry → birth by identity → fit → (ltsm evicts the room: doors deleted BEFORE the
@@ -277,7 +273,7 @@ int main()
     {
         const auto same_hole = [&](float w) { return radius + w; };
         std::vector<IdentityRow> t{full_row("room_1", "door_1", -0.43f, 4.61f), full_row("room_1", "door_2", 0.64f, 2.54f)};
-        CHECK(strip_restorable(t, "room_1") == 2);                                   // fresh entry (first room)
+        for (auto& r : t) { r.pose.reset(); r.leaf.reset(); r.exist_logodds.reset(); }   // a fresh entry: identity only
         for (auto [n, x, y] : {std::tuple{"door_1", -0.55f, 4.61f}, std::tuple{"door_2", 0.72f, 2.45f}})
         {
             IdentityRow birth; birth.name = n; birth.xy = {x, y};
@@ -294,12 +290,8 @@ int main()
         for (auto r : {full_row("", "door_1", -0.545f, 4.606f), full_row("", "door_2", 0.642f, 2.536f)})
             CHECK(upsert_row(t, "room_1", r, same_hole(r.pose->width)));
         CHECK(t.size() == 2);                                                        // replaced, not duplicated
-        // The next room's fresh entry must not touch room_1's rows.
-        CHECK(strip_restorable(t, "room_2") == 0);
-        // Round-trip through the file as the agent does between visits.
-        std::stringstream ss; write_identity_table(ss, t); const auto p = parse_identity_table(ss);
         const std::vector<LiveDoor> live{{"door_2", Eigen::Vector2f(0.64f, 2.54f)}};  // the carried door
-        const auto d = plan_restore(p.rows, "room_1", true, live, radius);
+        const auto d = plan_restore(t, "room_1", true, live, radius);
         CHECK(d.restore.size() == 1 and d.restore[0].name == "door_1" and d.restore[0].pose.has_value());
     }
 
@@ -341,18 +333,14 @@ int main()
         CHECK(near(j.model.s.ap_cx, 2.f) and near(j.belief.L_evidence(), 0.0f) and not j.leaf_side_hint.has_value() and j.place_row_name == "door_5");
     }
 
-    // ── 6b. THE ROW FORMAT (Task 7/10): ledger, visit and removed_ms survive the file; a REMOVED row is kept ("no door here"), is
+    // ── 6b. THE ROW (Task 7/10): a REMOVED row is kept ("no door here"), is
     //       not restored, is not offered a look, and a live door writing at its hole ends the removal (rows are never forgotten) ──
     {
         IdentityRow gone = full_row("room_1", "door_7", 3.0f, 1.0f);
         gone.exist_logodds = -2.5f; gone.visit = 3; gone.removed_ms = kNowMs - 5000;
         IdentityRow live_row = full_row("room_1", "door_8", -3.0f, 1.0f);
-        std::stringstream ss; write_identity_table(ss, std::vector<IdentityRow>{gone, live_row}, 9);
-        const auto p = parse_identity_table(ss);
-        CHECK(p.rows.size() == 2 and p.malformed == 0);
-        CHECK(p.rows[0].removed_ms.has_value() and *p.rows[0].removed_ms == kNowMs - 5000 and p.rows[0].visit.value_or(0) == 3);
-        CHECK(not p.rows[1].removed_ms.has_value());
-        const auto d = plan_restore(p.rows, "room_1", true, {}, radius);
+        const std::vector<IdentityRow> rows{gone, live_row};
+        const auto d = plan_restore(rows, "room_1", true, {}, radius);
         CHECK(d.restore.size() == 1 and d.restore[0].name == "door_8");
         bool removed_skipped = false;
         for (const auto& s : d.skipped) removed_skipped = removed_skipped or (s.name == "door_7" and s.reason == SkipReason::Removed);
@@ -387,7 +375,7 @@ int main()
     }
     // ── 8. tourP8→P9 PLACE DRIFT: a dying door's degraded estimate barely moves the remembered place ──
     {
-        IdentityRow id2; id2.room = "room_1"; id2.name = "door_2"; id2.xy = {0.56f, 2.54f};    // stripped, id-only
+        IdentityRow id2; id2.room = "room_1"; id2.name = "door_2"; id2.xy = {0.56f, 2.54f};    // id-only
         std::vector<IdentityRow> t{id2};
         auto drifted = full_row("", "door_2", 0.35f, 2.54f);                                // fit at shutdown, P(exists) 0.02
         CHECK(upsert_row(t, "room_1", drifted, radius + 0.84f, 0.02f));

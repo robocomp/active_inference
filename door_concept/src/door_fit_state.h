@@ -237,7 +237,7 @@ struct DoorFitState
     bool leaf_graph_seeded = false;          // the leaf side has been taken from the graph (own node or a recall): no later recall seed
     std::unordered_set<std::uint64_t> recall_seeded_ids;   // recall nodes already considered (one seed per recall id)
     bool leaf_memory_from_recall = false;   // leaf_memory came from the ltsm recall child, not the node itself (log tag only)
-    // A door RESTORED from memory (SpecificWorker::restore_remembered_doors): its node carries the remembered width and
+    // A door RESTORED from memory (SpecificWorker::restore_rows): its node carries the remembered width and
     // height, so the belief init seeds w,h from the published box instead of the template priors — otherwise a door never
     // re-seen would be re-remembered at the template size on the next room switch.
     bool seed_wh_from_box = false;

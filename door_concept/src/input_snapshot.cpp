@@ -176,23 +176,11 @@ void InputSnapshot::on_owned_swept(const std::string& why, std::vector<std::uint
 }
 
 void InputSnapshot::on_identity_load(const std::string& identity_path, const std::string& registration_path,
-                                     std::optional<std::uint64_t> initial_room, const std::string& initial_room_name, bool without_removed)
+                                     std::optional<std::uint64_t> initial_room, const std::string& initial_room_name)
 {
     if (not armed_) return;
     core::IdentityLoad l;
     l.csv_text = slurp(identity_path, l.file_present);
-    if (without_removed and l.file_present)   // the recorded text is what the core loads: the tape stays self-consistent
-    {
-        std::istringstream is(l.csv_text);
-        auto parsed = parse_identity_table(is);
-        if (not parsed.unkeyed_format)
-        {
-            std::erase_if(parsed.rows, [](const rc::door::IdentityRow& r) { return r.removed_ms.has_value(); });
-            std::ostringstream os;
-            write_identity_table(os, parsed.rows, parsed.next_door_index, parsed.hazard);
-            l.csv_text = os.str();
-        }
-    }
     l.registration_csv_text = slurp(registration_path, l.registration_present);
     l.initial_room = initial_room;
     l.initial_room_name = initial_room_name;

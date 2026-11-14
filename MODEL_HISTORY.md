@@ -190,8 +190,12 @@ protecting itself — and the lifecycle contract forbids that pattern in UPDATE 
 4. **Implement §3** in `table_concept` behind a flag; A/B against the baseline. The check is τ: an object seen
    across several tour passes must show ω falling and `std_w` no longer growing while unobserved, while a
    deliberately moved object still adapts within seconds.
-5. **Implement §4**, then choose persistence. Both `ω` (a short per-DOF vector) and `p_FA` (a sparse cell map)
-   are compact — *those*, not Σ, are what is worth writing to a node attribute.
+5. **Implement §4**, then persistence. Both `ω` (a short per-DOF vector) and `p_FA` (a sparse cell map)
+   are compact — *those*, not Σ, are what is worth persisting. **Decided (owner ruling 2026-11-13, built 2026-11-14):** the
+   persistence of phantom memory is a PRIVATE per-agent file, `<agent>/etc/<class>_phantom_memory.csv`, keyed by the LTSM
+   `room_id` and held in the room's own frame (`common/phantom_memory`; door_concept: `etc/door_phantom_memory.csv`). It replaces
+   the open question and the graph-attribute lean: refuted places are facts about the agent's own sensor, so they are not
+   written to the shared graph; the world's doors live in LTSM and come back as `remembered_door` notes.
 
 ---
 
