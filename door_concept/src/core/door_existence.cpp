@@ -279,16 +279,40 @@ double DoorCore::wall_length_at(const Vec2f& xy) const
     return 5.0;
 }
 
-bool DoorCore::live_door_explains(const Vec2f& xy, float var) const
+bool DoorCore::live_door_explains(const std::vector<Vec2f>& polygon, const rc::door::RoomBand& band, bool room_is_proto,
+                                  std::span<const std::uint64_t> room_doors, const Vec2f& xy, float var) const
 {
-    if (world_ == nullptr or fit_.room_polygon().empty()) return false;
-    const float rn2 = cfg_.door.tracker_detection_noise_m * cfg_.door.tracker_detection_noise_m;
-    const double log_new = log_birth(xy, std::sqrt(std::max(1e-9f, var))) - std::log(wall_length_at(xy));
+    if (world_ == nullptr or polygon.size() < 3 or room_doors.empty()) return false;
+    const auto& cfg = cfg_.door;
+    const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
+    const std::vector<int> groups = wall_groups(polygon, band.sigma_m);   // the CALLER's room, not the core's (it takes its outline up at the next step)
+    const auto of_room = [&](std::uint64_t id) { return std::ranges::find(room_doors, id) != room_doors.end(); };
+    const rc::DoorFitState th = typical_door_at(xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
+    const int wall = wall_of(th.aperture.centre_xy(), polygon, groups);
+    const float sd = std::sqrt(std::max(1e-9f, var));
+    // log b - log Lambda of a NEW door at the place: the room's live doors on its wall charge the base rate, weighted by distinctness (as log_birth)
+    std::vector<float> r_others;
     for (const auto& [id, st] : world_->fit_states())
     {
-        if (st->is_bearing_hypothesis) continue;
+        if (not of_room(id) or st->is_bearing_hypothesis) continue;
         const auto it = last_p_door_.find(id);
-        const double p = it != last_p_door_.end() ? double(it->second) : 1.0;   // not yet judged (born or restored this cycle): taken as certain, as the candidates' test does
+        const Vec2f c = st->aperture.centre_xy();
+        if (wall >= 0 and c.allFinite() and wall_of(c, polygon, groups) == wall)
+            r_others.push_back((it != last_p_door_.end() ? it->second : 1.0f) * place_distinctness((c - xy).squaredNorm(), place_var(*st, rn2) + var));
+    }
+    const PlacePrior pp = prior_of(th, polygon, room_is_proto, band, 0, cfg.tracker_detection_noise_m, cfg.door_prior_h_std, false,
+                                   existence_size_prior(cfg), sd, sd, sd, std::numeric_limits<float>::quiet_NaN(), &rates_, r_others);
+    double len = 0.0;
+    if (const int wg = wall_of(xy, polygon, groups); wg >= 0)
+        for (std::size_t k = 0, n = polygon.size(); k < n; ++k)
+            if (groups[k] == wg) len += (polygon[(k + 1) % n] - polygon[k]).norm();
+    if (not (len > 0.0)) len = 5.0;   // kept: as wall_length_at (no wall under xy: a typical 5 m wall)
+    const double log_new = -std::log1p(std::exp(-static_cast<double>(pp.total()))) - std::log(len);
+    for (const auto& [id, st] : world_->fit_states())
+    {
+        if (not of_room(id) or st->is_bearing_hypothesis) continue;
+        const auto it = last_p_door_.find(id);
+        const double p = it != last_p_door_.end() ? double(it->second) : 1.0;   // not yet judged (born, restored or carried this cycle): taken as certain, as the candidates' test does
         const Vec2f c = st->aperture.centre_xy();
         if (not c.allFinite()) continue;
         if (place_explained_by(p, (c - xy).squaredNorm(), double(place_var(*st, rn2)) + double(var), log_new)) return true;

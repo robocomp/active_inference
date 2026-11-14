@@ -269,10 +269,13 @@ public:
         bool leaf_born = false;                  // one-model: seeded from a side-on LEAF; theta.aperture is its frame-wall aperture and theta.leaf the leaf's pose (phi known)
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
-    /// ONE-MODEL (S10, restore): does a LIVE door already carry the responsibility for a remembered place at `xy` (position variance `var`)?
-    /// Its aperture takes the place's likelihood against "a new door at that place" (place_explained_by: the MAP comparison, the same
-    /// densities along the wall as the candidates'). A note so explained is adopted into that door, not restored as a second one.
-    [[nodiscard]] bool live_door_explains(const Vec2f& xy, float var) const;
+    /// ONE-MODEL (S10, restore): does a LIVE door of the room the notes belong to already carry the responsibility for a remembered place at
+    /// `xy` (position variance `var`)? The CALLER supplies the room's outline, band and proto flag and the ids of the doors living in it
+    /// (a door being crossed into it included: descends from the room node): the core takes its own outline up only at its next step, so at
+    /// restore time it may hold none or the room just left. The aperture takes the place's likelihood against "a new door at that place"
+    /// (place_explained_by: the MAP comparison, the candidates' densities along the wall). A note so explained is adopted, not restored.
+    [[nodiscard]] bool live_door_explains(const std::vector<Vec2f>& polygon, const rc::door::RoomBand& band, bool room_is_proto,
+                                          std::span<const std::uint64_t> room_doors, const Vec2f& xy, float var) const;
     /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
     [[nodiscard]] bool candidate_is_open(const Candidate& c) const;
     /// Would a frame from `standpoint` be a new view of the candidate, by the ledger's own absorption rule? (spread 0: the standpoint is a plan)

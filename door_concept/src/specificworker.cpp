@@ -4225,11 +4225,22 @@ std::vector<std::string> SpecificWorker::restore_rows(std::uint64_t new_room, st
     // ONE-MODEL (S10): no same-hole radius. A note is restored as a labelled Bernoulli unless a live door already carries its
     // responsibility (its aperture takes the note place's likelihood against a new door there); that note is adopted into the live door.
     const float rn = cfg_.tracker_detection_noise_m;
+    // the doors of THIS room: instances whose node descends from it (a door being crossed into it included), by node id
+    std::vector<std::uint64_t> room_doors;
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        const auto parent_of = [&](std::uint64_t x) -> std::uint64_t
+        {
+            const auto xn = G->get_node(x);
+            return xn.has_value() ? G->get_attrib_by_name<parent_att>(xn.value()).value_or(0) : 0;
+        };
+        if (rc::door::descends_from(id, new_room, parent_of)) room_doors.push_back(id);
+    }
     const auto d = cfg_.exist_one_model and core_
         ? rc::door::plan_restore_by_responsibility(rows, room->name(), recalled, [&](const rc::door::IdentityRow& r)
           {
               const float sd = r.place_sd.value_or(rn);
-              return core_->live_door_explains(r.xy, sd * sd);
+              return core_->live_door_explains(fitter_->room_polygon(), fitter_->room_band(), rc::room::is_proto(*G, new_room), room_doors, r.xy, sd * sd);
           })
         : rc::door::plan_restore(rows, room->name(), recalled, live, identity_radius_m());
     for (const auto& k : d.skipped)

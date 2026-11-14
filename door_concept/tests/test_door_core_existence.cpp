@@ -1539,9 +1539,15 @@ int main()
         if (not r.w.st.empty())
         {
             const Vec2f dc = r.w.st.begin()->second.aperture.centre_xy();
-            const bool near = r.core.live_door_explains(dc + Vec2f(0.3f, 0.0f), 0.04f);
-            const bool far = r.core.live_door_explains(dc + Vec2f(1.5f, 0.0f), 0.04f);
-            std::print("live_door_explains: 0.3 m {}, 1.5 m {}\n", near, far);
+            // the CALLER's room: its outline and the ids of its doors (the core's own outline is not consulted: at restore time it may be empty or the room left)
+            const rc::door::RoomBand band{0.2f, 0.1f};
+            const std::vector<std::uint64_t> mine{r.w.st.begin()->first};
+            const bool near = r.core.live_door_explains(kRoom, band, false, mine, dc + Vec2f(0.3f, 0.0f), 0.04f);
+            const bool far = r.core.live_door_explains(kRoom, band, false, mine, dc + Vec2f(1.5f, 0.0f), 0.04f);
+            // a live door of ANOTHER room at the same coordinates is ignored (it is not in the restore room's door list)
+            const bool other_room = r.core.live_door_explains(kRoom, band, false, std::vector<std::uint64_t>{12345}, dc + Vec2f(0.3f, 0.0f), 0.04f);
+            std::print("live_door_explains: 0.3 m {}, 1.5 m {}, other room's door at 0.3 m {}\n", near, far, other_room);
+            CHECK(not other_room);
             CHECK(near and not far);
         }
     }
