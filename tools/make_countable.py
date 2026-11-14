@@ -14,6 +14,14 @@ Agent.name in countable_config.cpp, and dropping the perception-card test (tests
 and its CMake entry) until Task 4 brings a parameterised one.
 
 Run from the repo root. Refuses to overwrite an existing countable_concept/.
+
+--migrate-config <obj>_concept (Task 4): rewrite <obj>_concept/etc/config.toml IN PLACE onto countable_concept's
+sections, through KEYMAP.md with the class word substituted (KEYMAP is written from bed's names: BedModel.X ->
+<Cls>Model.X, BedConcept.BedFilterLog -> <Cls>Concept.<Cls>FilterLog). Line by line: a section header or a key name
+changes, the VALUE TEXT is never touched (countable_concept/tests/config_migration_test checks it against git). It
+adds `Class = "<obj>"` right under [Concept], applies the same renames to section/key names quoted in comments, and
+marks every renamed-section key that countable_concept's reader does not read with a comment line above it (kept,
+never deleted silently). Refuses a config that has no pre-countable section (already migrated).
 """
 import pathlib
 import re
@@ -91,5 +99,101 @@ def main() -> int:
     return 0
 
 
+def class_rules(word: str):
+    """SECTION_RULES with the class word substituted for Bed (same order: the class-word-in-the-key forms first)."""
+    return [(re.compile(rx.pattern.replace("Bed", word)), rep) for rx, rep in SECTION_RULES]
+
+
+def countable_read_keys() -> set:
+    """Every "Section.Key" the countable sources read (same regex the key map was built with)."""
+    keys = set()
+    for f in pathlib.Path("countable_concept/src").glob("*.[ch]*"):
+        keys.update(READ_CALL.findall(f.read_text(encoding="utf-8")))
+    return keys
+
+
+def migrate_config(agent_dir: str) -> int:
+    d = pathlib.Path(agent_dir.rstrip("/"))
+    if not d.name.endswith("_concept"):
+        print(f"{d}: not a <obj>_concept folder")
+        return 1
+    obj = d.name[: -len("_concept")]
+    word = obj[0].upper() + obj[1:]
+    path = d / "etc" / "config.toml"
+    bed_map = {}
+    for line in (DST / "KEYMAP.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("#") or " -> " not in line:
+            continue
+        old, new = (s.strip() for s in line.split(" -> "))
+        bed_map[old] = new
+
+    def cls(k: str) -> str:  # BedConcept.BedFilterLog -> <Cls>Concept.<Cls>FilterLog
+        sec, key = k.split(".", 1)
+        sub = lambda s: word + s[3:] if re.match(r"Bed[A-Z]", s) else s
+        return f"{sub(sec)}.{sub(key)}"
+
+    keymap = {cls(o): n for o, n in bed_map.items()}
+    renamed_sections = {f"{word}Model": "Model", f"{word}Concept": "Concept"}
+    rules = class_rules(word)
+    read = countable_read_keys()
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    if not any(re.match(r"\s*\[(%s)\]" % "|".join(renamed_sections), l) for l in lines):
+        print(f"{path}: no [{word}Model]/[{word}Concept] section — already migrated? refusing")
+        return 1
+    out, section, unread, n_keys = [], None, [], 0
+    header = re.compile(r"^(\s*)\[([^\]]+)\](.*)$", re.S)
+    keyline = re.compile(r"^(\s*)([A-Za-z_]\w*)(\s*=.*)$", re.S)
+    for line in lines:
+        if m := header.match(line):
+            section = m.group(2).strip()
+            new_sec = renamed_sections.get(section, section)
+            out.append(f"{m.group(1)}[{new_sec}]{m.group(3)}")
+            if new_sec == "Concept" and section != new_sec:
+                out.append(f'Class = "{obj}"   # REQUIRED (countable_concept): the object class this folder runs as — '
+                           f"YOLO label, node-name prefix, manifest common/concept_manifest/{obj}.concept.toml\n")
+            continue
+        m = keyline.match(line)
+        if m and section in renamed_sections:
+            old_key = f"{section}.{m.group(2)}"
+            new_key = keymap.get(old_key)
+            if new_key is None:  # not in the map: the class-word rule alone (section renamed, leading class word dropped)
+                k = m.group(2)
+                k = k[len(word):] if re.match(word + r"[A-Z]", k) else k
+                new_key = f"{renamed_sections[section]}.{k}"
+            n_keys += 1
+            if new_key not in read:
+                unread.append(f"{old_key} -> {new_key}")
+                out.append(f"{m.group(1)}# NOT READ by countable_concept (kept by the Task 4 migration, value unchanged): "
+                           f"{new_key.split('.', 1)[1]}\n")
+            rest = m.group(3)
+            eq = rest.index("=")
+            # value text verbatim; only the comment part (after a '#' outside quotes) gets the name renames
+            val, com, in_str = rest, "", False
+            for i, ch in enumerate(rest):
+                if ch == '"':
+                    in_str = not in_str
+                elif ch == "#" and not in_str and i > eq:
+                    val, com = rest[:i], rest[i:]
+                    break
+            for rx, rep in rules:
+                com = rx.sub(rep, com)
+            out.append(f"{m.group(1)}{new_key.split('.', 1)[1]}{val}{com}")
+            continue
+        if line.lstrip().startswith("#"):
+            for rx, rep in rules:
+                line = rx.sub(rep, line)
+        elif m:  # a key outside the renamed sections: name untouched; only its comment part gets the renames
+            pass
+        out.append(line)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(out))
+    print(f"{path}: migrated {n_keys} keys of [{word}Model]/[{word}Concept]; added Class = \"{obj}\"")
+    for u in unread:
+        print(f"  NOT READ by countable_concept, kept: {u}")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--migrate-config":
+        sys.exit(migrate_config(sys.argv[2]))
     sys.exit(main())

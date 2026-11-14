@@ -6,6 +6,7 @@
  */
 
 #include "countable_config.h"
+#include "countable_sections.h"   // rc::refuse_pre_countable_config
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 
@@ -24,6 +25,10 @@ namespace rc {
 CountableConfig load_countable_config(const ConfigLoader& cfg)
 {
     CountableConfig out;
+
+    // ── A config written for a pre-countable clone ([BedModel], [NightstandConcept], …) is refused before anything is
+    // read: every key here is optional, so it would otherwise start on code defaults with every tuned value ignored.
+    rc::refuse_pre_countable_config(cfg);
 
     // ── Identity first: the object class is a run-time string (Concept.Class), and everything below that
     // names the class — the manifest path, the registry/log label — derives from it. Agent.name is read raw

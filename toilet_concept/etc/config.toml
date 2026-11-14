@@ -56,7 +56,7 @@ MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 
 # ── AI2 belief (TOILET.md): full-covariance recursive filter; legs derived, soft mixture ──
 # This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
-[ToiletModel]
+[Model]
 SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
                             # face is attributed to the slab (candidate) vs a leg — used for the mask split.
 SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-surface (candidate) vs residual
@@ -101,7 +101,7 @@ AI2TopOversegSigmaPerM = 2.0    # R inflation (σ per m) for points ABOVE the ro
 # "IS THIS REALLY A TOILET?" model-evidence mis-detection filter (rejects e.g. a 70 cm elongated cabinet
 # mislabelled "toilet"). Continuous plausibility (aspect·size·height·fit) + a bounded plaus_evidence
 # accumulator → gates BIRTH and drives EXISTENCE decay; a SOFT singleton lets a stronger toilet inhibit weaker
-# duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: ToiletConcept.ToiletFilterEnabled.
+# duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: Concept.FilterEnabled.
 AspectScale = 0.15          # aspect_ok = exp(−(|w−h|/(w+h)/scale)²): ~1 square-ish footprint, →0 elongated
 SizeScale = 0.12   # toilet (Webots threerooms-piso); was 0.15 — size_ok  = exp(−((w−0.60)²+(h−0.60)²)/(2·scale²)): footprint near the standard 0.60×0.60
 AltSizeScale = 0.5   # toilet (Webots threerooms-piso); was 0.60 — the ALTERNATIVE hypothesis ("some other furniture-shaped box") footprint std (m).
@@ -355,7 +355,8 @@ ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification t
 # it for tables does not apply), but removal deliberately stays the camera silhouette's job — the silhouette HOLDs
 # out-of-FoV, so a toilet the robot is not looking at can never be deleted.
 
-[ToiletConcept]
+[Concept]
+Class = "toilet"   # REQUIRED (countable_concept): the object class this folder runs as — YOLO label, node-name prefix, manifest common/concept_manifest/toilet.concept.toml
 # Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
 # StateEps / KStable / DetectionAliveMaxFrames were read by getters with the keys ABSENT from config (silent
 # defaults) — now exposed; a NEW concept agent must expose its own. MatchedFramesBeforeAging / CentralRegionFrac
@@ -365,8 +366,8 @@ KStable = 30                # consecutive converged cycles before the belief is 
 DetectionAliveMaxFrames = 40 # cycles without a fresh mask before detection_alive → false
 MatchedFramesBeforeAging = 5 # a barely-born belief (fewer matched frames) is not aged by a stale no-mask cycle
 CentralRegionFrac = 0.25    # central image box [f,1-f]²; a detectable sample inside counts toward p_detect (removal)
-ToiletFilterEnabled = true  # master switch for the "is this really a toilet?" plausibility filter (see [ToiletModel] Aspect/Size/Height/Fe* keys)
-ToiletFilterLog = false     # log per-instance plausibility / plaus_evidence / existence ΔL + the birth-candidate scores
+FilterEnabled = true  # master switch for the "is this really a toilet?" plausibility filter (see [Model] Aspect/Size/Height/Fe* keys)
+FilterLog = false     # log per-instance plausibility / plaus_evidence / existence ΔL + the birth-candidate scores
 # Appearance-based FRONT (door) detection + yaw resolver. A square-ish, wall-flush toilet is yaw-ambiguous; the
 # door is an APPEARANCE feature (handle + seams = strong vertical lines). Project the FITTED box into the live ZED
 # RGB, score vertical-edge energy per face, fold the winner's bearing into the belief's door-mode resolver. Works
@@ -391,7 +392,7 @@ FrontLog = true             # log each adopted door-mode flip / accepted appeara
                             # diagnosis: with a square footprint (|w−h|≈8 mm live) yaw is unobservable mod 90°,
                             # so this resolver is the ONLY thing that can pick the quarter-turn. Pair with the
                             # new ai2_log columns front_mode/front_conf/cue_conf/cue_bearing.
-ToiletLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
+LogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
 ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
 # ObsDistance removed 2026-08-07: the epistemic stand-off is no longer a preference. It is the argmax of the
 # detector envelope over BOTH image axes (DetectMinFill/DetectMaxFill below, via common/nbv), so a comfort

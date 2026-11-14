@@ -56,7 +56,7 @@ MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 
 # ── AI2 belief (BED.md): full-covariance recursive filter; legs derived, soft mixture ──
 # This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
-[BedModel]
+[Model]
 SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
                             # face is attributed to the slab (candidate) vs a leg — used for the mask split.
 SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-surface (candidate) vs residual
@@ -83,7 +83,9 @@ AI2PriorSizeStd = 0.30      # (legacy; the size prior is now split into footprin
 AI2PriorFootprintM = 1.75   # bed (Webots threerooms-piso); was 0.60 — mean of the w & h(depth) prior (m)
 AI2PriorFootprintStd = 0.2   # bed (Webots threerooms-piso); was 0.08 — TIGHT → strong footprint prior (m); λ = 1/std²
 AI2PriorDepthM = 2.1   # bed (Webots threerooms-piso): depth (local Y, front-to-back) mean; the footprint mean above is the width
+# NOT READ by countable_concept (kept by the Task 4 migration, value unchanged): HeadboardHeightM
 HeadboardHeightM = 1.25   # bed (Bed.proto frame mesh top 1.255): a fixed panel on the BACK face; its points belong to the bed but never set H
+# NOT READ by countable_concept (kept by the Task 4 migration, value unchanged): HeadboardThickM
 HeadboardThickM = 0.10    # bed (Bed.proto headboard bounding box 0.10 thick)
 AI2PriorHeightM = 0.65   # bed: mattress 0.61 + blanket to 0.72 (Bed.proto meshes); the HEADBOARD is not the top — see below
 AI2PriorHeightStd = 0.10   # bed: tight — the box is the mattress layer, and the headboard is modelled separately
@@ -103,7 +105,7 @@ AI2TopOversegSigmaPerM = 2.0    # R inflation (σ per m) for points ABOVE the ro
 # "IS THIS REALLY A BED?" model-evidence mis-detection filter (rejects e.g. a 70 cm elongated cabinet
 # mislabelled "bed"). Continuous plausibility (aspect·size·height·fit) + a bounded plaus_evidence
 # accumulator → gates BIRTH and drives EXISTENCE decay; a SOFT singleton lets a stronger bed inhibit weaker
-# duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: BedConcept.BedFilterEnabled.
+# duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: Concept.FilterEnabled.
 AspectScale = 0.15          # aspect_ok = exp(−(|w−h|/(w+h)/scale)²): ~1 square-ish footprint, →0 elongated
 SizeScale = 0.3   # bed (Webots threerooms-piso); was 0.15 — size_ok  = exp(−((w−0.60)²+(h−0.60)²)/(2·scale²)): footprint near the standard 0.60×0.60
 AltSizeScale = 1   # bed (Webots threerooms-piso); was 0.60 — the ALTERNATIVE hypothesis ("some other furniture-shaped box") footprint std (m).
@@ -357,7 +359,8 @@ ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification b
 # it for tables does not apply), but removal deliberately stays the camera silhouette's job — the silhouette HOLDs
 # out-of-FoV, so a bed the robot is not looking at can never be deleted.
 
-[BedConcept]
+[Concept]
+Class = "bed"   # REQUIRED (countable_concept): the object class this folder runs as — YOLO label, node-name prefix, manifest common/concept_manifest/bed.concept.toml
 # Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
 # StateEps / KStable / DetectionAliveMaxFrames were read by getters with the keys ABSENT from config (silent
 # defaults) — now exposed; a NEW concept agent must expose its own. MatchedFramesBeforeAging / CentralRegionFrac
@@ -367,8 +370,8 @@ KStable = 30                # consecutive converged cycles before the belief is 
 DetectionAliveMaxFrames = 40 # cycles without a fresh mask before detection_alive → false
 MatchedFramesBeforeAging = 5 # a barely-born belief (fewer matched frames) is not aged by a stale no-mask cycle
 CentralRegionFrac = 0.25    # central image box [f,1-f]²; a detectable sample inside counts toward p_detect (removal)
-BedFilterEnabled = true  # master switch for the "is this really a bed?" plausibility filter (see [BedModel] Aspect/Size/Height/Fe* keys)
-BedFilterLog = false     # log per-instance plausibility / plaus_evidence / existence ΔL + the birth-candidate scores
+FilterEnabled = true  # master switch for the "is this really a bed?" plausibility filter (see [Model] Aspect/Size/Height/Fe* keys)
+FilterLog = false     # log per-instance plausibility / plaus_evidence / existence ΔL + the birth-candidate scores
 # Appearance-based FRONT (door) detection + yaw resolver. A square-ish, wall-flush bed is yaw-ambiguous; the
 # door is an APPEARANCE feature (handle + seams = strong vertical lines). Project the FITTED box into the live ZED
 # RGB, score vertical-edge energy per face, fold the winner's bearing into the belief's door-mode resolver. Works
@@ -393,7 +396,7 @@ FrontLog = true             # log each adopted door-mode flip / accepted appeara
                             # diagnosis: with a square footprint (|w−h|≈8 mm live) yaw is unobservable mod 90°,
                             # so this resolver is the ONLY thing that can pick the quarter-turn. Pair with the
                             # new ai2_log columns front_mode/front_conf/cue_conf/cue_bearing.
-BedLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
+LogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
 ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
 # ObsDistance removed 2026-08-07: the epistemic stand-off is no longer a preference. It is the argmax of the
 # detector envelope over BOTH image axes (DetectMinFill/DetectMaxFill below, via common/nbv), so a comfort

@@ -6,8 +6,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_testing()
 find_package(Eigen3 REQUIRED)
 
-# (The perception-card test is added by Task 4, parameterised over the class folders: no folder has a
-# migrated [Concept]/[Model] config before then.)
+# Perception card: make_card() against <class folder>/etc/config.toml; header-only, no Qt/DSR. Built ONCE, run per class
+# folder (the agent dir is argv[1]). Run: LANG=es_ES.UTF-8 ./countable_card_test ../../bed_concept [--json]
+add_executable(countable_card_test countable_card_test.cpp)
+target_include_directories(countable_card_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(countable_card_test PRIVATE -O2)
+target_link_libraries(countable_card_test PRIVATE Eigen3::Eigen)   # the I4 end-to-end case runs the evaluator
+foreach(cls nightstand bed toilet)
+  add_test(NAME countable_card_test_${cls} COMMAND countable_card_test ${CMAKE_CURRENT_LIST_DIR}/../../${cls}_concept)
+  set_tests_properties(countable_card_test_${cls} PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+endforeach()
+
+# Task 4 config migration: every pre-countable value survives the section/key rename (old text read from git at BASE_REV,
+# the commit before the migration), and a config with a [<X>Model]/[<X>Concept] section is refused. Compiles RoboComp's
+# ConfigLoader (as generated/ does) so the check runs on the real loader. Run: LANG=es_ES.UTF-8 ./config_migration_test
+if ("$ENV{ROBOCOMP}" STREQUAL "")
+  set(ENV{ROBOCOMP} "/home/robocomp/robocomp/")
+endif()
+add_executable(config_migration_test config_migration_test.cpp $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp)
+target_include_directories(config_migration_test PRIVATE ../src ../../common/concept_manifest $ENV{ROBOCOMP}/classes)
+target_compile_definitions(config_migration_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../.." BASE_REV="476000a8")
+target_compile_options(config_migration_test PRIVATE -O2)
+add_test(NAME config_migration_test COMMAND config_migration_test)
+set_tests_properties(config_migration_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
 
 # The bed's compound SDF: box ∪ headboard panel (2026-11-14). Run: ./headboard_sdf_test
 add_executable(headboard_sdf_test headboard_sdf_test.cpp ../src/countable_belief.cpp)
