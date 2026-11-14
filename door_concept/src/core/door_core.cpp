@@ -316,7 +316,10 @@ void DoorCore::fit_doors(DoorCycleOutput& out)
         const auto observation = fit_.observe(*inst);
 
         // Stale check: skip heavy update if data hasn't moved for too long
-        if (not rc::door::fitted_this_cycle(observation.has_fresh_data, inst->matched_frames))
+        // ONE-MODEL (S10): no frame-count gate. The fit with no fresh data is the belief's own ageing (Sigma grows on the agent clock) and the
+        // LiDAR leaf channel, which no new ledger view announces: gating it on "a new view since the last fit" starved both (tape_dm: 12
+        // removals/13 births against 2/4), so every fitted door is fitted every cycle.
+        if (not cfg_.door.exist_one_model and not rc::door::fitted_this_cycle(observation.has_fresh_data, inst->matched_frames))
             continue;
         // ★ A FACE BACKED BY A CROSSING KEEPS ITS POSE AND ITS LEAF (FACT_HOLD; user 2026-10-31 "hold both"): the body went
         //   through it, where it is and that it is open are what the crossing measured. pingpong13 door_6 (the entry mirror)

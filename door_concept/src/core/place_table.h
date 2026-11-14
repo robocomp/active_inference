@@ -23,6 +23,7 @@
 #include <vector>
 #include "view_ledger.h"
 #include "place_belief.h"
+#include "wall_base_rate.h"
 #include "../door_identity_table.h"
 
 namespace rc::door::core
@@ -125,6 +126,18 @@ public:
         int n = 0;
         for (auto& r : rows_)
             if (r.room == room and r.removed_wall_ms.has_value() and r.xy.allFinite() and (r.xy - xy).norm() < same_hole_m)
+            { r.removed_wall_ms.reset(); ++n; }
+        return n;
+    }
+    /// ONE-MODEL (S10): a crossing lifts the removals the crossed door's RESPONSIBILITY covers — a removed place that is the same place as
+    /// the crossed one (same_place: the MAP reading of their separation under both position variances), not one within a radius. The
+    /// dated semantics stay: only the removal mark goes, and a later removal re-refutes. Returns how many rows were lifted.
+    int lift_refutations_covered(std::string_view room, const Vec2f& holder_xy, const Eigen::Matrix2f& holder_cov)
+    {
+        int n = 0;
+        for (auto& r : rows_)
+            if (r.room == room and r.removed_wall_ms.has_value() and r.xy.allFinite()
+                and same_place((r.xy - holder_xy).squaredNorm(), 0.5 * double(holder_cov.trace() + r.cov.trace())))
             { r.removed_wall_ms.reset(); ++n; }
         return n;
     }

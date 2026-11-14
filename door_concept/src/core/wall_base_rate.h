@@ -7,6 +7,7 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <span>
 
 namespace rc::door::core
@@ -30,6 +31,22 @@ struct WallRates
 [[nodiscard]] inline float place_distinctness(double sq_dist, double var_sum)
 {
     return static_cast<float>(-std::expm1(-0.5 * sq_dist / std::max(1e-9, var_sum)));
+}
+
+/// RESTORE (S10): a place is EXPLAINED by a live door when the door's cause takes the place's likelihood against "a new door at that
+/// place" (the MAP comparison of the masks' responsibilities, same densities along the wall as Task 8): log p N(m; 0, var_sum) >= log b - log L,
+/// m^2 the squared separation, var_sum the two position variances, `log_new` = log b - log L of a new place there. No radius.
+[[nodiscard]] inline bool place_explained_by(double p_live, double sq_dist, double var_sum, double log_new)
+{
+    const double v = std::max(1e-9, var_sum);
+    return std::log(std::max(1e-9, p_live)) - 0.5 * sq_dist / v - 0.5 * std::log(2.0 * std::numbers::pi * v) >= log_new;
+}
+
+/// Two places are ONE place when "one place" is the MAP reading of their separation: the same-place weight exp(-m^2/2) beats the
+/// distinct weight 1 - exp(-m^2/2) (equal priors; place_distinctness < 1/2). Used where no wall (hence no log b - log L) is at hand.
+[[nodiscard]] inline bool same_place(double sq_dist, double var_sum)
+{
+    return place_distinctness(sq_dist, var_sum) < 0.5f;
 }
 
 /// log prior odds of "this wall has this door" when the other doors on its wall exist with probabilities `r_others`.

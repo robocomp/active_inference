@@ -269,6 +269,10 @@ public:
         bool leaf_born = false;                  // one-model: seeded from a side-on LEAF; theta.aperture is its frame-wall aperture and theta.leaf the leaf's pose (phi known)
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
+    /// ONE-MODEL (S10, restore): does a LIVE door already carry the responsibility for a remembered place at `xy` (position variance `var`)?
+    /// Its aperture takes the place's likelihood against "a new door at that place" (place_explained_by: the MAP comparison, the same
+    /// densities along the wall as the candidates'). A note so explained is adopted into that door, not restored as a second one.
+    [[nodiscard]] bool live_door_explains(const Vec2f& xy, float var) const;
     /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
     [[nodiscard]] bool candidate_is_open(const Candidate& c) const;
     /// Would a frame from `standpoint` be a new view of the candidate, by the ledger's own absorption rule? (spread 0: the standpoint is a plan)

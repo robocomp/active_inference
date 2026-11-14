@@ -1529,6 +1529,22 @@ int main()
         const auto [d2, c2] = charges(false);
         CHECK(std::isfinite(d1) and std::isfinite(c1) and std::abs(d1 - d2) < 1e-6f and std::abs(c1 - c2) < 1e-6f);
     }
+    //    S10 live_door_explains: a remembered place at a live door's hole is explained (its note is adopted into that door); one 1.5 m away is not
+    {
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        const Vec2f at = stand(4.0f, 0.0f);
+        for (int v = 0; v < 6; ++v) r.look(at, kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.w.st.size() == 1);
+        if (not r.w.st.empty())
+        {
+            const Vec2f dc = r.w.st.begin()->second.aperture.centre_xy();
+            const bool near = r.core.live_door_explains(dc + Vec2f(0.3f, 0.0f), 0.04f);
+            const bool far = r.core.live_door_explains(dc + Vec2f(1.5f, 0.0f), 0.04f);
+            std::print("live_door_explains: 0.3 m {}, 1.5 m {}\n", near, far);
+            CHECK(near and not far);
+        }
+    }
     //    two_real_doors_close_both_live: two true doors 1.0 m apart on one wall, each with its own masks: both are born and both stay.
     {
         Rig r(false, true);

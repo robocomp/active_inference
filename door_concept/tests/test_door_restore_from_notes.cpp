@@ -76,6 +76,37 @@ int main()
         CHECK(two.restore.size() == 2 and two.skipped.empty());
     }
 
+    // ── S10 (one-model): restore through responsibility, no radius ──
+    {
+        const std::vector<memnote::NoteInput> notes = {{11, "remembered_door_5", memnote::note_of(csv_row("door_5", 1.5f, -2.0f), 0.03f)}};
+        const auto rows = memnote::rows_of_notes(notes, "room_1");
+        const double log_new = std::log(0.2) - std::log(4.0);   // log b - log Lambda of a new door on a 4 m wall
+        const double var = 0.1 * 0.1 + 0.15 * 0.15 + 0.05 * 0.05;   // detection noise + the live fit's along-wall variance + the note's place_sd: summed position variance
+        const auto explained_by = [&](double p, const Eigen::Vector2f& live_xy)
+        { return [=](const IdentityRow& r) { return core::place_explained_by(p, (r.xy - live_xy).squaredNorm(), var, log_new); }; };
+        // note_adopted_by_live_door: a live door 0.3 m from the note's place and sure of itself explains it: skipped (adopted), no second door
+        const auto adopted = plan_restore_by_responsibility(rows, "room_1", true, explained_by(0.95, Eigen::Vector2f(1.5f + 0.3f, -2.0f)));
+        CHECK(adopted.restore.empty() and adopted.skipped.size() == 1 and adopted.skipped[0].reason == SkipReason::PlaceLive);
+        // note_restored_far_from_live: the live door 1.5 m away on another wall does not: restored
+        const auto far = plan_restore_by_responsibility(rows, "room_1", true, explained_by(0.95, Eigen::Vector2f(1.5f, -2.0f + 1.5f)));
+        CHECK(far.restore.size() == 1 and far.skipped.empty());
+        // a live door that is itself nearly refuted (p small) no longer carries the note's responsibility, even at the same spot
+        const auto weak = plan_restore_by_responsibility(rows, "room_1", true, explained_by(1e-4, Eigen::Vector2f(1.5f, -2.0f)));
+        CHECK(weak.restore.size() == 1);
+        // not a recall / no pose / removed: the same skips as plan_restore
+        CHECK(plan_restore_by_responsibility(rows, "room_1", false, explained_by(0.95, Eigen::Vector2f(9.f, 9.f))).not_recalled);
+        // refuted_note_still_dated: the dated refutation is unchanged by the flag (drop_refuted_places is the same function)
+        const std::vector<RefutedPlace> newer = {{Eigen::Vector2f(1.55f, -2.0f), kNow}};
+        CHECK(drop_refuted_places(rows, newer, 0.3f).dropped.size() == 1);
+        // lift under the flag: the crossed door's responsibility covers the removed place at its spot, not one a wall away
+        core::PlaceTable T(true, core::kLookalikeProbDefault, true);
+        IdentityRow r1; r1.room = "room_2"; r1.name = "door_8"; r1.xy = {-1.77f, 3.19f}; r1.removed_ms = 1000;
+        IdentityRow r2; r2.room = "room_2"; r2.name = "door_9"; r2.xy = {1.5f, 3.19f}; r2.removed_ms = 1000;
+        ParsedIdentityTable pit; pit.rows = {r1, r2};
+        T.load(pit, 0.05f);
+        CHECK(T.lift_refutations_covered("room_2", Eigen::Vector2f(-1.7f, 3.2f), Eigen::Matrix2f::Identity() * 0.0025f) == 1);
+        CHECK(T.find("room_2", "door_8")->removed_wall_ms.has_value() == false and T.find("room_2", "door_9")->removed_wall_ms.has_value());
+    }
     {   // C2: a note at a refuted place is dropped (and reported, so it is adopted); a note elsewhere in the room is kept
         const std::vector<memnote::NoteInput> notes = {
             {11, "remembered_door_5", memnote::note_of(csv_row("door_5", 1.5f, -2.0f), 0.03f)},

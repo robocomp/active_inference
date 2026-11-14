@@ -3860,7 +3860,10 @@ void SpecificWorker::confirm_carried_crossing()
             p->crossed = true;
             // A crossing refutes the refutation: every "no door here" of this hole (its own row's, an older removal at the same place)
             // is lifted, so neither the restore nor the private phantom file carries it on (dm10: door_4 removed, re-born, crossed).
-            const int lifted = core_->places().lift_refutations(c.source_room, p->xy, rc::door::restore_same_hole_m(identity_radius_m(), p->width));
+            // ONE-MODEL (S10): the removals the crossed door's responsibility covers (the same place under both variances), not a radius.
+            const int lifted = cfg_.exist_one_model
+                ? core_->places().lift_refutations_covered(c.source_room, p->xy, p->cov)
+                : core_->places().lift_refutations(c.source_room, p->xy, rc::door::restore_same_hole_m(identity_radius_m(), p->width));
             if (lifted > 0)
                 std::print("door_concept: [crossing] {} ('{}') crossed: {} earlier removal(s) of this place lifted\n", c.source_name, c.source_room, lifted);
         }
@@ -4219,7 +4222,16 @@ std::vector<std::string> SpecificWorker::restore_rows(std::uint64_t new_room, st
                 l.xy_in_room = T->translation().head<2>().cast<float>();
         live.push_back(std::move(l));
     }
-    const auto d = rc::door::plan_restore(rows, room->name(), recalled, live, identity_radius_m());
+    // ONE-MODEL (S10): no same-hole radius. A note is restored as a labelled Bernoulli unless a live door already carries its
+    // responsibility (its aperture takes the note place's likelihood against a new door there); that note is adopted into the live door.
+    const float rn = cfg_.tracker_detection_noise_m;
+    const auto d = cfg_.exist_one_model and core_
+        ? rc::door::plan_restore_by_responsibility(rows, room->name(), recalled, [&](const rc::door::IdentityRow& r)
+          {
+              const float sd = r.place_sd.value_or(rn);
+              return core_->live_door_explains(r.xy, sd * sd);
+          })
+        : rc::door::plan_restore(rows, room->name(), recalled, live, identity_radius_m());
     for (const auto& k : d.skipped)
         decision_log_.record(rc::door::DoorDecisionKind::RestoreSkip, 0, k.name, double(static_cast<int>(k.reason)), 0, 0, 0, room->name());
     for (const auto& k : d.skipped)

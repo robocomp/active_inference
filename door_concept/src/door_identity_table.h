@@ -326,6 +326,27 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
     return d;
 }
 
+/// ONE-MODEL (S10): which of `room`'s remembered doors to recreate, with no same-hole radius. A note is a labelled Bernoulli (its note's L
+/// and state, seeded by seed_restored_instance) unless a live door already CARRIES its responsibility: `explained(row)` says the live
+/// door's aperture takes the note place's likelihood against "a new door at that place" (core::place_explained_by, the MAP comparison of
+/// the masks' responsibilities). That note is skipped as PlaceLive: the caller adopts it into the live door (mark_adopted), no second door.
+template <class Explained>
+inline RestoreDecision plan_restore_by_responsibility(std::span<const IdentityRow> rows, std::string_view room, bool recalled,
+                                                      Explained&& explained)
+{
+    RestoreDecision d;
+    if (not recalled) { d.not_recalled = true; return d; }
+    for (const auto& r : rows)
+    {
+        if (r.room != room) continue;
+        if (r.removed_ms.has_value()) { d.skipped.push_back({r.name, SkipReason::Removed}); continue; }
+        if (not r.pose.has_value()) { d.skipped.push_back({r.name, SkipReason::NoPose}); continue; }
+        if (explained(r)) d.skipped.push_back({r.name, SkipReason::PlaceLive});
+        else              d.restore.push_back(r);
+    }
+    return d;
+}
+
 /// Rows (notes from ltsm carry no removed_ms) that lie on a REFUTED place of this room (a removed PlaceRow: "no door here", also the rows
 /// injected from the private phantom file): memory never deletes a refuted face, so the agent drops them here, same-hole gate as
 /// plan_restore. `dropped` names them, for the log and for adoption (ltsm then retires the note).
@@ -333,6 +354,8 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
 /// crossed, and its note was then dropped on re-entry by the stale removed row. So a refuted place drops a note only when the
 /// removal is NEWER than the note's last sighting (the later observation supersedes the earlier one; an unknown sighting time
 /// counts as oldest), and a CROSSED door is never dropped: a crossing is proof that the opening exists (place_belief.h).
+// kept: memory, not evidence — the dated refutation (04d256d7) is a record of what was seen and when, not a model term; its same-hole
+// test is the identity gate that names the same place (no responsibility exists for a place no live door holds).
 struct RefutedPlace { Eigen::Vector2f xy = Eigen::Vector2f::Zero(); std::int64_t removed_ms = 0; };
 struct RefutedSplit { std::vector<IdentityRow> kept; std::vector<std::string> dropped; };
 [[nodiscard]] inline RefutedSplit drop_refuted_places(std::span<const IdentityRow> rows, std::span<const RefutedPlace> refuted,

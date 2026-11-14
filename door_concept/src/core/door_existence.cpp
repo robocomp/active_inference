@@ -279,6 +279,23 @@ double DoorCore::wall_length_at(const Vec2f& xy) const
     return 5.0;
 }
 
+bool DoorCore::live_door_explains(const Vec2f& xy, float var) const
+{
+    if (world_ == nullptr or fit_.room_polygon().empty()) return false;
+    const float rn2 = cfg_.door.tracker_detection_noise_m * cfg_.door.tracker_detection_noise_m;
+    const double log_new = log_birth(xy, std::sqrt(std::max(1e-9f, var))) - std::log(wall_length_at(xy));
+    for (const auto& [id, st] : world_->fit_states())
+    {
+        if (st->is_bearing_hypothesis) continue;
+        const auto it = last_p_door_.find(id);
+        const double p = it != last_p_door_.end() ? double(it->second) : 1.0;   // not yet judged (born or restored this cycle): taken as certain, as the candidates' test does
+        const Vec2f c = st->aperture.centre_xy();
+        if (not c.allFinite()) continue;
+        if (place_explained_by(p, (c - xy).squaredNorm(), double(place_var(*st, rn2)) + double(var), log_new)) return true;
+    }
+    return false;
+}
+
 void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
 {
     mask_causes_.clear();
