@@ -353,7 +353,8 @@ private:
     std::uint64_t hyp_looks_room_ = 0;
     double hyp_look_ms_sum_ = 0.0, hyp_look_ms_max_ = 0.0; long hyp_look_n_ = 0, hyp_look_hits_ = 0;   // best_look timing, logged every 100 evaluations
     /// Offer the best look of each open question; withdraw the settled ones. True while some question stands.
-    bool step_hypothesis_looks(std::span<const rc::door::hlook::Member> members, const std::function<bool(const rc::door::hlook::Member&)>& undecided,
+    bool step_hypothesis_looks(std::span<const rc::door::hlook::Member> members, std::span<const std::pair<std::string, std::string>> competing,
+                               const std::function<bool(const rc::door::hlook::Member&)>& undecided,
                                const rc::nbv::Sensor& sensor, std::span<const rc::nbv::Obstacle> furniture, bool can_plan);
     void refresh_remembered_rooms();   // one-model: rates + door-count prior from LTSM's remembered rooms (room entry + every >= 1 s)
     void step_wall_hypotheses();                            // a promoted room's walls are its door slots (room-door-belief spec §3.3)

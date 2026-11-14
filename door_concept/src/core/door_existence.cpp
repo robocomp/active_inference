@@ -442,6 +442,13 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
             }
         const float R = cfg.ai2_sigma_base_m * cfg.ai2_sigma_base_m + std::max(0.0f, sl.depth_var);
         mask_causes_[i] = causes_of_mask(dv.slice_index, pts, R, doors, model, bp != nullptr ? *bp : bp_default);
+        {   // one-model: the doors on this mask's list of causes compete for it
+            std::vector<NodeRef> nodes;
+            for (const auto& cz : mask_causes_[i].causes)
+                if ((cz.kind == CauseKind::Aperture or cz.kind == CauseKind::Leaf) and mask_causes_[i].rho_door(cz.door) >= rc::door::hlook::kWeightFloor)
+                    nodes.push_back({'d', cz.door});
+            note_competition(nodes);
+        }
         if (const int lh = mask_causes_[i].new_leaf_hyp; lh >= 0)
         {
             mask_leaf_[i] = hyps[static_cast<std::size_t>(lh)];
@@ -768,6 +775,15 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             }
         }
         det_candidate_[d] = best;
+        if (cfg.exist_one_model and d < mask_causes_.size())
+        {   // one-model: this mask is explained by the candidate and by every door on its list of causes: they compete for it
+            std::vector<NodeRef> nodes;
+            if (mask_causes_[d].rho_kind(CauseKind::NewDoor) >= rc::door::hlook::kWeightFloor) nodes.push_back({'c', candidates_[static_cast<std::size_t>(best)].key});
+            for (const auto& cz : mask_causes_[d].causes)
+                if ((cz.kind == CauseKind::Aperture or cz.kind == CauseKind::Leaf) and mask_causes_[d].rho_door(cz.door) >= rc::door::hlook::kWeightFloor)
+                    nodes.push_back({'d', cz.door});
+            note_competition(nodes);
+        }
         self_det.try_emplace(static_cast<std::size_t>(best), static_cast<int>(d));
     }
     // every pending candidate in this room receives the frame (hits from its own detection, misses where it should be seen)
@@ -885,6 +901,14 @@ bool DoorCore::hypothesise_place(const std::string& room, const Vec2f& xy, bool 
 static float question_L(const DoorCore::Candidate& c)
 {
     return c.belief.L() - c.belief.prior.size + std::max(c.best_size, c.belief.prior.size);
+}
+
+void DoorCore::note_competition(std::vector<NodeRef> nodes)
+{
+    std::ranges::sort(nodes);
+    nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+    for (std::size_t a = 0; a < nodes.size(); ++a)
+        for (std::size_t b = a + 1; b < nodes.size(); ++b) competes_.emplace(nodes[a], nodes[b]);
 }
 
 std::vector<rc::door::hlook::Alt> DoorCore::leaf_alternatives(const Candidate& c) const

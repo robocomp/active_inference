@@ -777,10 +777,23 @@ int main(int argc, char** argv)
                 model.zed = core.detectors().zed; model.lidar = core.detectors().lidar; model.polygon = poly; model.furniture = furniture;
                 model.wall_thickness_m = std::max(1e-3f, cfg.door.door_thickness_m); model.robot_radius_m = radius;
                 const auto poses = hl::room_poses(poly, furniture, radius);
-                const float reach = cfg.door.door_thickness_m + 2.0f * core.fit().room_band().sigma_m;
+                std::vector<std::pair<std::string, std::string>> competing;
+                {
+                    std::map<std::uint64_t, std::string> door_name;
+                    for (const auto& [id, st] : world.fit_states()) if (st != nullptr) door_name[id] = st->node_name;
+                    const auto name_of = [&](const DoorCore::NodeRef& n) -> std::string
+                    {
+                        if (n.first == 'c') return std::format("place_{}", n.second);
+                        const auto it = door_name.find(n.second);
+                        return it != door_name.end() ? it->second : std::string{};
+                    };
+                    for (const auto& [a, b] : core.competing())
+                        if (const auto na = name_of(a), nb = name_of(b); not na.empty() and not nb.empty()) competing.emplace_back(na, nb);
+                }
                 if (in->robot.room_T_body.has_value())
                     std::println("HLOOK cycle {} robot ({:.2f},{:.2f})", in->cycle, (*in->robot.room_T_body)(0, 3), (*in->robot.room_T_body)(1, 3));
-                for (const auto& q : hl::questions_from(members, reach, undecided))
+                if (in->cycle % 20 == 0) for (const auto& [a, b] : competing) std::println("HLOOK cycle {} competes {} -- {}", in->cycle, a, b);
+                for (const auto& q : hl::questions_from(members, competing, undecided))
                 {
                     const auto w = hl::weights_of(q);
                     const auto t0 = std::chrono::steady_clock::now();

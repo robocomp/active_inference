@@ -149,20 +149,82 @@ int main()
         CHECK(not settled(q));
     }
 
-    // cluster_from_overlapping_leaves: a side-wall leaf hypothesis and the front wall's door explain the same panel: ONE question, null + both
+    // cluster_from_competition: members that competed for a mask form ONE question (null + each); an unrelated open member is its own
     {
-        // the leaf stands along x = 4.4 from the corner region; door B's hinge is at its corner, door A's at the other end
         Member A; A.name = "place_7"; A.aperture = right(2.0f); A.leaf = LeafState{1.2f, HingeSide::Near, +1.f}; A.L = -0.9; A.leaf_born = true;
         Member B; B.name = "door_0"; B.aperture = bottom(3.9f); B.leaf = LeafState{std::numbers::pi_v<float> / 2.f, HingeSide::Far, +1.f}; B.L = 1.0;
-        Member C; C.name = "door_9"; C.aperture = top(1.0f); C.leaf = LeafState{}; C.L = 0.2;   // somewhere else: its own question
+        Member C; C.name = "door_9"; C.aperture = top(1.0f); C.leaf = LeafState{}; C.L = 0.2;
         const std::array<Member, 3> ms{A, B, C};
-        const auto segA = leaf_segment(A.aperture, A.leaf), segB = leaf_segment(B.aperture, B.leaf);
-        std::printf("leaf segments: A (%.2f,%.2f)-(%.2f,%.2f)  B (%.2f,%.2f)-(%.2f,%.2f)  distance %.3f\n", segA[0].x(), segA[0].y(), segA[1].x(), segA[1].y(),
-                    segB[0].x(), segB[0].y(), segB[1].x(), segB[1].y(), segment_distance(segA, segB));
-        const auto qs = questions_from(ms, 5.0f, [](const Member& m) { return m.name == "door_9"; });   // reach 5 m: all three close
-        CHECK(qs.size() == 1 and qs[0].hyps.size() == 4);   // null + the three
-        const auto qs2 = questions_from(ms, 0.01f, [](const Member& m) { return m.name == "door_9"; });
-        CHECK(std::ranges::any_of(qs2, [](const Question& q) { return q.key == "q_door_9" and q.hyps.size() == 2; }));
+        const auto open9 = [](const Member& m) { return m.name == "door_9"; };
+        const std::array<std::pair<std::string, std::string>, 1> edge{{{"place_7", "door_0"}}};
+        const auto qs = questions_from(ms, edge, open9);
+        CHECK(qs.size() == 2);
+        CHECK(std::ranges::any_of(qs, [](const Question& q) { return q.key == "c_door_0" and q.hyps.size() == 3; }));   // null + the two
+        CHECK(std::ranges::any_of(qs, [](const Question& q) { return q.key == "q_door_9" and q.hyps.size() == 2; }));
+        const auto none = questions_from(ms, {}, open9);   // no mask ever tied them: nothing but the open one
+        CHECK(none.size() == 1 and none[0].key == "q_door_9");
+    }
+
+    // sampled_beyond_budget: S = 7 apertures, 8 hypotheses: 4^7 columns is over the budget for the room's poses; the EIG is sampled, nothing cached,
+    // and within 0.05 nats of the exact one (computed once here)
+    {
+        const std::vector<rc::nbv::Obstacle> fur{{2.5f, 2.0f, 0.8f, 0.5f, 0.2f}};
+        const Model m = model_of(fur, false);
+        Question q{"seven", {}};
+        const LeafState open{1.2f, HingeSide::Near, +1.f};
+        q.hyps.push_back({{}, {}, 0.3});
+        for (int k = 0; k < 7; ++k) q.hyps.push_back({{bottom(0.1f + 0.68f * k, 0.5f)}, {open}, 0.1});
+        const auto poses = room_poses(kRoom, fur, R);
+        LookCache cache;
+        const auto t0 = std::chrono::steady_clock::now();
+        const Best b = best_look(q, poses, m, &cache);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        CHECK(cache.sampled and cache.tab.empty() and b.valid);
+        double worst = 0.0;
+        for (const Pose& p : {b.pose, poses[poses.size() / 3], poses[poses.size() / 2]})
+            worst = std::max(worst, std::abs(eig_at(q, p, m, true) - eig_at(q, p, m, false)));
+        std::printf("seven slots: %zu poses over budget, sampled best_look %.1f ms, eig %.4f; worst |sampled - exact| over 3 poses %.4f nats\n", poses.size(), ms, b.eig_nats, worst);
+        CHECK(worst < 0.05);
+    }
+
+    // cache_signature_covers_every_pose: two admissible lists of equal size and endpoints but a different middle pose rebuild the tables
+    {
+        const Model m = model_of(no_furniture, false);
+        Member mem; mem.name = "place_1"; mem.aperture = bottom(2.0f); mem.leaf = LeafState{};
+        const Question q = place_question("place_1", mem, 0.5);
+        std::vector<Pose> l1{{{1.0f, 2.0f}, 0.f}, {{2.5f, 2.0f}, -1.57f}, {{4.0f, 2.0f}, 3.0f}};
+        std::vector<Pose> l2 = l1;
+        l2[1] = {{2.5f, 1.0f}, -1.57f};
+        LookCache cache;
+        const Best b1 = best_look(q, l1, m, &cache);
+        CHECK(not cache.hit);
+        const Best b1b = best_look(q, l1, m, &cache);
+        CHECK(cache.hit and b1b.eig_nats == b1.eig_nats);
+        const Best b2 = best_look(q, l2, m, &cache);
+        CHECK(not cache.hit);
+        const Best b2_fresh = best_look(q, l2, m);
+        CHECK(b2.eig_nats == b2_fresh.eig_nats and b2.pose.xy == b2_fresh.pose.xy);
+    }
+
+    // standing_pose_is_held: two poses that tie as argmax (alternating with the list order) do not alternate the published target
+    {
+        const std::vector<rc::nbv::Obstacle> fur{{2.5f, 1.0f, 4.0f, 0.2f, 0.f}};
+        const Model m = model_of(fur, false);
+        Question q{"hold", {}};
+        q.hyps.push_back({{bottom(2.0f)}, {LeafState{1.2f, HingeSide::Near, +1.f}}, 0.5});
+        q.hyps.push_back({{}, {}, 0.5});
+        const Pose P{{2.5f, 3.0f}, std::numbers::pi_v<float> / 2.f}, Q{{2.0f, 3.0f}, std::numbers::pi_v<float> / 2.f};   // both blind: EIG 0 each
+        const std::array<Pose, 2> pq{P, Q}, qp{Q, P};
+        Pose standing = P;
+        bool alternated_without_hold = best_look(q, pq, m).pose.xy != best_look(q, qp, m).pose.xy;
+        CHECK(alternated_without_hold);   // the argmax itself flips with the list order
+        bool moved = false;
+        for (int k = 0; k < 6; ++k)
+        {
+            const Best b = best_look(q, k % 2 ? std::span<const Pose>(qp) : std::span<const Pose>(pq), m, nullptr, &standing);
+            moved = moved or b.pose.xy != standing.xy;
+        }
+        CHECK(not moved);
     }
 
     // timing (reported, not asserted): a 20 m2 room whose outline has 24 vertices (live rooms have ~30 edges), 4 hypotheses over 3 apertures

@@ -28,10 +28,12 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -256,17 +258,13 @@ inline bool in_view_possible(const rc::nbv::Target& t, const Pose& pose, const r
     return not (pos_side == 4 or neg_side == 4);
 }
 
-/// The joint outcome table over the slots, p(z | h, pose), z = Σ_s o_s 4^s with o_s = 2 camera_yes + lidar_yes. `los[h][s]` from los_at.
-inline std::vector<std::vector<double>> table(const Question& q, const Scene& sc, const Model& m, const Pose& pose,
-                                              const std::vector<std::vector<float>>& los)
+/// Per hypothesis and slot, the four outcome probabilities {neither, lidar only, camera only, both} (o = 2 camera_yes + lidar_yes). `los[h][s]` from los_at.
+inline std::vector<std::vector<std::array<double, 4>>> slot_probs(const Question& q, const Scene& sc, const Model& m, const Pose& pose,
+                                                                  const std::vector<std::vector<float>>& los)
 {
     const std::size_t H = q.hyps.size(), S = sc.holes.size();
-    std::size_t Z = 1;
-    for (std::size_t s = 0; s < S; ++s) Z *= 4;
-    std::vector<std::vector<double>> out(H, std::vector<double>(Z, 0.0));
-    std::vector<std::array<double, 4>> ps(S);
+    std::vector<std::vector<std::array<double, 4>>> ps(H, std::vector<std::array<double, 4>>(S));
     for (std::size_t h = 0; h < H; ++h)
-    {
         for (std::size_t s = 0; s < S; ++s)
         {
             const bool present = sc.present[h][s] >= 0;
@@ -278,17 +276,73 @@ inline std::vector<std::vector<double>> table(const Question& q, const Scene& sc
             const double pc = std::clamp(present ? front * h_state : front * m.zed.false_alarm, 0.0, 1.0);   // clamp: a probability
             const double through = present ? double(po) * m.lidar.through_open + (1.0 - double(po)) * m.lidar.through_wall : double(m.lidar.through_wall);
             const double pl = std::clamp(double(los[h][s]) * through, 0.0, 1.0);
-            ps[s] = {(1 - pc) * (1 - pl), (1 - pc) * pl, pc * (1 - pl), pc * pl};
+            ps[h][s] = {(1 - pc) * (1 - pl), (1 - pc) * pl, pc * (1 - pl), pc * pl};
         }
+    return ps;
+}
+
+/// The joint outcome table over the slots, p(z | h, pose), z = Σ_s o_s 4^s. EXACT: 4^slots columns.
+inline std::vector<std::vector<double>> table(const Question& q, const Scene& sc, const Model& m, const Pose& pose,
+                                              const std::vector<std::vector<float>>& los)
+{
+    const std::size_t H = q.hyps.size(), S = sc.holes.size();
+    std::size_t Z = 1;
+    for (std::size_t s = 0; s < S; ++s) Z *= 4;
+    const auto ps = slot_probs(q, sc, m, pose, los);
+    std::vector<std::vector<double>> out(H, std::vector<double>(Z, 0.0));
+    for (std::size_t h = 0; h < H; ++h)
         for (std::size_t z = 0; z < Z; ++z)
         {
             double p = 1.0;
             std::size_t r = z;
-            for (std::size_t s = 0; s < S; ++s, r /= 4) p *= ps[s][r % 4];
+            for (std::size_t s = 0; s < S; ++s, r /= 4) p *= ps[h][s][r % 4];
             out[h][z] = p;
         }
-    }
     return out;
+}
+
+/// Sampling resolution of the Monte-Carlo EIG: outcomes drawn per hypothesis. The same uniform stream serves every pose (common random numbers), so
+/// the estimate is smooth across poses and the choice between them is not decided by sampling noise.
+inline constexpr int kOutcomeSamples = 256;
+
+/// EIG = Σ_h w_h E_{z ~ p(.|h)} [ln p(z|h) − ln p(z)] by sampling z; nothing is enumerated, so the cost is H·samples·H·S whatever 4^S is.
+inline double eig_sampled(std::span<const double> w, const std::vector<std::vector<std::array<double, 4>>>& ps)
+{
+    const std::size_t H = ps.size(), S = H ? ps[0].size() : 0;
+    double eig = 0.0;
+    std::vector<double> lp(H);
+    for (std::size_t h = 0; h < H; ++h)
+    {
+        if (not (w[h] > 0.0)) continue;
+        std::uint64_t st = 0x9E3779B97F4A7C15ull * (h + 1);
+        double acc = 0.0;
+        for (int n = 0; n < kOutcomeSamples; ++n)
+        {
+            std::vector<int> o(S);
+            for (std::size_t s = 0; s < S; ++s)
+            {
+                st ^= st << 13; st ^= st >> 7; st ^= st << 17;   // xorshift64
+                const double u = static_cast<double>(st >> 11) * (1.0 / 9007199254740992.0);
+                double c = 0.0;
+                int k = 0;
+                for (; k < 3; ++k) { c += ps[h][s][static_cast<std::size_t>(k)]; if (u < c) break; }
+                o[s] = k;
+            }
+            double mx = -std::numeric_limits<double>::infinity();
+            for (std::size_t g = 0; g < H; ++g)
+            {
+                double l = 0.0;
+                for (std::size_t s = 0; s < S; ++s) l += std::log(ps[g][s][static_cast<std::size_t>(o[s])]);   // log 0 = -inf: an outcome g forbids
+                lp[g] = l;
+                if (w[g] > 0.0) mx = std::max(mx, l + std::log(w[g]));
+            }
+            double z = 0.0;
+            for (std::size_t g = 0; g < H; ++g) z += w[g] > 0.0 ? std::exp(lp[g] + std::log(w[g]) - mx) : 0.0;
+            acc += lp[h] - (mx + std::log(z));
+        }
+        eig += w[h] * acc / kOutcomeSamples;
+    }
+    return std::max(0.0, eig);
 }
 }   // namespace detail
 
@@ -300,15 +354,20 @@ inline std::vector<std::vector<double>> table(const Question& q, const Scene& sc
     return detail::table(q, sc, m, pose, detail::los_at(q, sc, pose.xy));
 }
 
+/// resource budget, not a model term: the exact outcome tables of a question (poses x hypotheses x 4^slots doubles) are kept while they fit this many
+/// cells (4 M = 32 MB); beyond it the EIG is estimated per pose from sampled outcomes and nothing is cached.
+inline constexpr double kTableBudgetCells = 4.0e6;
+
 /// The outcome tables of every pose of a question, memoised across cycles. The tables hold the GEOMETRY of the question (what each hypothesis
 /// predicts from each pose); the weights, which move every cycle, enter only in the EIG. So while the hypotheses' geometry, the room and the
-/// pose grid are the same to a sampling resolution (1 cm and 0.02 rad: 60x finer than the pose grid and far below the sensors' own spread) the
-/// tables are not recomputed. Not a gate on the look: a miss recomputes them exactly.
+/// pose list are the same to a sampling resolution (1 cm and 0.02 rad for the geometry; the poses to the bit) the tables are not recomputed. Not a
+/// gate on the look: a miss recomputes them exactly. Only exact tables within kTableBudgetCells are held.
 struct LookCache
 {
     std::vector<std::int32_t> sig;
     std::vector<std::vector<std::vector<double>>> tab;   // [pose][h][z]
     bool hit = false;                                    // the last call reused the tables
+    bool sampled = false;                                // the last call was over budget: EIG by sampling, nothing held
 };
 
 namespace detail
@@ -335,25 +394,44 @@ namespace detail
     for (const auto& o : m.furniture) { len(o.cx); len(o.cy); len(o.w); len(o.h); ang(o.yaw); }
     len(m.robot_radius_m); len(m.wall_thickness_m);
     g.push_back(static_cast<std::int32_t>(poses.size()));
-    if (not poses.empty()) { len(poses.front().xy.x()); len(poses.front().xy.y()); len(poses.back().xy.x()); len(poses.back().xy.y()); }
+    for (const auto& p : poses)   // the tables are index-aligned with the poses: every pose, to the bit
+    {
+        g.push_back(std::bit_cast<std::int32_t>(p.xy.x())); g.push_back(std::bit_cast<std::int32_t>(p.xy.y())); g.push_back(std::bit_cast<std::int32_t>(p.yaw));
+    }
     return g;
 }
-}   // namespace detail
 
-/// The pose among `poses` with the largest expected information gain about the question (hypotheses below kWeightFloor left out). The poses
-/// of one position (poses come grouped, as room_poses emits them) share the LiDAR's lines of sight. With a `cache` the tables are reused while
-/// the question's geometry is unchanged (see LookCache).
-[[nodiscard]] inline Best best_look(const Question& question, std::span<const Pose> poses, const Model& m, LookCache* cache = nullptr)
+/// The EIG of every pose (exact within the budget, sampled beyond it).
+[[nodiscard]] inline std::vector<double> eigs(const Question& q, std::span<const Pose> poses, const Model& m, LookCache* cache)
 {
-    Best best;
-    const Question q = live_part(question);
-    if (q.hyps.empty()) return best;
+    std::vector<double> out(poses.size(), 0.0);
     const auto w = weights_of(q);
+    std::vector<const Aperture*> distinct;
+    for (const auto& h : q.hyps)
+        for (const auto& a : h.apertures)
+            if (std::ranges::none_of(distinct, [&](const Aperture* d) { return same_aperture(*d, a); })) distinct.push_back(&a);
+    std::size_t Z = 1;
+    for (std::size_t s = 0; s < distinct.size(); ++s) Z *= 4;
+    const bool exact = static_cast<double>(poses.size()) * static_cast<double>(q.hyps.size()) * static_cast<double>(Z) <= kTableBudgetCells;
+    if (cache != nullptr) cache->sampled = not exact;
+    if (not exact)
+    {
+        const Scene sc = make_scene(q, m);
+        if (cache != nullptr) { cache->hit = false; cache->tab.clear(); cache->sig.clear(); }
+        Eigen::Vector2f at(std::numeric_limits<float>::quiet_NaN(), 0.f);
+        std::vector<std::vector<float>> los;
+        for (std::size_t i = 0; i < poses.size(); ++i)
+        {
+            if (not (poses[i].xy == at)) { los = los_at(q, sc, poses[i].xy); at = poses[i].xy; }
+            out[i] = eig_sampled(w, slot_probs(q, sc, m, poses[i], los));
+        }
+        return out;
+    }
     std::vector<std::vector<std::vector<double>>> local;
     auto* tabs = &local;
     if (cache != nullptr)
     {
-        auto sig = detail::signature(q, poses, m);
+        auto sig = signature(q, poses, m);
         cache->hit = (sig == cache->sig and cache->tab.size() == poses.size());
         if (not cache->hit) { cache->sig = std::move(sig); cache->tab.clear(); }
         tabs = &cache->tab;
@@ -366,15 +444,46 @@ namespace detail
         tabs->reserve(poses.size());
         for (const auto& p : poses)
         {
-            if (not (p.xy == at)) { los = detail::los_at(q, sc, p.xy); at = p.xy; }
-            tabs->push_back(detail::table(q, sc, m, p, los));
+            if (not (p.xy == at)) { los = los_at(q, sc, p.xy); at = p.xy; }
+            tabs->push_back(table(q, sc, m, p, los));
         }
     }
-    for (std::size_t i = 0; i < poses.size(); ++i)
-    {
-        const double e = core::bf::expected_information_gain(w, (*tabs)[i]);
-        if (not best.valid or e > best.eig_nats) { best.valid = true; best.pose = poses[i]; best.eig_nats = e; }
-    }
+    for (std::size_t i = 0; i < poses.size(); ++i) out[i] = core::bf::expected_information_gain(w, (*tabs)[i]);
+    return out;
+}
+}   // namespace detail
+
+/// The EIG of one pose, whichever way (exact table or sampled outcomes) fits the budget; for tests and callers with a single pose.
+[[nodiscard]] inline double eig_at(const Question& question, const Pose& pose, const Model& m, bool force_sampled = false)
+{
+    const Question q = live_part(question);
+    if (q.hyps.empty()) return 0.0;
+    const Scene sc = make_scene(q, m);
+    const auto los = detail::los_at(q, sc, pose.xy);
+    return force_sampled ? detail::eig_sampled(weights_of(q), detail::slot_probs(q, sc, m, pose, los))
+                         : core::bf::expected_information_gain(weights_of(q), detail::table(q, sc, m, pose, los));
+}
+
+/// The pose among `poses` with the largest expected information gain about the question (hypotheses below kWeightFloor left out; no top-K).
+/// With a `standing` pose (the one last published, if it is still among `poses`) it is HELD: the result moves only when another pose's EIG, under
+/// the current weights, exceeds the standing pose's EIG under the same weights; `Best::eig_nats` is then the standing pose's.
+/// With a `cache` the exact tables are reused while the question's geometry is unchanged (see LookCache).
+[[nodiscard]] inline Best best_look(const Question& question, std::span<const Pose> poses, const Model& m, LookCache* cache = nullptr,
+                                    const Pose* standing = nullptr)
+{
+    Best best;
+    const Question q = live_part(question);
+    if (q.hyps.empty() or poses.empty()) return best;
+    const auto e = detail::eigs(q, poses, m, cache);
+    std::optional<std::size_t> hold;
+    if (standing != nullptr)
+        for (std::size_t i = 0; i < poses.size(); ++i)
+            if (poses[i].xy == standing->xy and poses[i].yaw == standing->yaw) { hold = i; break; }
+    std::size_t arg = 0;
+    for (std::size_t i = 1; i < poses.size(); ++i)
+        if (e[i] > e[arg]) arg = i;
+    if (hold.has_value() and not (e[arg] > e[*hold])) arg = *hold;
+    best.valid = true; best.pose = poses[arg]; best.eig_nats = e[arg];
     return best;
 }
 
@@ -396,34 +505,6 @@ struct Member
     std::vector<Alt> alts;
 };
 
-/// The plan-view segment of a member's leaf (hinge to free end).
-[[nodiscard]] inline std::array<Eigen::Vector2f, 2> leaf_segment(const Aperture& ap, const LeafState& ls)
-{
-    const LeafPose L = leaf_pose(ap, ls);
-    return {L.hinge_xy, L.hinge_xy + L.ex * (2.f * L.half_w)};
-}
-
-[[nodiscard]] inline float segment_distance(const std::array<Eigen::Vector2f, 2>& a, const std::array<Eigen::Vector2f, 2>& b)
-{
-    const auto point_seg = [](const Eigen::Vector2f& p, const std::array<Eigen::Vector2f, 2>& s)
-    {
-        const Eigen::Vector2f d = s[1] - s[0];
-        const float l2 = d.squaredNorm();
-        const float t = l2 > 1e-12f ? std::clamp((p - s[0]).dot(d) / l2, 0.f, 1.f) : 0.f;
-        return (p - (s[0] + t * d)).norm();
-    };
-    // plan-view segments: the distance is 0 when they cross, else the least endpoint-to-segment distance
-    const auto cross = [](const Eigen::Vector2f& u, const Eigen::Vector2f& v) { return u.x() * v.y() - u.y() * v.x(); };
-    const Eigen::Vector2f r = a[1] - a[0], s = b[1] - b[0];
-    const float den = cross(r, s);
-    if (std::abs(den) > 1e-9f)
-    {
-        const float t = cross(b[0] - a[0], s) / den, u = cross(b[0] - a[0], r) / den;
-        if (t >= 0.f and t <= 1.f and u >= 0.f and u <= 1.f) return 0.f;
-    }
-    return std::min({point_seg(a[0], b), point_seg(a[1], b), point_seg(b[0], a), point_seg(b[1], a)});
-}
-
 [[nodiscard]] inline Hyp single_hyp(const Member& m, double w) { return {{m.aperture}, {m.leaf}, w}; }
 
 /// A single undecided place: {exists with probability p, not}.
@@ -433,21 +514,25 @@ struct Member
     return {std::move(key), {single_hyp(m, p_exists), Hyp{{}, {}, 1.0 - p_exists}}};
 }
 
-/// The questions of a set of members. Members whose LEAVES come within `reach_m` of each other explain the same panel: one cluster, ONE
-/// of them (or none) is the door (weights odds_i = e^{L_i} against the null's 1). A leaf-born member's alts join its cluster. Every
-/// member that is no competitor of another (and no leaf-born) is a single-member {exists, not} question. A cluster stands until `settled`.
-/// `reach_m` = the leaf thickness plus twice the room frame's own precision: two leaf segments that close are the same observed panel.
+/// The questions of a set of members. Two members COMPETE when some mask put non-negligible responsibility on both (door_mask_causes.h rho >= kWeightFloor); `competing` lists those pairs by member name. Connected components
+/// of that graph are the clusters: members explaining one panel, of which ONE (or none) is the door (weights odds e^{L_i} against the null's 1). A
+/// leaf-born member's alts join its cluster. A lone member is a single-member {exists, not} question while `undecided` says it is open. A cluster
+/// stands until `settled`.
 template <class Undecided>
-[[nodiscard]] inline std::vector<Question> questions_from(std::span<const Member> members, float reach_m, Undecided&& undecided)
+[[nodiscard]] inline std::vector<Question> questions_from(std::span<const Member> members,
+                                                          std::span<const std::pair<std::string, std::string>> competing, Undecided&& undecided)
 {
     const std::size_t N = members.size();
     std::vector<std::size_t> comp(N);
     for (std::size_t i = 0; i < N; ++i) comp[i] = i;
     const auto find = [&](std::size_t i) { while (comp[i] != i) i = comp[i] = comp[comp[i]]; return i; };
-    for (std::size_t i = 0; i < N; ++i)
-        for (std::size_t j = i + 1; j < N; ++j)
-            if (segment_distance(leaf_segment(members[i].aperture, members[i].leaf), leaf_segment(members[j].aperture, members[j].leaf)) <= reach_m)
-                comp[find(i)] = find(j);
+    const auto index_of = [&](const std::string& n) -> std::optional<std::size_t>
+    {
+        for (std::size_t i = 0; i < N; ++i) if (members[i].name == n) return i;
+        return std::nullopt;
+    };
+    for (const auto& [a, b] : competing)
+        if (const auto ia = index_of(a), ib = index_of(b); ia.has_value() and ib.has_value()) comp[find(*ia)] = find(*ib);
     std::vector<Question> out;
     std::vector<bool> done(N, false);
     for (std::size_t r = 0; r < N; ++r)
@@ -457,8 +542,6 @@ template <class Undecided>
         for (std::size_t i = 0; i < N; ++i)
             if (find(i) == find(r)) { group.push_back(i); done[i] = true; }
         const bool leafy = std::ranges::any_of(group, [&](std::size_t i) { return members[i].leaf_born; });
-        // a lone member is a question only while it is open; a CLUSTER (several members explaining one panel) is one until its weights settle,
-        // whether or not any member is "open" by itself: the lingering phantom beside the real door is exactly a cluster of two decided-looking doors
         if (group.size() == 1 and not undecided(members[group[0]])) continue;
         if (group.size() == 1 and not leafy)
         {

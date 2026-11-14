@@ -4694,7 +4694,20 @@ void SpecificWorker::step_candidate_looks()
         }();
         const std::function<bool(const rc::door::hlook::Member&)> undecided = [&](const rc::door::hlook::Member& m)
         { return m.name.starts_with("place_") ? open_cands.contains(m.name) : m.restored_unseen; };
-        any_open = step_hypothesis_looks(hl_members, undecided, sensor, furniture, can_plan) or any_open;
+        std::vector<std::pair<std::string, std::string>> competing;   // the core's competition graph, by member name
+        {
+            std::map<std::uint64_t, std::string> door_name;
+            for (const auto& [id, inst] : fitter_->instances()) door_name[id] = inst.node_name;
+            const auto name_of = [&](const rc::door::core::DoorCore::NodeRef& n) -> std::string
+            {
+                if (n.first == 'c') return std::format("place_{}", n.second);
+                const auto it = door_name.find(n.second);
+                return it != door_name.end() ? it->second : std::string{};
+            };
+            for (const auto& [a, b] : core_->competing())
+                if (const auto na = name_of(a), nb = name_of(b); not na.empty() and not nb.empty()) competing.emplace_back(na, nb);
+        }
+        any_open = step_hypothesis_looks(hl_members, competing, undecided, sensor, furniture, can_plan) or any_open;
     }
 
     // A look is offered iff it pays (VOI > its time). Among the wall slots only the best-paying one holds a node: a room's walls are
@@ -4746,6 +4759,7 @@ void SpecificWorker::step_candidate_looks()
 // ranks them by gain minus travel (AffordanceManager), so a question the look cannot help (gain ~ 0) is outranked by itself.
 // Run at the look step's own rate (every cycle): the room's poses are a 0.6 m grid with 8 headings (~350 for a 20 m2 room); the time is logged.
 bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Member> members,
+                                           std::span<const std::pair<std::string, std::string>> competing,
                                            const std::function<bool(const rc::door::hlook::Member&)>& undecided,
                                            const rc::nbv::Sensor& sensor, std::span<const rc::nbv::Obstacle> furniture, bool can_plan)
 {
@@ -4756,9 +4770,7 @@ bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Memb
         hyp_looks_.clear();
         hyp_looks_room_ = room_node_id_;
     }
-    // two leaves closer than the panel's thickness plus twice the room frame's own precision are one observed panel
-    const float reach = cfg_.door_thickness_m + 2.0f * core_->fit().room_band().sigma_m;
-    const auto questions = hl::questions_from(members, reach, undecided);
+    const auto questions = hl::questions_from(members, competing, undecided);
     std::set<std::string> asking;
     bool standing = false;
     const auto withdraw = [&](const std::string& key, HypLook& e, const char* why)
@@ -4806,7 +4818,9 @@ bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Memb
         for (const auto& p : poses)
             if (e.tried.find_view(p.xy, e.ref.centre_xy(), e.ref.across_u(), view_r(), 0.0f, 0) == rc::door::core::ViewLedger::npos) admissible.push_back(p);
         const auto t0 = std::chrono::steady_clock::now();
-        const hl::Best best = hl::best_look(q, admissible, model, &e.cache);
+        // the pose last published is HELD while it is among the admissible ones: it moves only to a pose with a larger EIG under the current weights
+        const hl::Pose standing{e.site.has_value() ? Eigen::Vector2f(e.site->x_m, e.site->y_m) : Eigen::Vector2f::Zero(), e.site.has_value() ? e.site->yaw_rad : 0.f};
+        const hl::Best best = hl::best_look(q, admissible, model, &e.cache, e.site.has_value() ? &standing : nullptr);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         hyp_look_ms_sum_ += ms; hyp_look_ms_max_ = std::max(hyp_look_ms_max_, ms); hyp_look_hits_ += e.cache.hit ? 1 : 0;
         if (++hyp_look_n_ % 100 == 0)   // ★log cadence only, decides nothing
