@@ -5,20 +5,20 @@ THROUGH, door_opening_edges.h's through_bin_counts on the registered sweep).
   through_open = P(an observed bin reads through | it lies in a true OPEN aperture, 5 cm inside the jambs)
   through_wall = P(an observed bin reads through | it lies on solid wall): the wall stretches beside the doors, plus the aperture of a
                  door that is still SHUT (its leaf is wall to the LiDAR).
-Both are pooled bin ratios with a Jeffreys Beta(1/2, 1/2) prior, (through + 1/2) / (observed + 1): a probability of exactly 0 or 1 is not
-a likelihood anyone can multiply, and on the apartment tapes the wall bins have 0 through readings in ~10^4. `n` is the number of SWEEPS
+Both are the POSTERIOR MEAN of the pooled bin ratio under a Beta prior centred on the compiled default with a pseudo-count of PRIOR_N = 20
+bins, (through + 20 d) / (observed + 20): a probability of exactly 0 or 1 is not a likelihood anyone can multiply, and on the apartment
+tapes the wall bins have almost no through readings in ~10^5. `n` is the number of SWEEPS
 that contributed (the bins of one sweep are correlated, so the bin count would overstate the evidence); the bin counts are printed.
 --skip FILE:DOOR:STATE drops one (tape, door, state) whose "shut" label the data itself contradicts: tape_dm's DOOR_0 reads through 28 % of
 its aperture bins in the 853 sweeps BEFORE its first recorded OPEN request (cycle 1991) — the door was already ajar, by a request the tape
 does not carry — so its "shut" bins are not solid wall.
 Usage: python3 -I tools/fit_lidar_through.py BINS.csv [BINS.csv ...] [--skip FILE:DOOR:STATE] [--dry-run] [--out etc/door_detectors.csv] [--source TAG]
-Writes the two `lidar` rows only without --dry-run; every other row of the output file is carried over. Fewer than MIN_SWEEPS sweeps for
-a row: that row is not fitted (compiled default, n = 0).
+Writes the two `lidar` rows only without --dry-run; every other row of the output file is carried over. No bins for a row: the default, n = 0.
 """
 import argparse, csv, datetime, os, sys
 
 DEFAULT = {"through_open": 0.75, "through_wall": 0.01}
-MIN_SWEEPS = 20   # kept: a count of evidence, not a model term
+PRIOR_N = 20   # pseudo-bins of the Beta prior centred on the compiled default
 
 
 def main():
@@ -41,9 +41,9 @@ def main():
         print(f"{k:8s} sweeps {n:6d} bins {o:7d} through {t:6d}  raw {t/o if o else float('nan'):.4f}")
     rows = {}
     o, t, n = acc["open_ap"]
-    rows["through_open"] = ((t + 0.5) / (o + 1.0), n) if n >= MIN_SWEEPS else (DEFAULT["through_open"], 0)
+    rows["through_open"] = ((t + PRIOR_N * DEFAULT["through_open"]) / (o + PRIOR_N), n)
     o2, t2, n2 = (acc["wall"][i] + acc["shut_ap"][i] for i in range(3))
-    rows["through_wall"] = ((t2 + 0.5) / (o2 + 1.0), n2) if n2 >= MIN_SWEEPS else (DEFAULT["through_wall"], 0)
+    rows["through_wall"] = ((t2 + PRIOR_N * DEFAULT["through_wall"]) / (o2 + PRIOR_N), n2)
     for k, (v, nn) in rows.items():
         print(f"lidar,{k}={v:.5f} (n={nn} sweeps)")
     if a.dry_run:

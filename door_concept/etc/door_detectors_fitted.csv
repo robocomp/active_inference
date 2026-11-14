@@ -1,20 +1,20 @@
 camera,param,value,n,source
-zed,min_fill,0.0217695,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-zed,max_fill,2.20714,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-zed,soft,0.00997253,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-zed,hit_rate,0.894806,43,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-zed,false_alarm,0.02,0,compiled_defaults
-ricoh,min_fill,0.0447921,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-ricoh,max_fill,4.76339,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-ricoh,soft,0.00526367,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-ricoh,hit_rate,0.976998,59,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-ricoh,false_alarm,0.27364,21,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+zed,min_fill,0.1,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+zed,max_fill,1.5,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+zed,soft,0.06,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+zed,hit_rate,0.938295,43,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+zed,false_alarm,0.194284,13,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+ricoh,min_fill,0.216,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+ricoh,max_fill,1.5,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+ricoh,soft,0.06,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+ricoh,hit_rate,0.705911,59,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+ricoh,false_alarm,0.112698,21,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
 support,present_a,1,0,compiled_defaults
 support,present_b,4,0,compiled_defaults
 support,present_outlier,0.002,0,compiled_defaults
 support,absent_a,12,0,compiled_defaults
 support,absent_b,1,0,compiled_defaults
 support,absent_outlier,0.8,0,compiled_defaults
-geometry,mu1_sd,-0.0259624,737,geo_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-lidar,through_open,0.802147,9351,lidar_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-lidar,through_wall,0.00110887,14823,lidar_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+geometry,mu1_sd,0,737,geo_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14 non-informative
+lidar,through_open,0.802144,9351,lidar_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+lidar,through_wall,0.00110819,14823,lidar_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14

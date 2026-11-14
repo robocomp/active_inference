@@ -12,7 +12,10 @@ tape and is a few outliers, not a location; both are printed. The label-0 frames
 as a check of the null (0, 1).
 
 Input columns: geo_x, geo_mu0, geo_s, label (1 = a frame of a true Webots door, 0 = not); tools/label_door_views.py writes
-RUN/door_geo_pairs.csv. Fewer than MIN_N label-1 frames: not identified, the compiled value (2.0, n = 0) is kept.
+RUN/door_geo_pairs.csv. Fewer than MIN_N label-1 frames: not identified, the compiled value (2.0, n = 0) is kept. The estimate's standard error is the median's
+(1.2533 * robust sd / sqrt(n), robust sd = IQR / 1.349, which the collapsed-s tail does not inflate). When the estimate is within 2 standard
+errors of 0 (or negative: the loader's domain is mu1_sd >= 0) the row is written as 0 = "no information" (mu1 = mu0, the geometry
+log-likelihood-ratio is exactly 0) with the real n and the source tagged "non-informative".
 Usage: python3 -I tools/fit_geometry_channel.py PAIRS.csv [PAIRS.csv ...] [--dry-run] [--out etc/door_detectors.csv] [--source TAG]
 Writes the `geometry,mu1_sd` row only without --dry-run; every other row of the output file is carried over.
 """
@@ -49,17 +52,25 @@ def main():
     print(f"{len(z1)} distinct label-1 frames (of {n_rep} logged rows), {len(z0)} distinct label-0 frames")
     if len(z0):
         print(f"label 0: mean z {z0.mean():+.3f} sd {z0.std():.3f}  (null model: 0, 1)")
+    noninf = False
     if len(z1) < MIN_N:
         print(f"mu1_sd: {len(z1)} label-1 frames, not fitted (compiled value {DEFAULT} kept)")
         k, n = DEFAULT, 0
     else:
         k, n = float(np.median(z1)), len(z1)
         q = np.percentile(z1, [10, 25, 75, 90])
+        iqr = float(np.percentile(z1, 75) - np.percentile(z1, 25))
+        se = 1.2533 * (iqr / 1.349) / math.sqrt(n)
+        print(f"standard error of the median {se:.4f}")
+        if k < 2 * se:   # kept: a decision about whether the data says anything at all, made once by the fitter, not a term of the likelihood
+            print(f"estimate {k:+.4f} is within 2 standard errors of 0 (or negative): written as 0, non-informative")
+            k = 0.0; noninf = True
         print(f"mu1_sd={k:.4f}  (n={n} distinct frames; Gaussian mean {z1.mean():.3f}, sd {z1.std():.3f}; z quantiles 10/25/75/90 % "
               f"{q[0]:.2f} {q[1]:.2f} {q[2]:.2f} {q[3]:.2f})")
     if a.dry_run:
         return 0
     src = (a.source or f"fit_geometry_channel.py {datetime.date.today()}") if n > 0 else "compiled_defaults"
+    if noninf: src += " non-informative"
     kept = [ln for ln in open(a.out) if not ln.startswith("geometry,")] if os.path.exists(a.out) else ["camera,param,value,n,source\n"]
     with open(a.out, "w", newline="") as o:
         o.writelines(kept)

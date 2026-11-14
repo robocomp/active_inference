@@ -13,7 +13,8 @@ LABELS (Task 5; tools/label_door_views.py writes them from the Webots world's tr
 door is a true door, 0 = it is not). With it the envelope and hit_rate are fitted on the label-1 views (this replaces the
 alive_end/crossed proxy for "a real door") and false_alarm on the label-0 views: a false alarm passes through the same front end as a
 door, so P(report | no door) = false_alarm * env(fill_h) * env(fill_v) * aspect * vis * kappa, one scalar fitted by maximum likelihood
-(fewer than MIN_FA_VIEWS label-0 views with a non-zero front end: not identifiable, the compiled default is kept with n = 0). Without
+(the rate is the POSTERIOR MEAN under a Beta prior centred on the compiled default worth PRIOR_N = 20 views, so a handful of views cannot
+move it far; n is the number of label-0 views with a non-zero front end; none: the default, n = 0). hit_rate is likewise a posterior mean. Without
 `label`, false_alarm is not identifiable from views of real doors and is kept at the compiled default.
 --fix-envelope: keep the compiled envelope (min_fill, max_fill, soft) and fit only hit_rate (and false_alarm). Use it when the views are too
 few to identify the envelope: on the three apartment tapes there are 43 zed / 59 ricoh views of true doors and the free fit ran its
@@ -30,7 +31,7 @@ DEFAULT_FA = {"zed": 0.02, "ricoh": 0.05}
 # the compiled defaults (core/detector_llr.h default_detectors()): min_fill, max_fill, soft, hit_rate
 DEFAULT_ROW = {"zed": (0.10, 1.50, 0.06, 0.9), "ricoh": (0.216, 1.5, 0.06, 0.5)}
 MIN_VIEWS = 20      # kept: fewer views than this and the 4-parameter envelope is not identified (a count of evidence, not a model term)
-MIN_FA_VIEWS = 20   # kept: likewise for the one false-alarm scalar
+PRIOR_N = 20        # pseudo-views of the Beta prior (centred on the compiled default) every fitted rate is the posterior mean under
 START = {"zed": (0.10, 0.60, 0.06, 0.9), "ricoh": (0.216, 1.5, 0.06, 0.5)}
 
 
@@ -78,20 +79,19 @@ def nelder_mead(f, x0, iters=1500):
     return sim[i], fs[i]
 
 
-def fit_false_alarm(front, y):
-    """ML of the scalar fa in P(report) = fa * front (front in (0,1], y a per-view report fraction): the Bernoulli log-likelihood is
-    concave in fa, so a golden-section search on (0, 1/max(front)) finds it."""
-    def f(fa):
-        p = np.clip(fa * front, 1e-9, 1 - 1e-9)
-        return -float(np.sum(y * np.log(p) + (1 - y) * np.log1p(-p)))
-    lo, hi = 1e-6, min(0.999, 1.0 / float(front.max()) - 1e-6)
-    g = (math.sqrt(5) - 1) / 2
-    c, d = hi - g * (hi - lo), lo + g * (hi - lo)
-    for _ in range(80):
-        if f(c) < f(d): hi = d
-        else: lo = c
-        c, d = hi - g * (hi - lo), lo + g * (hi - lo)
-    return 0.5 * (lo + hi)
+def posterior_mean(front, y, prior_mean):
+    """Posterior mean of the scalar rate r in P(report) = r * front (front in (0,1], y a per-view report fraction) under the Beta prior
+    centred on the compiled default with a pseudo-count of PRIOR_N views: Beta(PRIOR_N*m, PRIOR_N*(1-m)). On a grid of r in (0, 1/max front);
+    with front == 1 this is exactly (reports + PRIOR_N*m) / (views + PRIOR_N). No views: the prior mean."""
+    r = np.linspace(1e-5, 1 - 1e-5, 20001)
+    la, lb = PRIOR_N * prior_mean, PRIOR_N * (1 - prior_mean)
+    lp = (la - 1) * np.log(r) + (lb - 1) * np.log1p(-r)
+    for f_, y_ in zip(front, y):
+        p = np.clip(r * f_, 1e-12, 1 - 1e-12)
+        lp = lp + y_ * np.log(p) + (1 - y_) * np.log1p(-p)
+        lp = np.where(r * f_ < 1.0, lp, -np.inf)
+    w = np.exp(lp - lp.max())
+    return float((r * w).sum() / w.sum())
 
 
 def main():
@@ -140,13 +140,7 @@ def main():
                  vis=col("vis"), kap=col("kappa"), y=col("hit"))
         if a.fix_envelope:
             e = DEFAULT_ROW[cam]
-            lo, hi, g = 1e-4, 1 - 1e-4, (math.sqrt(5) - 1) / 2   # nll is convex in hit_rate at a fixed front end: golden section
-            c_, d_ = hi - g * (hi - lo), lo + g * (hi - lo)
-            for _ in range(80):
-                if nll((e[0], e[1], e[2], c_), d) < nll((e[0], e[1], e[2], d_), d): hi = d_
-                else: lo = c_
-                c_, d_ = hi - g * (hi - lo), lo + g * (hi - lo)
-            x = np.array([e[0], e[1], e[2], 0.5 * (lo + hi)]); f = nll(tuple(x), d)
+            x = np.array(e); f = nll(tuple(x), d)
         else:
             x, f = nelder_mead(lambda p: nll(p, d), START[cam])
         fa, n_fa = None, 0
@@ -157,10 +151,13 @@ def main():
                           colN("aspect", 1.0) if "aspect" in cols else np.ones(len(nn)), colN("vis"), colN("kappa")))])
             yN = colN("hit")
             use = fN > 1e-6
-            if int(use.sum()) >= MIN_FA_VIEWS:
-                fa = fit_false_alarm(fN[use], yN[use]); n_fa = int(use.sum())
-                print(f"{cam}: false_alarm={fa:.4f} from {n_fa} label-0 views (mean front end {fN[use].mean():.3f}, "
-                      f"mean report fraction {yN[use].mean():.4f}, {yN[use].sum():.1f} reports)")
+            if int(use.sum()) > 0:
+                fa = posterior_mean(fN[use], yN[use], DEFAULT_FA[cam]); n_fa = int(use.sum())
+                print(f"{cam}: false_alarm={fa:.4f} posterior mean from {n_fa} label-0 views (mean front end {fN[use].mean():.3f}, "
+                      f"mean report fraction {yN[use].mean():.4f}, {yN[use].sum():.1f} reports; prior {DEFAULT_FA[cam]} x {PRIOR_N} views)")
+        # hit_rate: the posterior mean under the same prior, at the fitted/fixed envelope (the ML above only places the envelope)
+        fr_ = predict((x[0], x[1], x[2], 1.0), d["fh"], d["fv"], d["asp"], d["vis"], d["kap"])
+        x = np.array([x[0], x[1], x[2], posterior_mean(fr_[fr_ > 1e-6], d["y"][fr_ > 1e-6], DEFAULT_ROW[cam][3])])
         fit[cam] = (x, len(rr), float(d["y"].sum()), fa, n_fa)
         print(f"{cam}: n_views={len(rr)} hits={d['y'].sum():.1f} misses={len(rr)-d['y'].sum():.1f} "
               f"min_fill={x[0]:.4f} max_fill={x[1]:.4f} soft={x[2]:.4f} hit_rate={x[3]:.4f}  nll={f:.1f}")

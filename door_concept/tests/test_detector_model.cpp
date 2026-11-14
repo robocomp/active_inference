@@ -159,6 +159,11 @@ int main()
         { std::ofstream o(tmp); o << "camera,param,value,n,source\nlidar,through_open,0.1,5,t\nlidar,through_wall,0.4,5,t\n"; }
         const auto d = load_detectors(tmp);
         CHECK(d.lidar.through_open == D.lidar.through_open and d.lidar.through_wall == D.lidar.through_wall and d.lidar.n_open == 0.f);
+        // geometry mu1_sd: 0 is allowed (no information), a negative value is out of domain -> the compiled 2, n = 0
+        { std::ofstream o(tmp); o << "camera,param,value,n,source\ngeometry,mu1_sd,0,737,t\n"; }
+        CHECK(load_detectors(tmp).geometry.mu1_sd == 0.0f and load_detectors(tmp).geometry.n == 737.f);
+        { std::ofstream o(tmp); o << "camera,param,value,n,source\ngeometry,mu1_sd,-0.026,737,t\n"; }
+        CHECK(load_detectors(tmp).geometry.mu1_sd == 2.0f and load_detectors(tmp).geometry.n == 0.f);
         std::filesystem::remove(tmp);
     }
     std::printf(fails ? "FAILED %d\n" : "ALL PASS\n", fails);

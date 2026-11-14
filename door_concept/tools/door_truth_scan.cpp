@@ -54,7 +54,7 @@ int main(int argc, char** argv)
     rp << "cycle,t_ms,room,tx,ty,yaw,gx,gy,gyaw,bx,by,byaw\n";
     lb << "cycle,t_ms,door,state,region,obs,thr,dist,side\n";
     const auto doors = gt_doors();
-    std::map<std::string, std::int64_t> opened_ms;   // door -> time of its first OPEN request
+    std::map<std::string, std::int64_t> opened_ms, closed_ms;   // door -> time of its last OPEN request / of the CLOSE after it (none: still open)
     std::map<std::string, std::array<std::array<int, 2>, 60>> prof;   // door/state/side -> per 5 cm along-wall bin: (observed, through)
     long n_sweeps = 0, n_unreg = 0, n_rows = 0;
     while (auto rec = read_input(f, v))
@@ -71,12 +71,16 @@ int main(int argc, char** argv)
         const double ty = in.robot.gt->y() - (s * B(0, 3) + c * B(1, 3));
         rp << in.cycle << ',' << in.t_ms() << ',' << *in.rooms.graph_current_room << ',' << tx << ',' << ty << ',' << yw << ',' << in.robot.gt->x() << ',' << in.robot.gt->y() << ',' << in.robot.gt->z() << ',' << B(0, 3) << ',' << B(1, 3) << ',' << yb << '\n';
         for (const auto& a : in.actuator_calls)
-            if (a.kind == ActuatorCallKind::Request and a.open)
+            if (a.kind == ActuatorCallKind::Request)
             {
                 const Eigen::Vector4d p = a.world_T_room * Eigen::Vector4d(a.xy_m.x(), a.xy_m.y(), 0, 1);
                 double best = 1e9; std::string nm;
                 for (const auto& d : doors) { const double e = std::hypot(p.x() - d.cx, p.y() - d.cy); if (e < best) { best = e; nm = d.name; } }
-                if (best < 1.5 and not opened_ms.contains(nm)) { opened_ms[nm] = in.t_ms(); std::println("cycle {} OPEN {} ({:.2f} m)", in.cycle, nm, best); }
+                if (best >= 1.5) continue;
+                std::println("cycle {} {} {} ({:.2f} m)", in.cycle, a.open ? "OPEN" : "CLOSE", nm, best);
+                // the state is the LAST request's: a close ends the open state (the next open starts a new swing)
+                if (a.open and not (opened_ms.contains(nm) and not closed_ms.contains(nm))) { opened_ms[nm] = in.t_ms(); closed_ms.erase(nm); }
+                if (not a.open and opened_ms.contains(nm) and not closed_ms.contains(nm)) closed_ms[nm] = in.t_ms();
             }
         if (not in.bpearl or not in.bpearl->room_fresh or in.bpearl->pts_room.empty()) continue;
         ++n_sweeps;
@@ -101,7 +105,7 @@ int main(int argc, char** argv)
                 const int T = tb.nT[static_cast<std::size_t>(b)], Bk = tb.nB[static_cast<std::size_t>(b)];
                 if (T + Bk == 0) continue;
                 const float a = tb.a_lo + (static_cast<float>(b) + 0.5f) * rc::door::kEdgeBinM;
-                if (std::getenv("TRUTH_PROFILE")) { const int pb = static_cast<int>(std::floor((a + 0.5f) / 0.05f)); if (pb >= 0 and pb < 60) { auto& pr = prof[std::string(d.name) + (opened_ms.contains(d.name) and in.t_ms() >= opened_ms[d.name] + 10000 ? " open " : " shut ") + ((-d.uy * (org.x() - d.cx) + d.ux * (org.y() - d.cy)) > 0 ? "+" : "-")][static_cast<std::size_t>(pb)]; ++pr[0]; pr[1] += (T > 0 and Bk == 0); } } 
+                if (std::getenv("TRUTH_PROFILE")) { const int pb = static_cast<int>(std::floor((a + 0.5f) / 0.05f)); if (pb >= 0 and pb < 60) { auto& pr = prof[std::string(d.name) + (opened_ms.contains(d.name) and in.t_ms() >= opened_ms[d.name] + 10000 and not closed_ms.contains(d.name) ? " open " : " shut ") + ((-d.uy * (org.x() - d.cx) + d.ux * (org.y() - d.cy)) > 0 ? "+" : "-")][static_cast<std::size_t>(pb)]; ++pr[0]; pr[1] += (T > 0 and Bk == 0); } } 
                 const bool thr = T > 0 and Bk == 0;
                 if (a >= ap.s + 0.05f and a <= ap.s + ap.w - 0.05f) { ++obs_ap; thr_ap += thr; }
                 else if ((a >= d.w0lo and a <= d.w0hi) or (a >= d.w1lo and a <= d.w1hi)) { ++obs_w; thr_w += thr; }
@@ -109,8 +113,11 @@ int main(int argc, char** argv)
             const auto it = opened_ms.find(d.name);
             // the leaf takes ~7 s to swing (tape_e2e18 DOOR_0: request at cycle 702, through bins from 716, full by 732): the 10 s after
             // a request are a transition, not a state
+            const auto ct = closed_ms.find(d.name);
             if (it != opened_ms.end() and in.t_ms() >= it->second and in.t_ms() < it->second + 10000) continue;
-            const char* state = (it != opened_ms.end() and in.t_ms() >= it->second + 10000) ? "open" : "shut";
+            if (ct != closed_ms.end() and in.t_ms() >= ct->second and in.t_ms() < ct->second + 10000) continue;   // a CLOSE swings too
+            const bool is_open = it != opened_ms.end() and in.t_ms() >= it->second + 10000 and (ct == closed_ms.end() or in.t_ms() < ct->second);
+            const char* state = is_open ? "open" : "shut";
             const double dist = std::hypot(org.x() - d.cx, org.y() - d.cy);
             const int side = (-d.uy * (org.x() - d.cx) + d.ux * (org.y() - d.cy)) > 0 ? 1 : -1;   // which side of the wall the sensor is on
             lb << in.cycle << ',' << in.t_ms() << ',' << d.name << ',' << state << ",ap," << obs_ap << ',' << thr_ap << ',' << dist << ',' << side << '\n'

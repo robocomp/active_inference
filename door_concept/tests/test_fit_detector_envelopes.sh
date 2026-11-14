@@ -14,3 +14,22 @@ fa=re.search(r"zed: false_alarm=([\d.]+)",sys.argv[1])
 if fa is None or abs(float(fa.group(1))-0.10)>0.02: bad.append(("false_alarm",fa and fa.group(1)))
 print("FAIL" if bad else "PASS", bad); sys.exit(1 if bad else 0)
 P
+
+# Beta-prior posterior mean: 1 false report in 21 label-0 views, default false_alarm 0.05 (ricoh), prior worth 20 views. With a front end of
+# exactly 1 the posterior mean is (1 + 20*0.05)/(21 + 20) = 2/41 = 0.04878; the fixture's front end is 0.9987 (env at fill 0.5), so expect 0.0488 +- 0.0015.
+python3 -I - "$tmp" <<'P'
+import sys
+h="cycle,door,camera,view_id,q,fill_h,fill_v,aspect,vis,kappa,hit,label\n"
+rows=[]
+for i in range(25): rows.append(f"{i},d{i},ricoh,{i},0.5,0.9,0.9,1,1,1,1,1")
+for i in range(21): rows.append(f"{100+i},n{i},ricoh,{100+i},0.05,0.9,0.9,1,1,1,{1 if i==0 else 0},0")
+open(sys.argv[1],"w").write(h+"\n".join(rows)+"\n")
+P
+out=$(python3 -I tools/fit_detector_envelopes.py "$tmp" --fix-envelope --dry-run) || exit 1
+echo "$out"
+python3 -I - "$out" <<'P'
+import re,sys
+m=re.search(r"ricoh: false_alarm=([\d.]+) posterior mean from (\d+) label-0 views",sys.argv[1])
+ok=m is not None and abs(float(m.group(1))-2/41)<0.0015 and int(m.group(2))==21
+print("PASS" if ok else "FAIL", m and m.groups()); sys.exit(0 if ok else 1)
+P

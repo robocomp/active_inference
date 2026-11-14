@@ -227,7 +227,8 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
         }
         if (c[0] == "geometry")
         {
-            if (c[1] == "mu1_sd" and std::isfinite(v)) { t.geometry.mu1_sd = v; t.geometry.n = n; }
+            if (c[1] == "mu1_sd" and std::isfinite(v) and v >= 0.0f) { t.geometry.mu1_sd = v; t.geometry.n = n; }   // 0 = no information (mu1 = mu0); a negative spread would flip the evidence sign
+            else if (c[1] == "mu1_sd") { std::fprintf(stderr, "[detector_model] %s: geometry mu1_sd %g out of domain (need finite, >= 0): compiled default\n", p.string().c_str(), static_cast<double>(v)); }
             else ++malformed;
             continue;
         }
