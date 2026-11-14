@@ -1,7 +1,8 @@
 // class_evidence_test — the shape log-evidence ratio and the birth height density (pure math).
 #include <clocale>
 #include <cstdio>
-#include "countable_class_evidence.h"
+#include <random>
+#include "countable_belief.h"
 
 using namespace rc::countable;
 static int bad = 0;
@@ -47,5 +48,26 @@ int main()
     for (int i = 0; i < 1000; ++i) pts.emplace_back(0.f, 0.f, float(i) / 999.0f);
     for (int i = 0; i < 5; ++i) pts.emplace_back(0.f, 0.f, 3.0f);
     check("robust_extent", std::fabs(robust_z_extent(pts) - 0.94f) < 0.02f);
+    // candidate_plausibility: the birth score IS the class probability (bed parameters).
+    rc::CountableBeliefParams bp;
+    bp.prior_height_m = 0.65f; bp.prior_height_std = 0.10f;
+    bp.prior_footprint_m = 1.75f; bp.prior_footprint_std = 0.20f; bp.prior_depth_m = 2.10f;
+    bp.headboard_h_m = 1.25f;
+    bp.class_p_label_true = 0.8f; bp.class_alt_std_m = 1.0f; bp.birth_height_noise_m = 0.05f; bp.birth_height_outlier_frac = 0.05f;
+    std::mt19937 rng(7); std::uniform_real_distribution<float> U(0, 1);
+    auto cloud = [&](int n, float zmax) { std::vector<Eigen::Vector3f> v; for (int i = 0; i < n; ++i) v.emplace_back(U(rng), U(rng), zmax * U(rng)); return v; };
+    check("candidate_sparse_is_prior", rc::CountableBelief::candidate_plausibility(cloud(8, 1.9f), bp) == 0.8f);
+    const float pb = rc::CountableBelief::candidate_plausibility(cloud(400, 1.9f), bp);
+    // A mattress seen from above-front: its top face (blanket, z = 0.72 per Bed.proto) is a large share of the points, its side runs floor..top, with floor-contact points (robust extent = 0.72).
+    auto mattress = [&]() { auto v = cloud(240, 0.72f); for (int i = 0; i < 160; ++i) v.emplace_back(U(rng), U(rng), 0.72f); for (int i = 0; i < 30; ++i) v.emplace_back(U(rng), U(rng), 0.0f); return v; };
+    const float pm = rc::CountableBelief::candidate_plausibility(mattress(), bp);
+    const float pu = rc::CountableBelief::candidate_plausibility(cloud(400, 0.65f), bp);   // side face only: q97-q03 = 0.94 x 0.65
+    std::printf("candidate: blackboard(1.9 m) %.4f  mattress(extent 0.72) %.4f  mattress(side only, extent 0.61) %.4f\n", pb, pm, pu);
+    // NB the exact-0.65 extent sits ON the edge of the class height range: P = 0.891 (see birth_mattress_ok), not > 0.9.
+    check("candidate_blackboard_cloud", pb < 0.3f and pm > 0.9f);
+    const auto sp = bp.class_shape_prior();
+    check("shape_prior_top_is_headboard", sp.H_top == 1.25f and sp.H_mean == 0.65f and sp.w_mean == 1.75f and sp.h_mean == 2.10f);
+    bp.headboard_h_m = -1.0f;
+    check("shape_prior_top_without_headboard", bp.class_shape_prior().H_top == 0.65f);
     return bad ? 1 : 0;
 }

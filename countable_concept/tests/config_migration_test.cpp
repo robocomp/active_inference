@@ -130,7 +130,8 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
     CHECK(old_v.size() > 150 and new_v.size() > 150);
 
     const std::set<std::string> excluded = {word + "Model.HeadboardHeightM", word + "Model.HeadboardThickM"};
-    std::set<std::string> produced = {"Concept.Class"};
+    // keys born after the migration base (class existence, spec 2026-11-14), not renames of an old one
+    std::set<std::string> produced = {"Concept.Class", "Model.ClassAltStdM", "Model.BirthHeightNoiseM", "Model.BirthHeightOutlierFrac"};
     int moved = 0, same = 0, renamed = 0;
     for (const auto& [ok, ov] : old_v)
     {

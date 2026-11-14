@@ -87,6 +87,11 @@ height_min_m = 0.50
 height_soft_m = 0.08
 why  = "aspect is scored against the class's own aspect; height_min sits well below the measured height"
 
+[prior.class]
+kind = "label_reliability"
+p_label_true = 0.8
+why  = "P(a mask with this label is really this class); near YOLOE's median confidence on the real bed (.85, detcheck3). Owner may change it (11-14)"
+
 [prior.explaining_away]
 kind = "known_surface_mixture"
 source = "room.walls"

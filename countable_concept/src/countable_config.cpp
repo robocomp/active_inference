@@ -17,7 +17,8 @@
 #include <format>
 #include <print>
 
-#include "../../common/concept_manifest/concept_manifest.h"   // rc::manifest (SHARED)
+#include "../../common/concept_manifest/concept_manifest.h"
+#include "../../common/concept_manifest/class_prior.h"   // rc::manifest (SHARED)
 #include <string>
 
 #include <genericworker.h>   // ConfigLoader
@@ -148,6 +149,24 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         out.ai2_headboard_t_m = bp->thickness_m;
         std::print("[manifest] {} back panel: height {:.2f} m, thickness {:.2f} m\n", out.concept_class, bp->height_m, bp->thickness_m);
     }
+    {   // π_cls: a CLASS fact too. Absent ⇒ 0.8 (said so); present but outside the open (0,1) ⇒ refuse (logit is ±inf).
+        const auto pl = rc::manifest::load_class_prior(manifest_path);
+        if (pl)
+        {
+            if (not (*pl > 0.0f and *pl < 1.0f))
+                throw CountableConfigError(std::format("{}: ★ {} [prior.class] p_label_true = {} must lie in the open interval (0,1) "
+                                   "(logit is infinite at 0 and 1) — refusing to start\n", out.agent_name, manifest_path, *pl));
+            out.class_p_label_true = *pl;
+            std::print("[manifest] {} class prior: p_label_true {:.3f}\n", out.concept_class, *pl);
+        }
+        else std::print("[manifest] {} has no [prior.class] p_label_true — using the default {:.2f}\n", out.concept_class, out.class_p_label_true);
+    }
+    out.class_alt_std_m           = getf("Model.ClassAltStdM", 1.0f,
+            "size std (m) of the 'some other furniture' alternative, per size variable, Gaussian about the class mean (class evidence)");
+    out.birth_height_noise_m      = getf("Model.BirthHeightNoiseM", 0.05f,
+            "birth height noise σ_z (m): the cloud's robust z-extent is a measurement of the object height with this std");
+    out.birth_height_outlier_frac = getf("Model.BirthHeightOutlierFrac", 0.05f,
+            "birth mask-bleed outlier fraction ε: share of masks whose z-extent is unrelated to the class height (person, wall above)");
     out.ai2_wall_flush_prior    = getf("Model.WallFlushPrior", 0.0f,
             "class probability that the object stands against a wall (furniture prior); 0 = never assumed");
     out.ai2_room_axis_std_deg   = getf("Model.RoomAxisStdDeg", 0.0f,

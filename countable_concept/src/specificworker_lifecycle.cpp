@@ -191,6 +191,14 @@ void SpecificWorker::run_instance_tracker()
     plaus_p.plaus_fe_scale     = cfg_.plaus_fe_scale;
     plaus_p.prior_footprint_m  = cfg_.ai2_prior_footprint_m;
     plaus_p.prior_depth_m      = cfg_.ai2_prior_depth_m;
+    plaus_p.prior_height_m     = cfg_.ai2_prior_height_m;
+    plaus_p.prior_height_std   = cfg_.ai2_prior_height_std;
+    plaus_p.prior_footprint_std = cfg_.ai2_prior_footprint_std;
+    plaus_p.headboard_h_m      = cfg_.ai2_headboard_h_m;
+    plaus_p.class_p_label_true        = cfg_.class_p_label_true;
+    plaus_p.class_alt_std_m           = cfg_.class_alt_std_m;
+    plaus_p.birth_height_noise_m      = cfg_.birth_height_noise_m;
+    plaus_p.birth_height_outlier_frac = cfg_.birth_height_outlier_frac;
     // ── Is this cycle a genuinely NEW observation? ────────────────────────────────────────────────────
     // The detections below are rebuilt EVERY cycle on purpose: a pending birth candidate that finds no matching
     // detection expires (instance_tracker.h swaps next_cand in), so skipping stale cycles would wipe every

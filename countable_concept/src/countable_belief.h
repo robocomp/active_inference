@@ -135,6 +135,28 @@ struct CountableBeliefParams
     // the template is the manifest's. headboard_h_m <= 0 = a plain box (the refrigerator parent's model).
     float headboard_h_m = -1.0f;
     float headboard_t_m = 0.10f;
+
+    // ── CLASS EXISTENCE (spec 2026-11-14 countable class existence) ──────────────────────────────────────
+    // π_cls: P(a mask carrying this class's label is really this class), from the manifest's [prior.class]. The
+    // "some other furniture" alternative is a Gaussian about the class mean with std class_alt_std_m per size
+    // variable. The birth height density has noise σ_z = birth_height_noise_m and an outlier fraction ε =
+    // birth_height_outlier_frac (a mask that bleeds onto the wall/person above the object).
+    float class_p_label_true        = 0.8f;
+    float class_alt_std_m           = 1.0f;
+    float birth_height_noise_m      = 0.05f;
+    float birth_height_outlier_frac = 0.05f;
+    // The class's size prior in the evidence's (H, w, h) order. H_top = the tallest declared part: the headboard
+    // when it is taller than the mattress layer, else the H mean.
+    rc::countable::ClassShapePrior class_shape_prior() const
+    {
+        rc::countable::ClassShapePrior c;
+        c.H_mean = prior_height_m;   c.H_std = prior_height_std;
+        c.w_mean = prior_footprint_m; c.w_std = prior_footprint_std;
+        c.h_mean = depth_mean();      c.h_std = prior_footprint_std;
+        c.H_top  = headboard_h_m > prior_height_m ? headboard_h_m : prior_height_m;
+        c.p_label_true = class_p_label_true;
+        return c;
+    }
     float top_no_float_precision = 10000.0f; // 1/m² firm two-sided anchor pinning H → observed robust cloud top
     float top_no_float_margin_m  = 0.02f;   // upward allowance (m) added to the observed top as the anchor target
 

@@ -85,6 +85,11 @@ struct CountableConfig
     float ai2_prior_footprint_m   = 0.60f;   // mean of the w & h(depth) prior (m)
     float ai2_prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m)
     float ai2_headboard_h_m       = -1.0f;   // headboard panel top (m); <=0 = no headboard (plain box)
+    // Class existence (spec 2026-11-14): π_cls from the manifest's [prior.class]; the rest from [Model].
+    float class_p_label_true        = 0.8f;    // P(a mask with this label is really this class)
+    float class_alt_std_m           = 1.0f;    // "other furniture" size std (m) per variable, about the class mean
+    float birth_height_noise_m      = 0.05f;   // birth height noise σ_z (m)
+    float birth_height_outlier_frac = 0.05f;   // birth mask-bleed outlier fraction ε
     float ai2_headboard_t_m       = 0.10f;   // headboard panel thickness (m)
     float ai2_wall_flush_prior    = 0.0f;    // class P(stands against a wall) — furniture prior
     float ai2_room_axis_std_deg   = 0.0f;    // room-axis alignment std (deg); <=0 = off

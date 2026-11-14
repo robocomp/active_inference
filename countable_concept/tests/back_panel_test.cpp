@@ -6,6 +6,7 @@
 #include <cstring>
 #include <random>
 #include "back_panel.h"
+#include "class_prior.h"
 #include "countable_belief.h"
 
 #ifndef MANIFEST_DIR
@@ -39,6 +40,17 @@ int main()
     CHECK(not opened);                                   // an open failure ...
     CHECK(not rc::manifest::load_back_panel(mf("nightstand"), &opened).has_value());
     CHECK(opened);                                       // ... is not the same as "no block"
+
+    for (const char* cls : {"bed", "nightstand", "toilet"})
+    {
+        const auto cp = rc::manifest::load_class_prior(mf(cls));
+        CHECK(cp.has_value());
+        if (cp) CHECK(*cp == 0.8f);
+    }
+    CHECK(not rc::manifest::load_class_prior(mf("table")).has_value());     // a manifest without the section
+    bool cp_opened = true;
+    CHECK(not rc::manifest::load_class_prior(mf("no_such_class"), &cp_opened).has_value());
+    CHECK(not cp_opened);
 
     const rc::CountableBeliefState s{0.0f, 0.0f, 0.6f, 0.5f, 0.5f, 0.3f};
     std::mt19937 rng(20261114); std::uniform_real_distribution<float> U(-1.5f, 1.5f), Uz(-1.0f, 1.0f);

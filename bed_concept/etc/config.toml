@@ -214,6 +214,9 @@ MotionCmSizeGain = 0.20      # extent (w,h,H) shared-error std per m/s — the a
 MotionCmYawGain  = 0.12      # yaw shared-error std (rad) per m/s — the anti-ROTATE lever
 AI2AngLeverM = 2.0           # rad/s → m/s lever (tangential speed of a bed ~this far away) for ego-motion
 AI2PeriphRef = 0.50          # centroid radius (focal-norm) at which the off-axis periphery penalty → 1
+ClassAltStdM = 1.0            # 'some other furniture' size std (m) per variable, about the class mean (class evidence; pi_cls is in the manifest [prior.class])
+BirthHeightNoiseM = 0.05      # birth height noise sigma_z (m): robust cloud z-extent measures the object height with this std
+BirthHeightOutlierFrac = 0.05 # birth mask-bleed outlier fraction (person / wall above the object)
 AI2MotionRefMps = 0.60       # motion magnitude (m/s) at which a fully-peripheral frame is fully unreliable
 # Discrete confirm-only gate ("only update if the robot is still"): true ⇒ CONFIRM but do NOT move the geometry mean
 # (predict-only) when MOVING (ego lin/ang OR motion_dotd above its still-level) AND the mask is off-centre. A

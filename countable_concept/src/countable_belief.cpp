@@ -1053,21 +1053,23 @@ float CountableBelief::countable_log_evidence_ratio(const CountableBeliefState& 
     return llr_aspect + llr_size + llr_height;
 }
 
-// Birth-candidate plausibility — HEIGHT ONLY. ★A partial mask (e.g. a front-only ZED view) is a VERTICAL
-// face, so its 2-D footprint projects to a thin line → always "elongated"/tiny → aspect & size are MEANINGLESS
-// at birth and would reject a real bed (observed: countable_dets=1 but births=0). The mask's z-EXTENT is
-// reliable from any viewpoint: a bed is TALL (~1.5 m+), the mis-detected cabinet is SHORT (~0.7 m). So gate
-// birth on height alone; the footprint (square 0.6×0.6) is settled later by the fit + the footprint prior.
-// Too few points ⇒ neutral 0.5 (don't punish a sparse first glimpse).
+// Birth-candidate plausibility = P(this cloud is a <class>) on the SAME scale as the class evidence of the fit:
+//   logit(π_cls) + Λ_height, with Λ_height = birth_height_log_evidence(robust z-extent of the cloud).
+// π_cls is the manifest's label reliability; Λ_height scores the cloud's height as a density under "this class"
+// (a mixture over the mattress..headboard range, plus an outlier fraction for mask bleed) against "some other
+// furniture" — two-sided, so a 1.9 m blackboard cloud is as improbable as a too-short one. ★A partial mask (a
+// front-only ZED view) is a VERTICAL face, so its 2-D footprint is a thin line and aspect/size are MEANINGLESS at
+// birth; the z-extent is reliable from any viewpoint, so only height enters here. The footprint is settled later
+// by the fit (class_log_evidence). Fewer than 12 points ⇒ the bare prior π_cls (a sparse first glimpse is
+// neither rewarded nor punished).
 float CountableBelief::candidate_plausibility(const std::vector<Eigen::Vector3f>& pts,
                                                  const CountableBeliefParams& p)
 {
-    if (pts.size() < 12) return 0.5f;
-    float zmin = std::numeric_limits<float>::max(), zmax = -std::numeric_limits<float>::max();
-    for (const auto& q : pts) { zmin = std::min(zmin, q.z()); zmax = std::max(zmax, q.z()); }
-    const float H     = std::max(0.10f, zmax - zmin);                 // rough height = mask z-range
-    const float hsoft = std::max(1e-4f, p.plaus_height_soft);
-    return 1.0f / (1.0f + std::exp(-(H - p.plaus_height_min) / hsoft));   // tall → ~1 (birth), short → ~0
+    if (pts.size() < 12) return p.class_p_label_true;
+    using namespace rc::countable;
+    return class_probability(logit(p.class_p_label_true) +
+                             birth_height_log_evidence(robust_z_extent(pts), p.class_shape_prior(), p.birth_height_noise_m,
+                                                       p.birth_height_outlier_frac, p.class_alt_std_m));
 }
 
 // Soft singleton inhibition deltas (see the header). Bounded per-instance existence-logodds increments:
