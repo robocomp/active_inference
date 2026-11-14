@@ -58,3 +58,10 @@ add_executable(assets_test assets_test.cpp)
 target_include_directories(assets_test PRIVATE ../src)
 target_compile_definitions(assets_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
 add_test(NAME assets_test COMMAND assets_test)
+
+# Class evidence (spec 2026-11-14 countable class existence): shape log-evidence ratio + birth height density; header-only.
+add_executable(class_evidence_test class_evidence_test.cpp)
+target_include_directories(class_evidence_test PRIVATE ../src)
+target_compile_options(class_evidence_test PRIVATE -O2)
+target_link_libraries(class_evidence_test PRIVATE Eigen3::Eigen)
+add_test(NAME class_evidence_test COMMAND class_evidence_test)
