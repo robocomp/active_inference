@@ -1,6 +1,6 @@
 # Existence of a countable object = something is there × it is this class
 
-Date: 2026-11-14. Status: DRAFT after builder check, awaiting the owner. Nothing built.
+Date: 2026-11-14. Status: APPROVED by the owner (11-14). Nothing built.
 Scope: `countable_concept` (nightstand, bed, toilet). Other agents untouched.
 
 ## 1. Intent (owner)
