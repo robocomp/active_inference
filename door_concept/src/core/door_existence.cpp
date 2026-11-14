@@ -197,7 +197,7 @@ static float place_var(const rc::DoorFitState& st, float rn2)
 // Two places on one hole (m -> 0) are one door under two labels and charge each other nothing; two real doors a metre apart (m >> 1) charge
 // the full second-door cost. Continuous, no radius. Doors weigh their own along-wall variance; candidates their detection variance.
 std::vector<float> DoorCore::other_p_on_wall(int wall, const std::vector<Vec2f>& polygon, const std::vector<int>& groups,
-                                             std::uint64_t self_door, std::uint64_t self_cand, const Vec2f& self_xy, float self_var) const
+                                             std::uint64_t self_door, std::uint64_t self_cand, const Vec2f& self_xy, float self_var, bool doors_only) const
 {
     std::vector<float> r;
     if (wall < 0) return r;
@@ -214,7 +214,7 @@ std::vector<float> DoorCore::other_p_on_wall(int wall, const std::vector<Vec2f>&
     }
     for (const Candidate& c : candidates_)
     {
-        if (c.key == self_cand or c.room != room_name_) continue;
+        if (doors_only or c.key == self_cand or c.room != room_name_) continue;
         const auto it = last_p_cand_.find(c.key);
         if (it != last_p_cand_.end() and wall_of(c.theta.aperture.centre_xy(), polygon, groups) == wall)
             r.push_back(it->second * distinct(c.xy, c.var));
@@ -242,12 +242,8 @@ double DoorCore::log_birth(const Vec2f& xy, float sd) const
     const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
     const rc::DoorFitState th = typical_door_at(xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
     const int wall = wall_of(th.aperture.centre_xy(), polygon, groups);
-    std::vector<float> r_others;   // the live doors only: a candidate IS the new-door hypothesis, not another door
-    if (wall >= 0)
-        for (const auto& [id, st] : world_->fit_states())
-            if (not st->is_bearing_hypothesis)
-                if (const auto it = last_p_door_.find(id); it != last_p_door_.end() and wall_of(st->aperture.centre_xy(), polygon, groups) == wall)
-                    r_others.push_back(it->second);
+    // the live doors only (a candidate IS the new-door hypothesis, not another door), charged by distinctness as everywhere else
+    const std::vector<float> r_others = other_p_on_wall(wall, polygon, groups, ~std::uint64_t{0}, ~std::uint64_t{0}, xy, sd * sd, /*doors_only=*/true);
     const PlacePrior pp = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(), 0, cfg.tracker_detection_noise_m, cfg.door_prior_h_std, false,
                                    existence_size_prior(cfg), sd, sd, sd, std::numeric_limits<float>::quiet_NaN(), &rates_, r_others);
     return -std::log1p(std::exp(-static_cast<double>(pp.total())));   // log of the logistic: stable for either sign

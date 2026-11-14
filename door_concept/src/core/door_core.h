@@ -348,7 +348,7 @@ private:
     WallRates rates_{};   // seeds only; Task 4 sets them (set_wall_rates) from the remembered rooms
     /// The previous cycle's p of every other live door and candidate on `wall` (not `self_door` / `self_cand`), for wall_base_rate.
     [[nodiscard]] std::vector<float> other_p_on_wall(int wall, const std::vector<Vec2f>& polygon, const std::vector<int>& groups,
-                                                     std::uint64_t self_door, std::uint64_t self_cand, const Vec2f& self_xy, float self_var) const;
+                                                     std::uint64_t self_door, std::uint64_t self_cand, const Vec2f& self_xy, float self_var, bool doors_only = false) const;
     std::uint64_t visit_room_ = 0;     // the room the current visit is in
     int visit_ = 0;                    // the ledger's visit counter: a new room entry is a new visit
     std::uint64_t last_rgb_gen_ = 0;   // the RGB generation the last existence update scored
