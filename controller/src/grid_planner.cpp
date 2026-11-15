@@ -713,24 +713,55 @@ bool GridPlanner::can_turn_here(const Eigen::Vector2f& pos_room) const
 
 GridPlanner::TurnBlock GridPlanner::why_cannot_turn(const Eigen::Vector2f& pos_room) const
 {
+    std::vector<int> all(kHeadings);
+    for (int h = 0; h < kHeadings; ++h) all[h] = h;
+    return turn_block_over(pos_room, all);
+}
+
+GridPlanner::TurnBlock GridPlanner::why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const
+{
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    // The SHORT way round: the arc the alignment drives (yaw_err = wrap_pi(target - current)), as rotation_sweep.
+    const float two_pi = 2.0f * static_cast<float>(M_PI);
+    const float sweep = std::remainder(yaw_to - yaw_from, two_pi);
+    // ★ SAMPLE SPACING FROM THE BODY, NOT A MAGIC ANGLE: the footprint's farthest covered cell sits `reach` from the
+    //   pivot; it moves one grid cell when the body turns cell/reach radians, so no bucket the body passes through can
+    //   be stepped over. (Before the world/offsets exist reach is 0: fall back to the heading-bucket width.)
+    const float reach = std::sqrt(static_cast<float>(offsets_reach2_cells_)) * cell_;
+    const float d_theta = reach > 0.f ? std::min(cell_ / reach, two_pi / kHeadings) : two_pi / kHeadings;
+    const int n = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / d_theta)));
+    std::set<int> buckets;
+    for (int i = 0; i <= n; ++i)
+        buckets.insert(heading_bucket(yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n))));
+    return turn_block_over(pos_room, std::vector<int>(buckets.begin(), buckets.end()), heading_bucket(yaw_from));
+}
+
+GridPlanner::TurnBlock GridPlanner::turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings,
+                                                    int standing_heading) const
+{
     TurnBlock b;
     int ix, iy;
     if (not world_to_cell(pos_room, ix, iy)) { b.blocked = true; b.off_map = true; return b; }
     const_cast<GridPlanner*>(this)->rebuild_offsets();
     if (offsets_.size() != kHeadings) { b.blocked = true; return b; }
 
+    // the cells under the footprint at the heading the body already has: not newly swept (see why_cannot_sweep)
+    std::set<std::pair<int, int>> standing;
+    if (standing_heading >= 0 and standing_heading < kHeadings)
+        for (const auto& o : offsets_[standing_heading]) standing.insert({ix + o.x(), iy + o.y()});
+
     float best = std::numeric_limits<float>::max();
     // A cell can sit under several headings' footprints; count it once so "cells_blocked" reads as the
     // size of the obstruction and not as how thoroughly we looked at it.
     std::set<std::pair<int, int>> seen;
-    for (int h = 0; h < kHeadings; ++h)
+    for (const int h : headings)
     {
         bool this_heading = false;
         for (const auto& o : offsets_[h])
         {
             const int nx = ix + o.x(), ny = iy + o.y();
             if (not in_bounds(nx, ny)) { this_heading = true; b.off_map = true; continue; }
-            if (not occ_[idx(nx, ny)]) continue;
+            if (not occ_[idx(nx, ny)] or standing.contains({nx, ny})) continue;
             this_heading = true;
             seen.insert({nx, ny});
             const auto w = cell_to_world(nx, ny);

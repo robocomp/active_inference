@@ -1724,16 +1724,23 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     if (orient_in_place and grid_planner_.has_world())
     {
         const auto robot_xy = step.robot_pose.pos.head<2>().cast<float>();
-        if (const auto blk = grid_planner_.why_cannot_turn(robot_xy); blk.blocked)
+        // ★ THE ARC THE BODY WILL TURN THROUGH, NOT THE FULL CIRCLE (onemodeloff01, 2026-11-15). An orient sweeps the
+        // footprint from the current yaw to the target yaw; it was refused for cells BEHIND the robot that the 62 deg
+        // arc never reaches ("4/8 headings blocked, nearest 0.40 m, bearing 176"), the door left shut and offered for
+        // ever. The yaws are the policy's FORWARD headings (body angle theta + pi/2); the direction is the SHORT way,
+        // the one step_orient / the Heading goal drive. If that arc is blocked the orient is reported, not repaired.
+        const float yaw_now = step.robot_pose.theta + std::numbers::pi_v<float> / 2.f;
+        if (const auto blk = grid_planner_.why_cannot_sweep(robot_xy, yaw_now, step.target.yaw_rad); blk.blocked)
         {
             if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
             {
                 last_repair_reject_log_ms_ = timestamp_ms;
-                std::println("[controller] '{}' is an orient affordance and the body cannot turn "
-                             "all the way round at ({:.2f},{:.2f}), where the robot stands — "
+                std::println("[controller] '{}' is an orient affordance and the body cannot sweep the turn "
+                             "from yaw {:.0f} to {:.0f} deg (the short way) at ({:.2f},{:.2f}), where the robot stands — "
                              "reporting infeasible. Nothing to repair: an orient has no standpoint.",
-                             step.target.node_name, robot_xy.x(), robot_xy.y());
-                std::println("[controller]   because: {}/{} headings blocked by {} cell(s){}; nearest "
+                             step.target.node_name, yaw_now * 57.2958f, step.target.yaw_rad * 57.2958f,
+                             robot_xy.x(), robot_xy.y());
+                std::println("[controller]   because: {}/{} headings of the arc blocked by {} cell(s){}; nearest "
                              "at ({:.2f},{:.2f}) = {:.2f} m, bearing {:.0f} deg",
                              blk.headings_blocked, 8, blk.cells_blocked,
                              blk.off_map ? ", footprint leaves the map" : "",
@@ -1746,8 +1753,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             // opposite responses. Recorded on the audit line so it survives the terminal.
             audit_standpoint("fact-orient-cannot-turn", timestamp_ms,
                              last_raw_target_pos_.value_or(step.target.room_pos), robot_xy, robot_xy,
-                             "can_turn_here",
-                             std::format("{}/8 headings blocked by {} cell(s){}; nearest {:.2f} m at "
+                             "can_sweep_arc",
+                             std::format("{}/8 arc headings blocked by {} cell(s){}; nearest {:.2f} m at "
                                          "bearing {:.0f} deg, cell ({:.2f},{:.2f})",
                                          blk.headings_blocked, blk.cells_blocked,
                                          blk.off_map ? ", off-map" : "", blk.nearest_m,
@@ -1762,7 +1769,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             plan_spline_valid_ = false;
             last_repair_applied_m_ = 0.f;
             note_why(rc::why::Cause::TargetRejected,
-                     std::format("orient '{}': the body cannot turn here ({}/8 headings blocked, nearest {:.2f} m) — reported "
+                     std::format("orient '{}': the body cannot sweep that turn here ({}/8 headings of the arc blocked, nearest {:.2f} m) — reported "
                                  "Infeasible", step.target.node_name, blk.headings_blocked, blk.nearest_m));
             stop(path_controller, motion_commander);
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
@@ -3739,6 +3746,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     const auto &leg = *door_route_leg_;
     const std::uint64_t now = time_source();
     update_chain_end(step);
+    door_face_yaw_.reset();
     door_reaim_goal_.reset();   // door-passable spec step 2: set afresh each cycle, only while the re-aim applies
     // ★A route built on the room-frame door is rebuilt on the PERCEIVED opening as soon as the anchor is up; one built on the
     //  anchor is rebuilt when it no longer takes the body through the opening as now measured (band_cross_route_passes: the
@@ -3873,6 +3881,35 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                     const auto gs = rc::policy::reaim_place_goal(rp, ra.p_robot, ra.yaw_robot, 0.f, 0.f);
                     door_reaim_goal_ = std::make_pair(gs.goal.p, gs.goal.yaw.value_or(0.f));
                 }
+                // ★ AT THE VANTAGE, FACING AWAY (chat_e2e20): no fresh anchor to re-aim on, so turn in place to the door's heading
+                //   in the room frame (controller_anchor_servo.h should_face_door). The swept arc is checked first.
+                const float face_err = rc::door_heading_err(step.robot_pose.theta, leg.approach_yaw);
+                if (rc::should_face_door(vact, route_arrived, face_err))
+                {
+                    const float yaw_now = step.robot_pose.theta + 0.5f * static_cast<float>(M_PI);
+                    if (const auto blk = grid_planner_.why_cannot_sweep(step.robot_pose.pos, yaw_now, leg.approach_yaw); blk.blocked)
+                    {
+                        if (door_face_logged_ != leg.key + "!")
+                        {
+                            door_face_logged_ = leg.key + "!";
+                            std::println("[door-route] {}: at the vantage facing {:+.0f} deg off the door, but the body cannot sweep the turn "
+                                         "({}/8 headings of the arc blocked by {} cell(s), nearest {:.2f} m at bearing {:.0f} deg) — holding, "
+                                         "not turning", leg.door, face_err * 57.2958f, blk.headings_blocked, blk.cells_blocked,
+                                         blk.nearest_m, blk.nearest_bearing_deg);
+                        }
+                        cross_status_ = "at the vantage facing away from the door, the turn is blocked: " + why_not;
+                    }
+                    else
+                    {
+                        door_face_yaw_ = leg.approach_yaw;
+                        if (door_face_logged_ != leg.key)
+                        {
+                            door_face_logged_ = leg.key;
+                            std::println("[door-route] {}: at the vantage but facing {:+.0f} deg off the door (no fresh anchor to re-aim on) — "
+                                         "turning in place to face it", leg.door, face_err * 57.2958f);
+                        }
+                    }
+                }
                 if (not front_of_open)
                     why_not = std::format("P(open) {:.2f}{} · seen {} · s {:+.2f} m{} · e {:+.2f} m of ±{:.2f}{} · heading {:+.0f} deg{}",
                                           p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
@@ -3914,7 +3951,9 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 return true;
             }
             mouth_wait_.reset();
-            if (door_reaim_goal_.has_value())
+            if (door_face_yaw_.has_value())
+                cross_status_ = "turning in place to face the door: " + why_not;
+            else if (door_reaim_goal_.has_value())
             {
                 cross_status_ = "re-aiming on the perceived opening: " + why_not;
                 if (door_reaim_logged_ != leg.key)

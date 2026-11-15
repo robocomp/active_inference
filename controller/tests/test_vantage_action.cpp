@@ -8,6 +8,7 @@
 #include "../src/controller_anchor_servo.h"
 
 #include <cmath>
+#include <numbers>
 #include <print>
 #include <string_view>
 
@@ -76,6 +77,33 @@ int main()
     CHECK(rc::vantage_action(false, true, true, true, false, true, true, false) != VantageAction::ReAim);
     // facing alone failing also re-aims once the route has arrived
     CHECK(rc::vantage_action(false, true, true, true, true, false, true, true) == VantageAction::ReAim);
+
+    // ── FACE THE DOOR (2026-11-15; chat_e2e20 `cross door_25`: robot 1.45 m in front, heading -176 deg, 50+ s idle) ──────────
+    // At the vantage with the route arrived and the door believed open, the robot faces AWAY: the anchor is not fresh (it cannot
+    // see the door behind it) so vantage_action says RouteDrives, and nothing drove. The passage turns the body to the door itself,
+    // in the ROOM frame (the door's forward heading from the route's vantage vs the body's own), with the facing test the passage
+    // already uses: |heading error| < 90 deg.
+    constexpr float kPi = std::numbers::pi_v<float>;
+    const float door_yaw = -kPi / 2.f;                       // the door is straight toward -y
+    // heading -176 deg from the door normal: the policy yaw is door_yaw + 176 deg  =>  theta = yaw - pi/2
+    const float yaw_m176 = door_yaw + 176.f * kPi / 180.f;
+    const float err_m176 = rc::door_heading_err(yaw_m176 - kPi / 2.f, door_yaw);
+    CHECK(std::abs(std::abs(err_m176) - 176.f * kPi / 180.f) < 1e-3f);
+    // the e2e20 verdict: route arrived, mouth not seen, anchor stale -> RouteDrives -> face the door
+    const auto v_stale = rc::vantage_action(false, true, false, true, true, false, true, false);
+    CHECK(v_stale == VantageAction::RouteDrives);
+    CHECK(rc::should_face_door(v_stale, true, err_m176));
+    // the same with the door SEEN open but the anchor stale (open_seen true, facing false, anchor not fresh)
+    CHECK(rc::should_face_door(rc::vantage_action(false, true, true, true, true, false, true, false), true, err_m176));
+    // already facing it (within 90 deg either side): nothing to turn
+    CHECK(not rc::should_face_door(VantageAction::RouteDrives, true, 0.3f));
+    CHECK(not rc::should_face_door(VantageAction::RouteDrives, true, -1.5f));
+    // the route has not arrived: the route drives, the body is not at the vantage to turn there
+    CHECK(not rc::should_face_door(VantageAction::RouteDrives, false, err_m176));
+    // the other actions own the decision: the servo drives, a fresh anchor re-aims, a placed hold stays a hold
+    CHECK(not rc::should_face_door(VantageAction::Servo, true, err_m176));
+    CHECK(not rc::should_face_door(VantageAction::ReAim, true, err_m176));
+    CHECK(not rc::should_face_door(VantageAction::HoldNoMouth, true, err_m176));
 
     std::println("{}/{} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;

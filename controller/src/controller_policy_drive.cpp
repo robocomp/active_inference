@@ -931,6 +931,14 @@ bool ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': not built", door_route_leg_->door));
             return false;
         }
+        if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_ and door_face_yaw_.has_value())
+        {
+            // at the vantage, facing away from the door with no fresh anchor: turn in place to the door's heading (drive_door_route,
+            // should_face_door). A Heading goal holds the position, so this is a pure rotation.
+            const auto goal = rc::policy::heading_goal(robot_pose.pos, *door_face_yaw_, gp.tol_yaw, gp.tol_xy);
+            policy_tick(goal, std::format("door face {}", door_route_leg_->door), cpose, obstacle_tracker, motion_commander, now);
+            return false;
+        }
         if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_ and door_reaim_goal_.has_value())
         {
             // door-passable spec step 2: off-axis at the vantage ⇒ re-aim on the perceived opening (set by drive_door_route)
