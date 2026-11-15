@@ -159,7 +159,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     risk_.clear();
     residual_soft_in_ = residual_hard_in_ = 0;
     live_only_.clear();
-    if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); dist_.clear(); return; }
+    if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); occ_nocells_.clear(); src_squares_.clear(); dist_.clear(); return; }
 
     float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
     for (const auto& p : room_polygon)
@@ -233,6 +233,8 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     // when every latch was a wall. Its risk is added to the ONE planner cell holding its centre: it is
     // an expectation, not an obstacle extent, so there is nothing to round outward — the footprint and
     // safety_margin_m already carry the body's reach.
+    occ_nocells_ = occ_;     // everything but the residual stamp, for the sweep's true-extent test
+    src_squares_.clear();
     if (cells.cell_size_m > 0.f and not cells.centres.empty())
     {
         const float h = 0.5f * cells.cell_size_m;
@@ -256,6 +258,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
                 continue;
             }
             ++residual_hard_in_;
+            src_squares_.push_back({c, h});
             int ix0, iy0, ix1, iy1;
             world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
             world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
@@ -268,6 +271,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
         {
             ++residual_hard_in_;
             const auto& c = cells.centres[k];
+            src_squares_.push_back({c, h});
             int ix0, iy0, ix1, iy1;
             world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
             world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
@@ -419,7 +423,7 @@ void GridPlanner::write_grid(std::ostream& os) const
 
 bool GridPlanner::read_grid(std::istream& is)
 {
-    w_ = h_ = 0; occ_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear(); world_key_ = 0; free_memo_.clear();
+    w_ = h_ = 0; occ_.clear(); occ_nocells_.clear(); src_squares_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear(); world_key_ = 0; free_memo_.clear();
     std::string tok;
     while (is >> tok and tok != "grid") is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     if (tok != "grid") return false;
@@ -436,6 +440,7 @@ bool GridPlanner::read_grid(std::istream& is)
         std::string row;
         if (not (is >> row) or static_cast<int>(row.size()) != w_) { w_ = h_ = 0; occ_.clear(); return false; }
         for (int ix = 0; ix < w_; ++ix) occ_[idx(ix, iy)] = row[ix] == '1' ? 1 : 0;
+        occ_nocells_ = occ_; src_squares_.clear();   // a snapshot keeps lattice extent only
     }
     // Optional soft layer (write_grid). Absent in older snapshots, which therefore replay as before.
     // Parsed with from_chars: these agents run under a comma-decimal locale (CLAUDE.md).
@@ -750,13 +755,14 @@ float overlap_area_with_square(std::vector<Eigen::Vector2f> poly, float x0, floa
 }
 }  // namespace
 
-float GridPlanner::body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, int ix, int iy) const
+float GridPlanner::body_square_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, const Eigen::Vector2f& c, float h) const
 {
     const auto poly = footprint.at_pose_yaw(pos_room, yaw, /*with_margin=*/false);
-    const auto c = cell_to_world(ix, iy);
-    const float h = 0.5f * cell_;
     return overlap_area_with_square(poly, c.x() - h, c.y() - h, c.x() + h, c.y() + h);
 }
+
+float GridPlanner::body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, int ix, int iy) const
+{ return body_square_overlap_m2(pos_room, yaw, cell_to_world(ix, iy), 0.5f * cell_); }
 
 GridPlanner::TurnBlock GridPlanner::why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const
 {
@@ -775,32 +781,38 @@ GridPlanner::TurnBlock GridPlanner::why_cannot_sweep(const Eigen::Vector2f& pos_
     // sample spacing from the body: the farthest vertex moves HALF a grid cell per step, so it cannot jump over a cell
     const float d_theta = reach > 0.f ? 0.5f * cell_ / reach : two_pi / kHeadings;
     const int n = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / d_theta)));
+    // the obstacles at TRUE extent: lattice cells of everything but the residual stamp, plus the residual cells' own squares
+    std::vector<SourceSquare> squares = src_squares_;
     const int r = static_cast<int>(std::ceil((reach + cell_) / cell_));
-    std::set<int> buckets;
-    std::set<std::pair<int, int>> seen;
-    float best = std::numeric_limits<float>::max();
     for (int dy = -r; dy <= r; ++dy)
         for (int dx = -r; dx <= r; ++dx)
         {
             const int cx = ix + dx, cy = iy + dy;
             if (not in_bounds(cx, cy)) { b.off_map = true; continue; }
-            if (not occ_[idx(cx, cy)]) continue;
-            const float a0 = body_cell_overlap_m2(pos_room, yaw_from, cx, cy);
-            for (int i = 1; i <= n; ++i)
-            {
-                const float y = yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n));
-                if (body_cell_overlap_m2(pos_room, y, cx, cy) <= a0) continue;
-                buckets.insert(heading_bucket(y));
-                seen.insert({cx, cy});
-                const auto w = cell_to_world(cx, cy);
-                if (const float d = (w - pos_room).norm(); d < best)
-                {
-                    best = d; b.nearest_cell = w; b.nearest_m = d;
-                    b.nearest_bearing_deg = std::atan2(w.y() - pos_room.y(), w.x() - pos_room.x()) * 180.f / static_cast<float>(M_PI);
-                }
-                break;
-            }
+            if (occ_nocells_.size() == occ_.size() and occ_nocells_[idx(cx, cy)])
+                squares.push_back({cell_to_world(cx, cy), 0.5f * cell_});
         }
+    std::set<int> buckets;
+    std::set<std::pair<int, int>> seen;
+    float best = std::numeric_limits<float>::max();
+    for (const auto& sq : squares)
+    {
+        if ((sq.c - pos_room).norm() > reach + sq.half * 1.4143f) continue;   // the square cannot reach the hull
+        const float a0 = body_square_overlap_m2(pos_room, yaw_from, sq.c, sq.half);
+        for (int i = 1; i <= n; ++i)
+        {
+            const float y = yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n));
+            if (body_square_overlap_m2(pos_room, y, sq.c, sq.half) <= a0) continue;
+            buckets.insert(heading_bucket(y));
+            seen.insert({static_cast<int>(std::lround(sq.c.x() * 1000.f)), static_cast<int>(std::lround(sq.c.y() * 1000.f))});
+            if (const float d = (sq.c - pos_room).norm(); d < best)
+            {
+                best = d; b.nearest_cell = sq.c; b.nearest_m = d;
+                b.nearest_bearing_deg = std::atan2(sq.c.y() - pos_room.y(), sq.c.x() - pos_room.x()) * 180.f / static_cast<float>(M_PI);
+            }
+            break;
+        }
+    }
     b.headings_blocked = static_cast<int>(buckets.size());
     b.cells_blocked = static_cast<int>(seen.size());
     b.blocked = not seen.empty();

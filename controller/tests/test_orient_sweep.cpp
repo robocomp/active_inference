@@ -83,6 +83,21 @@ int main()
         check(p.why_cannot_sweep(r, 90.f * kDeg, 100.f * kDeg).blocked, "R2d: turning the way the overlap grows: refused");
     }
 
+    // NEGATIVE, at the live lattice (0.10 m): a 0.05 m cell exactly where the hull's lateral wheel face (0.284 m) ends the arc
+    // (start yaw 1.18, end 0.10: the wheel axis ends along 0.10 + 90 deg): the arc really reaches it -> refused
+    {
+        const std::vector<Eigen::Vector2f> room{{0.f, -4.f}, {5.f, -4.f}, {5.f, 0.5f}, {0.f, 0.5f}};
+        const Eigen::Vector2f r(2.07f, -1.59f);
+        const float wy = 0.10f + 0.5f * kPi;
+        const Eigen::Vector2f c = r + 0.28f * Eigen::Vector2f(std::cos(wy), std::sin(wy));
+        rc::GridPlanner p;
+        p.params.cell_size_m = 0.10f;
+        p.params.safety_margin_m = 0.05f;
+        p.set_world(room, {}, rc::OccupiedCells{.centres = {c}, .cell_size_m = 0.05f, .risk_nats = {}});
+        check(p.why_cannot_sweep(r, 0.10f + 1.08f, 0.10f).blocked, "N1: a cell where the hull's wheel face really sweeps: refused (live lattice)");
+        check(not p.why_cannot_sweep(r, 0.10f, 0.10f).blocked, "N2: the same cell, no turn at all: free");
+    }
+
     // THE REAL onemodeloff01 GEOMETRY (controller.log: robot (2.07,-1.59); two cells around (1.67,-1.56), 0.40 m, bearing 176 deg;
     // aff_door_3_open target yaw +0.10 rad, the robot 62 deg off it). The blocking cells are residual's 0.05 m cells; the planner
     // stamps them into ITS lattice (0.10 m cells in the live grid), so each verdict is given on both lattices. The start yaw is
@@ -115,10 +130,12 @@ int main()
                                 v.blocked ? "REFUSED" : "free", v.cells_blocked, amax);
                     // on a lattice equal to residual's 0.05 m the grid holds the cells' true squares: the hull (reach 0.318 m) cannot touch them.
                     // On 0.10 m the stamp enlarges each 0.05 m cell into the enclosing lattice squares (reported, not asserted).
-                    if (std::string_view(name) == "shadow hull" and lattice < 0.07f)
-                        check(not v.blocked, "onemodeloff01 (shadow hull, true 0.05 m cells): the 62 deg orient is free from either start yaw");
-                    if (std::string_view(name) != "shadow hull" and lattice < 0.07f)
-                        check(v.blocked, "onemodeloff01 (0.46x0.65 rectangle, true 0.05 m cells): its corner (0.398 m) does reach them -- refused");
+                    // fix round 3: the sweep tests each residual cell at its TRUE 0.05 m extent, whatever the lattice -- so the live 0.10 m
+                    // lattice gives the same verdict as the 0.05 m one
+                    if (std::string_view(name) == "shadow hull")
+                        check(not v.blocked, "onemodeloff01 (the planner's shadow hull, 0.05 m residual cells, lattice as printed): free from either start yaw");
+                    else
+                        check(v.blocked, "(for the record) a 0.46x0.65 rectangle's corner (0.398 m) would reach them -- refused");
                 }
             }
     }

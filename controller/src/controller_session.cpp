@@ -1674,8 +1674,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // With GoalFacingYawEnabled the robot performs a terminal rotation IN PLACE here, and that rotation
     // runs with no obstacle check of any kind — the align branch returns ahead of every safety stage.
     // nearest_free only ever asked "does the footprint fit at the facing heading", which is one heading
-    // out of the whole arc the body sweeps; for a 0.46 x 0.65 body the swept width peaks at the DIAGONAL
-    // (0.796 m), so a spot that is fine to stand in can be impossible to turn in. Ask for the stronger
+    // out of the whole arc the body sweeps; for the shadow hull (farthest vertex 0.318 m; ROBOT_GEOMETRY.md) the swept width peaks at its DIAGONAL, so a spot that is fine to stand in can be impossible to turn in. Ask for the stronger
     // property, and prefer the roomiest spot that has it.
     // Falls back to nearest_free rather than failing: a standpoint that is merely reachable still beats
     // no standpoint, and this is a preference for clearance, not a new precondition for servicing an
@@ -1703,7 +1702,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // unreachable about it describe a place the robot was never going — facts that are true of a point
     // and false of the action.
     // ★AND THE ONE QUESTION THAT DOES MATTER WAS NEVER ASKED. A rotation in place sweeps the body's
-    // DIAGONAL (0.796 m for this 0.46 x 0.65 base, against 0.46 m standing), and it runs with NO
+    // reach (the shadow hull's farthest vertex, 0.318 m, against its half-width standing), and it runs with NO
     // obstacle check of any kind — the align branch returns ahead of every safety stage. Whether that
     // sweep fits is a fact about where the robot IS, this side is the only one that can establish it,
     // and the answer is reported rather than repaired: there is nowhere to move the target TO, because
