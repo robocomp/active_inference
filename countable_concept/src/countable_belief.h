@@ -375,9 +375,11 @@ public:
         if (not frame.lidar_only) update_volatility(state_.vec() - before);
         return fe;
     }
-    // The engine runs a point-free frame as a measurement when this says it carries data: LiDAR rays with a usable precision.
+    // The engine runs a point-free frame as a measurement when this says it carries data: a LiDAR-only frame with rays of
+    // usable precision. A point-free frame that is not lidar_only stays predict-only, exactly as before.
     bool has_extra_data(const CountableFrame& f) const
     {
+        if (not f.lidar_only) return false;
         const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
         if (usable(f.lidar)) return true;
         return std::ranges::any_of(f.lidar_extra, usable);

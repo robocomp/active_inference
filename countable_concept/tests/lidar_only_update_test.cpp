@@ -78,6 +78,11 @@ static void empty_frame_is_predict_only()
     // and a point-free, non-lidar_only frame (the legacy meaning) is the same
     CountableBelief d = make_belief(); CountableFrame g; d.update(g);
     CHECK((d.covariance() - c.covariance()).norm() == 0.0f);
+    // a point-free frame WITH rays but lidar_only=false is still ignored by the engine (predict-only)
+    CountableBelief e = make_belief(); auto h = lidar_frame(two_face_rays()); h.lidar_only = false;
+    CHECK(e.update(h) == 0.0f);
+    CHECK((e.state().vec() - c.state().vec()).norm() == 0.0f);
+    CHECK((e.covariance() - c.covariance()).norm() == 0.0f);
 }
 
 static void lidar_only_moves_toward_rays()
@@ -183,7 +188,10 @@ static void lidar_only_repeated_sweeps()
         std::printf("  repeated sweeps: %s settled sigma %.5f  analytic (Q*Sc)^(1/4) %.5f (variance sqrt(Q*Sc) = %.3e)  ratio %.3f\n",
                     nm[j], sg, an, std::sqrt(Q(i) / sc(i)), sg / an);
         CHECK(std::isfinite(sg) and sg > 0.0f);
-        CHECK(sg < 2.0f * an and sg > 0.5f * an);
+        // LOWER bound only: the failure to guard against is COLLAPSE (overconfidence). With one face per axis the rays leave
+        // (cx,w) and (cy,h) degenerate, so sigma stays ABOVE the per-frame cap's fixed point (Q*Sc)^(1/4), which assumes every
+        // DOF observed. Overconfidence against the true error is checked two-sided in the live run.
+        CHECK(sg >= 0.5f * an);
     }
 }
 
