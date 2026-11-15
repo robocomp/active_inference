@@ -459,13 +459,12 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
         const double wall_len = wall_length_at(dv.xy);
         mask_log_birth_[i] = log_b;
         MaskCauseModel model;
-        // ★A HOLE HOLDS ONE DOOR, for the aperture mode as for the leaf mode below: a new door at the hole a live door stands in has the mass the live door leaves,
-        //  (1 − r · overlap). Without it a mask exactly on a live door was shared with a duplicate label at the same hole (one currency, final review 9, makes the
-        //  new place's perfect-fit density 1/√(2πR) against the door's R_eff, which the door's own larger prior r used to hide behind a constant).
+        // ★ONE CURRENCY (item 9 R_eff): the new place is priced at its marginal over the across-wall position a door born here would carry (σ²_across,birth), exactly as a live
+        //  door is over its own; a duplicate label at a live door's hole then pays the door's own factor and loses to it by the door's prior and by what the door knows, with NO
+        //  extra hole-share factor (the exact-overlap Φ share this replaced compensated for the plug-in R: replays tape_dm/e18/e19, 5/2, 2/2, 4/3, no churn without it).
         model.one_currency = cfg.exist_one_currency;
-        model.log_birth = cfg.exist_one_currency
-            ? log_b + std::log(std::max(hole_free(typical_door_at(dv.xy, cfg.exist_typical_w_m, cfg.exist_typical_h_m, polygon).aperture, groups), 1e-300))   // 1e-300: numerical floor on a log
-            : log_b;
+        model.across_var_new = fit_.birth_across_var(dv.xy);
+        model.log_birth = log_b;
         model.log_kappa = std::log(std::max(1e-9, static_cast<double>(dm.false_alarm)));
         model.log_pd_new = std::log(std::max(1e-9, static_cast<double>(dm.hit_rate)));
         model.along_len_m = wall_len;
@@ -506,7 +505,7 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
                         const double lw = hy.log_w - wall_base_rate(rates_, {}) + wall_base_rate(rates_, r_o);
                         const double lb = -std::log1p(std::exp(-lw));
                         // a hole holds one door: a NEW door at a hole a live door already stands in has the mass the live door leaves (1 − r · overlap)
-                        const double hole_free = this->hole_free(hy.aperture, groups);
+                        const double hole_free = cfg.exist_one_currency ? 1.0 : this->hole_free(hy.aperture, groups);   // one currency: no share, the marginal prices the duplicate (above)
                         // the leaf is NOT SHUT against ITS frame wall (the angle to that wall, not to the wall nearest the mask): 1 - aperture angular there
                         const float th_h = std::acos(std::min(1.0f, std::abs(dir.dot(hy.aperture.wall_u))));
                         const double log_not_h = std::log1p(-std::min(rc::door::aperture_angle_likelihood(th_h, rc::door::segment_angle_sd(seg.length, mband.sigma_m)), 1.0 - 1e-16));
@@ -588,17 +587,13 @@ const rc::door::RegisteredSweep& DoorCore::registered(const rc::door::Aperture& 
     return reg_cache_.back().second;
 }
 
-// The share of the aperture's span NO live door stands in: Π_i (1 − r_i · P(overlap_i)) over the live doors on the same wall, r_i the door's last-cycle existence
-// probability and P(overlap_i) the probability that the two apertures overlap along the wall: a hole holds one door, so the two are disjoint exactly when the
-// separation of their centres is at least the mean width w̄, and the live door's centre is known only to its own sd along the wall (σ, the fit's s variance plus the
-// pose chain's): with Δ the offset of the new centre from the door's, P(disjoint) = Φ((Δ − w̄)/σ) + Φ((−Δ − w̄)/σ). Continuous, no radius; σ → 0 recovers "overlap iff |Δ| < w̄"
-// (before: the linear share max(0, 1 − |Δ|/w̄), which at half a width left a door half-free beside a CERTAIN door and so let a duplicate label form beside every displaced door).
+// The share of the aperture's span NO live door stands in: Π_i (1 − r_i · overlap_i) over the live doors on the same wall, r_i the door's last-cycle existence
+// probability and overlap_i the fraction of the (mean) width the two spans share along the wall, max(0, 1 − |Δ| / w̄). Continuous (no radius). The pre-OneCurrency
+// pricing only: under Existence.OneCurrency a duplicate label is priced by the marginal over its across-wall position (door_mask_causes.h) and takes no share.
 double DoorCore::hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const
 {
     const auto& polygon = fit_.room_polygon();
     const int wall = wall_of(ap.centre_xy(), polygon, groups);
-    const float rn2 = cfg_.door.tracker_detection_noise_m * cfg_.door.tracker_detection_noise_m;
-    const auto phi = [](double z) { return 0.5 * std::erfc(-z / std::numbers::sqrt2); };
     double free = 1.0;
     for (const auto& [id, st] : world_->fit_states())
     {
@@ -606,16 +601,8 @@ double DoorCore::hole_free(const rc::door::Aperture& ap, const std::vector<int>&
         const auto it = last_p_door_.find(id);
         if (it == last_p_door_.end() or wall_of(st->aperture.centre_xy(), polygon, groups) != wall) continue;
         const double wbar = 0.5 * (ap.w + st->aperture.w);
-        const double delta = (ap.centre_xy() - st->aperture.centre_xy()).dot(ap.wall_u);
-        if (not cfg_.door.exist_one_currency)
-        {   // the linear share of the mean width the two spans share (the earlier form: Task 9)
-            free *= 1.0 - static_cast<double>(it->second) * std::max(0.0, 1.0 - std::abs(delta) / std::max(1e-3, wbar));
-            continue;
-        }
-        const double var = st->ai2_initialized ? std::max(0.0f, st->ai2_belief.covariance()(0, 0)) + st->chain_cov_xx : rn2;
-        const double sd = std::sqrt(std::max(1e-12, var));   // 1e-12: numerical floor on a variance
-        const double disjoint = phi((delta - wbar) / sd) + phi((-delta - wbar) / sd);
-        free *= 1.0 - static_cast<double>(it->second) * (1.0 - disjoint);
+        const double d = std::abs((st->aperture.centre_xy() - ap.centre_xy()).dot(ap.wall_u));
+        free *= 1.0 - static_cast<double>(it->second) * std::max(0.0, 1.0 - d / std::max(1e-3, wbar));
     }
     return free;
 }

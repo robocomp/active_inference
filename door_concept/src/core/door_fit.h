@@ -127,6 +127,10 @@ public:
     void set_room_is_proto(bool p) { room_is_proto_ = p; }
     [[nodiscard]] bool room_is_proto() const { return room_is_proto_; }
     [[nodiscard]] rc::door::RoomBand room_band() const { return {cfg_.exist_wall_thickness_m, cfg_.exist_boundary_sigma_m}; }
+    /// The variance ACROSS its wall a door born at room-frame `xy` would carry: the leaf plane's prior depth variance (make_belief_params' recess_prior_std²,
+    /// the sd a fresh belief's Σ(3,3) starts at) plus the pose chain's across share 0.5(Σ_xx + Σ_yy) at the point (compute_chain_cov's term). The quantity a
+    /// live door carries as place_var with its POSTERIOR recess sd in place of the prior one: the new-door cause is marginal over it (door_mask_causes.h).
+    [[nodiscard]] float birth_across_var(const Eigen::Vector2f& xy) const;
 
     // ── instance lifecycle ──
     /// The DSR-free half of DoorFitter::ensure_instance: `init_state` is what the node said (width_m/depth_m/height_m,

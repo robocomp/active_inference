@@ -56,10 +56,11 @@ static std::vector<V3> leaf_points(const rc::DoorBelief& door, rc::door::HingeSi
 static const rc::DoorBeliefParams kBP{};
 static const double kLogKappa = std::log(0.194), kLogPd = std::log(0.938);
 
-static MaskCauses explain(const std::vector<V3>& pts, const std::vector<DoorCauseInput>& doors, double log_birth, bool one_currency = false)
+static MaskCauses explain(const std::vector<V3>& pts, const std::vector<DoorCauseInput>& doors, double log_birth, bool one_currency = false, double across_var_new = 0.0)
 {
     MaskCauseModel m;
     m.one_currency = one_currency;
+    m.across_var_new = across_var_new;
     m.log_birth = log_birth; m.log_kappa = kLogKappa; m.log_pd_new = kLogPd; m.along_len_m = 5.5;
     return causes_of_mask(0, pts, kR, doors, m, kBP);
 }
@@ -161,6 +162,52 @@ int main()
         // a broad door does not out-weigh a sharp one's share of the same mask: breadth is paid for
         DoorCauseInput sharp = d, broad = d; sharp.along_var = 0.0025f; broad.along_var = 0.36f;
         CHECK(explain(pts, {broad}, std::log(b), true).rho_door(7) < explain(pts, {sharp}, std::log(b), true).rho_door(7));
+    }
+
+    // item 9 R_eff (owner 11-15): the new door and clutter are priced at their MARGINAL over the across-wall position a door born at the mask would carry (σ²_across,birth,
+    // DoorFit::birth_across_var), as a live door is over its own (R_eff = R + σ²_across), not at a perfect fit.
+    {
+        const auto door = make_door(1.0f);
+        const auto ch = make_channel(0.0f, 0.99999, 0.9);
+        const auto pts = leaf_points(door, rc::door::HingeSide::Near, +1.0f, 0.0f);   // a mask exactly on the shut door
+        const double b = 0.4, r = 0.95, birth_var = 0.1 * 0.1;   // the birth prior's across sd ~ 0.1 m (recess prior sqrt(T^2/12 + sigma_b^2))
+        // (a) a YOUNG live door (sd across 0.2 m) and a perfect-fit duplicate place at the same hole: the door wins the mask. At the perfect-fit density (across_var_new = 0, the
+        //     profile likelihood this replaces) the duplicate beat it by R_eff/R.
+        DoorCauseInput young; young.id = 7; young.belief = &door; young.leaf = &ch; young.log_r = std::log(r); young.log_pd = kLogPd;
+        young.place_var = 0.2f * 0.2f; young.along_var = 0.09f;
+        const auto plug = explain(pts, {young}, std::log(b), true, 0.0);
+        const auto marg = explain(pts, {young}, std::log(b), true, birth_var);
+        std::printf("young door (sd across 0.2): plug-in rho door %.4f new %.4f | marginal rho door %.4f new %.4f clutter %.4f\n", plug.rho_door(7), plug.rho_kind(CauseKind::NewDoor), marg.rho_door(7), marg.rho_kind(CauseKind::NewDoor), marg.rho_kind(CauseKind::Clutter));
+        CHECK(marg.rho_door(7) > marg.rho_kind(CauseKind::NewDoor));
+        CHECK(marg.rho_door(7) > 0.5);
+        // (c) the odds new : door still scale with the door's own uncertainty - no constant edge in either direction: across (a doubled σ_across costs the door) and along
+        double prev = 0.0;
+        for (const float sd_across : {0.1f, 0.2f, 0.4f})
+        {
+            DoorCauseInput d = young; d.place_var = sd_across * sd_across;
+            const auto mc = explain(pts, {d}, std::log(b), true, birth_var);
+            const double odds = mc.rho_kind(CauseKind::NewDoor) / std::max(1e-300, mc.rho_door(7));
+            std::printf("  sd across %.1f: odds new:door %.4f\n", sd_across, odds);
+            CHECK(odds > prev);   // the broader its across-wall belief, the less the door's own cause outweighs a new place
+            prev = odds;
+        }
+        // a door as uncertain across its wall as a newborn would be (σ²_across = birth_var) pays exactly what the new place pays: the odds are the prior-and-along odds alone
+        DoorCauseInput eq = young; eq.place_var = float(birth_var); eq.along_var = 0.36f;
+        const auto me = explain(pts, {eq}, std::log(b), true, birth_var);
+        const double want = (b / 5.5) / (r / std::sqrt(2.0 * M_PI * double(eq.along_var)));
+        const double odds_eq = me.rho_kind(CauseKind::NewDoor) / std::max(1e-300, me.rho_door(7));
+        std::printf("  equal across uncertainty: odds new:door %.4f (prior x along %.4f)\n", odds_eq, want);
+        CHECK(std::abs(odds_eq / want - 1.0) < 0.5);   // the fit's own mean log u at this mask is a constant factor (~1.3), as above
+        // the new door and clutter carry the SAME across factor: their odds stay the prior odds b p_D / kappa, whatever the birth variance
+        for (const double bv : {0.0, 0.0025, 0.04})
+        {
+            const auto m2 = explain(pts, {young}, std::log(b), true, bv);
+            const double ratio = m2.rho_kind(CauseKind::NewDoor) / std::max(1e-300, m2.rho_kind(CauseKind::Clutter));
+            CHECK(std::abs(ratio / (b * 0.938 / 0.194) - 1.0) < 0.02);
+        }
+        // the flag off is untouched by the field
+        const auto off0 = explain(pts, {young}, std::log(b), false, 0.0), off1 = explain(pts, {young}, std::log(b), false, birth_var);
+        CHECK(off0.rho_kind(CauseKind::NewDoor) == off1.rho_kind(CauseKind::NewDoor) and off0.rho_door(7) == off1.rho_door(7));
     }
 
     // clutter takes a mask nobody explains

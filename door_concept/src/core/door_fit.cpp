@@ -387,6 +387,18 @@ void DoorFit::seed_bearing_hypothesis(rc::DoorFitState& inst, const Eigen::Vecto
     refresh_geometry(inst);
 }
 
+float DoorFit::birth_across_var(const Eigen::Vector2f& xy) const
+{
+    const auto band = room_band();
+    const float sd = cfg_.door_recess_prior_std >= 0.0f ? cfg_.door_recess_prior_std   // the same expression make_belief_params writes into recess_prior_std
+                   : std::sqrt(band.wall_thickness_m * band.wall_thickness_m / 12.0f + band.sigma_m * band.sigma_m);
+    float chain = 0.0f;
+    if (cfg_.rt_cov_add_chain and masks_ != nullptr)
+        if (const auto g = chain_point_cov(masks_->packet().room_zed_chain, Eigen::Vector3d(xy.x(), xy.y(), 0.5 * cfg_.door_prior_h_m)); g.has_value())
+            chain = 0.5f * static_cast<float>((*g)(0, 0) + (*g)(1, 1));
+    return sd * sd + chain;
+}
+
 void DoorFit::compute_chain_cov(rc::DoorFitState& inst)
 {
     inst.chain_cov_xx = 0.0f;

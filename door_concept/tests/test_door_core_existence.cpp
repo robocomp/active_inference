@@ -241,11 +241,11 @@ struct Rig
     DoorCore core;
     std::vector<rc::door::DoorDecision> removes, births;
     // These cases jump between standpoints from one cycle to the next: a teleport is not a turn, so turning is priced only where a case asks.
-    static DoorCoreConfig config(bool turns, bool one_model = false) { DoorCoreConfig c; if (not turns) c.door.ai2_ang_lever_m = 0.0f; c.door.exist_one_model = one_model; return c; }
+    static DoorCoreConfig config(bool turns, bool one_model = false, bool one_currency = false) { DoorCoreConfig c; if (not turns) c.door.ai2_ang_lever_m = 0.0f; c.door.exist_one_model = one_model; c.door.exist_one_currency = one_currency; return c; }
     std::vector<std::string> csv, cost_rows;
     std::uint64_t cycle = 0;
     int frame = 0;
-    explicit Rig(bool turns = false, bool one_model = false) : cfg(config(turns, one_model)), core(cfg)
+    explicit Rig(bool turns = false, bool one_model = false, bool one_currency = false) : cfg(config(turns, one_model, one_currency)), core(cfg)
     {
         w.cfg = cfg.door;
         w.core = &core;
@@ -1610,6 +1610,25 @@ int main()
         }
     }
 
+    //    second_real_door_one_metre_on_is_born_one_currency (final review 9, item 9 R_eff): with Existence.OneCurrency a door has been seen alone (its along-wall belief
+    //    still broad, sd ~ 0.6 m) when a second REAL door appears 1.0 m along the same wall: the new door's cause is the marginal over its own across-wall position, so
+    //    it is not drowned by the young door's cause and is born; both stay and nobody is re-born.
+    {
+        Rig r(false, true, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        for (int v = 0; v < 30; ++v)
+            r.look(stand(v % 2 ? 4.0f : 3.0f, -20.0f + 10.0f * static_cast<float>(v % 5), 1.0f), {1.0f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}});
+        const std::size_t alone = r.births.size();
+        for (int v = 0; v < 90; ++v)
+            r.look(stand(v % 2 ? 4.0f : 3.0f, -20.0f + 10.0f * static_cast<float>(v % 5), 1.5f), {1.5f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}, {2.0f, kWallY, 0.85f}});
+        std::print("second_real_door_one_metre_on_one_currency: {} doors, {} births ({} before the second), {} removes\n", r.w.st.size(), r.births.size(), alone, r.removes.size());
+        for (const auto& d : r.births) std::print("  BIRTH cycle {} {} ({:.2f},{:.2f})\n", d.cycle, d.name, d.a, d.b);
+        for (const auto& d : r.removes) std::print("  REMOVE cycle {} {} {}\n", d.cycle, d.name, d.note);
+        CHECK(alone == 1);
+        CHECK(r.w.st.size() == 2);
+        CHECK(r.births.size() == 2);
+        CHECK(r.removes.empty());
+    }
     {   // Task 8b A: a door whose leaf is open is not reported by the detector like a shut one (hit_rate_open): the ZED reporting nothing for
         // 40 frames while the leaf is open (P(open) = 1) leaves L within 0.5 of where the shut-leaf look left it; the old pooled rate dropped it
         const auto run = [&](float h_open_zed)
