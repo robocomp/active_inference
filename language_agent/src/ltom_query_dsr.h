@@ -6,12 +6,15 @@
  * that is there now is left to the live tools and never reported twice.
  */
 
+#include <algorithm>
 #include <cstdint>
+#include <vector>
 #include <string>
 
 #include <dsr/api/dsr_api.h>
 
 #include "object_facts.h"
+#include "question_policy.h"
 
 namespace rc::chat
 {
@@ -66,6 +69,68 @@ inline HumanFacts load_human(DSR::DSRGraph& G)
     if (const auto s = G.get_attrib_by_name<human_claim_answer_stamp_att>(*n); s.has_value()) h.answer_stamp = s.value();
     h.answer = G.get_attrib_by_name<human_claim_answer_att>(*n).value_or("");
     return h;
+}
+
+/// LTOM's open questions about moved objects (`ltom_question_<stamp>` nodes; spec 2026-11-15-changed-object), oldest
+/// first. Colour, class and name come from the memory node of the object asked about.
+inline std::vector<OpenQuestion> load_questions(DSR::DSRGraph& G)
+{
+    std::vector<OpenQuestion> out;
+    for (const auto& n : G.get_nodes_by_type("metaconcept"))
+    {
+        if (not n.name().starts_with("ltom_question_")) continue;
+        if (G.get_attrib_by_name<question_kind_att>(n).value_or("") != "moved") continue;
+        OpenQuestion q;
+        q.stamp = G.get_attrib_by_name<question_stamp_att>(n).value_or(0);
+        q.memory_uid = G.get_attrib_by_name<question_memory_uid_att>(n).value_or(0);
+        q.live_uid = G.get_attrib_by_name<question_live_uid_att>(n).value_or(0);
+        q.room = G.get_attrib_by_name<question_room_att>(n).value_or("");
+        q.again = G.get_attrib_by_name<question_again_att>(n).value_or(false);
+        if (const auto o = G.get_attrib_by_name<question_old_xy_att>(n); o.has_value() and o.value().get().size() >= 2)
+            q.old_xy = {o.value().get()[0], o.value().get()[1]};
+        if (const auto w = G.get_attrib_by_name<question_new_xy_att>(n); w.has_value() and w.value().get().size() >= 2)
+            q.new_xy = {w.value().get()[0], w.value().get()[1]};
+        if (q.stamp == 0 or q.memory_uid == 0) continue;
+        for (const auto& m : G.get_nodes_by_type("object"))
+            if (G.get_attrib_by_name<object_uid_att>(m) == std::optional<std::uint64_t>(q.memory_uid))
+            {
+                q.memory_name = m.name();
+                q.cls = G.get_attrib_by_name<object_subtype_att>(m).value_or("");
+                q.colour = G.get_attrib_by_name<color_name_att>(m).value_or("");
+                break;
+            }
+        if (q.cls.empty()) q.cls = q.memory_name.substr(0, q.memory_name.rfind('_'));
+        if (q.cls.empty()) q.cls = "object";
+        out.push_back(std::move(q));
+    }
+    std::ranges::sort(out, {}, &OpenQuestion::stamp);
+    return out;
+}
+
+/// What LTOM learned from the person's answers (`ltom_belief_<key>` nodes): counts and the dated evidence lines.
+inline std::vector<BeliefFacts> load_beliefs(DSR::DSRGraph& G)
+{
+    std::vector<BeliefFacts> out;
+    for (const auto& n : G.get_nodes_by_type("metaconcept"))
+    {
+        if (not n.name().starts_with("ltom_belief_")) continue;
+        BeliefFacts b;
+        b.key = n.name().substr(std::string_view("ltom_belief_").size());
+        b.yes = G.get_attrib_by_name<belief_yes_att>(n).value_or(0);
+        b.no = G.get_attrib_by_name<belief_no_att>(n).value_or(0);
+        const std::string ev = G.get_attrib_by_name<belief_evidence_att>(n).value_or("");
+        for (std::size_t a = 0; a < ev.size();)
+        {
+            const std::size_t e = ev.find('\n', a);
+            const std::string line = ev.substr(a, e == std::string::npos ? std::string::npos : e - a);
+            if (not line.empty()) b.evidence.push_back(line);
+            if (e == std::string::npos) break;
+            a = e + 1;
+        }
+        out.push_back(std::move(b));
+    }
+    std::ranges::sort(out, {}, &BeliefFacts::key);
+    return out;
 }
 
 }   // namespace rc::chat

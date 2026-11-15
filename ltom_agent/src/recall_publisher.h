@@ -42,6 +42,7 @@ public:
     void sync(std::optional<std::uint64_t> room_id, std::span<const Recall> want);
 
 private:
+    void sync_link(const DSR::Node& node, const Recall& r);
     std::shared_ptr<DSR::DSRGraph> G_;
     std::unique_ptr<DSR::RT_API> rt_api_;
     std::set<std::string> warned_;   // failures are logged once per (node, what)

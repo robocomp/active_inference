@@ -201,7 +201,8 @@ void SpecificWorker::initialize()
     memory_graph_ = std::make_unique<ltom::MemoryGraph>(G_memory);
     memory_graph_->sync(repertory_->entries(), {});     // retained objects show at once, fleet or no fleet
     human_graph_ = std::make_unique<ltom::HumanGraph>(G_memory);
-    human_graph_->sync(book_, std::nullopt);
+    human_graph_->sync(book_, std::nullopt, repertory_.get());
+    human_graph_->sync_questions(repertory_->questions());
     recall_pub_ = std::make_unique<ltom::RecallPublisher>(G);
     sweep_stale_recalls();   // may run before leaked nodes finish syncing; the first Operating entry sweeps again
     inner_eigen_ = G->get_inner_eigen_api();   // once, on the main thread, after the graph is up
@@ -259,7 +260,11 @@ void SpecificWorker::compute()
         last_answer_ = ltom::answer_after_save(applied, saved);
         std::println("[ltom] human claim {} -> {}", ltom::claim_kind_name(claim->kind), last_answer_->text);
     }
-    if (human_graph_) human_graph_->sync(book_, last_answer_);
+    if (human_graph_)
+    {
+        human_graph_->sync(book_, last_answer_, repertory_.get());
+        human_graph_->sync_questions(repertory_->questions());   // changed object: what LTOM asks the person
+    }
 
     // Recall nodes: the remembered, absent members of the offered classes, in the room the robot is in now.
     if (recall_pub_)

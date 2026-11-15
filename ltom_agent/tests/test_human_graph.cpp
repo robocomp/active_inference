@@ -18,6 +18,7 @@ ltom::Entry chair(int n)
 {
     ltom::Entry e;
     e.uid = uid_of(n); e.cls = "chair"; e.name = "chair_" + std::to_string(n);
+    if (n == 34) { e.color_name = "magenta"; e.color_prob = 0.74f; }   // the question names it by colour
     e.lives.push_back({.born_ms = 1000, .first_seen_ms = 1100, .last_seen_ms = 5000, .end_ms = 5200, .end = ltom::End::death});
     e.keyframes.push_back({.t_ms = 1100, .room_key = 1, .pose = {1.0, 2.0, 0.5, 0.01, 0.01, 0.1}});
     return e;
@@ -143,6 +144,55 @@ void test_language_agent_reads_the_human()
     const auto mem = rc::chat::load_remembered(*f.G, 10000);
     CHECK(std::ranges::none_of(mem.objects, [](const auto& o) { return o.name == "human_1"; }));
 }
+// ── Changed object (2026-11-15): questions and beliefs on the memory graph, as language_agent reads them ─────
+ltom::Sighting live57(float same, float left)
+{
+    ltom::Sighting s; s.uid = uid_of(57); s.cls = "chair"; s.name = "chair_57"; s.room_key = 1; s.born_ms = 6000;
+    s.pose = {3.0, -1.0, 0.0, 0.01, 0.01, 0.1};
+    s.link = ltom::LinkObs{uid_of(34), same, left};
+    return s;
+}
+void test_question_node_published_and_removed()
+{
+    Fixture f;
+    const std::vector<ltom::Sighting> v{live57(0.9f, 0.8f)};
+    f.rep.observe(v, {20}, {uid_of(57)}, 7000);
+    f.mem.sync(f.rep.entries(), {uid_of(57)});
+    f.human.sync_questions(f.rep.questions());
+    CHECK(f.G->get_node("ltom_question_7000").has_value());
+    const auto qs = rc::chat::load_questions(*f.G);
+    CHECK(qs.size() == 1);
+    if (qs.size() == 1)
+    {
+        CHECK(qs[0].stamp == 7000 and qs[0].memory_uid == uid_of(34) and qs[0].live_uid == uid_of(57));
+        CHECK(qs[0].room == "room_1" and qs[0].cls == "chair" and qs[0].colour == "magenta" and qs[0].memory_name == "chair_34");
+        CHECK(qs[0].old_xy.x == 1.0f and qs[0].old_xy.y == 2.0f and qs[0].new_xy.x == 3.0f and not qs[0].again);
+    }
+    f.human.sync_questions(f.rep.questions());   // repeatable
+    CHECK(f.G->get_nodes_by_type("metaconcept").size() >= 1);
+    f.book.apply(ltom::Claim{ltom::ClaimKind::moved, "yes:7000", uid_of(34), "yes, I moved it", 9}, f.rep, 8000);
+    f.human.sync_questions(f.rep.questions());
+    CHECK(not f.G->get_node("ltom_question_7000").has_value());
+    CHECK(rc::chat::load_questions(*f.G).empty());
+}
+void test_belief_node_lines()
+{
+    Fixture f;
+    const std::vector<ltom::Sighting> v{live57(0.9f, 0.8f)};
+    f.rep.observe(v, {20}, {uid_of(57)}, 7000);
+    f.book.apply(ltom::Claim{ltom::ClaimKind::moved, "yes:7000", uid_of(34), "yes, I moved it", 9}, f.rep, 8000);
+    f.human.sync(f.book, std::nullopt, &f.rep);
+    const auto bs = rc::chat::load_beliefs(*f.G);
+    const auto it = std::ranges::find(bs, std::string("moves_things"), &rc::chat::BeliefFacts::key);
+    CHECK(it != bs.end());
+    if (it != bs.end())
+    {
+        CHECK(it->yes == 1 and it->no == 0 and it->evidence.size() == 1);
+        CHECK(it->evidence.size() == 1 and it->evidence[0].contains(" | yes | yes, I moved it | chair_34"));
+    }
+    f.human.sync(f.book, std::nullopt, &f.rep);   // repeatable
+    CHECK(rc::chat::load_beliefs(*f.G).size() == bs.size());
+}
 }   // namespace
 
 int main()
@@ -154,6 +204,8 @@ int main()
     test_answer_published();
     test_read_claim();
     test_language_agent_reads_the_human();
+    test_question_node_published_and_removed();
+    test_belief_node_lines();
     std::println("{}", failures == 0 ? "ALL PASS" : "FAILED");
     return failures == 0 ? 0 : 1;
 }
