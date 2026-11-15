@@ -1,0 +1,16 @@
+# object_priors.toml
+#
+# Prior bed definitions for the bed_concept agent.
+# Each [[beds]] entry is checked at startup; if the node named `node_name`
+# is absent from the DSR graph it is created with the given geometry.
+
+[[beds]]
+node_name  = "bed_1"
+width_m    = 1.5          # Prior bed width  (X axis in bed frame)
+depth_m    = 1.4          # Prior bed depth  (Y axis in bed frame)
+height_m   = 0.75         # Prior bed-top height from floor
+room_x_m   = 3.5          # Initial room-frame X (will be refined by active inference)
+room_y_m   = 1.2          # Initial room-frame Y
+yaw_rad    = 0.0          # Initial heading
+sigma_pose = 0.1          # Prior uncertainty on position (m) — used by KL regulariser
+sigma_size = 0.60         # Prior uncertainty on dimensions (m)

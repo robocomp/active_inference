@@ -110,12 +110,11 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
     target.z1 = belief.cz() + belief.seat_h() + belief.back_h();   // the BACKREST is what the camera sees
     target.sigma_pos_m = std::sqrt(std::max({0.0f, S(0, 0), S(1, 1)}));
 
-    const Eigen::Matrix<float, 3, 3> I3 = Eigen::Matrix<float, 3, 3>::Identity();
     const auto raw_gain_of = [&](int i, float standoff)
     {
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const auto  dI = belief.predicted_information(sample_face_surface(belief, i), Ri);
-        const float continuous = 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
+        const float continuous = rc::nbv::d_optimal_gain<3>(S, dI);
 
         // ★ADD THE DISCRETE TERM. Sigma_ carries only the WITHIN-mode yaw width (~1 deg), so a gain built
         // from it alone says a chair is nearly resolved while the belief still does not know which of four
@@ -136,16 +135,14 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
         return continuous + discrete;
     };
 
-    const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,
-                                                   room_polygon);
-    if (not plan.valid)
-        return {};
-    // ★NO USABLE FACE ⇒ REFUSE, never publish the hint. plan.best_pos is then the raw argmax, which for a
-    // wall-anchored object is a pose behind the wall. Publishing it hands the controller an unroutable
-    // standpoint, and the controller REPAIRS rather than rejects: nearest_reachable is measured from the
-    // robot, so the goal snaps to the nearest occupiable cell — the floor right at the object. An invalid
-    // proposal makes the caller hold_offered() instead: "no viewpoint from here", which is the honest answer.
-    if (not plan.any_usable)
+    // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
+    // stand in the wall and the controller would repair it to the floor at the object), scale the winner by the
+    // adequacy gap ONLY when a σ* is published (chair publishes none ⇒ unbounded), refuse a non-finite result.
+    const rc::nbv::CountableInputs in{sensor, robot_radius_m_, obstacles, room_polygon};
+    const auto useful = [&](float best_raw)
+    { return rc::nbv::useful_fraction(rc::kChairDofs, [&](std::size_t j) { return S(j, j); }, best_raw); };
+    const auto res = rc::nbv::plan_countable(target, in, raw_gain_of, useful);
+    if (res.refused_no_usable_face)
     {
         static int shouted = 0;
         if (shouted++ < 5)
@@ -153,27 +150,12 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
                        "outside the room. REFUSING (the raw argmax would stand in the wall).\n");
         return {};
     }
-    const int   best_idx  = plan.best_face;
-    const float best_raw  = plan.face_raw_gains[best_idx];
-    // ★BOUND THE GAIN BY THE ADEQUACY GAP — but only if a consumer has actually stated one.
-    // Information beyond σ* is worthless to the consumer, so an adequate object must STOP attracting;
-    // without this an agent asks to be visited forever and starves every other affordance (measured: the
-    // chair, whose gain never fell because its dominant uncertainty is discrete). The guard matters as
-    // much as the bound: adequacy_gap_nats() returns 0 for a DOF table with no σ* anywhere — an empty sum
-    // — and 0 is exactly the value meaning "adequate", so applying it unguarded would force the gain to
-    // zero and the object would never be selected at all. Ask first. Agents that DECLARE no consumer
-    // demand (SIGMA-STAR: none) therefore stay unbounded, which is coherent: with no demand, "adequate"
-    // is undefined. This activates by itself the moment a σ* is published.
-    float best_gain = plan.face_gains[best_idx];   // DETECTION-WEIGHTED
-    if (rc::any_sigma_star(rc::kChairDofs))
-    {
-        const float adequacy_gap = rc::adequacy_gap_nats(rc::kChairDofs, [&](std::size_t j) { return S(j, j); });
-        const float useful_frac  = (best_raw > 1e-9f) ? std::min(best_raw, adequacy_gap) / best_raw : 0.0f;
-        best_gain *= useful_frac;
-    }
-    const auto& face_gain = plan.face_gains;
-    if (not std::isfinite(best_gain))
+    if (not res.proposal.valid)
         return {};
+    const rc::nbv::Plan& plan = res.plan;
+    const int   best_idx  = plan.best_face;
+    const float best_gain = res.proposal.epistemic_gain;
+    const auto& face_gain = plan.face_gains;
 
     static int dbg = 0;
     if (log_period_ > 0 and ++dbg % log_period_ == 0)
@@ -199,10 +181,7 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
                    plan.face_p_detect[0], plan.face_p_detect[1], plan.face_p_detect[2], plan.face_p_detect[3]);
     }
 
-    EpistemicProposal proposal{plan.best_pos.x(), plan.best_pos.y(), plan.best_yaw, best_gain, true};
-    if (!proposal.is_finite())
-        return {};
-    return proposal;
+    return res.proposal;
 }
 
 }  // namespace rc

@@ -214,31 +214,43 @@ cleanup.
 
 ---
 
-## 6. Conformance audit (2026-07-31)
+## 6. Conformance audit (2026-07-31; Phase 0 columns 2026-11-13)
 
 Derived by reading each agent, not inferred from includes. `—` = not applicable to that agent's sensing.
 
-| agent | CREATE | UPDATE | admissibility | REMOVE | P(detect) | wall LoS | HISTORY record | OWNERSHIP |
-|---|---|---|---|---|---|---|---|---|
-| table | ✅ resurrects from ltom recall | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| chair | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* |
-| bottle | ✅ resurrects from ltom recall | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
-| cabinet | ✅ resurrects from ltom recall | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ restores from ltsm `remembered_door` notes; refuted places in a private phantom file *(2026-11-14, Task 6)* | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
-| refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
-| residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
-| human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
-| self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
-| ltsm `recognition` / `recall_late` / `staged` *(2026-10-24)* | — no instances (decides which KNOWN room this is; births nothing) | — no belief | — | ❌ metric evidence only, no occupancy/absence channel | — | — | ❌ no phantom record | ✅ |
-| retina `place_evidence` *(2026-10-24, PLANNED, not producing)* | — | — | — | — | — | — | ❌ not built | ❌ not yet owned |
-| ltom_agent *(2026-11-01, observer + recall offers)* | — never writes an instance | — no belief | — | — | — | — | — | ✅ |
+| agent | CREATE | UPDATE | admissibility | REMOVE | P(detect) | wall LoS | HISTORY record | OWNERSHIP | room follows robot | outline containment |
+|---|---|---|---|---|---|---|---|---|---|---|
+| table | ✅ resurrects from ltom recall | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ | ✅ | ✅ birth + existence |
+| chair | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` *(Phase 0 re-read, below)* | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* | ✅ | ✅ birth + existence |
+| bottle | ✅ resurrects from ltom recall | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ | ✅ | ⚠️ birth only (no existence channel) |
+| cabinet | ✅ resurrects from ltom recall | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ | ✅ | ✅ birth (both paths) + existence |
+| door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ restores from ltsm `remembered_door` notes; refuted places in a private phantom file *(2026-11-14, Task 6)* | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* | — not audited (Phase 0: countable only) | — |
+| refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ | ✅ | ✅ birth + existence |
+| hood *(2026-11-13, Phase 0)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ⚠️ `[Owns]` says `hood_concept 21`, `[Agent].id` is 17 (on main HEAD; an uncommitted fix to 17 sits in the main checkout) | ✅ | ✅ birth (wall-mounted: tolerance = depth/2) + existence |
+| countable_concept *(2026-11-14; classes nightstand 29, bed 30, toilet 31)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist`; existence = occupancy × class *(2026-11-14)*: the class factor (own L_cls, own debounce, same `RemovalPolicy`) removes only on its own measured shape evidence Λ and holds on an unmeasured cycle; occupancy (sensor debounce, out-of-view HOLD) unchanged | ✅ (fleet-prior envelope, uncalibrated) | ✅ shared helper | ✅ | ✅ `[Owns]` = `<class>_concept <id>` per class | ✅ | ✅ birth (tolerance = ½·max(width, depth)) + existence |
+| residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ | — | — |
+| human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | — | — |
+| language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ | — | — |
+| self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ | — | — |
+| ltsm `recognition` / `recall_late` / `staged` *(2026-10-24)* | — no instances (decides which KNOWN room this is; births nothing) | — no belief | — | ❌ metric evidence only, no occupancy/absence channel | — | — | ❌ no phantom record | ✅ | — | — |
+| retina `place_evidence` *(2026-10-24, PLANNED, not producing)* | — | — | — | — | — | — | ❌ not built | ❌ not yet owned | — | — |
+| ltom_agent *(2026-11-01, observer + recall offers)* | — never writes an instance | — no belief | — | — | — | — | — | ✅ | — | — |
 
 *2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
 
 *2026-11-01 (ltom recall, step 3):* chair's CREATE gained **resurrection**: at a tracker birth, `chair_concept/src/recall_candidates.h` reads the `ltom_recall_<uid>` metaconcept nodes ltom offers under the current room (own agent's uid, `chair_<N>` not live) and `rc::recall::decide` (common/recall_match) picks the MAP hypothesis over {recalled candidates, new} on the room-frame centroid alone (measurement cov `DetectionNoiseM^2 I`, `Tracker.RecallPiMove` / `RecallLogPriorNew`). The newborn then takes that candidate's `chair_<N>` and `object_uid` instead of issuing new ones; a candidate is taken once per cycle. Birth stays tracker-only: resurrection only chooses the identity, never creates, delays or suppresses a birth. Logged as `RESURRECT chair_N uid=.. p=..`. Live check pending.
 
 *2026-11-08 (working room follows the robot, chair only so far):* chair_concept no longer latches its room. `rc::room::follow_current_room` re-resolves it every cycle, so a birth is parented to the room the robot is in. REMOVE gained a channel: a chair whose `parent` is not that room is `left_behind` and is deleted, because its pose is not in this frame and fitting it would corrupt what ltom remembers; ltom offers it back on return. table, bottle, cabinet, refrigerator and hood still latch.
+
+*2026-11-13 (Phase 0, branch `feat/countable-phase0`):* all six countable agents (chair, table, bottle, hood,
+refrigerator, cabinet) now share the room code: the working room follows the robot (`rc::room::follow_current_room`),
+left-behind instances are dropped (`rc::room::drop_left_behind`, which walks `parent` up to the room so a bottle on a
+table is judged by the table's room), births are judged by `rc::room::birth_verdict` against the WORKING room's outline
+with a physical tolerance (half-depth / half short side), and births WAIT (tracker `hold_births`, candidates keep their
+evidence) while that room has no usable outline. An out-of-room existence term (`out_of_room_logodds`, gain 1.5) is in
+chair, table, hood, refrigerator and cabinet; bottle has none (containment at birth only). chair's REMOVE cell was
+stale: re-read 2026-11-13, `chair_existence.cpp` integrates into `rc::exist` and decides with
+`rc::exist::decide_removal`, so it is ✅. Ledger: `docs/superpowers/plans/2026-11-11-countable-agents-phase0-ledger.md`.
 
 *2026-11-04 (ltom recall, step 4a):* the CREATE cell of table, chair, bottle, cabinet and refrigerator now reads "resurrects from ltom recall", and hood (no row of its own in this audit) does the same: a tracker birth may take the remembered instance's number and uid (`rc::choose_recall`, MAP over {recalled candidates, new}; birth itself stays tracker-only). Cabinet does it on both tracker birth paths (detection and residual-arm seed); `run_kitchen_model()` nodes carry no uid and are left out.
 
@@ -419,6 +431,9 @@ Current agents (read from code 2026-10-18; ⚠ = mismatch between the kind and h
 | table | count | rigid | passive | shape subtype is a count-like attribute |
 | hood | count | rigid | passive | wall-mounted: count with a support parent |
 | refrigerator | count | ⚠ rigid | passive | the door is only a *facing mode* (`resolve_front`); no door angle. Becomes articulated when the door is a joint |
+| nightstand | count | ⚠ rigid | passive | drawers are only a *facing mode* (the inherited door-seam cue); no drawer joint |
+| bed | count | rigid | passive | headboard against the wall; facing from the clearance prior only |
+| toilet | count | rigid | passive | tank against the wall; lid/seat not modelled |
 | door | count | articulated (φ) | passive | the only agent with a joint posterior (`door_phi_posterior.h`); the phantom-door / "open door = missing wall" issue is the §6.1 visibility-given-joint rule |
 | cabinet | **mass** (along the wall) | ⚠ rigid | passive | `cabinet_kitchen.h` already models runs as cells (`cell_mass`), and churn went to 0 after the kitchen-of-runs fix: the agent *discovered* it is mass. Drawers/doors are absent |
 | residual | ⚠ count | rigid | passive | unexplained occupancy is closer to *stuff*, but it is born as box units |

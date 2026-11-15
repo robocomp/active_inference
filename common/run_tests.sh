@@ -28,5 +28,14 @@ for src in */*_test.cpp; do
     if ! "$BIN/$name"; then fails=$((fails + 1)); fi
 done
 
+# self_body_test needs robot_footprint.cpp + mesh_hull.cpp, so it is a tiny CMake project two levels deep (the
+# */*_test.cpp glob above does not see it). Same pass/fail accounting as the loop.
+if cmake -S self_body/tests -B "$BIN/self_body_build" -DCMAKE_BUILD_TYPE=Release >"$BIN/self_body.log" 2>&1 \
+   && cmake --build "$BIN/self_body_build" -j4 >>"$BIN/self_body.log" 2>&1; then
+    "$BIN/self_body_build/self_body_test" || fails=$((fails + 1))
+else
+    echo "BUILD FAILED: self_body/tests"; tail -20 "$BIN/self_body.log"; fails=$((fails + 1))
+fi
+
 [ "$fails" -eq 0 ] && echo "common: all test binaries passed" || echo "common: $fails test binary(ies) FAILED"
 exit $((fails > 0))

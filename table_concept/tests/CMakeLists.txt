@@ -52,3 +52,10 @@ target_compile_definitions(table_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LI
 target_compile_options(table_card_test PRIVATE -O2)
 add_test(NAME table_card_test COMMAND table_card_test)
 target_link_libraries(table_card_test PRIVATE Eigen3::Eigen)
+
+# Phase 0 Task 12: the planner on the shared core (common/nbv/countable_planner.h) vs a verbatim pre-task copy.
+# Run: LANG=es_ES.UTF-8 ./planner_ab_test
+add_executable(planner_ab_test planner_ab_test.cpp legacy_epistemic_planner.cpp ../src/epistemic_planner.cpp ../src/table_belief.cpp)
+target_include_directories(planner_ab_test PRIVATE . ../src ../../common ../../common/media_transport)
+target_compile_options(planner_ab_test PRIVATE -O2)
+target_link_libraries(planner_ab_test PRIVATE Eigen3::Eigen)

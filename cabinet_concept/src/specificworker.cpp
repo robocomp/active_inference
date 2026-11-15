@@ -33,6 +33,7 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../../common/room_resolve/room_follow.h"        // rc::room::drop_left_behind
 
 #include "../../common/obj/convergence.h"   // rc::converge::step (SHARED)
 
@@ -368,13 +369,9 @@ void SpecificWorker::compute()
     if (not G or not rt_api_)
         return;
 
-    // Refresh room node id if not yet found
-    if (room_node_id_ == 0)
-    {
-        const auto room = rc::room::current_room(*G);
-        if (not room.has_value()) return;
-        room_node_id_ = *room;
-    }
+    // The room this agent works in follows the robot, every cycle (was: latched at the first room). No room yet: wait.
+    room_node_id_ = rc::room::follow_current_room(room_node_id_, rc::room::current_room(*G));
+    if (room_node_id_ == 0) return;
 
     // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
     // pushed by update_node_attr_signal — see the connect block in initialize().
@@ -429,6 +426,13 @@ void SpecificWorker::compute()
 
     // `object` nodes named "cabinet_*" are ours (see CabinetSceneGraph: cortex has no `cabinet` type;
     // the class lives in the `object_subtype` attr).
+    // The robot left a cabinet's room: fitting it here would corrupt the pose ltom remembers; ltom offers it back.
+    rc::room::drop_left_behind(*G, "cabinet", room_node_id_, [this](std::uint64_t id)
+    {
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            it->second.affordance.remove();
+        fitter_->forget_node(id);
+    });
     std::vector<DSR::Node> cabinet_nodes;
     for (const auto& n : G->get_nodes_by_type("object"))
         if (n.name().starts_with("cabinet"))

@@ -23,28 +23,15 @@
 
 #include <Eigen/Dense>
 
+#include "../../common/nbv/countable_planner.h"        // rc::nbv::CountableProposal / d_optimal_gain
 #include "bottle_model.h"
 #include "bottle_belief.h"                           // AI2 belief: Σ + predicted_information for the NBV
 #include "../../common/nbv/viewpoint_score.h"        // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
 namespace rc {
 
-struct EpistemicProposal
-{
-    float epistemic_target_x_m     = 0.0f;
-    float epistemic_target_y_m     = 0.0f;
-    float epistemic_target_yaw_rad = 0.0f;
-    float epistemic_gain           = 0.0f;   // expected information gain ΔH (nats)
-    bool  valid                    = false;
-
-    bool is_finite() const
-    {
-        return std::isfinite(epistemic_target_x_m) &&
-               std::isfinite(epistemic_target_y_m) &&
-               std::isfinite(epistemic_target_yaw_rad) &&
-               std::isfinite(epistemic_gain);
-    }
-};
+// The proposal type is SHARED by every countable agent (common/nbv/countable_planner.h); same field names.
+using EpistemicProposal = rc::nbv::CountableProposal;
 
 class EpistemicPlanner
 {

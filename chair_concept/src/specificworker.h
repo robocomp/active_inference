@@ -31,6 +31,7 @@
 #ifndef SPECIFICWORKER_H
 #define SPECIFICWORKER_H
 
+#include <array>
 #include <atomic>
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
 #include <limits>
@@ -111,7 +112,6 @@ private:
 
     // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
-    void drop_left_behind(const DSR::Node& node);
     void update_thumbnails();
     std::uint64_t last_thumb_frame_ = 0;
     bool thumbs_dirty_ = false;
@@ -242,6 +242,10 @@ private:
     // common/instance_tracker/birth_evidence.h rule 1.
     long  last_birth_mask_frame_ = -1;
     uint64_t                                            room_node_id_ = 0;
+    bool                                                births_held_ = false;   // WAIT episode (no outline) — logged on change
+    uint64_t                                            outline_room_ = 0;      // last logged (room, outline) — log on change
+    std::size_t                                         outline_n_ = 0;
+    std::array<float, 4>                                outline_bbox_{};
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate
 
 signals:

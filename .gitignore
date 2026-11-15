@@ -105,3 +105,15 @@ retina/models/dinov3
 # perception cards written by each agent at startup (card_io.h write_card_file), and its atomic-write temp file
 */etc/perception_card.json
 */etc/perception_card.json.tmp
+
+# Countable class folders (2026-11-14): bin/<obj>_concept is a COMMITTED symlink to ../../countable_concept/bin/countable_concept.
+# Exactly that link is un-ignored; anything else in those bin/ dirs stays ignored.
+!/nightstand_concept/bin/
+/nightstand_concept/bin/*
+!/nightstand_concept/bin/nightstand_concept
+!/bed_concept/bin/
+/bed_concept/bin/*
+!/bed_concept/bin/bed_concept
+!/toilet_concept/bin/
+/toilet_concept/bin/*
+!/toilet_concept/bin/toilet_concept

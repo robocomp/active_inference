@@ -319,6 +319,21 @@ lidar (media plane) ──► <Obj>LidarIngestor ──► <Obj>LidarRangeChanne
 
 ---
 
+# A new countable class (nightstand, bed, toilet, …) — no scaffold, no source copy
+
+A countable object that needs no object-specific code is NOT a new agent: it is a class of the one
+`countable_concept` binary, which reads its class at run time. `tools/scaffold_from_refrigerator.sh` is
+RETIRED (removed 2026-11-14); do not copy refrigerator_concept for these. A new class is:
+
+1. a folder `<obj>_concept/` with `etc/config.toml` (`[Agent] id/name`, `[Owns]`, `[Concept] Class = "<obj>"`);
+2. `common/concept_manifest/<obj>.concept.toml` (priors and any extra part, e.g. the bed's headboard);
+3. `<obj>_concept/meshes/<obj>.obj`;
+4. the launch link `<obj>_concept/bin/<obj>_concept -> ../../countable_concept/bin/countable_concept`
+   (commit the link; run it by this path so the process name stays `<obj>_concept`);
+5. an unused id from the registry below (`[Agent].id` and `[Owns]` must agree).
+
+Anything that needs real new code still goes through the checklist that follows.
+
 # Scaffolding a new agent — the executable checklist (written while doing `hood_concept`, 2026-08-11)
 
 The sections below describe what an agent IS. This one is the sequence that produces one, in the order the
@@ -494,9 +509,10 @@ table is the source of truth). Taken:
 | 9 | retina | 14 | residual_concept | 15 | door_concept |
 | 16 | scene_graph_viewer | 24 | kitchen_metaconcept | 17 | hood_concept |
 | 18 | viewer3d | 19 | ltsm_agent | 25 | language_agent |
-| 26 | episodic_agent | 28 | ltom_agent | | |
+| 26 | episodic_agent | 28 | ltom_agent | 29 | nightstand_concept (countable_concept class) |
+| 30 | bed_concept (countable_concept class) | 31 | toilet_concept (countable_concept class) | | |
 
-Next free: **29** (2026-11-01: 27 = self_calibration, 28 = ltom_agent; DDS domain **5** is RESERVED for ltom's future memory graph, not joined yet. 2026-10-17: 26 = episodic_agent. 2026-10-12: 18 = viewer3d and 19 = ltsm_agent were in use but MISSING from this table —
+Next free: **32** (2026-11-14: 29 = nightstand, 30 = bed, 31 = toilet, all three classes of the one `countable_concept` binary. 2026-11-01: 27 = self_calibration, 28 = ltom_agent; DDS domain **5** is RESERVED for ltom's future memory graph, not joined yet. 2026-10-17: 26 = episodic_agent. 2026-10-12: 18 = viewer3d and 19 = ltsm_agent were in use but MISSING from this table —
 the same omission as 16 below; recorded now together with 25 = language_agent.) History: (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
 second meta-concept schema, RECTILINEAR. ★16 was already taken by scene_graph_viewer and was MISSING
 from this table — the exact omission that caused both collisions below; added now.) (2026-07: cabinet=21 and refrigerator=21 collided because cabinet was never

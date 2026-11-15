@@ -50,3 +50,10 @@ target_include_directories(bottle_card_test PRIVATE ../src ../../common ../../co
 target_compile_definitions(bottle_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
 target_compile_options(bottle_card_test PRIVATE -O2)
 add_test(NAME bottle_card_test COMMAND bottle_card_test)
+
+# Phase 0 Task 15: the planner after taking the shared proposal type + d_optimal_gain, vs a verbatim pre-task copy.
+# Run: LANG=es_ES.UTF-8 ./planner_ab_test
+add_executable(planner_ab_test planner_ab_test.cpp legacy_epistemic_planner.cpp ../src/epistemic_planner.cpp ../src/bottle_belief.cpp)
+target_include_directories(planner_ab_test PRIVATE . ../src ../../common ../../common/media_transport)
+target_compile_options(planner_ab_test PRIVATE -O2)
+target_link_libraries(planner_ab_test PRIVATE Eigen3::Eigen)

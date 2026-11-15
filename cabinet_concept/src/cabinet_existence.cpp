@@ -3,6 +3,7 @@
  */
 
 #include "cabinet_existence.h"
+#include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict / out_of_room_logodds
 
 #include <algorithm>
 #include <array>
@@ -88,6 +89,20 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
         const auto& bs = inst.ai2_belief.state();
         const auto& S  = inst.ai2_belief.covariance();
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
+
+        // ROOM CONTAINMENT (shared, common/room_resolve/room_containment.h): P(cabinet outside its room) ≈ 0.
+        // Tolerance = half the run's short side. The outline is a trusted nominal model ⇒ one IDEAL observation.
+        if (fitter.has_room_polygon()
+            and rc::room::birth_verdict(fitter.room_polygon(), Eigen::Vector2f(bs.cx, bs.cy), 0.5f * std::min(bs.L, bs.d))
+                == rc::room::BirthVerdict::Suppress)
+        {
+            inst.existence.integrate(1.0f, rc::room::out_of_room_logodds(false, cfg_.existence_out_of_room_gain));
+            std::print("[cabinet {}] [existence] OUTSIDE room at ({:.2f},{:.2f}) L={:.2f}\n",
+                       id, bs.cx, bs.cy, inst.existence.logodds());
+            if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, 1.0f).remove)
+                doomed.push_back(id);
+            continue;   // outside the room → no sensor evidence can rescue it; skip the normal channels
+        }
         const bool observed = inst.frames_since_detection == 0;                      // fresh mask this cycle
         bool integrated = false;
 

@@ -1,0 +1,121 @@
+# bed.concept.toml — WHAT a bed IS.
+#
+# Scaffolded 2026-11-14 from refrigerator.concept.toml (tools/scaffold_from_refrigerator.sh): a box with a front face,
+# floor-standing, its back against a wall. World facts below are MEASURED on the Webots model the agent is first
+# validated on (threerooms-piso): Bed.proto (R2025a) bounding boxes: 2.1 long x 1.75 wide, mattress top 0.65, headboard 1.25, footboard 0.83. They are this world's bed, not a class survey — widen the stds
+# before trusting them on another bed. Model constants (precisions, explain-away) are the parent's, re-used as
+# properties of the BOX model rather than of a fridge.
+
+[concept]
+name       = "bed"
+graph_type = "object"
+subtype    = "bed"
+agent_id   = 30
+
+[model]
+shape          = "solid_box"
+support        = "floor_anchored"
+state          = ["cx", "cy", "H", "w", "h", "yaw"]
+symmetry       = "none"
+opens          = "front"            # the foot; the headboard rests against the wall. No appearance cue: the facing comes from prior.clearance
+
+[model.geometry]
+support   = "floor_anchored"
+z_top_m   = 0.65
+extent_m  = 0.65
+from      = "measured"
+why       = "Webots threerooms-piso: Bed.proto (R2025a) bounding boxes: 2.1 long x 1.75 wide, mattress top 0.65, headboard 1.25, footboard 0.83"
+
+[prior.footprint]
+kind = "gaussian"
+dims = ["w", "h"]
+mean_m = 1.75
+depth_mean_m = 2.10
+std_m = 0.20
+why  = "measured on the Webots model. Plan is NOT square: mean_m is the width (local X), depth_mean_m the front-to-back depth (local Y)."
+
+[prior.height]
+kind = "gaussian"
+dims = ["H"]
+mean_m = 0.65
+std_m = 0.10
+why  = "the MATTRESS layer (mattress 0.61, blanket to 0.72 on the Bed.proto meshes). The headboard is NOT the top: owner 2026-11-14"
+
+[prior.headboard]
+kind = "fixed_template"
+face = "back"
+height_m = 1.25
+thickness_m = 0.10
+from = "measured"
+why  = "Bed.proto frame mesh top 1.255, headboard bounding box 0.10 thick. Part of the bed's SDF (min(box, panel)): its points pull the pose and the front/back mode but never H, and the robust top is taken from the points the box explains"
+
+[prior.depth_observability]
+kind = "conditional_precision"
+dim = "h"
+precision = 20000.0
+observed_band_m = 0.10
+why  = "box-model constant kept from refrigerator_concept: depth is identifiable only once the cloud spans it"
+
+[prior.top]
+kind = "two_sided_anchor"
+dim = "H"
+precision = 10000.0
+margin_m = 0.02
+target = "observed_robust_top"
+why  = "box-model constant kept from refrigerator_concept"
+
+[prior.attachment]
+kind = "wall_flush"
+face = "back"
+precision = 400.0
+parallel_precision = 200.0
+reach_m = 0.15
+no_cross_precision = 2000.0
+class_prior = 0.90                  # P(against a wall): the concept holds it (owner 2026-11-14)
+why  = "the back rests against a room wall — a bed's headboard stands against a wall"
+
+[prior.alignment]
+kind = "room_axis"
+fold = 4
+std_deg = 3.0
+why  = "furniture is aligned with the room's axes; 4-fold, so it never decides front/back"
+
+[prior.clearance]
+kind = "facing_free_space"
+face = "front"
+gain_nats = 3.0
+why  = "the front faces the room, never the wall it stands against — resolves the 180° ambiguity"
+
+[prior.identity]
+kind = "shape_log_evidence_ratio"
+aspect_scale = 0.15
+size_scale = 0.30
+alt_size_scale = 1.00
+height_min_m = 0.35
+height_soft_m = 0.10
+why  = "aspect is scored against the class's own aspect; height_min sits well below the measured height"
+
+[prior.class]
+kind = "label_reliability"
+p_label_true = 0.8
+why  = "P(a mask with this label is really this class); near YOLOE's median confidence on the real bed (.85, detcheck3). Owner may change it (11-14)"
+fit_error_H_m = 0.1
+fit_error_w_m = 0.05
+fit_error_h_m = 0.05
+fit_error_why = "rms of the final box-fit error vs Webots GT over objects_live4 + objects_live5 (n = 2, provisional, owner option A 11-14)"
+
+[prior.explaining_away]
+kind = "known_surface_mixture"
+source = "room.walls"
+weight = 0.25
+sigma_m = 0.05
+one_sided = true
+why  = "a mask point on a wall is already explained"
+
+[sensing]
+primary   = "zed.masks:bed"          # YOLOE household-v3 label (detection check detcheck3, 2026-11-13)
+secondary = ["lidar3d.helios", "zed.rgb"]
+peripheral = "ricoh.bearing"
+
+[display]
+mesh = "meshes/bed.obj"

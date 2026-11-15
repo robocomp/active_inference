@@ -368,6 +368,8 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
             "Each cycle carve the LiDAR sweep against the refrigerator footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob");
     out.existence_removal_prob    = getf("RefrigeratorModel.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when L < log(p/(1−p))");
+    out.existence_out_of_room_gain = getf("RefrigeratorModel.ExistenceOutOfRoomGain", 1.5f,
+            "|dL| per evidence cycle while the refrigerator centre is outside the room outline by more than half its short side");
     out.existence_frame_correlation = getf("RefrigeratorModel.ExistenceFrameCorrelation", 0.0f,
             "rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and the default); opt in only with a value MEASURED from…");
     out.existence_logodds_max     = getf("RefrigeratorModel.ExistenceLogoddsMax", 4.0f,

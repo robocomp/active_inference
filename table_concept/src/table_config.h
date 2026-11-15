@@ -299,6 +299,7 @@ struct TableConfig
     // deletes furniture); enable to replace merge-only removal.
     bool  existence_removal_enabled = false;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
+    float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     float existence_logodds_max     = 4.0f;   // clamp |L| so evidence stays finite AND recoverable
     // Frame-to-frame correlation of same-sign existence observations. A detector does not fail by
     // independent coin flip — it fails at a particular framing — so N consecutive misses are worth far

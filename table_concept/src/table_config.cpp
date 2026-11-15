@@ -299,6 +299,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
             "carve the LiDAR sweep against the footprint and remove on EVIDENCE, not on missed detections", rc::cfg::experiment);
     out.existence_removal_prob    = getf("TableModel.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when P(occupied) falls below this");
+    out.existence_out_of_room_gain = getf("TableModel.ExistenceOutOfRoomGain", 1.5f,
+            "|dL| per evidence cycle while the table centre is outside the room outline");
     out.existence_logodds_max     = getf("TableModel.ExistenceLogoddsMax", 4.0f,
             "clamp |L| so the evidence stays finite AND recoverable");
     out.existence_frame_correlation = getf("TableModel.ExistenceFrameCorrelation", 0.0f,

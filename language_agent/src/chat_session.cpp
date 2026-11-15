@@ -732,7 +732,7 @@ QJsonArray ChatSession::tools_json() const
         "MEASURED colour (a name with its probability, or 'colour not measured'). Read-only.",
         QJsonObject{{"subtype", QJsonObject{{"type", "string"},
                                             {"description", "a class to filter by, in English singular (chair, table, "
-                                                            "bottle, cabinet, refrigerator, hood, person), optionally "
+                                                            "bottle, cabinet, refrigerator, hood, nightstand, bed, toilet, person), optionally "
                                                             "after a colour word (magenta chair); empty = all"}}}},
         {}));
     tools.append(tool_def("where_is",
