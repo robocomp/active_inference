@@ -800,7 +800,13 @@ void SpecificWorker::run_instance_tracker()
     // file's own comment documents as broken (see the note above).
     if (cfg_.exist_enabled)
         update_existence_beliefs();
-    update_identity_links();   // changed object: ghosts at remembered spots, links of chairs born new
+    {   // changed object: ghosts at remembered spots, links of chairs born new; this frame's chair detections (room frame)
+        std::vector<Eigen::Vector2f> det_xy;
+        for (const auto& d : dets)
+            if (d.slice_index >= 0 and static_cast<std::size_t>(d.slice_index) < pkt.slices.size())
+                det_xy.emplace_back(pkt.slices[d.slice_index].centroid.x(), pkt.slices[d.slice_index].centroid.y());
+        update_identity_links(det_xy);
+    }
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the chair (not the 0,0 RT-read default).
     // ltom recall candidates, read once per cycle; a candidate taken by a birth leaves the list (take once).
@@ -814,8 +820,8 @@ void SpecificWorker::run_instance_tracker()
         if (const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G)))
             recall_cands = rc::recall_candidates(*G, *room, "chair", static_cast<std::uint32_t>(G->get_agent_id()),
                                                  scene_graph_->identity_last(), live_names);
-        // A memory ltom already links to a live chair (changed object) is taken: no birth resurrects it.
-        std::erase_if(recall_cands, [](const rc::RecallCand& rc) { return rc.same_as_uid != 0; });
+        // A memory ltom links to a live chair (changed object) stays a birth candidate: a chair born AT its old spot
+        // is that memory after all (position decides, as for any recall), and the wrong link then lapses.
     }
     for (const int d : res.births)
     {
@@ -1487,13 +1493,15 @@ int SpecificWorker::startup_check()
 // as for a live chair (P(detect) of a chair there × (1 − occlusion)), and HELD while a live chair stands on the spot.
 // For each chair born new this run (and each chair ltom already links to), the identity posterior over {recall_k...,
 // new}; the MAP is published on the node (same_as_uid / same_as_prob / left_spot_prob). The node's name never changes.
-void SpecificWorker::update_identity_links()
+void SpecificWorker::update_identity_links(const std::vector<Eigen::Vector2f>& det_xy)
 {
     auto& insts = fitter_->instances();
     std::erase_if(born_new_ids_, [&](std::uint64_t id) { return not insts.contains(id); });
     const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G));
+    // No room this cycle (a room change, a relocalisation glitch): no information, so HOLD — ghosts and links stay
+    // as they were (clearing them would cut every link and re-ask every question when the room comes back).
+    if (not room.has_value()) return;
     std::vector<rc::RecallCand> cands;
-    if (room.has_value())
     {
         std::set<std::string> live_names;
         for (const auto& n : G->get_nodes_by_type("object"))
@@ -1520,21 +1528,22 @@ void SpecificWorker::update_identity_links()
             g.belief.set(g.L0);
             g.L0 = g.belief.logodds();   // after the clamp
         }
-        // A live chair standing on the spot: whatever is seen there is that chair, not evidence about this memory.
-        const bool occupied = std::ranges::any_of(insts, [&](const auto& kv)
-        {
-            const auto& s = kv.second.model.state();
-            return std::abs(s.cx - c.cand.mu.x()) < half and std::abs(s.cy - c.cand.mu.y()) < half;
-        });
-        if (occupied) continue;
+        // A chair seen standing on the spot (a live instance, or this frame's detection) CONFIRMS "still there"
+        // (occupancy confirms); nothing there removes; out of view holds. The footprint is the chair's own size.
+        const auto on_spot = [&](float x, float y)
+        { return std::abs(x - c.cand.mu.x()) < half and std::abs(y - c.cand.mu.y()) < half; };
+        const bool seen_there =
+            std::ranges::any_of(insts, [&](const auto& kv) { return on_spot(kv.second.model.state().cx, kv.second.model.state().cy); })
+            or std::ranges::any_of(det_xy, [&](const Eigen::Vector2f& d) { return on_spot(d.x(), d.y()); });
         Eigen::Vector2f cam = Eigen::Vector2f::Zero();
-        const float p_vis = fitter_->ghost_p_vis(c.cand.mu, &cam);
-        if (p_vis <= 0.f) continue;   // not in view: HOLD
-        const float before = g.belief.p_exists();
+        const auto ev = rc::recall::ghost_evidence(fitter_->ghost_p_vis(c.cand.mu, &cam), seen_there, cfg_.exist_evidence_gain);
+        if (ev.p_vis <= 0.f) continue;   // not in view: HOLD
+        const float before = rc::recall::left_spot_prob(g.belief.logodds(), g.L0);
         g.belief.note_viewpoint(cam.x(), cam.y(), c.cand.mu.x(), c.cand.mu.y(), half);
-        g.belief.integrate(p_vis, -cfg_.exist_evidence_gain);
-        if ((before > 0.5f) != (g.belief.p_exists() > 0.5f))
-            std::print("chair_concept: [link] ghost chair_{} left_spot p={:.2f}\n", c.n, 1.f - g.belief.p_exists());
+        g.belief.integrate(ev.p_vis, ev.ratio);
+        const float after = rc::recall::left_spot_prob(g.belief.logodds(), g.L0);
+        if ((before > 0.5f) != (after > 0.5f))
+            std::print("chair_concept: [link] ghost chair_{} left_spot p={:.2f}\n", c.n, after);
     }
 
     // The link of each eligible live chair.
@@ -1596,7 +1605,7 @@ void SpecificWorker::update_identity_links()
             inst.link_uid = c.cand.uid;
             inst.link_prob = ch->second.p;
             const auto gi = ghosts_.find(c.cand.uid);
-            inst.link_left_spot_prob = gi == ghosts_.end() ? 0.f : 1.f - gi->second.belief.p_exists();
+            inst.link_left_spot_prob = gi == ghosts_.end() ? 0.f : rc::recall::left_spot_prob(gi->second.belief.logodds(), gi->second.L0);
         }
         if (was != inst.link_uid)
         {

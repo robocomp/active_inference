@@ -334,6 +334,45 @@ static void open_question_survives_restart()
     fs::remove(f);
 }
 
+// ── Final-review fixes ────────────────────────────────────────────────────────────────────────────────────────
+static void link_switch_cuts_previous()   // F2: a live chair whose MAP moves to another memory leaves the first one
+{
+    auto r = with_memory();
+    constexpr std::uint64_t k51 = (1ull << 40) | 51;
+    Entry m2; m2.uid = k51; m2.cls = "chair"; m2.name = "chair_51";
+    m2.lives.push_back(Life{.end = End::death}); m2.keyframes = {kf(60, 2, 0.5, 0.5)};
+    r.insert_loaded(m2);
+    see(r, live(0.9f, 0.8f), 1000);                    // linked to chair_50, question open
+    Sighting s = live(0.9f, 0.8f); s.link = LinkObs{k51, 0.9f, 0.8f};
+    see(r, s, 1100);                                   // now believed to be chair_51
+    CHECK(not r.entries().at(kMem).continued_by.has_value());
+    CHECK(r.entries().at(kMem).moves.empty());
+    CHECK(r.entries().at(k51).continued_by == kLive and r.entries().at(kLive).continues == k51);
+    const auto q = r.questions();
+    CHECK(q.size() == 1 and q.begin()->second.memory_uid == k51);
+}
+static void no_relink_after_no()           // F5: the chair node still carries the old link for a cycle after "no"
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    CHECK(b.apply(moved("no", 1000, 7, "no"), r, 1500).text == "recorded");
+    see(r, live(0.9f, 0.8f), 1600);                    // stale same_as on the node
+    CHECK(not r.entries().at(kMem).continued_by.has_value());
+    CHECK(r.questions().empty());
+}
+static void owner_exit_keeps_question_askable()   // F6: the chair agent restarts; the move is asked when it is back
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    CHECK(r.questions().size() == 1);
+    const std::vector<Sighting> none;
+    r.observe(none, {}, {}, 1100);                     // chair_concept (owner 1) gone: owner_exit
+    CHECK(r.questions().empty());
+    see(r, live(0.9f, 0.8f), 2000);                    // back, the same chair_57 with its link
+    CHECK(r.questions().size() == 1);
+}
+
 int main()
 {
     std::setlocale(LC_ALL, "");   // the agents run under es_ES (CLAUDE.md)
@@ -357,6 +396,9 @@ int main()
     forget_drops_records_keeps_note();
     human_io_roundtrips_beliefs();
     open_question_survives_restart();
+    link_switch_cuts_previous();
+    no_relink_after_no();
+    owner_exit_keeps_question_askable();
     if (failures == 0) std::println("test_repertory_links: all passed");
     return failures == 0 ? 0 : 1;
 }

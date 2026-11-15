@@ -71,8 +71,28 @@ static void no_candidates()
     CHECK(l.posterior.size() == 1 and l.posterior[0] == 1.f);
 }
 
+// Final-review fixes F4 / F1: the old spot's emptiness is THIS visit's evidence only (an even prior), and a chair
+// seen standing at the spot confirms the ghost, it does not merely hold it.
+static void left_spot_is_this_visits_evidence()
+{
+    CHECK(left_spot_prob(-2.75f, -2.75f) == 0.5f);          // a memory that died at P 0.06, nothing seen yet: undecided
+    CHECK(left_spot_prob(2.2f - 3.f, 2.2f) > 0.9f);         // looked, nothing there
+    CHECK(left_spot_prob(2.2f + 1.f, 2.2f) < 0.5f);         // looked, something there
+}
+static void ghost_evidence_confirms_when_seen()
+{
+    const auto absent = ghost_evidence(0.8f, false, 0.15f);
+    CHECK(absent.p_vis == 0.8f and absent.ratio == -0.15f);
+    const auto there = ghost_evidence(0.8f, true, 0.15f);
+    CHECK(there.p_vis == 0.8f and there.ratio == 0.15f);
+    const auto unseen = ghost_evidence(0.f, true, 0.15f);
+    CHECK(unseen.p_vis == 0.f);                              // out of view: HOLD
+}
+
 int main()
 {
+    left_spot_is_this_visits_evidence();
+    ghost_evidence_confirms_when_seen();
     moved_magenta_old_spot_empty();
     moved_old_spot_unseen_still_links();
     colour_mismatch_is_new();

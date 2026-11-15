@@ -3,6 +3,7 @@
 #pragma once
 #include <optional>
 #include <cstdint>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <span>
@@ -90,6 +91,18 @@ inline std::uint32_t owner_of(std::uint64_t uid) { return static_cast<std::uint3
 // estimate's own uncertainty (sum of both covariances) rather than a metric cutoff. Flagged in the plan.
 constexpr double kKeyframeChi2 = 11.34;
 
+// The owner said this memory was not the object seen in `room_key`: gone from it since its last keyframe there.
+// A later keyframe in that room outdates the record (it was seen there again).
+inline bool gone_from(const Entry& e, std::int64_t room_key)
+{
+    if (e.keyframes.empty()) return false;
+    std::int64_t last_t = e.keyframes.front().t_ms;
+    for (const Keyframe& k : e.keyframes) last_t = std::max(last_t, k.t_ms);
+    for (const GoneFromRoom& g : e.gone)
+        if (g.room_key == room_key and g.t_ms >= last_t) return true;
+    return false;
+}
+
 class Repertory
 {
 public:
@@ -121,7 +134,8 @@ public:
 
 private:
     void tend_links(std::span<const Sighting> alive, std::int64_t now_ms);
-    void close_questions_of_live(std::uint64_t live_uid);
+    // asked = false when the live object only left with its owner (an agent restart): the move is asked when it is back.
+    void close_questions_of_live(std::uint64_t live_uid, bool asked);
     struct Pending { std::int64_t vanish_ms; };
     std::int64_t grace_ms_;
     std::map<std::uint64_t, Entry> entries_;

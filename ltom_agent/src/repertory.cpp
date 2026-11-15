@@ -80,7 +80,8 @@ Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::
         const bool owner_absent = not owners_present.contains(owner_of(uid));
         const auto [pit, first_miss] = pending_.try_emplace(uid, Pending{now_ms});
         const std::int64_t vanish = pit->second.vanish_ms;
-        if (owner_absent or (not first_miss and now_ms - vanish >= grace_ms_)) close_questions_of_live(uid);
+        if (owner_absent) close_questions_of_live(uid, false);
+        else if (not first_miss and now_ms - vanish >= grace_ms_) close_questions_of_live(uid, true);
         if (owner_absent)
         {
             l.end = End::owner_exit; l.end_ms = vanish; ch.owner_exited.push_back(uid);
@@ -108,6 +109,17 @@ void Repertory::tend_links(std::span<const Sighting> alive, std::int64_t now_ms)
         {
             const auto m = entries_.find(s.link->memory_uid);
             if (m == entries_.end()) continue;
+            // The owner said no for that room: a stale link still on the node (one cycle) must not re-link it.
+            if (gone_from(m->second, s.room_key)) continue;
+            // The live object's MAP moved to another memory: the previous, unconfirmed link is undone first. A
+            // confirmed one is the owner's word and stands.
+            if (const auto me = entries_.find(s.uid); me != entries_.end() and me->second.continues.has_value() and
+                                                      *me->second.continues != m->first)
+            {
+                const auto old = entries_.find(*me->second.continues);
+                if (old != entries_.end() and not old->second.moves.empty() and old->second.moves.back().confirmed) continue;
+                if (old != entries_.end()) cut_link(old->first, now_ms, "");
+            }
             if (not m->second.continued_by.has_value()) record_link(m->first, s.uid, now_ms, s.link->same_prob);
             else if (*m->second.continued_by == s.uid and not m->second.moves.empty() and not m->second.moves.back().confirmed)
             {
@@ -134,14 +146,14 @@ void Repertory::tend_links(std::span<const Sighting> alive, std::int64_t now_ms)
     }
 }
 
-void Repertory::close_questions_of_live(std::uint64_t live_uid)
+void Repertory::close_questions_of_live(std::uint64_t live_uid, bool asked)
 {
     const auto l = entries_.find(live_uid);
     if (l == entries_.end() or not l->second.continues.has_value()) return;
     const auto m = entries_.find(*l->second.continues);
     if (m == entries_.end() or m->second.moves.empty()) return;
     Move& mv = m->second.moves.back();
-    if (mv.question_stamp != 0) { mv.question_stamp = 0; mv.asked = true; dirty_ = true; }
+    if (mv.question_stamp != 0) { mv.question_stamp = 0; mv.asked = asked; dirty_ = true; }
 }
 
 std::map<std::uint64_t, Question> Repertory::questions() const

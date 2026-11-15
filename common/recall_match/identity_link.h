@@ -87,4 +87,20 @@ struct Link { std::optional<std::size_t> index; std::vector<float> posterior; };
     if (*best > out.posterior.back()) out.index = static_cast<std::size_t>(best - out.posterior.begin());
     return out;
 }
+/// P(the remembered object left its old spot) from THIS visit's evidence only: the ghost's log-odds change since it
+/// was seeded, under an even prior. The remembered existence prior L0 belongs in the link posterior, not here — a
+/// memory that died at P 0.06 must not read "left" before anyone has looked (spec anti-goal: a spot never seen empty).
+[[nodiscard]] inline float left_spot_prob(float L_now, float L0)
+{
+    return 1.f / (1.f + std::exp(L_now - L0));
+}
+
+/// One frame's evidence for the ghost at an old spot (CONCEPT_AGENT_LIFECYCLE: occupancy confirms, absence removes,
+/// occlusion holds). p_vis: how well the frame could have resolved a chair there (0 = hold). seen_there: a chair is
+/// seen standing on the spot (a live instance or a detection) — that confirms "still there".
+struct GhostEvidence { float p_vis = 0.f; float ratio = 0.f; };
+[[nodiscard]] inline GhostEvidence ghost_evidence(float p_vis, bool seen_there, float gain)
+{
+    return {p_vis, seen_there ? gain : -gain};
+}
 }   // namespace rc::recall
