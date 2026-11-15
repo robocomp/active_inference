@@ -256,7 +256,7 @@ void SpecificWorker::request_shutdown()
     {
         // (The costs and the detector rates are FIXED within a session and are NOT written back: etc/door_costs.csv is written offline
         //  by tools/door_costs_from_logs.py from etc/door_cost_events.csv, the rates by tools/fit_detector_envelopes.py.)
-        save_identities();   // carries the place table's learned change hazard (#hazard line)
+        save_identities();   // the learned change hazard + name counter to this agent's node, for ltsm (step_door_memory)
         step_phantom_save();
     }
 
@@ -664,7 +664,8 @@ void SpecificWorker::initialize()
         }
     }
     // Input recording (spec §6.6): the identity table + learned registration exactly as loaded, and the room entered.
-    input_snapshot_.on_identity_load("etc/door_identities.csv", "etc/door_world_registration.csv",
+    // (2026-11-15: no identity table is read any more — door names come back from ltsm — so the tape records none: an empty path.)
+    input_snapshot_.on_identity_load("", "etc/door_world_registration.csv",
         room_node_id_ != 0 ? std::optional<std::uint64_t>{room_node_id_} : std::nullopt,
         room_node_id_ != 0 ? rc::room::name_of(*G, room_node_id_) : std::string{});
     door_registration_.load("etc/door_world_registration.csv");   // solved per request, per room
@@ -682,9 +683,9 @@ void SpecificWorker::initialize()
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
-    // Which door is which — remembered from earlier runs. Without this the numbering falls out of the order
-    // the robot happens to sweep the room, so the same door was door_1 one run and door_2 the next.
-    load_identities();
+    // Which door is which across runs: a door's name comes back with ltsm's remembered_door note, the name counter and the change
+    // hazard with ltsm_topology's door_memory (step_door_memory). Nothing is read from etc/door_identities.csv any more.
+    if (not cfg_.names_from_ltsm) door_memory_adopted_ = true;
     load_phantoms();
     latch_recall_names();   // a warm start's start-up recall may already be there (an agent restart mid-run)
     if (room_node_id_ != 0)
@@ -1369,6 +1370,7 @@ void SpecificWorker::compute()
     // Must run before anything below reads room_node_id_ — births, the containment prior and every RT
     // write are all parented by it.
     step_room_following();
+    step_door_memory();   // ltsm's door names' counter + hazard: adopted once before any door is named, then published on change
     reap_archived_rooms();   // link 5: our doors under a room ltsm has archived
     if (room_node_id_ == 0)
     {
@@ -1694,6 +1696,8 @@ void SpecificWorker::CoreWorld::remove_door(std::uint64_t id, float L)
 
 std::uint64_t SpecificWorker::CoreWorld::create_door(const rc::door::core::BirthRequest& r)
 {
+    // no door is named before ltsm's counter is in (step_door_memory): 0 = not born this cycle, the evidence asks again next cycle
+    if (not w_.door_names_ready()) return 0;
     const Eigen::Vector3f& c = r.centroid;
     const auto counter_before = w_.next_door_index_;
     const auto new_id = w_.scene_graph_->create_instance_from_detection(c, r.room_id, r.preferred_name, w_.next_door_index_);
@@ -1800,7 +1804,7 @@ void SpecificWorker::refresh_room_geometry()
                    "(containment prior ACTIVE)\n", n, xmin, xmax, ymin, ymax);
 }
 
-// ─── Identity across runs (etc/door_identities.csv) ─────────────────────────────────────────────
+// ─── Identity across runs (was etc/door_identities.csv; since 2026-11-15 the run's table only — see step_door_memory) ───
 //
 // cleanup_owned_nodes deletes every door node on the way out, so at the next launch nothing in the graph says which
 // door was which. Names then fell out of
@@ -1820,51 +1824,57 @@ std::string SpecificWorker::current_room_name() const
     return room_name_cache_.first == room_node_id_ ? room_name_cache_.second : std::string{};
 }
 
-void SpecificWorker::load_identities()
+void SpecificWorker::save_identities()
 {
-    std::ifstream f("etc/door_identities.csv");
-    if (not f)
-        return;
-    identities_.clear();
-    // Parsing is rc::door::parse_identity_table (door_identity_table.h): std::from_chars, both the 4-column rows of the
-    // 2026-10-13 table (identity only) and the 17-column ones that carry the pose to restore.
-    auto parsed = rc::door::parse_identity_table(f);
-    if (parsed.unkeyed_format)
-    {
-        decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, {}, 0, 0, 1.0);
-        std::print("door_concept: [identity] etc/door_identities.csv has the old un-keyed format — ignored "
-                   "(rewritten room-keyed on the next save)\n");
-        return;
-    }
-    // The name counter: the persisted one, raised past every remembered name (a file from before the counter).
-    next_door_index_ = std::max(next_door_index_, rc::door::next_door_index_floor(parsed));
-    std::print("door_concept: [identity] door-name counter: next fresh name door_{}\n", next_door_index_);
-    // The core loads its place table from the same file ONCE, on its first cycle (identity_load); the learned change hazard is set
-    // here too (SET, idempotent) so that a save before that first cycle does not overwrite it with the prior.
-    if (core_ and parsed.hazard.has_value()) core_->places().set_hazard(*parsed.hazard);
-    identities_ = std::move(parsed.rows);
-    decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, {}, double(identities_.size()), double(parsed.malformed));
-    for (const auto& i : identities_)   // spec 6.6: the table content at load is an explicit event
-        decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, i.name, i.xy.x(), i.xy.y(), i.pose.has_value() ? 1.0 : 0.0, 0, i.room);
-    if (not identities_.empty())
-    {
-        std::print("door_concept: [identity] loaded {} remembered door face(s) ({} dropped as malformed):",
-                   identities_.size(), parsed.malformed);
-        for (const auto& i : identities_)
-            std::print(" {}:{}@({:.2f},{:.2f}){}", i.room, i.name, i.xy.x(), i.xy.y(), i.pose.has_value() ? "" : "[id-only]");
-        std::print("\n");
-    }
+    // 2026-11-15: NOT A FILE ANY MORE. The table lives for the run; what must outlive it — the name counter and the change hazard —
+    // is published to ltsm (step_door_memory), and each door's name comes back with its remembered_door note.
+    if (door_memory_adopted_) step_door_memory();
 }
 
-void SpecificWorker::save_identities() const
+// DOOR MEMORY THROUGH LTSM (common/ltsm_topology/door_memory.h). Once: adopt ltsm's counter and hazard from ltsm_topology (merged with
+// this agent's own: both only grow), before any door is named — a counter started below a name ltsm remembers would hand that name
+// out again. Then: write them on this agent's node whenever they change; ltsm keeps the merge in memory and saves it with the memory.
+void SpecificWorker::step_door_memory()
 {
-    // DIAG-ROTATE: exempt — this is PERSISTED STATE, not a diagnostics log. note_identity() rewrites the
-    // whole table on every identity change, so rotating here would leave one stamped copy per door seen.
-    std::ofstream f("etc/door_identities.csv", std::ios::trunc);
-    if (not f)
-        return;
-    rc::door::write_identity_table(f, identities_, next_door_index_,
-                                   core_ ? std::optional(core_->places().hazard_state()) : std::nullopt);   // imbues the classic locale: never a comma decimal separator
+    if (not G or not core_) return;
+    if (not door_memory_adopted_)
+    {
+        const auto t = G->get_node("ltsm_topology");
+        const auto j = t.has_value() ? G->get_attrib_by_name<ltsm_topology_att>(t.value()) : std::nullopt;
+        const auto topo = j.has_value() ? rc::topo::decode_topology(j.value()) : std::unexpected(std::string("no ltsm_topology yet"));
+        if (not topo.has_value())
+        {
+            if (not std::exchange(door_memory_wait_logged_, true))
+                std::print("door_concept: [names] waiting for ltsm's door memory (ltsm_topology) before naming any door ({})\n", topo.error());
+            return;
+        }
+        const auto m = topo->door_memory.value_or(rc::doormem::DoorMemory{});   // an older ltsm / a fresh memory: nothing kept yet
+        next_door_index_ = std::max(next_door_index_, m.next_index);
+        const auto own = core_->places().hazard_state();
+        const auto h = rc::doormem::merged({0, own.changes, own.sum_elapsed_s}, m);
+        core_->places().set_hazard({h.changes, h.exposure_s});
+        door_memory_adopted_ = true;
+        std::print("door_concept: [names] ltsm's door memory adopted: next fresh name door_{}, change hazard {:.3g} changes over {:.1f} s{}\n",
+                   next_door_index_, h.changes, h.exposure_s, topo->door_memory.has_value() ? "" : " (ltsm kept none yet)");
+    }
+    const auto hz = core_->places().hazard_state();
+    const rc::doormem::DoorMemory now{next_door_index_, hz.changes, hz.sum_elapsed_s};
+    const auto t = std::chrono::steady_clock::now();
+    // on change at once; otherwise every 2 s re-assert (the agent node is cortex's and may be re-created: an I/O period, not a model constant)
+    if (door_memory_published_ == now and t - door_memory_checked_ < std::chrono::seconds(2)) return;
+    door_memory_checked_ = t;
+    // this agent's node, as cortex finds it: type "agent" with agent_id (not by its "<name> <id>" name)
+    std::optional<DSR::Node> n;
+    for (auto& a : G->get_nodes_by_type("agent"))
+        if (G->get_attrib_by_name<agent_id_att>(a).value_or(0u) == static_cast<std::uint32_t>(agent_id)) { n = std::move(a); break; }
+    if (not n.has_value()) return;
+    const auto had_next = G->get_attrib_by_name<door_next_index_att>(n.value());
+    const auto had_hz = G->get_attrib_by_name<door_change_hazard_att>(n.value());
+    const std::vector<float> hv{static_cast<float>(now.changes), static_cast<float>(now.exposure_s)};
+    if (had_next == now.next_index and had_hz.has_value() and had_hz->get() == hv) { door_memory_published_ = now; return; }
+    G->add_or_modify_attrib_local<door_next_index_att>(n.value(), now.next_index);
+    G->add_or_modify_attrib_local<door_change_hazard_att>(n.value(), hv);
+    if (G->update_node(n.value())) door_memory_published_ = now;
 }
 
 // Upsert BY PLACE WITHIN THE CURRENT ROOM: one hole in this room's walls carries one name. The same name may hold a
@@ -3427,7 +3437,7 @@ void SpecificWorker::step_room_following()
 void SpecificWorker::step_entry_mirrors()
 {
     (void)current_room_name();   // keep the room-name cache warm: the room may be evicted before release_room
-    if (not G or not fitter_ or not scene_graph_ or not inner_eigen_)
+    if (not G or not fitter_ or not scene_graph_ or not inner_eigen_ or not door_names_ready())
         return;
 
     // 1. Retire mirrors whose proto-room, source instance or own node is gone. A proto-room that was
@@ -4133,6 +4143,7 @@ void SpecificWorker::step_phantom_save()
 
 void SpecificWorker::step_pending_restore()
 {
+    if (not door_names_ready()) return;   // a note whose name is not plain takes a fresh one: not before ltsm's counter is in
     step_restore_from_notes();
 }
 
@@ -5343,7 +5354,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
 
 std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWorker::recreate_lost_door(std::uint64_t new_room)
 {
-    if (lost_doors_.empty() or not inner_eigen_ or not scene_graph_) return std::nullopt;
+    if (lost_doors_.empty() or not inner_eigen_ or not scene_graph_ or not door_names_ready()) return std::nullopt;
     const auto room = G->get_node(new_room);
     const auto roots = G->get_nodes_by_type("root");
     if (not room.has_value() or roots.empty()) return std::nullopt;

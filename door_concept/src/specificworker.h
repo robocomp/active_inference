@@ -68,6 +68,8 @@
 #include "decision_log.h"          // rc::door::DoorDecisionLog (binary decision log, default off)
 #include "input_snapshot.h"        // rc::door::InputSnapshot (DoorCycleInput recording, default off)
 #include <map>
+#include <chrono>
+#include "../../common/ltsm_topology/door_memory.h"   // rc::doormem — names counter + change hazard kept by ltsm
 #include "../../common/phantom_memory/phantom_memory.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"
@@ -219,6 +221,9 @@ private:
     // ★AND, SINCE 2026-10-20, THE POSE TO RESTORE IT (door_identity_table.h): yaw/size, the existence belief and the leaf
     //   memory. SINCE 2026-11-14 THE FILE CARRIES IDENTITY ONLY (room, name, place): a room re-entered FROM MEMORY gets its
     //   doors back from the remembered_door notes ltsm posts (step_restore_from_notes), never from this table.
+    // ★SINCE 2026-11-15 THE TABLE IS NOT WRITTEN TO DISK AT ALL: it lives for the run (crossings, actuation of the other face, the
+    //   looks). A door's name across runs comes back with its note; the name counter and the change hazard go to ltsm through this
+    //   agent's node (door_next_index / door_change_hazard) and come back in ltsm_topology's door_memory (step_door_memory).
     using DoorIdentity = rc::door::IdentityRow;
     std::string current_room_name() const;
     mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
@@ -227,9 +232,15 @@ private:
     // The door-name counter (2026-10-29): every fresh name is `door_<next_door_index_++>`, persisted with the table
     // (`#next_door,N`) so a name is never handed out twice, across runs too. Names are OPAQUE (door_identity_table.h).
     std::uint64_t next_door_index_ = 1;
-    void persist_door_counter(std::uint64_t before) const { if (next_door_index_ != before) save_identities(); }
-    void load_identities();                                            // once, at startup
-    void save_identities() const;                                      // whole table + counter, locale-independent
+    void persist_door_counter(std::uint64_t before) { if (next_door_index_ != before) save_identities(); }
+    void save_identities();                                            // the counter + change hazard to ltsm (publish_door_memory); the table stays in memory
+    // ── Door memory through ltsm (common/ltsm_topology/door_memory.h) ──
+    bool door_memory_adopted_ = false;                                 // ltsm's counter + hazard taken (or Identity.NamesFromLtsm = false)
+    bool door_memory_wait_logged_ = false;
+    std::optional<rc::doormem::DoorMemory> door_memory_published_;     // what this agent's node carries now
+    std::chrono::steady_clock::time_point door_memory_checked_{};      // last check that the agent node still carries it
+    [[nodiscard]] bool door_names_ready() const { return door_memory_adopted_; }   // no door is named before ltsm's counter is in
+    void step_door_memory();                                           // adopt once, then publish on change
     void note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m = 0.0f);   // upsert by PLACE, then save
     // note_identity with the full row (pose, existence, leaf); `weight` = P(the writer is this hole's door), its P(exists)
     void upsert_identity(DoorIdentity row, float width_m, float weight);
