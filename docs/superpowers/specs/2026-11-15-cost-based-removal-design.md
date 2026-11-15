@@ -57,6 +57,17 @@ work, before the tracker rework and the bedroom-rig metaconcept).
   (top included) is surface ⇒ FOR; a return deep inside a part is interior ⇒ AGAINST; a beam that crosses a part and
   returns beyond it is through ⇒ AGAINST; a beam that crosses only space the shape does not fill says nothing. The
   through term counts only the part of a return a surface hit does not already explain (thin panels).
+- **G0b. The object's position uncertainty is marginalised as ONE common-mode shift** (owner picked (a), 11-15; the
+  replay found a wall-straddling phantom kept alive because each face test was broadened independently by the footprint
+  σ, which ages to 0.17–0.6 m while masks are gated — `carve_replay --explain`, d550a081). The footprint offset
+  δ ~ N(0, Σ_xy) (the belief's own covariance) moves ALL parts together; each face test uses the sensor σ only; the
+  increment is the marginal ΔL = log Σ_k w̃_k exp(ℓ_k) over quadrature nodes δ_k, with ℓ_k the carve's log-odds at the
+  shifted box and w̃_k ∝ (quadrature weight) · π_place(δ_k). π_place is the class's own wall no-cross factor (the fit's
+  `wall_no_cross_precision` P, log π = −½·P·d³, d = how far the shifted footprint crosses the room outline): a shift that
+  would put the object inside a wall is ruled out by the prior the class already has. No new constant; the quadrature
+  order is numerical, not a model parameter. Yaw uncertainty is not marginalised here.
+- **Later (owner, 11-15): (b)** the LiDAR returns should UPDATE the belief's position, not only test existence — then
+  Σ reflects what all sensors know instead of ageing while the LiDAR has its best view. A fit-side design, not this change.
 - **G1. The costed line.** For an opted-in agent: remove when L < −ln(C_delete / C_keep). No `removal_prob`, no debounce,
   no streak, no timer. With the default costs the line is L = −1.08 (p ≈ 0.25).
 - **G2. Costs are seconds of robot time, per class, learned from logs** (owner 11-15: "keep robot time only").

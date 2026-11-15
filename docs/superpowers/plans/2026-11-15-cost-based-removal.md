@@ -266,39 +266,58 @@ measured ρ and costs per class, and countable's one costed decision on the prod
   git commit -m "countable tools: carve replay through the agent's carve_parts (objects_live6 real objects >= 0, phantoms < 0)"
   ```
 
-### Task 4b: a return on a known wall is not support (added during execution, ruling 11-15)
+### Task 4b: WITHDRAWN by the owner 11-15 ("Do not patch the code") — replaced by Task 4c
 
-**Why:** the Task 4 replay showed a nightstand-sized phantom centred on a wall face scoring +1.78/cycle under
-`carve_parts` (−2.08 under `carve_box`): with the logged footprint σ 0.17 m the surface band is ±0.18 m, so returns
-from the wall plane 0.26 m behind the phantom's front count as support (`carve_replay --explain`, commit d550a081).
-Room containment admits it (centre on the boundary). The spec's anti-goal forbids a phantom over a wall kept alive.
-The room already explains a return on its wall — the fit applies the same explaining-away to mask points
-(`[prior.explaining_away] known_surface_mixture`, source `room.walls`).
+### Task 4c: marginalise the box position as one common-mode shift (spec G0b)
 
-**Files:** `common/existence_belief/existence_belief.h` (additions only), `common/existence_belief/carve_parts_test.cpp`,
-`countable_concept/src/countable_existence.cpp`, `countable_concept/tools/carve_replay.cpp`
+**Files:**
+- Modify: `common/existence_belief/existence_belief.h` (additions only), `common/existence_belief/carve_parts_test.cpp`
+- Create: `countable_concept/src/countable_placement_prior.h`; Modify: `countable_concept/src/countable_existence.cpp`
+  (the flag-on LiDAR branch only), `countable_concept/tools/carve_replay.cpp`, `countable_concept/tests/CMakeLists.txt`
+  (+ `countable_concept/tests/placement_prior_test.cpp`)
 
 **Interfaces:**
-- `inline std::vector<float> rc::exist::wall_explained(const std::vector<Eigen::Vector3f>& sweep, std::span<const Eigen::Vector2f> outline, float sensor_sigma_m);`
-  per return: e = exp(−½ (d/σ)²), d = distance in x–y from the return to the nearest outline EDGE (closed polygon); an
-  empty or < 3-vertex outline ⇒ all 0.
-- `carve_parts` gains a trailing `std::span<const float> explained = {}` (one weight per sweep point, empty ⇒ all 0):
-  per beam the support term becomes `inside·ws·(1 − e)` and `inside·ws·e` moves to `e_interior` (a wall return inside
-  the volume is what a solid would have blocked). `e_free` and `n_reached` unchanged. Empty span ⇒ byte-identical to
-  today's `carve_parts`.
-- countable (flag on): `explained = wall_explained(sweep, fitter.room_polygon(), cfg_.existence_sensor_sigma_m)` for
-  the Helios sweep only (the bpearl stays occupancy-only and unweighted); no room polygon ⇒ empty.
-- carve_replay: same call, outline = the GT room rectangle of the node's room (bedroom x −8.39..−1.815,
-  y 9.35..13.48; bathroom x −1.615..1.69, y 9.35..13.48 — measured numbers), world frame.
+- Produces, in `existence_belief.h`:
+  ```cpp
+  struct ShiftNode { float dx, dy, log_w; };            // log_w = log of the quadrature weight (sums to 1 before the prior)
+  // Gauss–Hermite tensor grid on the principal axes of Σ_xy (eigen-decomposition); order 3 ⇒ 9 nodes
+  // (1-D nodes 0, ±√3·σ_i, weights 2/3, 1/6, 1/6); order 5 ⇒ 25 nodes (standard probabilists' GH).
+  std::vector<ShiftNode> common_mode_nodes(const Eigen::Matrix2f& sigma_xy, int order);
+  // log Σ_k exp(log_w_k + l_k) / Σ_k exp(log_w_k), computed with log-sum-exp; empty ⇒ 0
+  float log_marginal(std::span<const float> l, std::span<const float> log_w);
+  ```
+- Produces, in `countable_placement_prior.h`:
+  ```cpp
+  // −½·P·d³, d = max over the 4 footprint corners of the distance OUTSIDE the closed outline (0 inside); P ≤ 0 or an
+  // outline with < 3 vertices ⇒ 0. Same functional form and constant as the fit's wall no-cross factor
+  // (countable_belief.cpp, residual min(0, gap), λ = P·penetration).
+  float no_cross_logprior(float cx, float cy, float yaw, float w, float h,
+                          std::span<const Eigen::Vector2f> outline, float precision);
+  ```
+- countable, flag on: Σ_xy = the belief covariance's (cx, cy) block; nodes = `common_mode_nodes(Σ_xy, 3)`; for each node:
+  Helios `carve_parts` at (cx + dx, cy + dy) with surface σ **0** (the footprint σ is now in the nodes; the sensor σ stays in
+  the SensorModel), bpearl likewise (occupancy only, as today), exclusion weight as today, the `observed` zeroing as today,
+  ℓ_k = `solid_delta(ev_k, sm)`; log_w_k += `no_cross_logprior(shifted box, fitter.room_polygon(), cfg_.ai2_wall_no_cross_precision)`;
+  l_full = `log_marginal(ℓ, log_w)`. Everything after (`p_detect_lidar` scaling, integrate, `occ_delta_cycle`) unchanged.
+  The debug columns (`dbg_ex_lidar_occ/free`, `dbg_ex_lidar_free_eff`) carry the posterior-weighted means over nodes.
+  `n_reached` for `coverage` = the posterior-weighted mean. No room polygon ⇒ the prior term is 0. Flag off ⇒ untouched.
+- carve_replay: same computation through the same functions (outline = the GT room rectangle of the node: bedroom
+  x −8.39..−1.815, y 9.35..13.48; bathroom x −1.615..1.69, y 9.35..13.48 — measured numbers; Σ_xy from the logged
+  std_cx, std_cy, zero correlation), printed next to the per-beam carve_parts column; `--order 3|5`.
 
-- [ ] **Step 1: Tests** (in `carve_parts_test.cpp`): `wall_return_is_not_support`: the box-over-wall case with surface σ
-  0.17 (realistic) and the wall as the outline ⇒ `solid_delta < 0` WITH weights and (documenting the gap) `> 0`
-  without; `object_off_the_wall_keeps_support`: a box whose front is 0.13 m from the outline (the headboard case),
-  returns on its front ⇒ e_occ with weights ≥ 0.95 × without; `wall_explained_basics`: a point on an edge ⇒ e ≈ 1,
-  0.15 m away ⇒ e < 1e-5, empty outline ⇒ zeros.
-- [ ] **Step 2: Implement**, run the test (g++ command of Task 1), then build the carve_replay target and re-run the
-  20-cycle smoke: every real node still ≥ 0 under carve_parts and phantom_wall_nightstand_6 < 0.
-- [ ] **Step 3: Commit** `"existence: a LiDAR return on a known wall is not support for an object (carve_parts explained weights)"`.
+- [ ] **Step 1: Tests.** In `carve_parts_test.cpp`: `nodes_reproduce_moments` (order 3 and 5: Σ w·δ = 0, Σ w·δδᵀ = Σ_xy
+  within 1e-4 for a rotated anisotropic Σ); `log_marginal_basics` (equal ℓ ⇒ that ℓ; one node with log_w −∞ ignored;
+  stable for ℓ = ±50). In `placement_prior_test.cpp`: inside ⇒ 0; a box whose corner is 0.1 m past an edge with P 2000
+  ⇒ −1.0 within 1e-3; < 3 vertices ⇒ 0. A scenario test (in carve_parts_test, using the helpers and a square outline):
+  the box-over-wall geometry with Σ_xy = diag(0.17², 0.17²) — marginal ΔL with the prior < 0, and WITHOUT the prior
+  (all log_w equal) documented as > 0; the real-object case (returns on the top and front of a box placed 0.10 m off its
+  believed centre, Σ = diag(0.17²)) — marginal ΔL > 0.
+- [ ] **Step 2: Implement** the helpers and the countable branch; syntax-check countable_existence.cpp (the agent build
+  waits for the live test to end); build `carve_replay` with `-j2`.
+- [ ] **Step 3: Smoke replay** (`--max-cycles 20 --phantoms`, orders 3 and 5): report every node's marginal mean ΔL.
+  Expected: real nodes ≥ 0, every probed phantom < 0, order 3 and 5 of the same sign everywhere. If a real node or a
+  phantom fails, STOP and report with `--explain` output — do not change part fractions, σ, or the prior.
+- [ ] **Step 4: Commit** `"existence: marginalise the box position as one common-mode shift, weighted by the class's no-cross prior"`.
 
 ### Task 5: Live 7a — the new carve alone, today's debounce (operator task)
 
