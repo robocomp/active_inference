@@ -718,59 +718,102 @@ GridPlanner::TurnBlock GridPlanner::why_cannot_turn(const Eigen::Vector2f& pos_r
     return turn_block_over(pos_room, all);
 }
 
-GridPlanner::TurnBlock GridPlanner::why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const
+namespace
 {
-    const_cast<GridPlanner*>(this)->rebuild_offsets();
-    // The SHORT way round: the arc the alignment drives (yaw_err = wrap_pi(target - current)), as rotation_sweep.
-    const float two_pi = 2.0f * static_cast<float>(M_PI);
-    const float sweep = std::remainder(yaw_to - yaw_from, two_pi);
-    // ★ SAMPLE SPACING FROM THE BODY, NOT A MAGIC ANGLE: the footprint's farthest covered cell sits `reach` from the
-    //   pivot; it moves one grid cell when the body turns cell/reach radians, so no bucket the body passes through can
-    //   be stepped over. (Before the world/offsets exist reach is 0: fall back to the heading-bucket width.)
-    const float reach = std::sqrt(static_cast<float>(offsets_reach2_cells_)) * cell_;
-    const float d_theta = reach > 0.f ? std::min(cell_ / reach, two_pi / kHeadings) : two_pi / kHeadings;
-    const int n = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / d_theta)));
-    std::set<int> buckets;
-    std::vector<float> yaws;   // yaws[0] is the current yaw
-    for (int i = 0; i <= n; ++i)
+// Area of (convex polygon) ∩ (axis-aligned square [x0,x1]x[y0,y1]): Sutherland-Hodgman against the four edges, then the shoelace.
+float overlap_area_with_square(std::vector<Eigen::Vector2f> poly, float x0, float y0, float x1, float y1)
+{
+    const auto clip = [&](auto inside, auto cut)
     {
-        const float y = yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n));
-        yaws.push_back(y);
-        buckets.insert(heading_bucket(y));
-    }
-    return turn_block_over(pos_room, std::vector<int>(buckets.begin(), buckets.end()), yaws);
+        std::vector<Eigen::Vector2f> out;
+        for (std::size_t i = 0, n = poly.size(); i < n; ++i)
+        {
+            const auto &a = poly[i], &b = poly[(i + 1) % n];
+            const bool ia = inside(a), ib = inside(b);
+            if (ia) out.push_back(a);
+            if (ia != ib) out.push_back(cut(a, b));
+        }
+        poly = std::move(out);
+    };
+    const auto at_x = [](float X) { return [X](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+        { const float t = (X - a.x()) / (b.x() - a.x()); return Eigen::Vector2f(X, a.y() + t * (b.y() - a.y())); }; };
+    const auto at_y = [](float Y) { return [Y](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+        { const float t = (Y - a.y()) / (b.y() - a.y()); return Eigen::Vector2f(a.x() + t * (b.x() - a.x()), Y); }; };
+    clip([&](const Eigen::Vector2f& p) { return p.x() >= x0; }, at_x(x0)); if (poly.empty()) return 0.f;
+    clip([&](const Eigen::Vector2f& p) { return p.x() <= x1; }, at_x(x1)); if (poly.empty()) return 0.f;
+    clip([&](const Eigen::Vector2f& p) { return p.y() >= y0; }, at_y(y0)); if (poly.empty()) return 0.f;
+    clip([&](const Eigen::Vector2f& p) { return p.y() <= y1; }, at_y(y1)); if (poly.empty()) return 0.f;
+    float A = 0.f;
+    for (std::size_t i = 0, n = poly.size(); i < n; ++i)
+        A += 0.5f * (poly[i].x() * poly[(i + 1) % n].y() - poly[(i + 1) % n].x() * poly[i].y());
+    return std::abs(A);
+}
+}  // namespace
+
+float GridPlanner::body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, int ix, int iy) const
+{
+    const auto poly = footprint.at_pose_yaw(pos_room, yaw, /*with_margin=*/false);
+    const auto c = cell_to_world(ix, iy);
+    const float h = 0.5f * cell_;
+    return overlap_area_with_square(poly, c.x() - h, c.y() - h, c.x() + h, c.y() + h);
 }
 
-GridPlanner::TurnBlock GridPlanner::turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings,
-                                                    const std::vector<float>& arc_yaws) const
+GridPlanner::TurnBlock GridPlanner::why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const
+{
+    // ★ EXACT GEOMETRY (fix round 2, owner ruling): the swept body — the footprint polygon itself, bare hull, no margin —
+    //   must not INTERSECT an occupied cell's square at any yaw of the arc. The 8-bucket rasterisation (+ safety margin) answers
+    //   "does the planner's inflated, quantised body collide", which refused turns the real body makes freely.
+    //   A cell the body ALREADY overlaps at the start yaw is forgiven only while the overlap AREA does not grow (the body is
+    //   evidently there; pressing deeper is a collision).
+    TurnBlock b;
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) { b.blocked = true; b.off_map = true; return b; }
+    const float two_pi = 2.0f * static_cast<float>(M_PI);
+    const float sweep = std::remainder(yaw_to - yaw_from, two_pi);   // the SHORT way, as step_orient / the Heading goal drive
+    float reach = 0.f;                                                 // the footprint's farthest vertex from the pivot
+    for (const auto& v : footprint.at_pose_yaw(Eigen::Vector2f::Zero(), 0.f, false)) reach = std::max(reach, v.norm());
+    // sample spacing from the body: the farthest vertex moves HALF a grid cell per step, so it cannot jump over a cell
+    const float d_theta = reach > 0.f ? 0.5f * cell_ / reach : two_pi / kHeadings;
+    const int n = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / d_theta)));
+    const int r = static_cast<int>(std::ceil((reach + cell_) / cell_));
+    std::set<int> buckets;
+    std::set<std::pair<int, int>> seen;
+    float best = std::numeric_limits<float>::max();
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx)
+        {
+            const int cx = ix + dx, cy = iy + dy;
+            if (not in_bounds(cx, cy)) { b.off_map = true; continue; }
+            if (not occ_[idx(cx, cy)]) continue;
+            const float a0 = body_cell_overlap_m2(pos_room, yaw_from, cx, cy);
+            for (int i = 1; i <= n; ++i)
+            {
+                const float y = yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n));
+                if (body_cell_overlap_m2(pos_room, y, cx, cy) <= a0) continue;
+                buckets.insert(heading_bucket(y));
+                seen.insert({cx, cy});
+                const auto w = cell_to_world(cx, cy);
+                if (const float d = (w - pos_room).norm(); d < best)
+                {
+                    best = d; b.nearest_cell = w; b.nearest_m = d;
+                    b.nearest_bearing_deg = std::atan2(w.y() - pos_room.y(), w.x() - pos_room.x()) * 180.f / static_cast<float>(M_PI);
+                }
+                break;
+            }
+        }
+    b.headings_blocked = static_cast<int>(buckets.size());
+    b.cells_blocked = static_cast<int>(seen.size());
+    b.blocked = not seen.empty();
+    return b;
+}
+
+GridPlanner::TurnBlock GridPlanner::turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings) const
 {
     TurnBlock b;
     int ix, iy;
     if (not world_to_cell(pos_room, ix, iy)) { b.blocked = true; b.off_map = true; return b; }
     const_cast<GridPlanner*>(this)->rebuild_offsets();
     if (offsets_.size() != kHeadings) { b.blocked = true; return b; }
-
-    // the cells under the footprint at the heading the body already has are forgiven while the turn does not go DEEPER into
-    // them (see why_cannot_sweep): clearance = distance to the cell - the footprint's support toward it, at the yaw sampled
-    std::set<std::pair<int, int>> standing;
-    if (not arc_yaws.empty())
-    {
-        const auto clearance = [&](const Eigen::Vector2f& w, float yaw)
-        {
-            const Eigen::Vector2f d = w - pos_room;
-            const float r = d.norm();
-            return r < 1e-6f ? 0.f : r - footprint.support_radius_yaw(yaw, d / r);
-        };
-        for (const auto& o : offsets_[heading_bucket(arc_yaws.front())])
-        {
-            const int nx = ix + o.x(), ny = iy + o.y();
-            if (not in_bounds(nx, ny) or not occ_[idx(nx, ny)]) continue;
-            const auto w = cell_to_world(nx, ny);
-            const float c0 = clearance(w, arc_yaws.front());
-            const bool deeper = std::ranges::any_of(arc_yaws, [&](float y) { return clearance(w, y) < c0; });
-            if (not deeper) standing.insert({nx, ny});
-        }
-    }
 
     float best = std::numeric_limits<float>::max();
     // A cell can sit under several headings' footprints; count it once so "cells_blocked" reads as the
@@ -783,7 +826,7 @@ GridPlanner::TurnBlock GridPlanner::turn_block_over(const Eigen::Vector2f& pos_r
         {
             const int nx = ix + o.x(), ny = iy + o.y();
             if (not in_bounds(nx, ny)) { this_heading = true; b.off_map = true; continue; }
-            if (not occ_[idx(nx, ny)] or standing.contains({nx, ny})) continue;
+            if (not occ_[idx(nx, ny)]) continue;
             this_heading = true;
             seen.insert({nx, ny});
             const auto w = cell_to_world(nx, ny);

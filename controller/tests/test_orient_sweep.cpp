@@ -1,8 +1,10 @@
-// Defect A (controller face-the-door, 2026-11-15): an orient turns the body through an ARC, not all the way round.
-// onemodeloff01: aff_door_3_open, orient 62 deg off, refused "4/8 headings blocked, nearest 0.40 m, bearing 176 deg" -- cells
-// BEHIND the robot that the 62 deg arc never reaches. GridPlanner::why_cannot_sweep asks about the swept arc only.
+// Defect A (controller face-the-door, 2026-11-15, fix round 2): an orient turns the body through an ARC, and the question is
+// EXACT GEOMETRY -- does the bare footprint polygon, rotating about the robot's position, intersect an occupied cell's square?
+// (Not the planner's 8 heading buckets + safety margin: onemodeloff01 refused a 62 deg turn "4/8 headings blocked, nearest 0.40 m,
+// bearing 176" for two cells the real body may never touch.) A cell the body already overlaps is forgiven only while the overlap
+// AREA does not grow.
 // Build+run (from controller/; pure Eigen + std):
-//   g++ -std=c++23 -O1 -Wall -Wextra -I/usr/include/eigen3 -Isrc tests/test_orient_sweep.cpp src/grid_planner.cpp
+//   g++ -std=c++23 -O1 -Wall -Wextra -I/usr/include/eigen3 -I../common -Isrc tests/test_orient_sweep.cpp src/grid_planner.cpp
 //       src/local_policy/cost_to_go.cpp ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp
 //       -o /tmp/tos && /tmp/tos   (one line)
 #include "grid_planner.h"
@@ -10,6 +12,8 @@
 #include <cmath>
 #include <cstdio>
 #include <numbers>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -22,68 +26,102 @@ void check(bool ok, const char* what)
 }
 constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float kDeg = kPi / 180.f;
-const std::vector<Eigen::Vector2f> kRoom{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
 
-// a short wall of occupied cells (0.05 m) centred `off` from the robot along `bearing_rad`, `n` cells long, across the bearing
-rc::GridPlanner planner_with_wall(const Eigen::Vector2f& robot, float bearing_rad, float dist, int n)
+rc::GridPlanner planner_with(const std::vector<Eigen::Vector2f>& room, const std::vector<Eigen::Vector2f>& cells, float cell,
+                             std::optional<rc::RobotFootprint> fp = std::nullopt)
 {
-    std::vector<Eigen::Vector2f> cells;
-    const Eigen::Vector2f u(std::cos(bearing_rad), std::sin(bearing_rad)), t(-u.y(), u.x());
-    for (int i = -n; i <= n; ++i) cells.push_back(robot + dist * u + 0.05f * static_cast<float>(i) * t);
     rc::GridPlanner p;
-    p.params.cell_size_m = 0.05f;
+    p.params.cell_size_m = cell;
     p.params.safety_margin_m = 0.05f;
-    p.set_world(kRoom, {}, rc::OccupiedCells{.centres = cells, .cell_size_m = 0.05f, .risk_nats = {}});
+    if (fp) p.set_footprint(*fp);
+    p.set_world(room, {}, rc::OccupiedCells{.centres = cells, .cell_size_m = cell, .risk_nats = {}});
     return p;
+}
+const std::vector<Eigen::Vector2f> kRoom{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
+// a short wall of occupied cells centred `dist` from the robot along `bearing`, 2n+1 cells across
+std::vector<Eigen::Vector2f> wall(const Eigen::Vector2f& robot, float bearing, float dist, int n, float cell)
+{
+    std::vector<Eigen::Vector2f> c;
+    const Eigen::Vector2f u(std::cos(bearing), std::sin(bearing)), t(-u.y(), u.x());
+    for (int i = -n; i <= n; ++i) c.push_back(robot + dist * u + cell * static_cast<float>(i) * t);
+    return c;
+}
+float reach_of(const rc::RobotFootprint& f)
+{
+    float r = 0.f;
+    for (const auto& v : f.at_pose_yaw({0.f, 0.f}, 0.f, false)) r = std::max(r, v.norm());
+    return r;
 }
 }  // namespace
 
 int main()
 {
     const Eigen::Vector2f robot(3.f, 3.f);
-    // obstacle 0.40 m from the centre, straight behind the robot (the robot faces yaw 0 = +x, so behind = bearing 180 deg)
-    auto p = planner_with_wall(robot, 180.f * kDeg, 0.40f, 1);   // 3 cells across, as the log's "2 cell(s)" at bearing 176
-    const auto full = p.why_cannot_turn(robot);
-    std::printf("  full circle: %d/8 headings blocked, %d cell(s)\n", full.headings_blocked, full.cells_blocked);
-    check(full.blocked, "the OLD question (all the way round) refuses: the cells behind block some heading");
+    const rc::RobotFootprint shadow = rc::RobotFootprint::shadow();
+    std::printf("  shadow hull reach (farthest vertex) %.3f m\n", reach_of(shadow));
 
-    // The onemodeloff01 case: cells 0.40 m behind (bearing 180) block the DIAGONAL headings 1,3,5,7 of the 8-heading grid ("4/8
-    // headings blocked, nearest 0.40 m, bearing 176"). The robot stands at yaw -30 deg (bucket 7, a blocked one: the grid's footprint
-    // has a margin and the robot is physically there), the door asks for +18 deg: buckets 7 -> 0, the body turning AWAY from the cells.
-    // (ruling 2: from -56 the body's diagonal swings 7 mm closer to the cells mid-arc, at -40 -- that arc is refused, by design.)
-    const auto a = p.why_cannot_sweep(robot, -30.f * kDeg, 18.f * kDeg);
-    check(not a.blocked, "A1: a 48 deg orient from the margin-blocked bucket 7 into free bucket 0 is feasible (the clearance to the cells only grows)");
-    check(not p.why_cannot_sweep(robot, 0.f, 0.f).blocked, "A1': no turn at all is feasible");
-    check(not p.why_cannot_sweep(robot, -56.f * kDeg, -56.f * kDeg).blocked,
-          "A1'': a body standing in a margin-blocked bucket may stay there (cells under its own footprint are not newly swept)");
-
-    // B: the SAME cells, a turn whose arc runs into another blocked bucket: refused, with the obstruction named
-    const auto b = p.why_cannot_sweep(robot, -56.f * kDeg, 150.f * kDeg);   // short way: -56 -> -154 through -90, -135 (bucket 5)
-    std::printf("  206 deg arc: %d heading(s) blocked, nearest %.2f m at bearing %.0f deg\n", b.headings_blocked, b.nearest_m,
-                b.nearest_bearing_deg);
-    check(b.blocked and b.headings_blocked >= 1, "A2: an arc that sweeps into the cells is refused (Infeasible kept)");
-    check(p.why_cannot_sweep(robot, 0.f, 62.f * kDeg).blocked, "A2': from yaw 0 the 62 deg arc enters bucket 1, where the cells are: refused");
-
-    // the short way is the one measured: from 100 deg to -100 deg is 160 deg THROUGH 180 (the cells), not 200 the other way
-    check(p.why_cannot_sweep(robot, 100.f * kDeg, -100.f * kDeg).blocked, "A3: the arc is the SHORT way round (through 180)");
-    // ...and the same two yaws seen from a robot with the cells on the OTHER side are free
-    auto q = planner_with_wall(robot, 0.f, 0.40f, 3);
-    check(q.why_cannot_sweep(robot, 100.f * kDeg, -100.f * kDeg).blocked == q.why_cannot_sweep(robot, -100.f * kDeg, 100.f * kDeg).blocked,
-          "A3': the short way round is symmetric in its endpoints");
-
-    // RULING 2: a standing cell is forgiven only while the turn does not go DEEPER into it. The robot sits at yaw 0 with a cell just
-    // inside its margin at bearing 90 deg (beside its flank); turning to 90 deg swings the long axis toward the cell: refused.
-    // Turning the OTHER way (-60) swings away from it: the clearance only grows: allowed.
+    // cells beyond the body's reach (0.45 m behind): no turn of any size touches them -- the old 8-heading test refused these
     {
-        auto w = planner_with_wall(robot, 90.f * kDeg, 0.40f, 0);
-        check(w.why_cannot_sweep(robot, 0.f, -60.f * kDeg).headings_blocked <= w.why_cannot_sweep(robot, 0.f, 60.f * kDeg).headings_blocked,
-              "R2: turning away from a standing cell is no worse than turning into it");
-        check(w.why_cannot_sweep(robot, 0.f, 90.f * kDeg).blocked, "R2': a turn that presses deeper into a standing cell is refused");
+        auto p = planner_with(kRoom, wall(robot, 180.f * kDeg, 0.45f, 1, 0.05f), 0.05f);
+        check(not p.why_cannot_sweep(robot, 0.f, 170.f * kDeg).blocked, "A1: a turn of 170 deg past cells outside the hull's reach is free");
+        check(not p.why_cannot_sweep(robot, -56.f * kDeg, 150.f * kDeg).blocked, "A1': so is the long -56 -> 150 sweep");
+    }
+    // a cell INSIDE the reach: the body's lateral wheel face (0.284) swings onto it
+    {
+        auto p = planner_with(kRoom, wall(robot, 180.f * kDeg, 0.30f, 0, 0.05f), 0.05f);
+        check(not p.why_cannot_sweep(robot, 0.f, 0.f).blocked, "A2: no turn: free");
+        check(p.why_cannot_sweep(robot, 0.f, 90.f * kDeg).blocked, "A2': yaw 0 -> 90 swings the wheel onto the cell 0.30 m behind: refused");
+    }
+    // a cell the body ALREADY overlaps at the start yaw (found by search: at yaw 90 deg the cell 0.20 m behind / 0.24 m to the side
+    // of the robot's centre overlaps the hull by 0.0013 m2): forgiven while the overlap does not grow, refused when it does
+    {
+        const Eigen::Vector2f r(3.025f, 3.025f), c = r + Eigen::Vector2f(-0.20f, -0.24f);
+        auto p = planner_with(kRoom, {c}, 0.05f);
+        check(p.body_cell_overlap_m2(r, 90.f * kDeg, c) > 0.f, "R2a: the start pose already overlaps that cell");
+        check(not p.why_cannot_sweep(r, 90.f * kDeg, 90.f * kDeg).blocked, "R2b: not turning: allowed");
+        check(not p.why_cannot_sweep(r, 90.f * kDeg, 80.f * kDeg).blocked, "R2c: turning the way the overlap does not grow: allowed");
+        check(p.why_cannot_sweep(r, 90.f * kDeg, 100.f * kDeg).blocked, "R2d: turning the way the overlap grows: refused");
     }
 
-    // a body hemmed in closely is refused any arc that reaches cells its own footprint does not already cover
-    auto boxed = planner_with_wall(robot, 45.f * kDeg, 0.33f, 6);
-    check(boxed.why_cannot_sweep(robot, 0.f, 90.f * kDeg).blocked, "A4: a body hemmed in at 0.33 m cannot swing into new cells");
+    // THE REAL onemodeloff01 GEOMETRY (controller.log: robot (2.07,-1.59); two cells around (1.67,-1.56), 0.40 m, bearing 176 deg;
+    // aff_door_3_open target yaw +0.10 rad, the robot 62 deg off it). The blocking cells are residual's 0.05 m cells; the planner
+    // stamps them into ITS lattice (0.10 m cells in the live grid), so each verdict is given on both lattices. The start yaw is
+    // unknown from the log, so BOTH 0.10 + 1.08 and 0.10 - 1.08; and for the shadow hull AND the 0.46 x 0.65 m rectangle
+    // (half-diagonal 0.398 m).
+    {
+        const std::vector<Eigen::Vector2f> room{{0.f, -4.f}, {5.f, -4.f}, {5.f, 0.5f}, {0.f, 0.5f}};
+        const Eigen::Vector2f r(2.07f, -1.59f);
+        const std::vector<Eigen::Vector2f> cells{{1.67f, -1.56f}, {1.67f, -1.61f}};   // residual cells, 0.05 m
+        const auto rect = rc::RobotFootprint::from_polygon({{-0.23f, -0.325f}, {0.23f, -0.325f}, {0.23f, 0.325f}, {-0.23f, 0.325f}});
+        check(rect.has_value(), "the 0.46 x 0.65 rectangle is a valid footprint");
+        for (const auto& [name, fp] : {std::pair{"shadow hull", shadow}, std::pair{"0.46x0.65 rectangle", *rect}})
+            for (const float lattice : {0.05f, 0.10f})
+            {
+                rc::GridPlanner p;
+                p.params.cell_size_m = lattice;
+                p.params.safety_margin_m = 0.05f;
+                p.set_footprint(fp);
+                p.set_world(room, {}, rc::OccupiedCells{.centres = cells, .cell_size_m = 0.05f, .risk_nats = {}});
+                std::printf("  %s (reach %.3f m), planner lattice %.2f m:\n", name, reach_of(fp), lattice);
+                for (const float start : {0.10f + 1.08f, 0.10f - 1.08f})
+                {
+                    const auto v = p.why_cannot_sweep(r, start, 0.10f);
+                    // the nearest hull-to-cell-edge geometry, by sampling the arc against the cells' own squares
+                    float amax = 0.f;
+                    for (const auto& c : cells)
+                        for (int i = 0; i <= 400; ++i)
+                            amax = std::max(amax, p.body_cell_overlap_m2(r, start + (0.10f - start) * static_cast<float>(i) / 400.f, c));
+                    std::printf("    start yaw %+.2f -> +0.10: %s (%d cell(s); max overlap on the cells' lattice squares %.5f m2)\n", start,
+                                v.blocked ? "REFUSED" : "free", v.cells_blocked, amax);
+                    // on a lattice equal to residual's 0.05 m the grid holds the cells' true squares: the hull (reach 0.318 m) cannot touch them.
+                    // On 0.10 m the stamp enlarges each 0.05 m cell into the enclosing lattice squares (reported, not asserted).
+                    if (std::string_view(name) == "shadow hull" and lattice < 0.07f)
+                        check(not v.blocked, "onemodeloff01 (shadow hull, true 0.05 m cells): the 62 deg orient is free from either start yaw");
+                    if (std::string_view(name) != "shadow hull" and lattice < 0.07f)
+                        check(v.blocked, "onemodeloff01 (0.46x0.65 rectangle, true 0.05 m cells): its corner (0.398 m) does reach them -- refused");
+                }
+            }
+    }
 
     std::printf("test_orient_sweep: %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

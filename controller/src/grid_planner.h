@@ -334,20 +334,16 @@ public:
     };
     [[nodiscard]] TurnBlock why_cannot_turn(const Eigen::Vector2f& pos_room) const;
 
-    // The same report for the ARC the body will actually turn through, not the full circle. An orient sweeps the
-    // footprint from the current yaw to the target yaw, the SHORT way (the direction step_orient / the policy's
-    // Heading goal drive: wrap_pi(target - current)). Cells behind the body that the arc never reaches are not a
-    // reason to refuse it (onemodeloff01: two cells 0.40 m behind refused a 62 deg turn). Yaws are room-frame
-    // FORWARD headings (the grid's heading index convention, as pose_free). The arc is sampled at the angle at
-    // which the footprint's farthest covered cell moves one grid cell, so no heading bucket the body passes
-    // through can be skipped. `headings_blocked` counts the buckets of the arc that are blocked.
-    // ★ THE BODY IS ALREADY WHERE IT STANDS: an occupied cell under the footprint at the CURRENT heading is forgiven
-    //   (the grid's footprint carries a safety margin and 8 buckets, so a robot parked 0.40 m from a stray cell reads as
-    //   "colliding" at its own heading) — but only while the turn does not go DEEPER into it: its clearance (distance to the
-    //   cell minus the footprint's support toward it, the same footprint geometry, no new margin) at every sampled yaw of the
-    //   arc must be at least what it is at the current yaw. A cell the turn presses into is blocked like any other.
-    //   Limit: the check is only as good as the 8 quantised footprints for the NEW cells, so for a short arc it tests the
-    //   1-2 buckets it enters, where the old all-round test covered all 8.
+    // The same report for the ARC the body will actually turn through, in EXACT GEOMETRY (not the 8 bucket rasterisation): the
+    // bare footprint polygon, rotating about the robot's position from yaw_from to yaw_to the SHORT way (the direction
+    // step_orient / the Heading goal drive), must not intersect an occupied cell's square. A cell the body already overlaps at
+    // the start yaw is forgiven only while the overlap area does not grow. No margin. Yaws are room-frame FORWARD headings.
+    // Sample spacing: the footprint's farthest vertex moves half a grid cell per step. `headings_blocked` = distinct heading
+    // buckets where a blocking sample fell.
+    float body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, int ix, int iy) const;
+    // the same for the cell containing a world point (0 off the map)
+    float body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, const Eigen::Vector2f& cell_point) const
+    { int ix, iy; return world_to_cell(cell_point, ix, iy) ? body_cell_overlap_m2(pos_room, yaw, ix, iy) : 0.f; }
     [[nodiscard]] TurnBlock why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const;
 
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
@@ -389,8 +385,7 @@ public:
 private:
     static constexpr int kHeadings = 8;
     // the shared body of why_cannot_turn / why_cannot_sweep: which of `headings` are blocked at pos_room, and by what
-    TurnBlock turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings,
-                              const std::vector<float>& arc_yaws = {}) const;
+    TurnBlock turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings) const;
 
     bool  in_bounds(int ix, int iy) const { return ix >= 0 and ix < w_ and iy >= 0 and iy < h_; }
     int   idx(int ix, int iy) const { return iy * w_ + ix; }
