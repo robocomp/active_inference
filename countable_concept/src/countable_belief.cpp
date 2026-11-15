@@ -486,13 +486,16 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
     //     size summary (size_prior_off_) it contributes nothing, or it re-adds the depth pin through lam_flush
     //     (depth_unobs_precision·depth_unobs) and the π_flush fallback of flush_posterior, and the summary's depth
     //     becomes the front-to-wall distance (final review C2, 2026-11-14).
-    if (not size_prior_off_)
+    // A LiDAR-only frame (f.lidar_only) skips every Gaussian class anchor — flush/parallel, room axis, (2) footprint, (2a)
+    // height: the predicted belief already contains them, and re-adding them each frame counts the prior as a measurement
+    // (spec lidar-measures §7b, C1 = A). The one-sided constraints (2b), (2c) and the rays stay: zero unless violated.
+    if (not size_prior_off_ and not f.lidar_only)
         accumulate_wall(s, f, Id, bd);
 
     // ROOM-AXIS ALIGNMENT (furniture prior): furniture is aligned with the room's axes whether or not it touches
     // a wall. ¼·sin(4Δ) vanishes at every multiple of 90°, so the four yaws a box can take on the room grid are
     // equally good and the front/back (and width/depth) decision stays with the data and the clearance prior.
-    if (f.room_axis_ok and params_.room_axis_std > 0.0f)
+    if (f.room_axis_ok and params_.room_axis_std > 0.0f and not f.lidar_only)
     {
         const float dlt = s.yaw - f.room_axis;
         const float r   = 0.25f * std::sin(4.0f * dlt);
@@ -505,7 +508,7 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
     // (2) FOOTPRINT prior: a TIGHT Gaussian pulling w → prior_footprint_m and h(depth) → prior_footprint_m
     //     (a standard bed footprint ≈ 0.60×0.60 is very consistent), precision λ_wd = 1/prior_footprint_std².
     //     H (index 2) is anchored separately just below (2a) — the top-of-box float needs a static anchor too.
-    if (params_.prior_footprint_std > 0.0f and not size_prior_off_)
+    if (params_.prior_footprint_std > 0.0f and not size_prior_off_ and not f.lidar_only)
     {
         const float lam_wd = 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std);
 
@@ -543,7 +546,7 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
     //      prior_height_m with precision 1/prior_height_std² — the DATA still sets the LOWER bound (points force
     //      H ≥ cloud-top), the anchor only prevents float ABOVE it. Broad enough to let a genuinely tall/short
     //      bed move when the cloud top demands it, firm enough to stop the runaway.
-    if (params_.prior_height_std > 0.0f and not size_prior_off_)
+    if (params_.prior_height_std > 0.0f and not size_prior_off_ and not f.lidar_only)
     {
         const float lam_H = 1.0f / (params_.prior_height_std * params_.prior_height_std);
         Id(2, 2) += lam_H;  bd(2) += lam_H * (params_.prior_height_m - s.H);        // H (index 2)

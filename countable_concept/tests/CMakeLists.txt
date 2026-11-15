@@ -111,3 +111,10 @@ target_include_directories(lidar_weights_test PRIVATE ../src ../../common ../../
 target_compile_options(lidar_weights_test PRIVATE -O2)
 target_link_libraries(lidar_weights_test PRIVATE Eigen3::Eigen)
 add_test(NAME lidar_weights_test COMMAND lidar_weights_test)
+
+# The LiDAR-only frame (spec 2026-11-15 lidar-measures §7b, C1 = A): rays + one-sided constraints, no re-added class anchors.
+add_executable(lidar_only_update_test lidar_only_update_test.cpp ../src/countable_belief.cpp)
+target_include_directories(lidar_only_update_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(lidar_only_update_test PRIVATE -O2)
+target_link_libraries(lidar_only_update_test PRIVATE Eigen3::Eigen)
+add_test(NAME lidar_only_update_test COMMAND lidar_only_update_test)

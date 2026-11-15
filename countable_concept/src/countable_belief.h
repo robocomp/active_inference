@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <vector>
@@ -291,6 +292,12 @@ struct CountableFrame
     rc::ai::LidarRays lidar;
     // Additional per-device ray-sets (e.g. the low "bpearl" LiDAR); each keeps its OWN origin.
     std::vector<rc::ai::LidarRays> lidar_extra;
+
+    // A frame that carries LiDAR rays ONLY (no camera points; spec 2026-11-15 lidar-measures §7b, C1 = A). It adds what was
+    // measured on it (the rays) plus the ONE-SIDED constraints that are zero unless violated ((2b) short height, (2c) wall
+    // no-cross). The Gaussian class anchors (flush/parallel, room axis, footprint, height) are NOT added: the predicted
+    // belief already contains them, and re-adding them each frame would count the prior as a measurement.
+    bool lidar_only = false;
 };
 
 // The bed generative model wired onto the shared rc::ai recursive-Laplace engine. Supplies only the
@@ -363,8 +370,17 @@ public:
         // ω is inferred ONLY on a cycle that actually took a measurement. A predict-only cycle has δθ = 0,
         // which under the update below would read as "this object never moves" and drive ω down — the same
         // repetition-is-not-independence error that has bitten this codebase four times.
-        update_volatility(state_.vec() - before);
+        // A LiDAR-only frame does not update ω either (spec lidar-measures §7b): its shift is the rays' correction of a
+        // belief the camera cycles built, not a measurement of how much the object moves.
+        if (not frame.lidar_only) update_volatility(state_.vec() - before);
         return fe;
+    }
+    // The engine runs a point-free frame as a measurement when this says it carries data: LiDAR rays with a usable precision.
+    bool has_extra_data(const CountableFrame& f) const
+    {
+        const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
+        if (usable(f.lidar)) return true;
+        return std::ranges::any_of(f.lidar_extra, usable);
     }
     // What the DATA alone says about the size (H, w, h): the posterior already contains the class size prior (blocks 2 and
     // 2a of accumulate_extra) every frame, so scoring it against the class would count that prior twice. Zero info until
