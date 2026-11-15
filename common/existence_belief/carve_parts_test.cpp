@@ -79,18 +79,28 @@ int main()
         const auto ev = carve_parts(O, sw, 0, 0, 0, std::span<const BoxPart>(&box, 1), 0.02f, sm);
         CHECK(ev.n_reached == 0);
     }
-    // a return on the front face of a thin panel is not "through"
+    // a return on the front face of a thin panel is not "through": the (1 - ws) discount is what removes it
     {
         const BoxPart panel{0, 0, 1.75f, 0.10f, 0, 1.25f};
-        const BoxPart pan_world{0, 0, 0.10f, 1.75f, 0, 1.25f};   // panel's long side along world y
-        // panel long axis is local x; with yaw = pi/2 its face normal points along world x toward the sensor
+        // yaw = pi/2: the panel's long axis runs along world y, its face normal points along world x at the sensor
+        const BoxPart pan_world{panel.cx, panel.cy, panel.sy, panel.sx, panel.z0, panel.z1};
         std::vector<V3> tg;
         for (int i = 0; i < 100; ++i)
             tg.emplace_back(0.0f, -0.8f + 1.6f * (i % 10) / 9.0f, 0.1f + 1.1f * (i / 10) / 9.0f);
         const auto sw = sweep_to(O, tg, {pan_world});
-        const auto ev = carve_parts(O, sw, 0, 0, 1.5707963f, std::span<const BoxPart>(&panel, 1), 0.05f, sm);
-        CHECK(ev.e_free < 5.0f);
-        CHECK(ev.e_occ > 40.0f);
+        const float surf = 0.10f;
+        const auto ev = carve_parts(O, sw, 0, 0, 1.5707963f, std::span<const BoxPart>(&panel, 1), surf, sm);
+        const float sigma_surf = std::sqrt(sm.sensor_sigma_m * sm.sensor_sigma_m + surf * surf);
+        float raw_through = 0.0f;                       // what the through term would be with no discount
+        for (const auto& P : sw)
+        {
+            const float len = (P - O).norm();
+            const float tf = (0.5f * pan_world.sx - O.x()) / (P.x() - O.x());   // exit through the back face
+            raw_through += 0.5f * std::erfc(-((1.0f - tf) * len / sigma_surf) * 0.70710678f);
+        }
+        CHECK(raw_through > 10.0f);
+        CHECK(ev.e_free < 1.0f);
+        CHECK(ev.e_occ > 30.0f);   // 0.5 reached per beam minus the through mass that the wider surface sigma lets in
     }
     // box over empty floor: wall behind it, returns come out the back
     {
@@ -103,14 +113,14 @@ int main()
         CHECK(ev.e_free + ev.e_interior > ev.e_occ);
         CHECK(solid_delta(ev, sm) < 0.0f);
     }
-    // box drawn over a wall: wall returns lie deeper inside than sigma from the entry
+    // box drawn over a wall (centred on the wall face x = 1.9, so the returns lie 0.25 m inside, 7 sigma): wall returns lie deeper inside than sigma from the entry
     {
         const BoxPart wall{2.0f, 0, 0.2f, 6, 0, 3};
         std::vector<V3> tg;
         for (int i = 0; i < 50; ++i) tg.emplace_back(2.0f, -0.2f + 0.4f * i / 49.0f, 0.3f);
         const auto sw = sweep_to(O, tg, {wall});
         const BoxPart b2{0, 0, 0.5f, 0.5f, 0, 0.62f};
-        const auto ev = carve_parts(O, sw, 2.1f, 0, 0, std::span<const BoxPart>(&b2, 1), 0.02f, sm);
+        const auto ev = carve_parts(O, sw, 1.9f, 0, 0, std::span<const BoxPart>(&b2, 1), 0.02f, sm);
         CHECK(solid_delta(ev, sm) < 0.0f);
     }
     // no top returns: one whole-box part agrees with carve_box on e_occ
