@@ -206,6 +206,9 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "Mixture weight of 'the remembered chair was moved' in the recall location likelihood (class prior; GUESS, chairs get moved)");
     out.recall_log_prior_new = getf("Tracker.RecallLogPriorNew", 0.0f,
             "Log prior of 'new chair' against one recalled candidate (0 = equal)");
+    out.link_pi_move = getf("Tracker.LinkPiMove", 0.10f, "identity link: per-visit P(a remembered chair was moved) (GUESS; the learned 'gets moved' belief replaces it)");
+    out.link_pi_gone = getf("Tracker.LinkPiGone", 0.10f, "identity link: per-visit P(a remembered chair left the room) (GUESS)");
+    out.link_lambda_new = getf("Tracker.LinkLambdaNew", 0.10f, "identity link: per-visit rate of a new chair arriving (GUESS)");
     out.tracker_birth_frames     = geti("Tracker.BirthFrames", 8,
             "frames a mask must stay unexplained before spawning a chair");
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM", 0.70f,

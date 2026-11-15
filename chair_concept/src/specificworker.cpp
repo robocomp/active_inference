@@ -32,7 +32,9 @@
  */
 
 #include "specificworker.h"
-#include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered chair at birth
+#include "../../common/recall_match/recall_candidates.h"
+#include "../../common/recall_match/identity_link.h"   // changed object: moved vs new, after birth
+#include "../../common/appearance_belief/colour_name.h"   // ltom recall: resurrect a remembered chair at birth
 #include "chair_card.h"   // make_card(): this agent's perception card
 #include "../../common/perception_card/card_io.h"   // write_card_file
 
@@ -798,6 +800,7 @@ void SpecificWorker::run_instance_tracker()
     // file's own comment documents as broken (see the note above).
     if (cfg_.exist_enabled)
         update_existence_beliefs();
+    update_identity_links();   // changed object: ghosts at remembered spots, links of chairs born new
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the chair (not the 0,0 RT-read default).
     // ltom recall candidates, read once per cycle; a candidate taken by a birth leaves the list (take once).
@@ -811,6 +814,8 @@ void SpecificWorker::run_instance_tracker()
         if (const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G)))
             recall_cands = rc::recall_candidates(*G, *room, "chair", static_cast<std::uint32_t>(G->get_agent_id()),
                                                  scene_graph_->identity_last(), live_names);
+        // A memory ltom already links to a live chair (changed object) is taken: no birth resurrects it.
+        std::erase_if(recall_cands, [](const rc::RecallCand& rc) { return rc.same_as_uid != 0; });
     }
     for (const int d : res.births)
     {
@@ -882,6 +887,7 @@ void SpecificWorker::run_instance_tracker()
             }
         }
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, resurrect);
+        if (new_id != 0 and not resurrect) born_new_ids_.insert(new_id);   // a candidate for the identity link
         if (new_id != 0 and resurrect)
         {
             const auto what = std::format("uid={} p={:.3f}", resurrect->uid, resurrect_p);
@@ -1475,3 +1481,131 @@ int SpecificWorker::startup_check()
 
 
 
+
+// ── Changed object (spec 2026-11-15-changed-object, owner's choice B) ────────────────────────────────────────────
+// For each untaken recall in the current room, a GHOST existence belief at its old spot: absence is charged exactly
+// as for a live chair (P(detect) of a chair there × (1 − occlusion)), and HELD while a live chair stands on the spot.
+// For each chair born new this run (and each chair ltom already links to), the identity posterior over {recall_k...,
+// new}; the MAP is published on the node (same_as_uid / same_as_prob / left_spot_prob). The node's name never changes.
+void SpecificWorker::update_identity_links()
+{
+    auto& insts = fitter_->instances();
+    std::erase_if(born_new_ids_, [&](std::uint64_t id) { return not insts.contains(id); });
+    const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G));
+    std::vector<rc::RecallCand> cands;
+    if (room.has_value())
+    {
+        std::set<std::string> live_names;
+        for (const auto& n : G->get_nodes_by_type("object"))
+            if (n.name().starts_with("chair_")) live_names.insert(n.name());
+        cands = rc::recall_candidates(*G, *room, "chair", static_cast<std::uint32_t>(G->get_agent_id()),
+                                      scene_graph_->identity_last(), live_names);
+    }
+
+    // Ghosts: one per offered recall; a recall that leaves the list takes its ghost with it.
+    std::set<std::uint64_t> offered;
+    for (const auto& c : cands) offered.insert(c.cand.uid);
+    std::erase_if(ghosts_, [&](const auto& kv) { return not offered.contains(kv.first); });
+    const float half = 0.5f * std::max(cfg_.prior.seat_w, cfg_.prior.seat_d);
+    for (const auto& c : cands)
+    {
+        auto [it, fresh] = ghosts_.try_emplace(c.cand.uid);
+        Ghost& g = it->second;
+        if (fresh)
+        {
+            // Starts at the owner's last belief that the chair existed (0 = not stated = even odds).
+            const float p = std::clamp(std::exp(c.cand.log_prior), 1e-3f, 1.f - 1e-3f);
+            g.L0 = c.cand.log_prior == 0.f ? 0.f : std::log(p / (1.f - p));
+            g.belief.set_max(cfg_.exist_max_logodds);
+            g.belief.set(g.L0);
+            g.L0 = g.belief.logodds();   // after the clamp
+        }
+        // A live chair standing on the spot: whatever is seen there is that chair, not evidence about this memory.
+        const bool occupied = std::ranges::any_of(insts, [&](const auto& kv)
+        {
+            const auto& s = kv.second.model.state();
+            return std::abs(s.cx - c.cand.mu.x()) < half and std::abs(s.cy - c.cand.mu.y()) < half;
+        });
+        if (occupied) continue;
+        Eigen::Vector2f cam = Eigen::Vector2f::Zero();
+        const float p_vis = fitter_->ghost_p_vis(c.cand.mu, &cam);
+        if (p_vis <= 0.f) continue;   // not in view: HOLD
+        const float before = g.belief.p_exists();
+        g.belief.note_viewpoint(cam.x(), cam.y(), c.cand.mu.x(), c.cand.mu.y(), half);
+        g.belief.integrate(p_vis, -cfg_.exist_evidence_gain);
+        if ((before > 0.5f) != (g.belief.p_exists() > 0.5f))
+            std::print("chair_concept: [link] ghost chair_{} left_spot p={:.2f}\n", c.n, 1.f - g.belief.p_exists());
+    }
+
+    // The link of each eligible live chair.
+    const rc::recall::LinkParams lp{cfg_.link_pi_move, cfg_.link_pi_gone, cfg_.link_lambda_new};
+    struct Pair { std::uint64_t node; std::size_t cand; float p; bool confirmed; };
+    std::vector<Pair> pairs;
+    for (auto& [id, inst] : insts)
+    {
+        const auto node = G->get_node(id);
+        const auto uid = node ? G->get_attrib_by_name<object_uid_att>(*node) : std::nullopt;
+        if (not uid.has_value()) continue;
+        const bool linked_by_ltom = std::ranges::any_of(cands, [&](const auto& c) { return c.same_as_uid == *uid; });
+        if (not born_new_ids_.contains(id) and not linked_by_ltom) continue;
+        std::vector<rc::recall::LinkCand> lc;
+        std::vector<std::size_t> idx;
+        for (std::size_t k = 0; k < cands.size(); ++k)
+        {
+            const auto& c = cands[k];
+            if (c.same_as_uid != 0 and c.same_as_uid != *uid) continue;   // linked to another live chair
+            if (c.same_as_uid == *uid and c.same_as_prob >= 1.f)          // the owner confirmed it
+            {
+                pairs.push_back({id, k, 1.f, true});
+                lc.clear();
+                idx.clear();
+                break;
+            }
+            const auto gi = ghosts_.find(c.cand.uid);
+            const float llr = gi == ghosts_.end() ? 0.f : gi->second.belief.logodds() - gi->second.L0;
+            lc.push_back({c.cand.uid, c.cand.log_prior, c.colour_name, c.colour_prob, llr});
+            idx.push_back(k);
+        }
+        if (lc.empty()) continue;
+        const auto cn = rc::appearance::name_colour(inst.appearance);
+        const std::optional<std::array<float, 12>> colour =
+            cn.name.empty() ? std::nullopt : std::optional<std::array<float, 12>>(cn.probs);
+        const auto link = rc::recall::link_posterior(lc, colour, lp);
+        if (link.index.has_value()) pairs.push_back({id, idx[*link.index], link.posterior[*link.index], false});
+    }
+    // Each memory is linked to at most one live chair: the most probable pairing wins.
+    std::ranges::sort(pairs, std::greater{}, &Pair::p);
+    std::set<std::size_t> cand_taken;
+    std::set<std::uint64_t> node_linked;
+    std::map<std::uint64_t, Pair> chosen;
+    for (const Pair& pr : pairs)
+        if (not cand_taken.contains(pr.cand) and not node_linked.contains(pr.node))
+        {
+            cand_taken.insert(pr.cand);
+            node_linked.insert(pr.node);
+            chosen.emplace(pr.node, pr);
+        }
+    for (auto& [id, inst] : insts)
+    {
+        const auto ch = chosen.find(id);
+        const std::uint64_t was = inst.link_uid;
+        if (ch == chosen.end()) { inst.link_uid = 0; inst.link_prob = 0.f; inst.link_left_spot_prob = 0.f; }
+        else
+        {
+            const auto& c = cands[ch->second.cand];
+            inst.link_uid = c.cand.uid;
+            inst.link_prob = ch->second.p;
+            const auto gi = ghosts_.find(c.cand.uid);
+            inst.link_left_spot_prob = gi == ghosts_.end() ? 0.f : 1.f - gi->second.belief.p_exists();
+        }
+        if (was != inst.link_uid)
+        {
+            const auto node = G->get_node(id);
+            const std::string name = node ? node->name() : std::to_string(id);
+            if (inst.link_uid == 0) std::print("chair_concept: [link] {} -> none\n", name);
+            else std::print("chair_concept: [link] {} -> chair_{} p={:.2f} left={:.2f}{}\n", name,
+                            static_cast<int>(inst.link_uid & rc::kUidNumberMask), inst.link_prob, inst.link_left_spot_prob,
+                            ch->second.confirmed ? " (confirmed)" : "");
+        }
+    }
+}
