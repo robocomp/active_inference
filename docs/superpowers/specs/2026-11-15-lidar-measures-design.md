@@ -1,6 +1,6 @@
 # Camera attributes, LiDAR measures: the LiDAR updates the countable belief on gated mask cycles
 
-Date: 2026-11-15. Status: DRAFT (owner picked "camera attributes, LiDAR measures" and approach B, 11-15). Nothing built.
+Date: 2026-11-15. Status: APPROVED by the owner 11-15 ("Approved, after lidar": the cabinet exit-release fix comes after this). Nothing built.
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
