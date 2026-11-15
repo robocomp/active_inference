@@ -119,3 +119,55 @@ peripheral = "ricoh.bearing"
 
 [display]
 mesh = "meshes/nightstand.obj"
+
+# ── Solid parts (fractions of the fitted w, h, H) for the 3-D LiDAR existence carve ──
+
+[[shape.part]]
+name = "body"
+x_f = 0.0
+y_f = 0.0
+w_f = 1.0
+h_f = 1.0
+z0_f = 0.66
+z1_f = 1.0
+why = "numbers measured on the Webots model (threerooms-piso)"
+
+[[shape.part]]
+name = "leg_mx_my"
+x_f = -0.44
+y_f = -0.44
+w_f = 0.08
+h_f = 0.08
+z0_f = 0.0
+z1_f = 0.66
+why = "numbers measured on the Webots model (threerooms-piso)"
+
+[[shape.part]]
+name = "leg_mx_py"
+x_f = -0.44
+y_f = 0.44
+w_f = 0.08
+h_f = 0.08
+z0_f = 0.0
+z1_f = 0.66
+why = "numbers measured on the Webots model (threerooms-piso)"
+
+[[shape.part]]
+name = "leg_px_my"
+x_f = 0.44
+y_f = -0.44
+w_f = 0.08
+h_f = 0.08
+z0_f = 0.0
+z1_f = 0.66
+why = "numbers measured on the Webots model (threerooms-piso)"
+
+[[shape.part]]
+name = "leg_px_py"
+x_f = 0.44
+y_f = 0.44
+w_f = 0.08
+h_f = 0.08
+z0_f = 0.0
+z1_f = 0.66
+why = "numbers measured on the Webots model (threerooms-piso)"

@@ -81,3 +81,12 @@ target_include_directories(class_factor_test PRIVATE ../src ../../common ../../c
 target_compile_options(class_factor_test PRIVATE -O2)
 target_link_libraries(class_factor_test PRIVATE Eigen3::Eigen)
 add_test(NAME class_factor_test COMMAND class_factor_test)
+
+# [[shape.part]] of the class manifests + the countable layout on a fitted box (feeds the 3-D LiDAR existence carve).
+# Run: LANG=es_ES.UTF-8 ./shape_parts_test
+add_executable(shape_parts_test shape_parts_test.cpp)
+target_include_directories(shape_parts_test PRIVATE ../src ../../common ../../common/concept_manifest)
+target_compile_definitions(shape_parts_test PRIVATE MANIFEST_DIR="${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest")
+target_compile_options(shape_parts_test PRIVATE -O2)
+target_link_libraries(shape_parts_test PRIVATE Eigen3::Eigen)
+add_test(NAME shape_parts_test COMMAND shape_parts_test)

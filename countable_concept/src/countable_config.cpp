@@ -149,6 +149,12 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         out.ai2_headboard_t_m = bp->thickness_m;
         std::print("[manifest] {} back panel: height {:.2f} m, thickness {:.2f} m\n", out.concept_class, bp->height_m, bp->thickness_m);
     }
+    try { out.shape_parts = rc::manifest::load_shape_parts(manifest_path); }
+    catch (const std::exception& e)
+    {
+        throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
+    }
+    std::print("[manifest] {} shape: {} part(s)\n", out.concept_class, out.shape_parts.size());
     {   // π_cls: a CLASS fact too. Absent ⇒ 0.8 (said so); present but outside the open (0,1) ⇒ refuse (logit is ±inf).
         const auto pl = rc::manifest::load_class_prior(manifest_path);
         if (pl)

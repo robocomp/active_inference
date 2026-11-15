@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+#include "../../common/concept_manifest/shape_parts.h"
 
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
@@ -91,6 +93,7 @@ struct CountableConfig
     float class_alt_std_m           = 1.0f;    // "other furniture" size std (m) per variable, about the class mean
     float birth_height_noise_m      = 0.05f;   // birth height noise σ_z (m)
     float birth_height_outlier_frac = 0.05f;   // birth mask-bleed outlier fraction ε
+    std::vector<rc::manifest::ShapePart> shape_parts;   // [[shape.part]] of the class manifest (empty = whole box)
     float ai2_headboard_t_m       = 0.10f;   // headboard panel thickness (m)
     float ai2_wall_flush_prior    = 0.0f;    // class P(stands against a wall) — furniture prior
     float ai2_room_axis_std_deg   = 0.0f;    // room-axis alignment std (deg); <=0 = off
