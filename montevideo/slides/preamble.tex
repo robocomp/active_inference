@@ -32,7 +32,8 @@
 % \wip: marks a post-thesis result.
 \newcommand{\wip}{{\scriptsize\color{white}\colorbox{accent}{\,work in progress\,}}}
 % \lesson{...}: the one sentence a frame exists to say.
-\newcommand{\lesson}[1]{\begin{alertblock}{}\centering #1\end{alertblock}}
+% one full-width band, no empty title bar above it
+\newcommand{\lesson}[1]{\par\begin{beamercolorbox}[wd=\linewidth, sep=0.45em, center]{block body alerted}#1\end{beamercolorbox}}
 % a measurement story
 \newenvironment{measured}[1]{\begin{exampleblock}{Measured: #1}}{\end{exampleblock}}
 

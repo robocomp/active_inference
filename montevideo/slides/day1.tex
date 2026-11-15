@@ -877,11 +877,11 @@
 \begin{frame}[plain]
   \centering\vfill
   {\fontsize{60}{60}\selectfont\bfseries\color{accent} BREAK}\\[1.5em]
-  {\large\color{muted} after the break: inference behind a sensory boundary}
+  {\large\color{muted} after the break: \textbf{Active Inference} begins}
   \vfill
 \end{frame}
 
-\section{Inference behind a sensory boundary}
+\section{Active Inference begins: a robot behind its senses}
 % =================================================================================================
 
 % The idea in 46 s (Spanish captions): click once in pympress to start; it loops.
@@ -891,247 +891,357 @@
   \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{The agent never sees the state}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \centering
-      \begin{tikzpicture}[node distance=1.6cm, every node/.style={font=\small}]
-        \node[draw, circle, minimum size=1.2cm, fill=muted!15] (s) {$s$};
-        \node[draw, circle, minimum size=1.2cm, right=2.2cm of s, fill=cool!15] (o) {$o$};
-        \draw[-{Stealth}, thick] (s) to[bend left=25] node[above] {$p(o\given s)$} (o);
-        \draw[-{Stealth}, thick, accent, dashed] (o) to[bend left=25] node[below] {$p(s\given o)$?} (s);
-        \node[below=0.4cm of s, align=center, font=\scriptsize] {world (hidden)};
-        \node[below=0.4cm of o, align=center, font=\scriptsize] {sensor buffer};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      The \textbf{generative model}:
-      \[ p(s,o) = p(o\given s)\,p(s) \]
-      \begin{itemize}\small
-        \item $p(o\given s)$ is the agent's theory of its own sensor: which LiDAR returns a robot at
-              this pose, in this room, would produce.
-        \item $p(s)$ is what it brought with it: plausible room shapes, typical table sizes.
-      \end{itemize}
-      Inference runs the arrow backwards:
-      \[ p(s\given o) = \frac{p(o\given s)\,p(s)}{p(o)} \]
-    \end{column}
-  \end{columns}
-  \src{active\_inference.tex l.181--212}
+\begin{frame}{Active Inference: perceive and act to stay unsurprised}
+  \centering
+  {\Large A creature keeps its senses where it expects them,\\[0.2em]
+   by minimising \alert{one quantity}: free energy.}
+
+  \vspace{1.6em}
+  \begin{tikzpicture}[lev/.style={draw, thick, rounded corners, minimum width=4.6cm, minimum height=1.6cm, align=center, font=\normalsize}]
+    \node[draw=accent, very thick, fill=accent!10, circle, minimum size=1.6cm, font=\Large] (F) at (0,0) {$F$};
+    \node[lev, draw=accent, fill=accent!8] (p) at (-4.4,0) {\textbf{perception}\\change the belief\\to fit the senses};
+    \node[lev, draw=black!60, fill=black!8] (a) at (4.4,0) {\textbf{action}\\change the senses\\to fit the belief};
+    \draw[-{Stealth[length=3mm]}, very thick, accent] (p) -- (F);
+    \draw[-{Stealth[length=3mm]}, very thick, black!60] (a) -- (F);
+  \end{tikzpicture}
+
+  \vfill
+  {\footnotesize\color{muted}
+   Friston, Kilner, Harrison, A free energy principle for the brain, \emph{J.\ Physiol.\ Paris}, 2006.\\
+   Friston et al., Action and behavior: a free-energy formulation, \emph{Biol.\ Cybern.}, 2010.}
+  \vspace{0.7em}
+  \lesson{This afternoon: what $F$ is, and why a robot can compute it when it cannot compute Bayes.}
 \end{frame}
 
-\begin{frame}{Where exact inference dies}
-  \[ p(o) = \int p(o\given s)\,p(s)\,\mathrm{d}s \]
-  \begin{itemize}
-    \item The probability of \emph{this scan} under \emph{every} room and furniture configuration
-          the robot considers possible, each weighted by how likely it is.
-    \item No closed form and no feasible quadrature. This is not a quirk of one sensor: it is the
-          generic situation.
-    \item Every practical method from here on is a way of \alert{not computing it}.
-  \end{itemize}
-  \vspace{0.8em}
-  \begin{block}{A word about ``state''}
-    $s$ is a latent variable of the \emph{agent's model}, not the physical truth, which is never
-    accessible. That distinction is what gives the question ``is this belief wrong?'' its meaning.
-  \end{block}
-  \src{active\_inference.tex l.200--220}
+\begin{frame}{The robot never sees the state}
+  \centering
+  \begin{tikzpicture}[x=1.2cm, y=0.82cm, v/.style={draw, circle, minimum size=1.5cm, font=\Large},
+      vs/.style={v, draw=cool!80!black, fill=cool!15}, vo/.style={v, draw=good!70!black, fill=good!15},
+      side/.style={font=\normalsize, muted}]
+    \fill[cool!8, rounded corners=8pt] (-4.85,-2.3) rectangle (4.95,2.55);
+    \node[font=\small\bfseries, text=cool!70!black, anchor=north west] at (-4.75,2.45) {the world};
+    \fill[accent!9, draw=accent!35, rounded corners=8pt] (-0.8,-2.2) rectangle (4.8,1.55);
+    \node[font=\small\bfseries, text=accent!80!black, anchor=south east] at (4.7,-2.1) {the robot};
+    \fill[muted!20] (-0.7,-1.3) rectangle (0.7,1.1);
+    \node[side] at (0,-1.95) {senses};
+    \node[vs] (s) at (-3.4,0) {$s$};
+    \node[vo] (o) at (0,0) {$o$};
+    \node[draw=accent, thick, rounded corners, fill=accent!10, minimum width=2.4cm, minimum height=1.4cm, align=center] (q) at (3.4,0) {belief $q(s)$\\$\approx p(s\given o)$};
+    \draw[-{Stealth[length=3mm]}, very thick, good!70!black] (s) -- node[below, font=\small, align=center] {sensor model\\$p(o\given s)$} (o);
+    \draw[-{Stealth[length=3mm]}, very thick, accent, densely dashed] (o) -- node[below, font=\small, align=center] {inference} (q);
+    \draw[-{Stealth[length=3mm]}, thick, muted!60, dashed] (s.north) to[out=50, in=130] node[pos=0.5, text=accent, font=\Large] {$\boldsymbol\times$} (q.north);
+    \node[font=\small, muted] at (0,3.55) {no direct line from the world to the robot};
+    \node[font=\small, text=cool!80!black] at (-3.4,1.2) {hidden};
+    \node[font=\small, text=cool!80!black] at (-3.4,-1.25) {prior $p(s)$};
+    \draw[decorate, decoration={brace, mirror, amplitude=6pt}, thick, black!60] (-4.3,-2.45) -- (0.8,-2.45)
+      node[midway, below=7pt, font=\small, align=center] {the model $p(s,o) = \textcolor{cool!80!black}{p(s)}\,\textcolor{good!70!black}{p(o\given s)}$\\{\itshape\color{black!70} we write it}};
+    \node[font=\small, align=center] at (3.4,-3.1) {the belief\\{\itshape\color{black!70} the robot computes it}};
+  \end{tikzpicture}
+
+  \vfill
+  \lesson{We want the posterior $p(s\given o)$; the robot holds a belief $q(s)$ as close to it as it can.}
 \end{frame}
 
 % =================================================================================================
 \section{Variational free energy}
 % =================================================================================================
 
-\begin{frame}{Do not compute the posterior; approximate it}
-  Choose a tractable family, and a member $q(s)$ of it (the \textbf{belief}). Move it towards
-  the true posterior, measuring closeness by
-  \[ \KL{q(s)}{p(s\given o)} = \int q(s) \ln\frac{q(s)}{p(s\given o)}\,\mathrm{d}s \;\ge 0 . \]
-  \pause
-  \alert{Problem:} it contains $p(s\given o)$, the very thing we cannot have.
+\begin{frame}{Why we cannot apply exact Bayes, $p(s\given o) = p(o\given s)\,p(s)\,/\,p(o)$}
+  \begin{center}\large $\displaystyle \textcolor{muted}{p(o)} = \sum_{\text{every } s} \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$
+  \quad{\normalsize one product per grid point, then add them all}\end{center}
+  \centering
+  \begin{tikzpicture}[hd/.style={font=\small\bfseries, align=center},
+      cnt/.style={font=\normalsize, text=prob!90!black}, tm/.style={font=\large\bfseries}]
+    % panel 1: one number -> a line of points
+    \foreach \i in {0,...,14} \fill[cool!70] (-4.6+\i*0.12,0) circle (1.3pt);
+    \node[hd] at (-3.75,1.3) {one wall distance\\(1 number)};
+    \node[font=\scriptsize, muted] at (-4.6,-0.3) {0\,m}; \node[font=\scriptsize, muted] at (-2.92,-0.3) {4\,m};
+    \node[font=\scriptsize, muted] at (-3.75,0.3) {every 2\,mm};
+    % panel 2: three numbers -> a cube of points
+    \begin{scope}[shift={(-0.55,-0.55)}]
+      \foreach \x in {0,...,5} \foreach \y in {0,...,5} \foreach \z in {0,...,5}
+        \fill[cool!70, opacity=0.55] (\x*0.2+\z*0.1, \y*0.2+\z*0.08) circle (1.1pt);
+    \end{scope}
+    \node[hd] at (0,1.3) {robot pose $x,y,\theta$\\(3 numbers)};
+    % panel 3: eleven numbers -> cannot be drawn
+    \node[font=\Huge, text=cool!70] at (3.9,0) {?};
+    \node[hd] at (3.9,1.3) {pose + the room around it\\(3 + 4 walls $\times$ 2 = 11 numbers)};
+    \draw[-{Stealth[length=2.5mm]}, thick, prob!90!black] (-2.3,0) -- node[above, font=\small] {$\times 2001^{2}$} (-1.0,0);
+    \draw[-{Stealth[length=2.5mm]}, thick, prob!90!black] (1.0,0) -- node[above, font=\small] {$\times 2001^{8}$} (3.2,0);
+    % counts and times
+    \node[cnt] at (-3.75,-1.0) {2001 values}; \node[tm, text=good!70!black] at (-3.75,-1.6) {2 $\mu$s};
+    \node[cnt] at (0,-1.0) {$8\times10^{9}$ points};     \node[tm, text=prob!90!black] at (0,-1.6) {8 s};
+    \node[cnt] at (3.9,-1.0) {$2\times10^{36}$ points};  \node[tm, text=accent] at (3.9,-1.6) {$6\times10^{19}$ years};
+    \foreach \x/\g in {-3.75/{the wall, this morning}, 0/{localisation}, 3.9/{the CORTEX robot}}
+      \node[font=\footnotesize\itshape, muted] at (\x,-2.15) {\g};
+  \end{tikzpicture}
 
-  \pause
   \vspace{0.5em}
-  Substitute Bayes' rule and separate out the part that does not depend on $q$:
-  \[
-    \KL{q}{p(s\given o)} = \underbrace{\int q(s)\ln\frac{q(s)}{p(o,s)}\,\mathrm{d}s}_{F[q,o]} \;+\; \ln p(o)
-  \]
-  $F$ needs only the belief and the joint $p(o\given s)p(s)$ the agent already wrote down.
-  \src{active\_inference.tex l.222--250}
+  {\footnotesize\color{muted} 2001 values for every number, $10^9$ products per second}\\[0.3em]
+  {\small The universe is $1.4\times10^{10}$ years old; the robot needs a new answer every 0.1\,s.}
+  \vfill
+  \lesson{Every method from here on is a way of \alert{not} computing $p(o)$.}
 \end{frame}
 
-\begin{frame}{The identity the framework rests on}
-  \[ \boxed{\; F[q,o] = \KL{q(s)}{p(s\given o)} - \ln p(o) \;} \]
-  \begin{columns}[c]
-    \begin{column}{0.46\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1cm, y=1cm, lab/.style={font=\scriptsize}]
-        \foreach \x/\k/\t in {0/1.5/start, 1.5/0.7/iterating, 3/0.08/converged} {
-          \fill[muted!30, draw=white, very thick] (\x,0) rectangle (\x+1,1.5);
-          \fill[accent!40, draw=white, very thick] (\x,1.5) rectangle (\x+1,1.5+\k);
-          \node[lab, below] at (\x+0.5,0) {\t};
-        }
-        \draw[densely dashed] (-0.2,1.5) -- (4.2,1.5);
-        \node[lab] at (0.5,0.75) {$-\ln p(o)$};
-        \node[lab] at (0.5,2.25) {$\mathrm{KL}$};
-        \node[lab, above] at (0.5,3.0) {$F$};
-        \node[lab, text=muted] at (2,-0.75) {dashed: no belief can move it};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \small
-      \textbf{Same minimiser.} Only the $\mathrm{KL}$ slab can shrink, so lowering the computable $F$
-      lowers the uncomputable divergence.\\[0.5em]
-      \textbf{A bound on surprise.} $\mathrm{KL}\ge 0$, so the bar never falls below the dashed line:
-      $F \ge -\ln p(o)$.\\[0.5em]
-      If you know machine learning: $-F$ is the \textbf{ELBO}.
-    \end{column}
-  \end{columns}
-  \src{active\_inference.tex l.252--268}
+\begin{frame}{Replace the posterior by the closest simple belief}
+  \centering
+  \includegraphics[width=0.84\textwidth]{d1_approx.pdf}
+
+  {\small $q(s)$: a Gaussian, just a mean and a width. Slide it until it is \alert{closest} to the posterior.}\\[0.25em]
+  {\small Closeness $= \KL{q}{p(s\given o)} \ge 0$ \;--- but it needs $\textcolor{accent}{p(s\given o)}$, which we cannot compute.}
+  \vfill
+  \lesson{Find the $q$ with the smallest KL to the posterior.}
+\end{frame}
+
+\begin{frame}{Kullback--Leibler (KL) divergence: a metric between distributions}
+  \begin{center}\large $\displaystyle \KL{q}{p} = \int \textcolor{cool!80!black}{q}\,\ln\frac{\textcolor{cool!80!black}{q}}{\textcolor{accent}{p}}\,\mathrm{d}s = \int \textcolor{cool!80!black}{q(s)}\,\big[\textcolor{cool!80!black}{\ln q(s)} - \textcolor{accent}{\ln p(s)}\big]\,\mathrm{d}s$
+  \\[0.1em]{\normalsize the sum of the \textcolor{prob!90!black}{differences} $\ln q - \ln p$, each weighted by $q$}\end{center}
+  \centering
+  \includegraphics[width=0.8\textwidth]{d1_kl_explain.pdf}
+
+  {\small $\ge 0$, and $= 0$ only when $q = p$.}\\[0.2em]
+  {\footnotesize\color{muted} Not symmetric: $\KL{q}{p} \neq \KL{p}{q}$ in general.}
+  \vfill
+  \lesson{KL is zero for a perfect match and grows as the beliefs differ, in place or in width.}
+\end{frame}
+
+\begin{frame}{Split the KL: the part we can compute is $F$}
+  \centering
+  \vspace{1.2em}
+  {\normalsize Closeness $= \KL{q}{p(s\given o)} \ge 0$ \;--- but it needs $\textcolor{accent}{p(s\given o)}$, which we cannot compute.}
+
+  \vspace{1.8em}
+  {\Large $\KL{q}{p(s\given o)} \;=\; \underbrace{\int q(s)\ln\frac{q(s)}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s}_{\textstyle F[q,o]}
+  \;+\; \underbrace{\ln \textcolor{muted}{p(o)}}_{\textstyle\text{constant}}$}
+
+  \vspace{1.2em}
+  \begin{minipage}[t]{0.45\textwidth}\centering
+   $F$: needs only $q$ and the model\\ $\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$, which we wrote
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.45\textwidth}\centering
+   $\ln p(o)$: the same for every $q$,\\ so it never changes which $q$ wins
+  \end{minipage}
+  \vfill
+  \lesson{Lower $F$ and the KL drops by the same amount: the closest $q$, without $p(o)$.}
+\end{frame}
+
+\begin{frame}{$F$ = surprise + how wrong the belief is}
+  \begin{center}\large $\boxed{\; F[q,o] = \textcolor{accent}{\KL{q(s)}{p(s\given o)}} \;+\; \textcolor{muted!80!black}{\big(-\ln p(o)\big)} \;}$\end{center}
+  \centering
+  \begin{tikzpicture}[x=1.6cm, y=0.88cm, lab/.style={font=\small}]
+    \foreach \x/\k/\t in {0/1.5/start, 1.6/0.7/iterating, 3.2/0.08/converged} {
+      \fill[muted!30, draw=white, very thick] (\x,0) rectangle (\x+1,1.5);
+      \fill[accent!40, draw=white, very thick] (\x,1.5) rectangle (\x+1,1.5+\k);
+      \node[lab, below] at (\x+0.5,0) {\t};
+      \node[lab, above] at (\x+0.5,1.5+\k) {$F$};
+    }
+    \draw[densely dashed, thick] (-0.2,1.5) -- (4.4,1.5);
+    \draw[-{Stealth[length=3mm]}, very thick, accent] (1.0,3.45) -- node[above, font=\small] {minimise $F$} (3.6,3.45);
+    \node[lab, text=muted!80!black, align=center] at (0.5,0.75) {surprise\\$-\ln p(o)$};
+    \node[lab, text=accent] at (0.5,2.25) {KL};
+    \node[lab, anchor=west, align=left, text=accent] at (4.55,2.0) {how wrong the belief is:\\the only part that moves};
+    \node[lab, anchor=west, align=left, text=muted!80!black] at (4.55,0.75) {fixed by the reading:\\no belief changes it};
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\small KL $\ge 0$, so $F \ge$ surprise: \;$F$ is an upper bound on the surprise.}\\[0.2em]
+  {\footnotesize\color{muted} In machine learning, $-F$ is the ELBO (evidence lower bound).}
+  \vfill
+  \lesson{Minimise $F$: the best belief, and a bound on how surprising the data were.}
 \end{frame}
 
 \begin{frame}{Complexity minus accuracy}
-  \[
-    F[q,o] = \underbrace{\KL{q(s)}{p(s)}}_{\text{complexity}}
-             \;-\; \underbrace{\E_q\!\left[\ln p(o\given s)\right]}_{\text{accuracy}}
-  \]
-  \begin{columns}[c]
-    \begin{column}{0.44\textwidth}
-      \centering
-      \includegraphics[width=\textwidth]{d1_complexity.pdf}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      \small
-      \textbf{Accuracy} alone would adopt any explanation that fits the current scan.\\[0.5em]
-      \textbf{Complexity} charges for the distance travelled from the prior: Occam's razor,
-      written as a divergence.\\[0.5em]
-      The belief settles where the two slopes cancel.\\[0.5em]
-      \footnotesize Both are measured in \textbf{nats}, the unit of $-\ln p$ (natural logarithm):
-      a difference of $k$ nats is odds of $e^k$ to 1. One nat $\approx$ 1.44 bits.
-    \end{column}
-  \end{columns}
-  \lesson{One trade, stated once, in nats, for every quantity the agent believes.}
-  \src{active\_inference.tex l.288--308}
-\end{frame}
-
-\begin{frame}{Worked example: the Kalman update is free-energy minimisation}
-  \small
-  Take the prior $s\sim\N(m,p)$, an observation $y\sim\N(s,r)$, and the belief $q=\N(\mu,\Sigma)$.
-  Every term is a Gaussian expectation:
-  \[
-    F(\mu,\Sigma) = \frac{(\mu-m)^2+\Sigma}{2p} + \frac{(y-\mu)^2+\Sigma}{2r} - \tfrac12\ln\Sigma + \text{const}
-  \]
-  \pause
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      $\partial F/\partial\mu = 0$:
-      \[ \mu = \frac{m/p + y/r}{1/p + 1/r} \]
-      the precision-weighted mean.
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      $\partial F/\partial\Sigma = 0$:
-      \[ \frac1\Sigma = \frac1p + \frac1r \]
-      precisions add.
-    \end{column}
-  \end{columns}
-  \vspace{0.5em}
-  \pause
-  The two halves come from different terms. The \emph{mean} comes from the prediction errors; the
-  \emph{variance} comes from the curvature of $F$ balanced against the entropy
-  $-\tfrac12\ln\Sigma$. Regularised least squares is the same trade with a flat prior.
-\end{frame}
-
-\begin{frame}{One quantity, differentiated twice}
+  \begin{center}\large
+    $F[q,o] = \underbrace{\textcolor{cool!80!black}{\KL{q(s)}{p(s)}}}_{\text{complexity: far from the prior}}
+             \;-\; \underbrace{\textcolor{good!70!black}{\E_q\!\left[\ln p(o\given s)\right]}}_{\text{accuracy: explains the reading}}$
+  \end{center}
   \centering
-  \begin{tikzpicture}[box/.style={draw, rounded corners=3pt, very thick, align=center, minimum height=0.8cm, font=\small},
-                      arr/.style={-{Stealth[length=2.5mm]}, very thick}]
-    \node[box, draw=cool, fill=cool!8, minimum width=3.1cm] (ag) at (0,0) {belief $q(s)$, mean $\mu$\\[-0.1em]$F[q,o]$};
-    \node[box, draw=muted, fill=muted!12, minimum width=2.6cm] (w) at (7.2,0) {the world\\[-0.1em](hidden)};
-    \draw[muted, densely dashed] (3.6,-0.75) -- (3.6,0.75) node[above, font=\scriptsize, text=muted] {sensory boundary};
-    \draw[arr, cool] ([yshift=0.2cm]w.west) -- node[above, font=\small, pos=0.25] {$o$} ([yshift=0.2cm]ag.east);
-    \draw[arr, good] ([yshift=-0.2cm]ag.east) -- node[below, font=\small, pos=0.25] {$a$} ([yshift=-0.2cm]w.west);
-  \end{tikzpicture}
-
-  \begin{columns}[T]
-    \begin{column}{0.46\textwidth}
-      \centering
-      \textbf{Perception}: fit the belief to the data
-      \[ \dot\mu = -\frac{\partial F}{\partial\mu} \]
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \centering
-      \textbf{Action}: fit the data to the belief
-      \[ \dot a = -\frac{\partial F}{\partial a}
-                = -\frac{\partial F}{\partial o}\,\frac{\partial o}{\partial a} \]
-    \end{column}
-  \end{columns}
-  \pause
-  \raggedright\small
-  $\partial o/\partial a$ is the causal model running forwards, and a scan already in the buffer
-  cannot be changed. So a decision scores the observations it \emph{would} bring:
-  \[
-    G(a) = \E_{q(o,s\given a)}\big[F\big] \;\approx\;
-    \underbrace{-\,I(s;o\given a)}_{\text{epistemic: what I would learn}}
-    \;\underbrace{-\,\E_{q(o\given a)}\ln p(o)}_{\text{pragmatic: what I want to see}}
-  \]
-  \src{active\_inference.tex l.335--427; derived in full later in the week}
+  \includegraphics[width=0.7\textwidth]{d1_complexity.pdf}
+  \vfill
+  {\footnotesize\color{muted} Units: nats ($-\ln p$). A difference of $k$ nats is odds of $e^k$ to 1.}
+  \lesson{The wall again: the belief settles at 2.52, where the two pulls balance.}
 \end{frame}
 
-\begin{frame}{A choice, marked as a choice}
-  \begin{itemize}
-    \item Closeness was measured with $\mathrm{KL}$. Nothing forced that: it is the $\alpha\to1$
-          member of the Rényi family, and the bound survives the substitution.
-    \item The order $\alpha$ controls the \emph{character} of the error: does the belief err
-          towards too broad, or towards too confident?
-    \item On this robot, that is not a statistical nicety. A covariance is \alert{spent}: on
-          deciding where to look next, and on how far a measurement may move a belief.
-  \end{itemize}
-  \vspace{0.5em}
-  The thesis keeps $\alpha\to1$ throughout. Making $\alpha$ itself a latent variable is open
-  future work.
-  \src{active\_inference.tex l.270--286; future\_work.tex l.22}
+% removed for now (user, 2026-11-15); bring back by deleting the \iffalse/\fi
+\iffalse
+\begin{frame}{Which KL? A choice, marked as a choice}
+  \centering
+  \includegraphics[width=0.95\textwidth]{d1_kl_choice.pdf}
+
+  \vspace{0.2em}
+  {\small Both are valid distances. We use $\KL{q}{p}$ all week: it errs towards \alert{too sure}.}
+  \vfill
+  \lesson{The robot spends its covariance on decisions: know which way it errs.}
 \end{frame}
+\fi
 
 % =================================================================================================
 \section{The Laplace approximation}
 % =================================================================================================
 
-\begin{frame}{Gaussian beliefs: the form everything later takes}
-  Take $q(s)=\N(\mu,\Sigma)$ and expand around the mode:
-  \[
-    F \approx -\ln p(o,\mu) + \tfrac12\operatorname{tr}(\Hess\Sigma) - \tfrac12\ln|\Sigma| - \tfrac n2\ln(2\pi e),
-    \qquad \Hess = -\nabla^2_s \ln p(o,s)\big|_{\mu}
-  \]
-  \begin{columns}[c]
-    \begin{column}{0.37\textwidth}
-      \centering
-      \includegraphics[width=\textwidth]{d1_laplace.pdf}
-    \end{column}
-    \begin{column}{0.59\textwidth}
-      \small
-      The \textbf{mean} moves to the bottom of the bowl: nonlinear least squares.\\[0.3em]
-      The \textbf{covariance} is pulled two ways, curvature against entropy;
-      $\partial F/\partial\Sigma=0$ balances them.\\[0.2em]
-      {\scriptsize dashed: the parabola Laplace sees; thin: the exact density.}
-    \end{column}
-  \end{columns}
-  \lesson{$\boxed{\;\Sigma = \Hess^{-1}\;}$\quad The uncertainty comes as a by-product of fitting, at no extra modelling cost.}
-  \src{active\_inference.tex l.310--333}
+\begin{frame}{Laplace: read a Gaussian belief off the bottom of the bowl}
+  \centering
+  {\small
+  \begin{tabular}{@{}r@{\;\;}l@{}}
+   \textbf{we write} & the model $p(o,s) = \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$: sensor datasheet + what we know of the world\\
+   \textbf{the robot computes} & the belief $\textcolor{accent}{q(s)}$ from the bowl $-\ln p(o,s)$ \;($-\ln$ of a Gaussian is a parabola)
+  \end{tabular}}
+  \vspace{0.2em}
+
+  \includegraphics[width=0.74\textwidth]{d1_laplace.pdf}
+
+  \begin{tikzpicture}[stp/.style={draw, thick, rounded corners, minimum height=0.9cm, align=center, font=\small}]
+    \node[stp, draw=accent, fill=accent!8] (a) at (0,0) {find the bottom\\mean $\mu$};
+    \node[stp, draw=accent, fill=accent!8] (b) at (4.2,0) {measure its curvature\\$\Hess$ at $\mu$};
+    \node[stp, draw=accent, fill=accent!8] (c) at (8.4,0) {belief width\\$\Sigma = \Hess^{-1}$};
+    \draw[-{Stealth[length=2.5mm]}, thick] (a) -- (b); \draw[-{Stealth[length=2.5mm]}, thick] (b) -- (c);
+  \end{tikzpicture}
+  \vfill
+  \lesson{Sharp bowl, sure belief: the precision \emph{is} the curvature.}
 \end{frame}
 
-\begin{frame}{Gauss--Newton, in one line}
-  For whitened residuals $r(s)$ with noise covariance $R$, and a Gaussian prior $\N(m,P)$:
-  \[
-    -\ln p(o,s) = \tfrac12 r^\top R^{-1} r + \tfrac12 (s-m)^\top P^{-1}(s-m) + \text{const},
+\begin{frame}{Why $\Sigma = \Hess^{-1}$: $F$ balances two pulls on the width}
+  \centering
+  {\small $q = \N(\mu,\sigma^2)$ on the bowl $-\ln p(o,s) \approx -\ln p(o,\mu) + \tfrac12\Hess\,(s-\mu)^2$; average it under $q$:}
+  \[\large
+    F(\mu,\sigma^2) \approx \underbrace{-\ln p(o,\mu)}_{\text{fit at the mean}}
+    \;+\; \underbrace{\textcolor{accent}{\tfrac12\,\Hess\,\sigma^2}}_{\substack{\text{a wide } q \text{ climbs}\\ \text{the walls: costs}}}
+    \;\underbrace{\textcolor{cool!80!black}{-\,\tfrac12\ln\sigma^2}}_{\substack{\text{a wide } q \text{ hedges}\\ \text{(entropy): pays}}}
+    \;+\;\text{const}
   \]
+  \pause
   \[
-    \Hess \approx J^\top R^{-1} J + P^{-1}, \qquad
-    \Delta s = -\Hess^{-1}\big(J^\top R^{-1} r + P^{-1}(s-m)\big).
+    \frac{\partial F}{\partial \sigma^2} = \textcolor{accent}{\tfrac12\Hess} \textcolor{cool!80!black}{\;-\;\frac{1}{2\sigma^2}} = 0
+    \quad\Longrightarrow\quad \boxed{\;\sigma^2 = \Hess^{-1}\;}
   \]
-  \begin{itemize}
-    \item Iterate to convergence. The final $\Hess^{-1}$ \emph{is} the belief's covariance.
-    \item In the lab, \texttt{laplace(residual, x0, sigma, prior=...)} does exactly this. It also
-          returns the Laplace free energy
-          $F \approx -\ln p(o,\mu) + \tfrac12\ln|\Hess| - \tfrac n2\ln 2\pi$,
-          which you will use to compare models.
-  \end{itemize}
+  {\small The mean term does not depend on $\sigma^2$: finding $\mu$ is just minimising $-\ln p(o,s)$ (least squares).}\\[0.3em]
+  {\footnotesize\color{muted} In $n$ dimensions: $F \approx -\ln p(o,\mu) + \tfrac12\operatorname{tr}(\Hess\Sigma) - \tfrac12\ln|\Sigma| + \text{const}$,
+   $\;\Hess = -\nabla^2_s \ln p(o,s)\big|_\mu$, $\;\Sigma = \Hess^{-1}$.}
+  \vfill
+  \lesson{The uncertainty comes free with the fit: no extra model, just the curvature.}
+\end{frame}
+
+% removed for now (user, 2026-11-15)
+\iffalse
+\begin{frame}{The Kalman update is free-energy minimisation}
+  \begin{center}
+  prior $s\sim\N(2,\, 0.5^2)$,\quad reading $o = 2.6$ with noise $0.2^2$,\quad belief $q = \N(\mu, \sigma^2)$
+  \end{center}
+  \[
+    F(\mu,\sigma^2) = \textcolor{cool!80!black}{\frac{(\mu-2)^2+\sigma^2}{2\cdot 0.5^2}}
+                    + \textcolor{good!70!black}{\frac{(2.6-\mu)^2+\sigma^2}{2\cdot 0.2^2}}
+                    - \tfrac12\ln\sigma^2 + \text{const}
+  \]
+  \pause
+  \begin{center}\small \textbf{precision} = 1 / variance: how much a source is trusted\end{center}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \centering
+      $\partial F/\partial\mu = 0$:
+      \[ \mu = \frac{\textcolor{cool!80!black}{4}\cdot 2 + \textcolor{good!70!black}{25}\cdot 2.6}{4 + 25} = 2.52 \]
+      each source weighted by its precision
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      $\partial F/\partial\sigma^2 = 0$:
+      \[ \frac1{\sigma^2} = \textcolor{cool!80!black}{4} + \textcolor{good!70!black}{25} = 29,\quad \sigma = 0.19 \]
+      precisions add
+    \end{column}
+  \end{columns}
+  \pause
+  \vfill
+  \lesson{Laplace is exact here: $\Hess = 4 + 25$, $\Sigma=\Hess^{-1}$, the same $2.52 \pm 0.19$ m as Bayes this morning.}
+\end{frame}
+\fi
+
+\begin{frame}{One quantity, differentiated twice}
+  \centering
+  \begin{tikzpicture}[arr/.style={-{Stealth[length=2.5mm]}, very thick}, side/.style={font=\small, muted}]
+    \fill[muted!20] (-0.5,-0.9) rectangle (0.5,0.9);
+    \node[side] at (-3.2,1.25) {robot}; \node[side] at (0,1.25) {senses}; \node[side] at (3.2,1.25) {world};
+    \node[draw=accent, thick, rounded corners, fill=accent!10, minimum width=2.4cm, minimum height=0.9cm, align=center] (q) at (-3.2,0) {belief $\mu$\\[-2pt]$F[q,o]$};
+    \node[draw=cool!80!black, thick, circle, fill=cool!15, minimum size=1cm] (w) at (3.2,0) {$s$};
+    \draw[arr, good!70!black] ([yshift=0.25cm]w.west) -- node[above, pos=0.5] {$o$} ([yshift=0.25cm]q.east);
+    \draw[arr, black!70] ([yshift=-0.25cm]q.east) -- node[below, pos=0.5] {$a$} ([yshift=-0.25cm]w.west);
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \textbf{Perception}: change the belief\\to fit the data
+      \[ \dot\mu = -\frac{\partial F}{\partial\mu} \]
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \centering
+      \textbf{Action}: change the data\\to fit the belief
+      \[ \dot a = -\frac{\partial F}{\partial o}\,\frac{\partial o}{\partial a} \]
+    \end{column}
+  \end{columns}
+  \pause
+  \vspace{0.2em}
+  \centering\small
+  A scan already taken cannot change, so a decision scores the scans it \emph{would} bring:
+  \[
+    G(a) \approx
+    \underbrace{-\,I(s;o\given a)}_{\text{what I would learn}}
+    \;\underbrace{-\,\E_{q(o\given a)}\ln p(o)}_{\text{what I want to see}}
+    \qquad\text{(Day 4)}
+  \]
+\end{frame}
+
+\begin{frame}{Laplace + the two derivatives: a robot that keeps its distance}
+  \begin{columns}[c]
+    \begin{column}{0.47\textwidth}
+      \small
+      Prior = where it expects to be: $s\sim\N(\textcolor{cool!80!black}{1.0},0.5^2)$\\
+      Sensor: $o = s + \text{noise}$, $\sigma = 0.2$\\[0.4em]
+      Laplace: $F \approx \tfrac12\,\textcolor{good!70!black}{25}\,\varepsilon_o^2 + \tfrac12\,\textcolor{cool!80!black}{4}\,\varepsilon_p^2$\\[0.2em]
+      \quad $\varepsilon_o = o-\mu$ \;(sensor error), \;$\varepsilon_p = \mu-1.0$\\
+      \quad {\footnotesize precision $= 1/\text{variance}$: $1/0.2^2 = \textcolor{good!70!black}{25}$, $1/0.5^2 = \textcolor{cool!80!black}{4}$}\\[0.5em]
+      \begin{tikzpicture}
+        \node[draw=accent, thick, rounded corners, fill=accent!6, align=left, font=\small, inner sep=6pt] {%
+          \textbf{every step}\\[0.2em]
+          read $o$\\
+          \textcolor{accent}{perception:} $\mu \mathrel{+}= \kappa_\mu\,(\textcolor{good!70!black}{25}\,\varepsilon_o - \textcolor{cool!80!black}{4}\,\varepsilon_p)$\\
+          \textcolor{black!70}{action:} \hspace{1.05em}$a \mathrel{-}= \kappa_a\,\textcolor{good!70!black}{25}\,\varepsilon_o\,\frac{\partial o}{\partial a}$\\
+          move with speed $a$ \quad{\footnotesize($\partial o/\partial a = \Delta t$)}};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d1_ai_loop.pdf}\\
+      {\footnotesize start 2.6\,m; $\kappa_\mu=0.04$, $\kappa_a=2$, 10 steps per second}
+    \end{column}
+  \end{columns}
+  \vfill
+  \lesson{The expectation is the goal: perception and action descend one $F$.}
+\end{frame}
+
+\begin{frame}{Gauss--Newton: jump to the bottom of a parabola, repeat}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d1_gauss_newton.pdf}\\
+      {\footnotesize range $o=2.0$ to a landmark 0.8\,m aside,\\ $h(s)=\sqrt{s^2+0.8^2}$, prior $\N(1.0, 0.5^2)$}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      \begin{tikzpicture}
+        \node[draw=accent, thick, rounded corners, fill=accent!6, align=left, font=\small, inner sep=6pt] {%
+          \textbf{repeat until $s$ stops}\\[0.2em]
+          error $\varepsilon_o = o - h(s)$,\; slope $J = h'(s)$\\
+          $\Hess = \textcolor{good!70!black}{25}\,J^2 + \textcolor{cool!80!black}{4}$ \hfill {\footnotesize curvature}\\
+          $s \mathrel{+}= \big(\textcolor{good!70!black}{25}\,J\,\varepsilon_o - \textcolor{cool!80!black}{4}\,(s-1.0)\big) / \Hess$\\[0.2em]
+          then $\mu = s$,\; $\Sigma = 1/\Hess$};
+      \end{tikzpicture}\\[0.6em]
+      {\footnotesize The perception step's pull, divided by the curvature: no step size to tune. Here 3 steps: $\mu = 1.70$, $\sigma = 0.20$.}
+    \end{column}
+  \end{columns}
+  \vspace{0.3em}
+  {\footnotesize\color{muted} Many numbers: $\Hess = J^\top R^{-1}J + P^{-1}$, $\Delta s = \Hess^{-1}\big(J^\top R^{-1}\varepsilon_o - P^{-1}(s-m)\big)$. Lab: \texttt{laplace(...)}.}
+  \vfill
+  \lesson{Each step fits a parabola and jumps to its bottom; the last parabola is the belief.}
 \end{frame}
 
 \begin{frame}{Example: one wall as a belief}
@@ -1172,7 +1282,6 @@
     \end{column}
   \end{columns}
   \lesson{A Laplace covariance is exactly as honest as the likelihood you wrote.}
-  \src{lab 1, exercises 3--4; the real localiser's incidence weight: room\_concept.tex l.232}
 \end{frame}
 
 \begin{frame}{Free energy compares models: the price of a parameter}
@@ -1215,7 +1324,6 @@
     \item ``A better model saves the agent work'' has to say \emph{which} work. The two readings
           come apart, and an endpoint chosen on the wrong reading measures nothing.
   \end{itemize}
-  \src{active\_inference.tex l.835--848}
 \end{frame}
 
 \begin{frame}{A factor inherits the errors of what it is estimated through}
@@ -1244,7 +1352,6 @@
     \end{column}
   \end{columns}
   \lesson{Carry an external reference. Never trust only what the agent computes about itself.}
-  \src{active\_inference.tex l.899--950}
 \end{frame}
 
 % =================================================================================================
