@@ -1,6 +1,6 @@
 // door_memory.h — the two door facts that outlive a run and are not the belief of any one door (2026-11-15): the next fresh
 // door name and the door-change hazard. door_concept writes them on its own agent node (door_next_index_att,
-// door_change_hazard_att); ltsm keeps the merge of everything it has seen on its memory graph's root, persists it with the
+// door_change_hazard_att); ltsm keeps the merge of everything it has seen on its memory node ltsm_door_memory, persists it with the
 // memory, and hands it back in ltsm_topology ("door_memory"), which door_concept adopts at start. Before this they lived in
 // door_concept's private etc/door_identities.csv. PURE: no graph, no Qt.
 #pragma once
