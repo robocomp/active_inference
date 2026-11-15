@@ -104,3 +104,10 @@ target_include_directories(lidar_golden_test PRIVATE ../src ../../common ../../c
 target_compile_options(lidar_golden_test PRIVATE -O2)
 target_link_libraries(lidar_golden_test PRIVATE Eigen3::Eigen)
 add_test(NAME lidar_golden_test COMMAND lidar_golden_test)
+
+# Per-ray membership weights on the ray factor + the weighted LiDAR selection (spec 2026-11-15 lidar-measures G2).
+add_executable(lidar_weights_test lidar_weights_test.cpp ../src/countable_belief.cpp)
+target_include_directories(lidar_weights_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(lidar_weights_test PRIVATE -O2)
+target_link_libraries(lidar_weights_test PRIVATE Eigen3::Eigen)
+add_test(NAME lidar_weights_test COMMAND lidar_weights_test)
