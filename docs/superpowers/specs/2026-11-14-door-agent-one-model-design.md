@@ -454,3 +454,36 @@ Owner questions:
 Known limits: the fitted open-door hit rates are dominated by their prior (zed .70 on 109 views, ricoh .47 on 206), so the
 open/shut distinction stays weak live; door twins in memory are counted whatever their evidence, so phantoms inflate the learned rates;
 the fitted rates come from one world (threerooms-piso).
+
+### 13.4 Final-review fix wave (2026-11-15, after the whole-branch review of 0ded97bb)
+
+One wave; every change is behind `Existence.OneModel`. Numbers are from `door_replay` on the three tapes with the flag on, wall seeding replayed, deterministic
+(no random element; the sampled look uses fixed streams); ground truth is threerooms-piso DOOR_0/1/2 through `door_truth_scan` + `label_door_views.py`'s match (0.75 m).
+
+| Finding | State |
+|---|---|
+| 1 per-wall charge | FIXED. A wall's members (doors, candidates, seeds) get their base rate from the EXACT marginal under the wall's configuration prior (no door 1; a first door odds P(first)/(1−P(first)); each further P(another)/(1−P(another))), computed jointly in the cycle by `room_door_posterior` from each member's own evidence (L with the base taken out). Labels on one hole are one slot (alternatives). No iteration, no previous-cycle p, order-free. A candidate's REFUSAL is judged under the live doors' charge only (`Candidate::base_open`): four evidence-free seeds on one wall hold p = 0.185 each (the wall's probability shared) and stay open questions. Two real doors born together no longer fall and re-birth. |
+| 2 legacy geometry | FIXED. A VL1–VL3 geometry aggregate is re-scored with the current model when parsed or first touched (mu1_sd 0 ⇒ framed, 0 nats; else present = mu0 + mu1_sd·s, clamped like the legacy branch). |
+| 3 flag boundary | FIXED in code: a flag-off parse of VL4/VL5 returns an empty ledger and the row keeps its L. The T13 arms still need separate memory (identity file + LTSM notes per arm). |
+| 4 double count of φ | FIXED. A sweep is scored with P(open) = the door's four-branch E[1−cos φ] BEFORE the sweep formed the posterior (the birth prior when no leaf belief), the quantity the camera reads. |
+| 5 live-door LiDAR duplicates | FIXED. The other live doors' spans hold their bins (Π(1−r), last-cycle r) for a live door as for a candidate; a duplicate label's LiDAR credit over 40 sweeps is half, not equal (3.25 + 3.25 nats before, 1.53 + 1.53 after). |
+| 6 leaf-born width | FIXED. The size term is paid on the measured leaf length with its own sd (√2·σ_band); aperture.w (fused) is geometry only. |
+| 7 decided clusters | FIXED. A cluster's hypotheses are the SUBSETS of its members at distinct holes (weights Π e^{L_i}; a hole holds one door), so two real doors that share a mask settle (EIG 0.526 → 0.017 nats at L = 5). |
+| 8 look keys | FIXED. A candidate's question identity carries on in the door it becomes; a cluster is keyed by its reference aperture; an entry follows its question (key, then nearest reference), keeping its tried ledger; an executing node is held until its claim ends. The pure parts are tested; the node hold itself is live-only (T13 a). |
+| 9 mask-cause currency | NEEDS_CONTEXT. Implemented behind `Existence.OneCurrency` (default off). The literal prescription (door's along term normalised, new door and clutter at the perfect-fit residual density, a hole's mass by the live door's along-wall sd) makes a young door (σ_across 0.1–0.3 m) lose its masks to a perfect-fit duplicate label: tape_dm 19 births / 17 removes (door_1 re-born ~16 times, from cycle 4) against 5 / 3 with the earlier door-favouring constant. Minors 14 and 15 are done (under the flag), and the exact skip of unreachable doors holds for both arms. |
+| 10 rates | Exact skip of a door whose cause is bounded below the reach floor; wall groups cached per outline; one table budget per cycle across the questions; the remembered-rooms read on room entry only. tape_dm replay, flag on with the 108 wall seeds: 41.3 ms/step mean, p99 113.9 (flag off: 20.3 mean, p99 78.5; before the wave 49 and 140, without seeds). e18: 39.0 / 98.7; e19: 21.9 / 62.6. The look is not in the replay's step. |
+| 11 ZED false alarm | FIXED. The compiled 0.02 ships (n = 0; the fit of n = 13 non-door views is unidentified: envelope mismatch); every other fitted row kept. `tools/fit_detector_envelopes.py` would rewrite the row: re-apply it after a refit. |
+| 12 leaf-born birth | FIXED. A leaf-born candidate is seeded at its own hypothesis aperture and leaf pose whatever mode the birth frame reads (births at 2.425 m instead of the blob's 2.000 m). |
+
+Minors: 13 (a cluster member carries its belief's L), 14, 15, 17 (explicit finite guard, logged; NaN-safe `responsibilities`), 19 (`test_detector_model`: the 1e-6
+tolerance of the first envelope was stale, a miss at q = 2.4e-4 costs 2.4e-4 nats), 21 (one per-cycle table budget), 23 (`from_chars` for `--clock-jitter-ms`) and the
+`registered()` deque are done; 20, 22, 24 stay open (24: door twins in memory are counted whatever their evidence).
+
+**Plan deviation (minor 18).** `bf::update_logodds` and `bf::k_best` are unused in production. A door's existence is the view ledger's log-likelihood ratio with hits
+weighted by the responsibility ρ (the exact Bernoulli update with clutter reduces to this additive form), not the spec §3.2 update itself; and a cluster is a connected
+component of the mask-competition graph with joint hypotheses over its members' subsets, not the k best joint assignments of masks to causes. The two functions stay in
+`bernoulli_filter.h` with their tests (`expected_information_gain` and `responsibilities` are the ones used).
+
+**Replay numbers (flag on, seeds).** tape_dm: 5 births (DOOR_1, DOOR_0, DOOR_2, DOOR_1 again, DOOR_0 again; all true), 3 removes (door_2 at 1024 at L −1.12 against the line −1.08, found again at 1553; door_3 at 1477; door_5 at 2057, the end of the tape); no re-birth within 10 cycles. Flag off: 4 births, one of them 0.94 m from DOOR_2, 3 removes.
+tape_e2e18: 2 births (DOOR_1, DOOR_0 as door_22 at 654), 2 removes at 778, the room switch; door_22: L +0.04 → +3.71 at 777, never below −1.08, φ 0.90 (sd 0.71) → 0.17 → 1.57 rad. tape_e2e19: 4 births (DOOR_1, DOOR_0, DOOR_0, DOOR_1), 3 removes (737 room switch; door_21 at 8759).
+Not replayed: the outline doorways (`room_doorways` is a graph node, not on the tape) and the restore of notes (graph attributes, not on the tape).
