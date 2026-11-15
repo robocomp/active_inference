@@ -561,6 +561,25 @@ int main()
         CHECK(not claims_mission("Your name is Pablo."));
         CHECK(not claims_mission("I see a white table with a green bottle on it."));
         CHECK(not claims_mission("The mission \"cross door_22\" failed: the door is shut."));   // a report, not a claim
+        // chat_e2e21 (2026-11-15): two claims with no call that the English-only list let through, both copied later
+        CHECK(claims_mission("He planificado la misión para volver a la habitación 3, explorarla y detenerme en cuanto "
+                             "vea una silla. ¿Quieres que la empiece?"));
+        CHECK(claims_mission("Sent to the controller: cross door_21 to room_1, and stop as soon as a chair is seen"));
+        CHECK(claims_mission("He enviado la misión al controlador."));
+        CHECK(claims_mission("Voy a cruzar la puerta door_21 ahora."));
+        CHECK(claims_mission("Estoy cruzando door_16."));
+        CHECK(claims_mission("Me dirijo a la habitación 2."));
+        CHECK(not claims_mission("Para ir a la habitación 2, debo cruzar la puerta door_16. ¿Quieres que planifique esa misión?"));
+        CHECK(not claims_mission("He visto una silla (chair_55) y es de color amarillo."));
+        CHECK(not claims_mission("He llegado a la habitación 2."));   // a mission's closing line after a wake, a fact
+        CHECK(not claims_mission("No he percibido ninguna silla en la habitación actual."));
+
+        // What the history keeps of a reply: the words when they are true, else a plain note the model cannot copy as a
+        // template for its next claim (chat_e2e21: "He planificado…" copied once, then "Sent to the controller: …").
+        CHECK(history_reply("door_21 is 4.2 m away.", MissionClaim::Fine) == "door_21 is 4.2 m away.");
+        CHECK(history_reply("He planificado la misión.", MissionClaim::Repair) == kUnbackedClaimNote);
+        CHECK(history_reply("Sent to the controller: cross door_21", MissionClaim::Correct) == kUnbackedClaimNote);
+        CHECK(not claims_mission(kUnbackedClaimNote));   // the note itself is never taken for a claim
 
         using MC = MissionClaim;
         const std::string lie = "It will start when you say yes.";

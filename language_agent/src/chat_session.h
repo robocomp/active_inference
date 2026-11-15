@@ -216,9 +216,10 @@ private:
     [[nodiscard]] QString planner_state() const;   ///< state_message() + the `ways from here` line (planner only)
     /// After a tool round of the model: re-ask to fix a failed draw, or one follow-up when it said nothing / saw a picture.
     void after_tool_round(bool had_words, bool image);
-    /// The words just shown claim a mission (planned / starts on yes / started) that has no card and sent nothing:
-    /// ask the model once more, then say so plainly (mission_plan.h check_mission_claim).
-    void check_claimed_mission(const QString& content);
+    /// The words just shown claim a mission or action (planned / starts on yes / started / sent) that has no card and
+    /// sent nothing (verdict from mission_plan.h check_mission_claim, not Fine): ask the model once more (Repair), then
+    /// say so plainly (Correct). The history already holds kUnbackedClaimNote in place of the words.
+    void handle_claimed_mission(const QString& content, MissionClaim verdict);
     [[nodiscard]] bool name_exists(std::string_view name) const;   ///< a node of the live graph or a remembered passage
     /// An object ltom remembers and the live graph does NOT have now: its last pose and the steps that bring it into view.
     [[nodiscard]] std::optional<rc::chat::RememberedPlace> remembered_place(std::string_view name) const;

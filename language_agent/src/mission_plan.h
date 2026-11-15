@@ -527,7 +527,15 @@ struct IdleTurn
         "i will approach", "i'll approach", "i am approaching", "i'm approaching", "i am now approaching",
         "i will go ", "i'll go ", "i am going to", "i'm going to", "i am now going", "i am heading", "i'm heading",
         "i will cross", "i'll cross", "i am crossing", "i'm crossing", "i will move", "i'll move", "i am moving",
-        "i'm moving", "i will turn", "i'll turn", "i am turning", "i'm turning", "i am currently turning"};
+        "i'm moving", "i will turn", "i'll turn", "i am turning", "i'm turning", "i am currently turning",
+        // the fast path's own reply to a yes, copied by the model with nothing sent (chat_e2e21)
+        "sent to the controller", "i have sent", "i've sent",
+        // Spanish (chat_e2e21: "He planificado la misión … ¿Quieres que la empiece?" with no call). Questions such as
+        // "¿quieres que planifique…?" and facts such as "he llegado" / "he visto" are not claims and are not listed.
+        "he planificado", "he preparado la misi", "he iniciado", "he empezado", "he comenzado", "he enviado",
+        "enviado al controlador", "voy a planificar", "estoy planificando", "voy a cruzar", "estoy cruzando",
+        "voy a ir ", "voy hacia", "me dirijo", "estoy yendo", "voy a acercarme", "me estoy acercando", "me acerco",
+        "voy a girar", "estoy girando", "voy a moverme", "me estoy moviendo"};
     return std::ranges::any_of(kClaims, [&](std::string_view c) { return low.find(c) != std::string::npos; });
 }
 
@@ -541,6 +549,18 @@ enum class MissionClaim { Fine, Repair, Correct };
 {
     if (card_shown or sent_this_turn or not claims_mission(reply)) return MissionClaim::Fine;
     return repaired ? MissionClaim::Correct : MissionClaim::Repair;
+}
+
+/// What the history keeps in place of a reply that claimed an action no tool backs. The person already saw the words;
+/// the model must not: kept, they become the template for its next claim (chat_e2e21 copied "He planificado…" and then
+/// the fast path's "Sent to the controller: …", each time with no call).
+inline constexpr std::string_view kUnbackedClaimNote =
+    "(That reply called no tool: nothing was planned or sent, and the robot did not move.)";
+
+/// The words of a reply as the history keeps them: unchanged when they are true (Fine), the note otherwise.
+[[nodiscard]] inline std::string history_reply(std::string_view reply, MissionClaim verdict)
+{
+    return verdict == MissionClaim::Fine ? std::string(reply) : std::string(kUnbackedClaimNote);
 }
 
 /// A wake goes to the model as a user-role message that says it is NOT the person speaking.

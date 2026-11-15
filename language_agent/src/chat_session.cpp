@@ -1085,8 +1085,15 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
                 // them in the history, 5/5 without).
                 if (not content.isEmpty())
                 {
-                    if (not turn_.followup) push_history({{"role", "assistant"}, {"content", content}});
-                    if (not wake_turn_) check_claimed_mission(content);
+                    // A claim no tool backs is kept as a plain note, never as the words (history_reply): kept, the
+                    // words are what the model copies for its next claim (chat_e2e21).
+                    const MissionClaim verdict =
+                        wake_turn_ ? MissionClaim::Fine
+                                   : check_mission_claim(content.toStdString(), pending_mission_.has_value() or planner_.has_value(),
+                                                         sent_this_turn_, claim_repaired_);
+                    if (not turn_.followup)
+                        push_history({{"role", "assistant"}, {"content", q(history_reply(content.toStdString(), verdict))}});
+                    if (verdict != MissionClaim::Fine) handle_claimed_mission(content, verdict);
                 }
                 // Tokens came but neither words nor a call: ollama dropped a tool call it could not parse (a draw script
                 // with 'Today\'s' in it is not JSON, eval 2026-10-19). Ask once more; then say so instead of silence.
@@ -1161,11 +1168,8 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
     window_->set_busy(true);
 }
 
-void ChatSession::check_claimed_mission(const QString& content)
+void ChatSession::handle_claimed_mission(const QString& content, MissionClaim verdict)
 {
-    const auto verdict = check_mission_claim(content.toStdString(), pending_mission_.has_value() or planner_.has_value(),
-                                             sent_this_turn_, claim_repaired_);
-    if (verdict == MissionClaim::Fine) return;
     if (verdict == MissionClaim::Repair)
     {
         // Once: the model is told what is true and gets the tools back (chat_e2e13: "I have started the mission to cross
