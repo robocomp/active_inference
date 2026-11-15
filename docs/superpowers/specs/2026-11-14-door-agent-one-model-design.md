@@ -487,3 +487,27 @@ component of the mask-competition graph with joint hypotheses over its members' 
 **Replay numbers (flag on, seeds).** tape_dm: 5 births (DOOR_1, DOOR_0, DOOR_2, DOOR_1 again, DOOR_0 again; all true), 3 removes (door_2 at 1024 at L −1.12 against the line −1.08, found again at 1553; door_3 at 1477; door_5 at 2057, the end of the tape); no re-birth within 10 cycles. Flag off: 4 births, one of them 0.94 m from DOOR_2, 3 removes.
 tape_e2e18: 2 births (DOOR_1, DOOR_0 as door_22 at 654), 2 removes at 778, the room switch; door_22: L +0.04 → +3.71 at 777, never below −1.08, φ 0.90 (sd 0.71) → 0.17 → 1.57 rad. tape_e2e19: 4 births (DOOR_1, DOOR_0, DOOR_0, DOOR_1), 3 removes (737 room switch; door_21 at 8759).
 Not replayed: the outline doorways (`room_doorways` is a graph node, not on the tape) and the restore of notes (graph attributes, not on the tape).
+
+### 13.5 Item 9 closed (2026-11-15, owner: "do the R_eff fix on replays now")
+
+The one-currency arm churned because a new door and clutter were priced at the plug-in (perfect-fit) residual density
+1/sqrt(2πR), a profile likelihood, while a live door paid its own across-wall uncertainty. Now (a05f57ca) both are priced at
+their marginal over the unknown across-wall position, with the same across term a live door uses evaluated at
+R + σ²_across,birth (DoorFit::birth_across_var: recess_prior_std² plus the pose chain's across share, the variance a fresh
+belief starts with). The hole-share Φ factor is gone under the flag. Existence.OneCurrency now defaults to true.
+
+| tape (flag on, wall seeds) | OneCurrency false | old true | true (marginal) |
+|---|---|---|---|
+| tape_dm births / removes / churn | 5 / 3 / 0 | 19 / 17 / 14 | 5 / 3 / 0 |
+| tape_e2e18 | 2 / 2 / 0 | 2 / 2 / 0 | 2 / 2 / 0 (door_22 min L +0.04) |
+| tape_e2e19 | 4 / 3 / 0 | 4 / 3 / 0 | 4 / 3 / 0 |
+
+All births are true doors. Flag off is bit-identical on all three tapes.
+
+Open items:
+- The new-door and clutter across term is evaluated at δ_across = 0. The wall-band term in log_birth carries the off-wall
+  residual. The reviewer estimates a residual edge of about 0.26 nat for the new door, because σ_b enters both.
+- Clutter shares the new door's near-wall across density, with no wall-band prior of its own. An area-uniform clutter
+  density would favour every door cause.
+- The core test of a second door 1.0 m along from a σ_along 0.6 m door is a regression guard only, because its scene does not
+  reach that σ. The live series must watch for it.
