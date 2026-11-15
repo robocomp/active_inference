@@ -1,0 +1,258 @@
+# language_agent utterance test set (2026-11-14) — Step 6 of the command-taxonomy task.
+# One or more utterances per coverage-matrix row (docs/command_taxonomy.md §3), Spanish and English.
+# expect: the tool call(s) the CHAT model should make (plan_mission requests are checked by their mission content).
+# needs: a proposal from command_taxonomy.md §5 the case depends on; cases without `needs` are valid regression cases today.
+# STATE assumed: robot in room_1; door_1 -> room_2 (remembered), door_22 -> room_3; chair_34 (magenta) and table_6 in
+# room_1; the person owns chair_34; room_3 is the kitchen (once P7 exists).
+
+cases:
+  # ── question · relational / existential ──
+  - id: q-rel-1
+    lang: es
+    say: "¿Dónde está mi silla?"
+    row: question/relational
+    expect: [{tool: where_is, args: {name: "my chair"}}]
+  - id: q-rel-2
+    lang: en
+    say: "Which rooms do you remember?"
+    row: question/relational
+    expect: [{tool: known_rooms}]
+  - id: q-ex-1
+    lang: es
+    say: "¿Hay alguna mesa en esta habitación?"
+    row: question/existential
+    expect: [{tool: find_objects, args: {subtype: table}}]
+  - id: q-ex-2
+    lang: en
+    say: "Is there a yellow chair here?"
+    row: question/existential
+    expect: [{tool: find_objects, args: {subtype: "yellow chair"}}]
+  - id: q-past-1
+    lang: en
+    say: "Where were you ten minutes ago?"
+    row: question/relational (past)
+    expect: [{tool: where_was, args: {ago_min: 10}}]
+  - id: q-past-2
+    lang: es
+    say: "¿Qué hiciste esta mañana después de las nueve?"
+    row: question/relational (past)
+    expect: [{tool: episodes, args: {since: "09:00"}}]
+
+  # ── question · perceptual / counterfactual / prospective ──
+  - id: q-perc-1
+    lang: es
+    say: "¿Puedes ver la nevera desde aquí?"
+    row: question/perceptual (ability form = a real question)
+    expect: [{tool: can_see, args: {concept: fridge}}]
+  - id: q-perc-2
+    lang: en
+    say: "What do you see right now?"
+    row: question/perceptual
+    expect: [{tool: look, args: {camera: front}}]
+  - id: q-cf-1
+    lang: es
+    say: "¿Cabrías por la puerta 1 si estuviera medio abierta?"
+    row: question/counterfactual (subjunctive)
+    expect: [{tool: imagine, args: {question: fit, door: door_1, opening: half}}]
+  - id: q-cf-2
+    lang: en
+    say: "What if you went to room 3 through door 22 instead?"
+    row: question/counterfactual
+    expect: [{tool: imagine, args: {question: succeed, to: room_3, via: door_22}}]
+  - id: q-pro-1
+    lang: es
+    say: "¿Cuánto tardarías en llegar a la habitación 3?"
+    row: question/prospective
+    expect: [{tool: route_to, args: {room: room_3}}, {tool: outcome_stats, args: {kind: cross}}]
+    needs: P8   # until then: composition, the model multiplies
+
+  # ── directive · material (immediate; indirect and optative forms) ──
+  - id: d-mat-1
+    lang: es
+    say: "Acércate a mi silla."
+    row: directive/material/accomplishment
+    expect: [{tool: approach_object, args: {object: "my chair"}}]
+  - id: d-mat-2
+    lang: en
+    say: "Could you go through door 1, please?"
+    row: directive/material/accomplishment (indirect request)
+    expect: [{tool: cross_door, args: {door: door_1}}]
+  - id: d-mat-3
+    lang: es
+    say: "Quiero que des la vuelta a la mesa."
+    row: directive/material/accomplishment (optative = request)
+    expect: [{tool: go_around_object, args: {object: table_6}}]
+  - id: d-mat-4
+    lang: en
+    say: "Turn around."
+    row: directive/material/semelfactive
+    expect: [{tool: move_relative, args: {distance_m: 0, turn_deg: 180}}]
+  - id: d-mat-5
+    lang: es
+    say: "¿Puedes abrir la puerta 1?"
+    row: directive/material (ability form with a concrete argument = request)
+    expect: [{tool: sim_door, args: {action: open, door: door_1}}]
+  - id: d-mat-6
+    lang: en
+    say: "Can you open doors?"
+    row: question/ability (generic argument = capability question)
+    expect: []   # answered in words, no tool call
+    needs: P5
+  - id: d-mat-7
+    lang: es
+    say: "Para."
+    row: directive/material/achievement
+    expect: [{fast_path: stop}]
+
+  # ── directive · complex / temporal (plan_mission) ──
+  - id: d-seq-1
+    lang: en
+    say: "Go to room 2, look around and come back."
+    row: directive/composite (sequence + return)
+    expect: [{tool: plan_mission, mission_has: [cross door_1, explore, go_to anchor]}]
+  - id: d-time-1
+    lang: es
+    say: "A las seis ve a la habitación 2."
+    row: directive/absolute deferred
+    expect: [{tool: plan_mission, mission_has: ["wait at=18:00", cross door_1]}]
+    note: 'today form; with P3 the same request becomes schedule(when={at: "18:00"}, do="ve a la habitación 2")'
+  - id: d-time-2
+    lang: en
+    say: "In ten minutes, go to room 3."
+    row: directive/relative deferred
+    expect: [{tool: plan_mission, mission_has: ["wait s=600s", cross door_22]}]
+  - id: d-time-3
+    lang: es
+    say: "Explora la habitación durante cinco minutos."
+    row: directive/activity bounded
+    expect: [{tool: plan_mission, mission_has: ["explore room_1 budget_s=300s"]}]
+  - id: d-time-4
+    lang: en
+    say: "Explore room 2."
+    row: directive/activity without a bound (the card must show the default budget)
+    expect: [{tool: plan_mission, mission_has: [cross door_1, "explore budget_s="]}]
+  - id: d-trig-1
+    lang: es
+    say: "Cuando llegues a la habitación 2, avísame."
+    row: directive/event-triggered (sequence; cuando + subjunctive = trigger)
+    expect: [{tool: plan_mission, mission_has: [cross door_1, say]}]
+  - id: d-trig-2
+    lang: en
+    say: "Wait until door 1 is open, then go through it."
+    row: directive/event-triggered (hold)
+    expect: [{tool: plan_mission, mission_has: ["wait until=door_open(door_1)", cross door_1]}]
+  - id: d-cond-1
+    lang: es
+    say: "Si la puerta 1 está cerrada, ábrela; si no, crúzala."
+    row: directive/conditional
+    expect: [{tool: plan_mission, mission_has: ["if door_open(door_1)", cross door_1, open door_1]}]
+    needs: P1
+  - id: d-cond-2
+    lang: en
+    say: "As soon as you see the cup, stop."
+    row: directive/event-triggered on perception
+    expect: [{tool: schedule, args: {when: {on: "seen(cup)"}, do: stop}}]
+    needs: P1, P3
+  - id: d-iter-1
+    lang: en
+    say: "Go around the table twice."
+    row: directive/iterative
+    expect: [{tool: plan_mission, mission_has: ["repeat 2"]}]
+  - id: d-quant-1
+    lang: es
+    say: "Revisa todas las habitaciones y vuelve aquí."
+    row: directive/quantified
+    expect: [{tool: plan_mission, mission_has: ["each $r in rooms", explore, go_to anchor]}]
+    needs: P4
+  - id: d-quant-2
+    lang: en
+    say: "Go to every chair and tell me its colour."
+    row: directive/quantified
+    expect: [{tool: plan_mission, mission_has: ["each $c in objects(chair)", approach, report]}]
+    needs: P4
+
+  # ── directive · perceptual ──
+  - id: d-perc-1
+    lang: es
+    say: "Busca la taza."
+    row: directive/perceptual/activity (telic once found)
+    expect: [{tool: plan_mission, mission_has: ["explore until=seen(cup) budget_s="]}]
+    needs: P1
+  - id: d-perc-2
+    lang: en
+    say: "Look at the door."
+    row: directive/perceptual/achievement (orient)
+    expect: [{tool: move_relative, args: {distance_m: 0, turn_deg: "<door_1 'to face it'>"}}]
+  - id: d-perc-3
+    lang: es
+    say: "Vigila la puerta 2 y avísame si se abre."
+    row: directive/perceptual/state (watch)
+    expect: [{tool: schedule, args: {when: {on: "door_open(door_22)"}, do: {say: "la puerta se ha abierto"}}}]
+    needs: P3
+
+  # ── directive · verbal / semiotic ──
+  - id: d-sem-1
+    lang: en
+    say: "Show me where my chair is."
+    row: directive/semiotic (composition relational + display)
+    expect: [{tool: where_is, args: {name: "my chair"}}, {tool: show, args: {name: layout, args: chair_34}}]
+    needs: P6   # show layout marking a target
+  - id: d-sem-2
+    lang: es
+    say: "Enséñame la cámara de 360."
+    row: directive/semiotic
+    expect: [{tool: show, args: {name: camera, args: ricoh}}]
+
+  # ── polarity: negative commands as constraints ──
+  - id: d-neg-1
+    lang: es
+    say: "No entres en la cocina."
+    row: directive/negative (constraint)
+    expect: [{tool: constrain, args: {kind: avoid, target: room_3, scope: until_cancelled}}]
+    needs: P2
+  - id: d-neg-2
+    lang: en
+    say: "Don't use door 22, go to room 3 another way."
+    row: directive/negative + material
+    expect: [{tool: constrain, args: {kind: avoid, target: door_22, scope: mission}}, {tool: plan_mission}]
+    needs: P2
+
+  # ── informative ──
+  - id: i-rel-1
+    lang: es
+    say: "Me llamo Pablo."
+    row: informative/relational (person)
+    expect: [{tool: human_claim, args: {kind: name, name: Pablo}}]
+  - id: i-rel-2
+    lang: en
+    say: "This room is the kitchen."
+    row: informative/relational (world)
+    expect: [{tool: tell_fact, args: {kind: room_name, room: room_1, name: kitchen}}]
+    needs: P7
+
+  # ── commissive ──
+  - id: c-rem-1
+    lang: es
+    say: "Recuérdame a las cinco que llame a mi madre."
+    row: commissive/reminder
+    expect: [{tool: schedule, args: {when: {at: "17:00"}, do: {say: "llama a tu madre"}}}]
+    needs: P3
+  - id: c-rec-1
+    lang: en
+    say: "Every morning at nine, check the bathroom."
+    row: commissive/recurring
+    expect: [{tool: schedule, args: {when: {every: "daily 09:00"}, do: "check the bathroom"}}]
+    needs: P3
+
+  # ── expressive ──
+  - id: e-1
+    lang: es
+    say: "¡Gracias, muy bien hecho!"
+    row: expressive
+    expect: []   # a short reply, no tool
+  - id: e-2
+    lang: es
+    say: "Ojalá estuviera abierta la puerta."
+    row: expressive (wish about the world, not a request)
+    expect: []   # answer in words; may offer sim_door, must not call it
+    needs: P5

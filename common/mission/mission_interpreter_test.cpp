@@ -335,6 +335,27 @@ void watch_class_fires_once_per_object()
     in.tick(30);
     CHECK((fired_of(in, "1") == std::vector<std::string>{"chair_51"}));
 }
+/// Owner 2026-11-15: a class watch ignores every object it knew when it started, even one that is dropped from the
+/// map and seen again; a NODE watch (seen(chair_34)) still fires when that node reappears (spec: "appears, or reappears").
+void watch_known_object_reborn_class_ignores_node_fires()
+{
+    FakeHost h;
+    h.present["chair"] = {"chair_34"};
+    h.present["chair_34"] = {"chair_34"};
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(chair) continue each=c\n    say \"$c\"\n"
+                   "  watch seen(chair_34) continue\n    say again\n  explore room_1 budget_s=300s\n"),
+             0);
+    in.tick(0);
+    h.present["chair"] = {};
+    h.present["chair_34"] = {};
+    in.tick(10);   // removed for absence
+    h.present["chair"] = {"chair_34"};
+    h.present["chair_34"] = {"chair_34"};
+    in.tick(20);   // re-born under the same name
+    CHECK(fired_of(in, "1").empty() and h.count("say chair_34") == 0);
+    CHECK((fired_of(in, "2") == std::vector<std::string>{"chair_34"}));
+}
 void watch_continue_moving_body_pauses_and_resumes()
 {
     FakeHost h;
@@ -1073,6 +1094,7 @@ int main()
     watch_ignores_known_objects();
     watch_continue_report_every_new();
     watch_class_fires_once_per_object();
+    watch_known_object_reborn_class_ignores_node_fires();
     watch_continue_moving_body_pauses_and_resumes();
     watch_queue_in_order();
     watch_stop_cancels_scope_mission_completes();

@@ -609,14 +609,17 @@ private:
             for (auto& n : host_.matches(p)) w.seen_base.insert(std::move(n));
         event(std::format("step {}: watching", label(*w.step)));
     }
-    /// The nodes that appeared since the watch was armed join its queue, once each. A node of the baseline that
-    /// leaves the graph stops being "known": if it comes back it is seen anew.
+    /// The nodes that appeared since the watch was armed join its queue, once each. A class watch never forgets its
+    /// baseline; a node watch (seen(chair_34)) does when that node leaves the graph, so its return is seen anew.
     void detect(Run& w)
     {
         Pred p = *w.step->pred("when");
         if (not substitute(p)) return;
         const auto now = host_.matches(p);
-        std::erase_if(w.seen_base, [&now](const std::string& n) { return not std::ranges::contains(now, n); });
+        // A class watch keeps its baseline for life: an object known when it started never fires it, even when dropped
+        // from the map and seen again (owner 2026-11-15). Only a watch on that very node sees it anew when it returns.
+        const std::string& what = p.refs.at("what").name;
+        std::erase_if(w.seen_base, [&](const std::string& n) { return n == what and not std::ranges::contains(now, n); });
         for (const auto& n : now)
             if (not w.seen_base.contains(n) and not std::ranges::contains(w.fired, n))
             {
