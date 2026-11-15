@@ -350,6 +350,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         // massively-hit solid body contributed NO confirmation and ex_locc swung erratically between 0.03 and 70
         // depending on whether a ring happened to graze a fake leg. See [[bed-table-geometry-churn]].
         // Both LiDARs are carved: the low bpearl strikes the bed body low, the high helios mid/upper.
+        // With Model.ExistenceCarveParts the carve uses the class's composed parts (carve_parts) instead of this one solid box.
         if (sweep)
         {
             // Model.ExistenceCarveParts: carve the class's composed parts (headboard, legs, tank, …) instead of the

@@ -90,3 +90,10 @@ target_compile_definitions(shape_parts_test PRIVATE MANIFEST_DIR="${CMAKE_CURREN
 target_compile_options(shape_parts_test PRIVATE -O2)
 target_link_libraries(shape_parts_test PRIVATE Eigen3::Eigen)
 add_test(NAME shape_parts_test COMMAND shape_parts_test)
+
+# Offline carve replay (tools/carve_replay_rays.py -> RAYS.bin): scores simulated LiDAR sweeps with the agent's own
+# carve_box and carve_parts through solid_delta. Run: ./carve_replay RAYS.bin ../../common/concept_manifest
+add_executable(carve_replay ../tools/carve_replay.cpp)
+target_include_directories(carve_replay PRIVATE ../src ../../common)
+target_compile_options(carve_replay PRIVATE -O2)
+target_link_libraries(carve_replay PRIVATE Eigen3::Eigen)
