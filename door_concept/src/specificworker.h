@@ -239,7 +239,13 @@ private:
     bool door_memory_wait_logged_ = false;
     std::optional<rc::doormem::DoorMemory> door_memory_published_;     // what this agent's node carries now
     std::chrono::steady_clock::time_point door_memory_checked_{};      // last check that the agent node still carries it
-    [[nodiscard]] bool door_names_ready() const { return door_memory_adopted_; }   // no door is named before ltsm's counter is in
+    // No door is named before ltsm's counter is in, nor in a RECALLED room before its notes are read: a door born in that window
+    // takes a remembered door's hole under a fresh name and the note is then refused (names_ltsm1: door_22 born on door_1's hole
+    // between the start-up recall and its notes). The old private file covered that window by matching the room's name.
+    [[nodiscard]] bool door_names_ready() const { return door_memory_adopted_ and not awaiting_room_notes(); }
+    [[nodiscard]] bool awaiting_room_notes() const
+    { return recalled_room_id_ != 0 and recalled_room_id_ == room_node_id_ and notes_read_room_ != room_node_id_; }
+    std::uint64_t notes_read_room_ = 0;   ///< the recalled room whose notes a restore pass has read (or that has none coming)
     void step_door_memory();                                           // adopt once, then publish on change
     void note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m = 0.0f);   // upsert by PLACE, then save
     // note_identity with the full row (pose, existence, leaf); `weight` = P(the writer is this hole's door), its P(exists)
@@ -402,6 +408,7 @@ private:
     void drop_phantom_room(const std::string& room_name);
     void step_phantom_save();
     void step_pending_restore();
+    [[nodiscard]] bool room_has_remembered_passage(const std::string& room) const;   // ltsm_topology lists a passage of it
     void step_restore_from_notes();
     std::unordered_set<std::string> restore_failed_logged_;   ///< rows whose recreation failed (logged once, retried every cycle)
     std::vector<std::string> restore_rows(std::uint64_t new_room, std::span<const rc::door::IdentityRow> rows);

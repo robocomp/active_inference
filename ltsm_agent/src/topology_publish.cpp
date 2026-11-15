@@ -124,7 +124,8 @@ rc::doormem::DoorMemory remembered_door_memory(DSR::DSRGraph& memory)
 std::optional<rc::doormem::DoorMemory> agent_door_memory(DSR::DSRGraph& live)
 {
     for (const auto& n : live.get_nodes_by_type("agent"))
-        if (const auto nm = live.get_attrib_by_name<agent_name_att>(n); nm.has_value() and nm->get() == "door_concept")
+        // cortex names it "<agent name> <agent id>" (dsr_agent_info_api.cpp): match the name, whatever id door_concept runs with
+        if (const auto nm = live.get_attrib_by_name<agent_name_att>(n); nm.has_value() and nm->get().starts_with("door_concept "))
             return door_memory_on(live, n);
     return std::nullopt;
 }

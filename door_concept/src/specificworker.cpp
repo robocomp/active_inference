@@ -4143,7 +4143,8 @@ void SpecificWorker::step_phantom_save()
 
 void SpecificWorker::step_pending_restore()
 {
-    if (not door_names_ready()) return;   // a note whose name is not plain takes a fresh one: not before ltsm's counter is in
+    // a note whose name is not plain takes a fresh one: not before ltsm's counter is in (only the counter: births wait for THIS)
+    if (not door_memory_adopted_) return;
     step_restore_from_notes();
 }
 
@@ -4164,11 +4165,19 @@ void SpecificWorker::step_restore_from_notes()
             return;   // the recalled outline has not reached us yet: wait (the door's belief must find its wall)
     }
     const auto notes = rc::door::memnote::read_notes(*G, room_node_id_);
-    if (notes.empty())
-        return;
     const auto room = G->get_node(room_node_id_);
     if (not room.has_value())
         return;
+    if (notes.empty())
+    {
+        // ltsm posts a note for every remembered door of the room; none can come when its topology knows no passage of it.
+        if (notes_read_room_ != room_node_id_ and not room_has_remembered_passage(room->name()))
+        {
+            notes_read_room_ = room_node_id_;
+            std::print("door_concept: [names] recalled '{}' has no remembered passage: no notes are coming, births go ahead\n", room->name());
+        }
+        return;
+    }
     const auto all_rows = rc::door::memnote::rows_of_notes(notes, room->name());
     // A refuted place (a removed PlaceRow of this room, phantom-file rows included) is never restored from memory: the note is dropped
     // here and reported handled, so it is adopted and ltsm retires it.
@@ -4188,6 +4197,21 @@ void SpecificWorker::step_restore_from_notes()
     for (const auto& n : notes)
         if (std::ranges::find(handled, rc::door::memnote::face_live_name(n.name)) != handled.end())
             rc::door::memnote::mark_adopted(*G, n.id);
+    if (notes_read_room_ != room_node_id_)
+    {
+        notes_read_room_ = room_node_id_;
+        std::print("door_concept: [names] recalled '{}': its {} note(s) read, births go ahead\n", room->name(), notes.size());
+    }
+}
+
+bool SpecificWorker::room_has_remembered_passage(const std::string& room) const
+{
+    const auto t = G->get_node("ltsm_topology");
+    const auto j = t.has_value() ? G->get_attrib_by_name<ltsm_topology_att>(t.value()) : std::nullopt;
+    if (not j.has_value()) return true;   // no topology yet: assume notes may come
+    const auto topo = rc::topo::decode_topology(j.value());
+    if (not topo.has_value()) return true;
+    return std::ranges::any_of(topo->passages, [&](const auto& p) { return p.room_a == room or p.room_b == room; });
 }
 
 /// The restore loop over `rows` (the CSV's identities_ or the notes' rows). Returns the names of the rows handled: restored (its
