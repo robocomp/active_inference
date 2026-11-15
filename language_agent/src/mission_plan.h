@@ -765,7 +765,7 @@ inline constexpr std::string_view kWakeRefusal =
     static constexpr std::string_view kAllowed[] = {
         "stop", "cancel_passage", "plan_mission",                                                  // halt / propose
         "look", "find_objects", "where_is", "known_rooms", "route_to", "can_see", "imagine_view", "imagine", "agents", "sensors",        // read the world
-        "graph_summary", "inspect", "use_skill", "episodes", "episode", "outcome_stats", "last_episode", "where_was",
+        "graph_summary", "inspect", "use_skill", "episodes", "episode", "outcome_stats", "last_episode", "where_was", "what_i_learned",
         "show", "draw", "table", "hide_canvas",                                                     // the side canvas
     };
     return std::ranges::find(kAllowed, tool) != std::ranges::end(kAllowed);

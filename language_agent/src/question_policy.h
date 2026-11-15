@@ -9,6 +9,7 @@
  */
 
 #include <cctype>
+#include <charconv>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -89,6 +90,39 @@ enum class Reply { yes, no, unknown, other };
 {
     const char* v = r == Reply::yes ? "yes" : r == Reply::no ? "no" : "unknown";
     return std::format("{}:{}", v, stamp);
+}
+
+/// A belief key in words: "moves_things" -> "you move things"; "gets_moved:<uid>" -> "<name> gets moved".
+[[nodiscard]] inline std::string belief_words(std::string_view key, std::string_view object_name)
+{
+    if (key == "moves_things") return "you move things";
+    if (key.starts_with("gets_moved:")) return std::format("{} gets moved", object_name.empty() ? "that object" : object_name);
+    return std::string(key);
+}
+
+/// The what_i_learned tool's answer: each belief with its counts and dated evidence lines, never a bare number.
+/// name_of(uid) names the object of a gets_moved belief.
+template <typename NameOf>
+[[nodiscard]] std::string learned_text(const std::vector<BeliefFacts>& beliefs, NameOf name_of)
+{
+    if (beliefs.empty()) return "I have not learned anything about you from our conversations yet.";
+    std::string out;
+    for (const auto& b : beliefs)
+    {
+        std::string name;
+        if (b.key.starts_with("gets_moved:"))
+        {
+            std::uint64_t uid = 0;
+            const char* first = b.key.data() + std::string_view("gets_moved:").size();
+            std::from_chars(first, b.key.data() + b.key.size(), uid);
+            name = name_of(uid);
+        }
+        out += std::format("Belief: {} (yes {}, no {}). Evidence, one dated line each (time | answer | the person's words | object):\n",
+                           belief_words(b.key, name), b.yes, b.no);
+        for (const auto& e : b.evidence)
+            out += "  " + e + (e.contains("| forgotten |") ? "   (you asked me to forget the earlier answers)" : "") + "\n";
+    }
+    return out;
 }
 
 /// Raised on open (1), once more after the person's next message that is not an answer (2), then silent.

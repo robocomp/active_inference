@@ -49,5 +49,14 @@ int main()
     assert(place_words({0.f, 0.1f}, room, doors) == "near the middle of the room"); ++checks;
     assert(place_words({0.f, 0.f}, {}, {}) == "near the middle of the room"); ++checks;
 
+    // what_i_learned: each belief with its dated evidence, never a bare number.
+    assert(belief_words("moves_things", "") == "you move things"); ++checks;
+    assert(belief_words("gets_moved:1099511627826", "chair_50") == "chair_50 gets moved"); ++checks;
+    const std::vector<BeliefFacts> bs{{.key = "moves_things", .yes = 1, .no = 0, .evidence = {"2026-11-15 10:02 | yes | yes, I moved it | chair_50"}}};
+    const std::string lt = learned_text(bs, [](std::uint64_t) { return std::string("chair_50"); });
+    assert(lt.contains("you move things") and lt.contains("yes 1, no 0") and lt.contains("2026-11-15 10:02 | yes | yes, I moved it | chair_50")); ++checks;
+    assert(learned_text({}, [](std::uint64_t) { return std::string(); }) == "I have not learned anything about you from our conversations yet."); ++checks;
+    const std::vector<BeliefFacts> forgot{{.key = "moves_things", .yes = 0, .no = 0, .evidence = {"2026-11-15 10:05 | forgotten | forget that | -"}}};
+    assert(learned_text(forgot, [](std::uint64_t) { return std::string(); }).contains("you asked me to forget")); ++checks;
     std::println("question_policy: {} checks passed", checks);
 }
