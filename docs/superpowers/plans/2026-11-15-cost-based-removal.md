@@ -266,6 +266,40 @@ measured ρ and costs per class, and countable's one costed decision on the prod
   git commit -m "countable tools: carve replay through the agent's carve_parts (objects_live6 real objects >= 0, phantoms < 0)"
   ```
 
+### Task 4b: a return on a known wall is not support (added during execution, ruling 11-15)
+
+**Why:** the Task 4 replay showed a nightstand-sized phantom centred on a wall face scoring +1.78/cycle under
+`carve_parts` (−2.08 under `carve_box`): with the logged footprint σ 0.17 m the surface band is ±0.18 m, so returns
+from the wall plane 0.26 m behind the phantom's front count as support (`carve_replay --explain`, commit d550a081).
+Room containment admits it (centre on the boundary). The spec's anti-goal forbids a phantom over a wall kept alive.
+The room already explains a return on its wall — the fit applies the same explaining-away to mask points
+(`[prior.explaining_away] known_surface_mixture`, source `room.walls`).
+
+**Files:** `common/existence_belief/existence_belief.h` (additions only), `common/existence_belief/carve_parts_test.cpp`,
+`countable_concept/src/countable_existence.cpp`, `countable_concept/tools/carve_replay.cpp`
+
+**Interfaces:**
+- `inline std::vector<float> rc::exist::wall_explained(const std::vector<Eigen::Vector3f>& sweep, std::span<const Eigen::Vector2f> outline, float sensor_sigma_m);`
+  per return: e = exp(−½ (d/σ)²), d = distance in x–y from the return to the nearest outline EDGE (closed polygon); an
+  empty or < 3-vertex outline ⇒ all 0.
+- `carve_parts` gains a trailing `std::span<const float> explained = {}` (one weight per sweep point, empty ⇒ all 0):
+  per beam the support term becomes `inside·ws·(1 − e)` and `inside·ws·e` moves to `e_interior` (a wall return inside
+  the volume is what a solid would have blocked). `e_free` and `n_reached` unchanged. Empty span ⇒ byte-identical to
+  today's `carve_parts`.
+- countable (flag on): `explained = wall_explained(sweep, fitter.room_polygon(), cfg_.existence_sensor_sigma_m)` for
+  the Helios sweep only (the bpearl stays occupancy-only and unweighted); no room polygon ⇒ empty.
+- carve_replay: same call, outline = the GT room rectangle of the node's room (bedroom x −8.39..−1.815,
+  y 9.35..13.48; bathroom x −1.615..1.69, y 9.35..13.48 — measured numbers), world frame.
+
+- [ ] **Step 1: Tests** (in `carve_parts_test.cpp`): `wall_return_is_not_support`: the box-over-wall case with surface σ
+  0.17 (realistic) and the wall as the outline ⇒ `solid_delta < 0` WITH weights and (documenting the gap) `> 0`
+  without; `object_off_the_wall_keeps_support`: a box whose front is 0.13 m from the outline (the headboard case),
+  returns on its front ⇒ e_occ with weights ≥ 0.95 × without; `wall_explained_basics`: a point on an edge ⇒ e ≈ 1,
+  0.15 m away ⇒ e < 1e-5, empty outline ⇒ zeros.
+- [ ] **Step 2: Implement**, run the test (g++ command of Task 1), then build the carve_replay target and re-run the
+  20-cycle smoke: every real node still ≥ 0 under carve_parts and phantom_wall_nightstand_6 < 0.
+- [ ] **Step 3: Commit** `"existence: a LiDAR return on a known wall is not support for an object (carve_parts explained weights)"`.
+
 ### Task 5: Live 7a — the new carve alone, today's debounce (operator task)
 
 **Files:** Create `docs/superpowers/results/2026-11-15-objects_live7a.md`.
