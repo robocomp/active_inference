@@ -5,6 +5,7 @@
 #include <format>
 #include <fstream>
 #include "affordance_manager.h"
+#include "update_if_live.h"
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/core/id_generator.h>   // agent_id_size: the creator agent is the low bits of a node id
@@ -515,7 +516,7 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
     graph->add_or_modify_attrib_local<epistemic_gain_att>(node, gain);
     if (!current_pending)
         graph->add_or_modify_attrib_local<epistemic_pending_att>(node, true);
-    graph->update_node(node);
+    (void)rc::affordance::update_if_live(*graph, node);
     // ★ WE ARMED IT, SO WE ARE WAITING — set synchronously rather than waiting to OBSERVE the node
     // in some state. A consumer that claims and finishes between two of our polls would otherwise be
     // invisible, which is precisely the race that wedged both agents (see monitor_execution).
@@ -736,7 +737,7 @@ bool AffordanceManager::refresh_gain(const std::shared_ptr<DSR::DSRGraph> &graph
     const auto cur = graph->get_attrib_by_name<epistemic_gain_att>(node.value());
     if (cur.has_value() and std::fabs(cur.value() - gain) <= 1e-4f) return false;   // no news
     graph->add_or_modify_attrib_local<epistemic_gain_att>(node.value(), gain);
-    graph->update_node(node.value());
+    (void)rc::affordance::update_if_live(*graph, node.value());
     return true;
 }
 
@@ -775,7 +776,7 @@ bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGr
         return false;
 
     graph->add_or_modify_attrib_local<active_att>(node, false);
-    graph->update_node(node);
+    (void)rc::affordance::update_if_live(*graph, node);
 
     waiting_completion_ = false;
     completion_detected_ = false;
@@ -1279,7 +1280,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
 
         auto node = node_opt.value();
         graph->add_or_modify_attrib_local<active_att>(node, true);
-        graph->update_node(node);
+        (void)rc::affordance::update_if_live(*graph, node);
 
         current_affordance_id_ = best_target->node_id;
         if (abandoned_claim_id_ == best_target->node_id)
@@ -1393,7 +1394,7 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
         rc::affordance::write_outcome(*graph, node, outcome);
         graph->add_or_modify_attrib_local<epistemic_pending_att>(node, false);
         graph->add_or_modify_attrib_local<active_att>(node, false);
-        graph->update_node(node);
+        (void)rc::affordance::update_if_live(*graph, node);
     }
     last_outcome_ = outcome;
 
@@ -1434,7 +1435,7 @@ bool AffordanceManager::complete_claim(const std::shared_ptr<DSR::DSRGraph> &gra
     rc::affordance::write_outcome(*graph, node, outcome);
     graph->add_or_modify_attrib_local<epistemic_pending_att>(node, false);
     graph->add_or_modify_attrib_local<active_att>(node, false);
-    graph->update_node(node);
+    (void)rc::affordance::update_if_live(*graph, node);
     if (abandoned_claim_id_ == node_id) abandoned_claim_id_ = 0;
     // Fix round 1 (M-1): remembered as the last completed request, as mark_reached remembers one — from the node's own target
     // (we hold no claimed pose for a claim that is not current), so the just-completed rule cannot hand it straight back.
@@ -1501,7 +1502,7 @@ void AffordanceManager::suppress_target(const std::shared_ptr<DSR::DSRGraph> &gr
         {
             auto n = node.value();
             graph->add_or_modify_attrib_local<epistemic_refused_att>(n, true);
-            graph->update_node(n);
+            (void)rc::affordance::update_if_live(*graph, n);
         }
     // Take the LONGER of any existing suppression: two independent reports that this one is
     // unreachable should not shorten the wait.
