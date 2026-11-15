@@ -65,7 +65,12 @@ work, before the tracker rework and the bedroom-rig metaconcept).
   shifted box and w̃_k ∝ (quadrature weight) · π_place(δ_k). π_place is the class's own wall no-cross factor (the fit's
   `wall_no_cross_precision` P, log π = −½·P·d³, d = how far the shifted footprint crosses the room outline): a shift that
   would put the object inside a wall is ruled out by the prior the class already has. No new constant; the quadrature
-  order is numerical, not a model parameter. Yaw uncertainty is not marginalised here.
+  order is numerical, not a model parameter. ★rev (owner 11-15, after the xy-only replay turned the real bed and nightstands
+  negative: their fitted H sits 1.4–3.2 cm above the true top, within the belief's own std_H): the common-mode variable is
+  the WHOLE box state θ = (cx, cy, H, w, h, yaw) ~ N(μ, Σ), Σ the belief's full 6×6 covariance, integrated with the
+  spherical-radial cubature rule (2n = 12 points μ ± √n·L·e_i, L = chol Σ, weights 1/2n — no free parameter). A point with
+  a non-positive size (H, w or h ≤ 0) is outside the state's support: its weight is 0. Each point also carries π_place.
+  Its validity depends on Σ being honest; the replay reports this, and (b) is what keeps Σ honest.
 - **Later (owner, 11-15): (b)** the LiDAR returns should UPDATE the belief's position, not only test existence — then
   Σ reflects what all sensors know instead of ageing while the LiDAR has its best view. A fit-side design, not this change.
 - **G1. The costed line.** For an opted-in agent: remove when L < −ln(C_delete / C_keep). No `removal_prob`, no debounce,

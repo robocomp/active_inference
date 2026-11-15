@@ -319,6 +319,25 @@ measured ρ and costs per class, and countable's one costed decision on the prod
   phantom fails, STOP and report with `--explain` output — do not change part fractions, σ, or the prior.
 - [ ] **Step 4: Commit** `"existence: marginalise the box position as one common-mode shift, weighted by the class's no-cross prior"`.
 
+#### Task 4c rev 2 (owner 11-15): marginalise the WHOLE box state
+
+The xy-only marginal (Steps 1–3 above, uncommitted, `task-4c-uncommitted.patch`) fixed the wall phantom but turned the
+real bed and nightstands negative (fitted H 1.4–3.2 cm above the true top, within std_H). Replace the xy nodes by:
+- `struct StateNode { Eigen::Matrix<float,6,1> d; float log_w; };`
+  `std::vector<StateNode> cubature_nodes(const Eigen::Matrix<float,6,6>& sigma);` — 12 nodes ±√6·L·e_i, L = Cholesky of Σ
+  (if Σ is not positive definite, use the eigen-decomposition with negative eigenvalues set to 0 and say so in a one-time
+  warning), log_w = log(1/12). Order of the state = the belief's [cx, cy, H, w, h, yaw].
+- per node: the box (cx+d0, cy+d1, yaw+d5) with sizes (H+d2, w+d3, h+d4); any size ≤ 0 ⇒ log_w = −∞ (outside the
+  support); else parts = `carve_parts_for` of the shifted sizes; + `no_cross_logprior` of the shifted footprint; ℓ_k as before;
+  l_full = `log_marginal`. Keep the xy helpers only if still used (otherwise delete them).
+- Tests: `cubature_reproduces_moments` (Σ w·d = 0, Σ w·ddᵀ = Σ within 1e-4 for a random SPD 6×6); `size_support`
+  (a node with h ≤ 0 has weight 0); the scenario tests of Step 1 re-run with a 6×6 Σ (diag: xy 0.17², H 0.05², w, h 0.06²,
+  yaw 0.05²): wall phantom with prior < 0; real box with H 0.03 m above its true top and 0.10 m off-centre > 0.
+- Replay: Σ from the logged std_* (diagonal; say so) — report per node the marginal mean ΔL, the fraction of nodes
+  outside the support, and us/call.
+- Same STOP rule: if any real node < 0 or probed phantom ≥ 0, stop and report ℓ_k / log_w_k per node; change nothing.
+- Commit message: `"existence: marginalise the whole box state (cubature over the belief covariance), weighted by the class's no-cross prior"`.
+
 ### Task 5: Live 7a — the new carve alone, today's debounce (operator task)
 
 **Files:** Create `docs/superpowers/results/2026-11-15-objects_live7a.md`.
