@@ -1,7 +1,8 @@
 # Camera attributes, LiDAR measures: the LiDAR updates the countable belief on gated mask cycles
 
 Date: 2026-11-15. Status: APPROVED by the owner 11-15 ("Approved, after lidar": the cabinet exit-release fix comes after this); §7b and §8
-amended 11-15 after Fable's plan review (owner: C1 = A, C2 = two-sided). Nothing built.
+amended 11-15 after Fable's plan review (owner: C1 = A, C2 = two-sided); §7c added 11-16 (owner: "apply active
+inference rigorously" — yes to the mixture with the camera prior, yes to LiDAR-first). Tasks 1–2 built; DRAFT §7c awaits review.
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
@@ -134,6 +135,90 @@ Commits local on `feat/cost-removal`; Webots shared (claim from chat and room, F
 - **m and the down-weights:** m multiplies each ray's precision BEFORE the ray-count and coverage down-weights, and the
   ray count is Σ m (effective rays), so a mostly-outside set gets little coverage credit.
 - **Divergence net:** the existing snapshot-and-reject around the update applies to LiDAR-only updates too.
+
+## 7c. The two corrected assumptions (11-16, owner: "can't we apply active inference rigorously?")
+
+Task 2's review measured the owner's named risk in a unit test: a nightstand 5 cm off a wall, wall returns at
+m = 0.001, the same sweep 100 times ⇒ the back face pulled from −5.0 cm to −1.3 cm (h 0.51 → 0.55 m); box rays alone
+−4.9 cm. Live it is worse: σ_px ≈ 12 px at 2 m, so a wall return 5 cm beside the mask has m ≈ 0.1. The cause is not
+a missing term but two false statements in the generative model. This section corrects them; it supersedes G3,
+the §7b bullet "m and the down-weights" and the Woodbury-only reading of C2.
+
+### 7c.1 The LiDAR's shared error persists across sweeps (supersedes G3)
+
+**What the model said:** each frame's shared error (pose chain, extrinsic, mask boundary, which surface points the
+beams sample) is drawn afresh every frame — that is what the per-frame Woodbury cap assumes. **What is true:** the
+world is static; while the viewpoint does not change, sweep t samples the same surface points with the same pose
+and the same mask boundary as sweep t−1. 100 identical sweeps are about one observation. Treating them as 100 is
+what collapses Σ (C2) and what lets m = 0.001 accumulate into a 3.7 cm pull.
+
+**The corrected model.** The LiDAR channel measures z = θ + b_L + ε: θ the box state, ε the per-ray range noise
+(independent per sweep), b_L ∈ ℝ⁶ the channel's SHARED error, a latent with prior N(0, Σc_L) (Σc_L = the LiDAR-only
+common mode of §7b: config floors + pose chain + ego-motion) and Gauss–Markov dynamics between sweeps:
+
+  b_L,t = ρ_t · b_L,t−1 + w_t,  w_t ~ N(0, (1 − ρ_t²) Σc_L)   (stationary at Σc_L for any ρ)
+
+b_L is carried in the belief as a real latent (state augmented to 12: θ and b_L, with their cross-covariance).
+Each sweep: predict b_L with ρ_t; linearise the rays at the current θ into (Id_L, bd_L) exactly as
+`accumulate_lidar_rays` does now; update the augmented state with the measurement Jacobian [I I]. Consequences, all
+by construction, none by a rule:
+- ρ = 0 reproduces today's per-frame Woodbury exactly (b redrawn every frame and marginalised). That is the
+  regression test.
+- ρ → 1 (nothing changed): a repeated sweep re-observes the same θ + b_L; the posterior of θ cannot go below what
+  one look plus Σc_L allows. 100 identical sweeps ≈ 1. The accumulated pull of a wrongly attributed return is
+  bounded by one sweep's worth.
+- The robot moves: ρ falls, b_L decorrelates, a new viewpoint counts as new information. Moving around an object is
+  what earns confidence — which is the active-inference reading of "look from elsewhere".
+
+**Where ρ comes from (physical, no tuned constant).** The shared error decorrelates when the beams sample different
+surface points and the mask boundary falls on different pixels of the object, i.e. when the camera/LiDAR viewpoint
+relative to the object changes by about one beam footprint. With δ = max(`azimuth_step_deg`, the largest ring gap)
+from the Helios `SensorModel` (media descriptor), z the range to the object and Δ the viewpoint change since the last
+sweep (sensor displacement perpendicular to the line of sight, plus z·|Δbearing|):
+
+  ρ_t = exp(−½ (Δ / (δ·z))²)
+
+The pose-chain part of b_L decorrelates with the localiser's own corrections, not with the beam footprint; the
+localiser does not publish a cross-time covariance, so this spec treats it as decorrelating with the viewpoint too
+(conservative while parked, possibly optimistic while turning in place). OPEN for review: whether a better source
+exists.
+
+**Scope:** the LiDAR channel only (owner, 11-16). Camera points keep the per-frame Woodbury (ρ_cam = 0); the same
+correction for the camera path is later work. On an admissible frame the rays therefore leave the camera's
+saturated (Id, bd) and enter through the b_L channel after it; on a LiDAR-only frame only the b_L channel runs.
+
+### 7c.2 The camera's m is a prior on ownership, not a precision multiplier (supersedes "m and the down-weights")
+
+**What the model said:** a return's precision is scaled by m — a tempered likelihood, an approximation. **What is
+true:** the camera says p(z_i = object) = m_i; the return then comes either from the box or from the rest of the
+scene, and the scene is not unknown — the room model knows its walls and floor. Owner 11-16: the mixture is
+accepted with the camera's m as its prior (this is not the camera-free explaining-away mixture rejected in §1).
+
+  p(ρ_i) = m_i · p(ρ_i | box) + (1 − m_i) · p(ρ_i | rest)
+  p(ρ | rest) = (1 − w_u) · N(ρ; t_room, σ_r² + σ_wall²) + w_u · U(0, ρ_max)   (the room predicts a hit at t_room)
+             = w_u · U(0, ρ_max)                                       (the room predicts none)
+
+t_room = the ray's first hit on the room's walls (the polygon edges, extruded) and floor (z = 0); σ_wall = the wall's
+`sigma_m`; σ_r and ρ_max from the Helios `SensorModel`; w_u = 0.2 and the form are the fleet's existing beam model
+(`lidar_ray_cost`, the door's and rc::exist's) — reused, not new. p(ρ | box) is today's first-hit Gaussian with the
+Cauchy kernel unchanged. The E-step responsibility
+
+  r_i = m_i p(ρ_i | box) / (m_i p(ρ_i | box) + (1 − m_i) p(ρ_i | rest))
+
+replaces m_i as the ray weight in `LidarRays::weights` (Task 1's mechanism, unchanged), recomputed at each GN
+iterate; coverage counts Σ r_i. Numbers (σ 2 cm, ρ_max 10 m): a return on the box face with the wall 0.5 m behind
+it, m = 0.9 ⇒ r ≈ 1; a wall return beside the box, 5 cm behind the back face, m = 0.1 ⇒ r ≈ 0.009 (the wall explains
+it); the same wall return at m = 0.5 ⇒ r ≈ 0.07. Known limit: a NEIGHBOUR (bed beside the nightstand) is not in the room
+model, so it is explained only by the uniform floor; there the mask prior and 7c.1 carry the case. Using other
+agents' published boxes as further "rest" components is later work.
+
+### 7c.3 Pass additions
+- Unit: ρ = 0 reproduces the per-frame Woodbury result (rel 1e-5); ρ = 1 and 100 identical sweeps give Σ within 5 %
+  of one sweep's posterior; a viewpoint step of 3 δz gives the full second-sweep information (within 5 %).
+- Unit: `wall_behind_does_not_pull` asserts the BACK-FACE gap against a box-rays-only baseline: the weighted case
+  changes it by < 0.5 cm over 100 identical sweeps with wall returns at m = 0.1 (the live value, not 0.001).
+- Unit: responsibilities — the three worked numbers above within 20 %.
+- Live: unchanged (§8, two-sided Σ and ≤ 10 cm drift).
 
 ## 8. Pass
 
