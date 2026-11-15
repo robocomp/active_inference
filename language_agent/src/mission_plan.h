@@ -103,6 +103,44 @@ inline std::optional<std::string> unknown_in_ref(const Ref& r, const std::functi
     return std::nullopt;
 }
 
+/// The object classes `seen(<class>)` may name: the subtypes the concept agents publish (find_objects' list).
+inline constexpr std::string_view kSeenClasses[] = {"chair", "table", "bottle", "cabinet", "refrigerator", "hood",
+                                                    "nightstand", "bed", "toilet", "person"};
+inline bool seen_class(std::string_view n) { return std::ranges::contains(kSeenClasses, n); }
+/// A node name's class: "chair_34" → "chair" (a trailing _<digits> dropped); a name without one is its own class.
+inline std::string_view class_of(std::string_view n)
+{
+    const auto u = n.rfind('_');
+    if (u == std::string_view::npos or u + 1 == n.size()) return n;
+    const bool digits = std::ranges::all_of(n.substr(u + 1), [](char c) { return c >= '0' and c <= '9'; });
+    return digits ? n.substr(0, u) : n;
+}
+
+/// The first `seen(X)` whose X is neither a class the robot recognises nor a live node.
+inline std::optional<std::string> unrecognised_seen(const std::vector<Step>& list,
+                                                    const std::function<bool(std::string_view)>& exists)
+{
+    for (const auto& s : list)
+    {
+        for (const auto& [key, v] : s.args)
+            if (const Pred* p = std::get_if<Pred>(&v); p != nullptr and p->name == "seen")
+                if (const auto w = p->refs.find("what"); w != p->refs.end() and w->second.kind == Ref::Kind::Node
+                                                          and not seen_class(w->second.name)
+                                                          and not (exists(w->second.name) and seen_class(class_of(w->second.name))))
+                    return w->second.name;
+        if (auto u = unrecognised_seen(s.steps, exists)) return u;
+    }
+    return std::nullopt;
+}
+
+/// True when step `id` lies inside a `watch`'s reaction body (its report is the watch's to tell, once per firing).
+inline bool inside_watch(const std::vector<Step>& steps, std::string_view id)
+{
+    for (std::size_t dot = id.find('.'); dot != std::string_view::npos; dot = id.find('.', dot + 1))
+        if (const Step* a = find_step(steps, id.substr(0, dot)); a != nullptr and a->op == "watch") return true;
+    return false;
+}
+
 inline std::optional<std::string> unknown_in(const std::vector<Step>& list,
                                              const std::function<bool(std::string_view)>& exists)
 {
@@ -118,7 +156,10 @@ inline std::optional<std::string> unknown_in(const std::vector<Step>& list,
             }
             else if (const Pred* p = std::get_if<Pred>(&v))
                 for (const auto& [pk, pr] : p->refs)
+                {
+                    if (p->name == "seen" and seen_class(pr.name)) continue;   // a class, not a node (unrecognised_seen)
                     if (auto u = unknown_in_ref(pr, exists)) return u;
+                }
         }
         if (auto u = unknown_in(s.steps, exists)) return u;
     }
@@ -308,6 +349,10 @@ inline std::string paused_at(const rc::mission::Progress& p)
 {
     auto m = parse_planned(ground_clock_text(strip_fence(reply), now_ms));
     if (not m.has_value()) return m;
+    if (const auto what = mission_plan_detail::unrecognised_seen(m->steps, exists); what.has_value())
+        return std::unexpected(std::format("I cannot recognise a {}: seen() takes one of chair, table, bottle, cabinet, "
+                                           "refrigerator, hood, nightstand, bed, toilet, person, or an object of the live map",
+                                           *what));
     if (const auto bad = unknown_name(*m, exists); bad.has_value())
         return std::unexpected(std::format("unknown name '{}': there is no such door, room or object in the live map now "
                                            "(a room not yet reached is named with cross ... bind=NAME, then $NAME)", *bad));
@@ -359,6 +404,9 @@ inline std::string paused_at(const rc::mission::Progress& p)
             out.push_back(std::format("→ {}/{} {}", top_index(v.id), total, label));
         // Why a running step WAITS (the controller's words): told when it changes, not when the wait ends — the step
         // goes on, and its own ✓/✗/⟳ line follows (chat 2026-11-12: minutes of exploring with no reason given).
+        if (v.op == "watch" and step != nullptr)   // each new firing (spec 2026-11-14): "watch seen(chair): chair_51"
+            for (std::size_t i = old ? old->fired.size() : 0; i < v.fired.size(); ++i)
+                out.push_back(std::format("watch {}: {}", rc::mission::text_detail::pred_text(*step->pred("when")), v.fired[i]));
         if (v.state == SS::Running and not v.note.empty() and (not old or old->note != v.note))
             out.push_back(std::format("… {} waits: {}", label, v.note));
         if (v.state == SS::Satisfied and was != SS::Satisfied)
@@ -392,10 +440,55 @@ inline std::string paused_at(const rc::mission::Progress& p)
     for (const auto& v : after.steps)
     {
         if (v.op != "report" or (v.state != SS::Running and v.state != SS::Satisfied)) continue;
+        if (inside_watch(m.steps, v.id)) continue;   // new_watch_reports tells it, once per firing
         const auto* old = view_of(before, v.id);
         if (old and (old->state == SS::Running or old->state == SS::Satisfied)) continue;
         if (const Step* s = find_step(m.steps, v.id))
             if (const auto t = s->string("text")) out.push_back(*t);
+    }
+    return out;
+}
+
+/// One firing of a watch whose body reports: the report's text with `$NAME` replaced by the node it fired on.
+struct WatchReport
+{
+    std::string topic, bound;
+};
+
+/// For every watch, one entry per node in `after.fired` beyond `before.fired` (in firing order), for each `report`
+/// in its body (spec 2026-11-14: the chat is woken per firing, about that object).
+[[nodiscard]] inline std::vector<WatchReport> new_watch_reports(const rc::mission::Progress& before,
+                                                                const rc::mission::Progress& after,
+                                                                const rc::mission::Mission& m)
+{
+    using namespace mission_plan_detail;
+    std::vector<WatchReport> out;
+    for (const auto& v : after.steps)
+    {
+        if (v.op != "watch") continue;
+        const Step* w = find_step(m.steps, v.id);
+        if (w == nullptr) continue;
+        const auto* old = view_of(before, v.id);
+        const std::string var = "$" + w->string("each").value_or("");
+        std::vector<std::string> texts;
+        const auto collect = [&texts](this const auto& self, const std::vector<Step>& list) -> void
+        {
+            for (const auto& s : list)
+            {
+                if (s.op == "report")
+                    if (const auto t = s.string("text")) texts.push_back(*t);
+                self(s.steps);
+            }
+        };
+        collect(w->steps);
+        for (std::size_t i = old ? old->fired.size() : 0; i < v.fired.size(); ++i)
+            for (std::string t : texts)
+            {
+                if (var.size() > 1)
+                    for (std::size_t at = t.find(var); at != std::string::npos; at = t.find(var, at + v.fired[i].size()))
+                        t.replace(at, var.size(), v.fired[i]);
+                out.push_back({.topic = std::move(t), .bound = v.fired[i]});
+            }
     }
     return out;
 }

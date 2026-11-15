@@ -489,8 +489,41 @@ inline void print_steps(std::string& out, const std::vector<Step>& steps, int de
         if (s.on_fail.kind == OnFail::Kind::Skip) line += " on_fail=skip";
         if (s.bind.has_value()) line += " bind=" + *s.bind;
         out += line + "\n";
+        if (s.op == "if")   // the branches are seq steps the text never names: then under the if, `else` at its indent
+        {
+            if (not s.steps.empty()) print_steps(out, s.steps[0].steps, depth + 1);
+            if (s.steps.size() > 1)
+            {
+                out += std::string(std::size_t(2 * depth), ' ') + "else\n";
+                print_steps(out, s.steps[1].steps, depth + 1);
+            }
+            continue;
+        }
         print_steps(out, s.steps, depth + 1);
     }
+}
+
+/// The parser reads `else` as a placeholder step after its `if`; this folds every if (+ else) into the IR shape:
+/// if.steps = [seq then] or [seq then, seq else]. A stray or empty `else` is a syntax error.
+inline std::optional<Error> fold_if_else(std::vector<Step>& list)
+{
+    std::vector<Step> out;
+    for (auto& s : list)
+    {
+        if (auto e = fold_if_else(s.steps); e.has_value()) return e;
+        if (s.op == "else")
+        {
+            if (out.empty() or out.back().op != "if" or out.back().steps.size() != 1)
+                return Error{.code = "malformed", .where = "steps", .text = "else without if"};
+            if (s.steps.empty()) return Error{.code = "malformed", .where = "steps", .text = "else needs a body"};
+            out.back().steps.push_back(Step{.op = "seq", .steps = std::move(s.steps)});
+            continue;
+        }
+        if (s.op == "if") s.steps = {Step{.op = "seq", .steps = std::move(s.steps)}};
+        out.push_back(std::move(s));
+    }
+    list = std::move(out);
+    return std::nullopt;
 }
 }   // namespace text_detail
 
@@ -560,7 +593,14 @@ inline void print_steps(std::string& out, const std::vector<Step>& steps, int de
 
         if (not have_mission_line) return std::unexpected(syntax(line_no, "a mission starts with `mission`"));
         in_steps = true;
-        auto s = lp.step();
+        // `else` (alone on its line) closes the then-branch of the `if` just above it at this indent (fold_if_else)
+        const bool is_else = lp.peek().kind == Token::Kind::Name and lp.peek().text == "else";
+        auto s = is_else ? std::expected<Step, Error>(Step{.op = "else"}) : lp.step();
+        if (is_else)
+        {
+            lp.take();
+            if (not lp.done()) return std::unexpected(syntax(line_no, "else stands alone on its line"));
+        }
         if (not s.has_value()) return std::unexpected(s.error());
         const int ind = int(indent);
         if (levels.empty()) levels.push_back({ind, &m.steps});
@@ -578,6 +618,7 @@ inline void print_steps(std::string& out, const std::vector<Step>& steps, int de
         levels.back().second->push_back(std::move(*s));
     }
     if (not have_mission_line) return std::unexpected(syntax(1, "a mission starts with `mission`"));
+    if (auto e = fold_if_else(m.steps); e.has_value()) return std::unexpected(*e);
     assign_ids(m);
     if (auto e = validate(m); e.has_value()) return std::unexpected(*e);
     return m;

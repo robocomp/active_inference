@@ -122,9 +122,9 @@ struct EndChoice
 }
 
 /// The step AFTER the leaf `id` in a mission's step tree (document order, descending into seq / repeat bodies), skipping the
-/// ops in `skip` (a `close` runs on the way, it has no standpoint). nullptr = none / not resolvable (then: old behaviour).
+/// ops in `skip` (a `close` runs on the way, it has no standpoint; a `watch` is armed at once and does not block). nullptr = none / not resolvable (then: old behaviour).
 [[nodiscard]] inline const rc::mission::Step* next_step(const std::vector<rc::mission::Step>& steps, const std::string& id,
-                                                        const std::vector<std::string>& skip = {"close"})
+                                                        const std::vector<std::string>& skip = {"close", "watch"})
 {
     std::vector<const rc::mission::Step*> flat;
     const auto walk = [&](auto&& self, const std::vector<rc::mission::Step>& list) -> void
@@ -145,10 +145,11 @@ struct EndChoice
     return nullptr;
 }
 
-/// The step right after `id` whatever it is (no skipping): what a cross's NEXT step is, for deciding "close behind comes next".
+/// The step right after `id` (only a `watch` is passed: it is armed at once and is not a step the robot executes): what a
+/// cross's NEXT step is, for deciding "close behind comes next".
 [[nodiscard]] inline const rc::mission::Step* following_step(const std::vector<rc::mission::Step>& steps, const std::string& id)
 {
-    return next_step(steps, id, {});
+    return next_step(steps, id, {"watch"});
 }
 
 }   // namespace rc::chain

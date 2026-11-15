@@ -191,6 +191,10 @@ private:
 		std::optional<std::string> current_room() override;
 		void on_bind(const std::string &name, const std::string &room) override;
 		std::optional<double> eval(const rc::mission::Pred &p) override;
+		/// seen(what): the object nodes of that class (object_subtype) or with that name present now (triggers 2026-11-14).
+		std::vector<std::string> matches(const rc::mission::Pred &p) override;
+		/// A door passage (cross/open/close) may be interrupted only before it is past its approach (room review I1).
+		bool interruptible(const rc::mission::Step &leaf, bool restart) override;
 		/// The mission's steps, for the look-ahead of ONE step (chained_action.h): set by start_mission before the first tick.
 		void set_plan(std::vector<rc::mission::Step> steps) { plan_ = std::move(steps); }
 		/// The step AFTER `leaf` that has a standpoint (a `close` runs on the way and is skipped), as a goal in the current room's

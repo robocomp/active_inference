@@ -2818,7 +2818,10 @@ void ChatSession::on_mission_progress(rc::mission::Progress now)
         log_.write("wake_queued", QJsonObject{{"kind", q(kind)}, {"mission", static_cast<qint64>(now.serial)}, {"note", q(note)}});
         wakes_.push(std::move(note), std::move(fixes));
     };
-    if (const auto topics = new_reports(before, now, mission_ir_); not topics.empty())
+    // A watch's firings (spec 2026-11-14): one report wake per new object, its report text naming that object.
+    auto topics = new_reports(before, now, mission_ir_);
+    for (auto& w : new_watch_reports(before, now, mission_ir_)) topics.push_back(std::move(w.topic));
+    if (not topics.empty())
     {
         // ★ The snapshot is taken NOW, as the step runs: the robot goes on moving while the model writes (spec §5.3).
         tick_digest();

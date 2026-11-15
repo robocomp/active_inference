@@ -108,6 +108,12 @@ requires standoff_m
   cross door_19
   close door_19
   approach table_1 side=yp
+  if door_open(door_19)<0.5
+    open door_19
+  else
+    cross door_19
+  watch seen(chair) continue each=c
+    report "the colour of $c"
   report "objects here"
 )";
         const auto m = parse_text(all);
@@ -229,6 +235,47 @@ requires standoff_m
         CHECK(ground_clock("2026-11-14T18:00:00+01:00", now) == "2026-11-14T18:00:00+01:00");   // ISO kept
         CHECK(not ground_clock("soon", now).has_value());
         CHECK(parse_iso(format_iso_local(now)) == now);
+    }
+
+    // ── watch / if / else text forms (triggers-and-conditionals 2026-11-14) ────────────────────────────────────
+    {
+        const std::string watch_text = "mission \"go to the kitchen, any chair's colour\"\n"
+                                       "  watch seen(chair) continue each=c\n"
+                                       "    report \"the colour of $c\"\n"
+                                       "  cross door_22 expect=room_3\n";
+        const auto w = parse_text(watch_text);
+        CHECK(w.has_value());
+        if (not w.has_value()) std::println("  watch: {}", w.error().message());
+        if (w.has_value())
+        {
+            CHECK(w->steps.size() == 2 and w->steps[0].op == "watch" and w->steps[0].string("then") == "continue");
+            CHECK(w->steps[0].string("each") == "c" and w->steps[0].pred("when")->name == "seen");
+            CHECK(w->steps[0].steps.size() == 1 and w->steps[0].steps[0].op == "report");
+            CHECK(print_text(*w) == watch_text);
+        }
+        const std::string if_text = "mission \"door 1\"\n"
+                                    "  if door_open(door_1)<0.5\n"
+                                    "    open door_1\n"
+                                    "  else\n"
+                                    "    cross door_1 expect=room_2 retry=2\n";
+        const auto i = parse_text(if_text);
+        CHECK(i.has_value());
+        if (not i.has_value()) std::println("  if: {}", i.error().message());
+        if (i.has_value())
+        {
+            CHECK(i->steps.size() == 1 and i->steps[0].op == "if" and i->steps[0].steps.size() == 2);
+            CHECK(i->steps[0].steps[0].op == "seq" and i->steps[0].steps[0].steps[0].op == "open");
+            CHECK(i->steps[0].steps[1].op == "seq" and i->steps[0].steps[1].steps[0].op == "cross");
+            CHECK(print_text(*i) == if_text);
+        }
+        const std::string if_only = "mission\n  if door_open(door_1)<0.5\n    open door_1\n  cross door_1\n";
+        const auto io = parse_text(if_only);
+        CHECK(io.has_value() and io->steps.size() == 2 and io->steps[0].steps.size() == 1);
+        if (io.has_value()) CHECK(print_text(*io) == if_only);
+        const auto stray = parse_text("mission\n  cross door_1\n  else\n    stop\n");
+        CHECK(not stray.has_value() and stray.error().message().contains("else without if"));
+        const auto empty_else = parse_text("mission\n  if door_open(door_1)<0.5\n    open door_1\n  else\n  cross door_1\n");
+        CHECK(not empty_else.has_value() and empty_else.error().message().contains("else needs a body"));
     }
 
     std::println("mission_text_test: {} checks, {} failures", checks, failures);
