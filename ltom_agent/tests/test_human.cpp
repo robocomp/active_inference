@@ -27,7 +27,7 @@ static bool rejected(const Answer& a) { return a.text.starts_with("rejected:"); 
 
 static void test_name_is_kept_with_history()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     CHECK(not b.name().has_value());
     CHECK(b.apply(Claim{ClaimKind::name, "Pablo", 0, "my name is Pablo", 1}, r, 1000).text == "recorded");
@@ -40,14 +40,14 @@ static void test_name_is_kept_with_history()
 }
 static void test_empty_name_rejected()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     CHECK(rejected(b.apply(Claim{ClaimKind::name, "", 0, "my name is", 1}, r, 1000)));
     CHECK(b.human().names.empty());
 }
 static void test_owns_needs_a_memory_entry()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     const auto a = b.apply(owns(kUnknown, 1), r, 1000);
     CHECK(rejected(a));
@@ -56,7 +56,7 @@ static void test_owns_needs_a_memory_entry()
 }
 static void test_owns_records_once()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     CHECK(b.apply(owns(kA, 1), r, 1000).text == "recorded");
     CHECK(b.apply(owns(kA, 2), r, 2000).text == "recorded");
@@ -67,7 +67,7 @@ static void test_owns_records_once()
 }
 static void test_disown_keeps_history()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     b.apply(owns(kA, 1), r, 1000);
     CHECK(b.apply(disowns(kA, 2), r, 2000).text == "recorded");
@@ -78,14 +78,14 @@ static void test_disown_keeps_history()
 }
 static void test_disown_of_not_owned_rejected()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     CHECK(rejected(b.apply(disowns(kA, 1), r, 1000)));
     CHECK(b.human().things.empty());
 }
 static void test_reclaim_after_disown_is_a_new_entry()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     b.apply(owns(kA, 1), r, 1000);
     b.apply(disowns(kA, 2), r, 2000);
@@ -96,7 +96,7 @@ static void test_reclaim_after_disown_is_a_new_entry()
 }
 static void test_same_stamp_is_applied_once()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     const auto a1 = b.apply(owns(kA, 7), r, 1000);
     CHECK(b.dirty());
@@ -111,7 +111,7 @@ static void test_same_stamp_is_applied_once()
 }
 static void test_two_owned_chairs()
 {
-    const auto r = repertory();
+    auto r = repertory();
     HumanBook b;
     b.apply(owns(kA, 1), r, 1000);
     b.apply(owns(kB, 2), r, 2000);

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <ranges>
 
 namespace ltom
 {
@@ -79,6 +80,7 @@ Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::
         const bool owner_absent = not owners_present.contains(owner_of(uid));
         const auto [pit, first_miss] = pending_.try_emplace(uid, Pending{now_ms});
         const std::int64_t vanish = pit->second.vanish_ms;
+        if (owner_absent or (not first_miss and now_ms - vanish >= grace_ms_)) close_questions_of_live(uid);
         if (owner_absent)
         {
             l.end = End::owner_exit; l.end_ms = vanish; ch.owner_exited.push_back(uid);
@@ -112,6 +114,16 @@ void Repertory::tend_links(std::span<const Sighting> alive, std::int64_t now_ms)
                 m->second.moves.back().prob = s.link->same_prob;
                 dirty_ = true;
             }
+            if (m->second.continued_by != s.uid or m->second.moves.empty()) continue;
+            Move& mv = m->second.moves.back();
+            if (not mv.confirmed and not mv.asked and mv.question_stamp == 0 and s.link->left_spot_prob > 0.5f)
+            {
+                auto stamp = static_cast<std::uint64_t>(now_ms);
+                const auto open = questions();
+                while (open.contains(stamp)) ++stamp;   // two questions in one cycle keep distinct stamps
+                mv.question_stamp = stamp;
+                dirty_ = true;
+            }
             continue;
         }
         const auto me = entries_.find(s.uid);
@@ -120,6 +132,48 @@ void Repertory::tend_links(std::span<const Sighting> alive, std::int64_t now_ms)
         if (m == entries_.end() or m->second.moves.empty() or m->second.moves.back().confirmed) continue;
         cut_link(m->first, now_ms, "");
     }
+}
+
+void Repertory::close_questions_of_live(std::uint64_t live_uid)
+{
+    const auto l = entries_.find(live_uid);
+    if (l == entries_.end() or not l->second.continues.has_value()) return;
+    const auto m = entries_.find(*l->second.continues);
+    if (m == entries_.end() or m->second.moves.empty()) return;
+    Move& mv = m->second.moves.back();
+    if (mv.question_stamp != 0) { mv.question_stamp = 0; mv.asked = true; dirty_ = true; }
+}
+
+std::map<std::uint64_t, Question> Repertory::questions() const
+{
+    std::map<std::uint64_t, Question> out;
+    const auto has_confirmed = [](const Entry& e, std::size_t upto)
+    { return std::ranges::any_of(e.moves | std::views::take(upto), &Move::confirmed); };
+    for (const auto& [uid, e] : entries_)
+    {
+        if (not e.continued_by.has_value() or e.moves.empty() or e.moves.back().question_stamp == 0) continue;
+        const Move& mv = e.moves.back();
+        Question q{mv.question_stamp, uid, mv.live_uid, mv.from.room_key, mv.from, mv.to, has_confirmed(e, e.moves.size() - 1)};
+        if (const auto l = entries_.find(mv.live_uid); l != entries_.end() and not l->second.keyframes.empty())
+            q.new_kf = *std::ranges::max_element(l->second.keyframes, {}, &Keyframe::t_ms);
+        if (not q.again and e.continues.has_value())
+            if (const auto prev = entries_.find(*e.continues); prev != entries_.end())
+                q.again = has_confirmed(prev->second, prev->second.moves.size());
+        out.emplace(q.stamp, q);
+    }
+    return out;
+}
+
+bool Repertory::close_question(std::uint64_t memory_uid, std::uint64_t stamp)
+{
+    const auto m = entries_.find(memory_uid);
+    if (m == entries_.end() or not m->second.continued_by.has_value() or m->second.moves.empty()) return false;
+    Move& mv = m->second.moves.back();
+    if (stamp == 0 or mv.question_stamp != stamp) return false;
+    mv.question_stamp = 0;
+    mv.asked = true;
+    dirty_ = true;
+    return true;
 }
 
 void Repertory::record_link(std::uint64_t memory_uid, std::uint64_t live_uid, std::int64_t now_ms, float prob)

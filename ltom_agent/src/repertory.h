@@ -49,7 +49,10 @@ struct Life { std::int64_t born_ms = 0, first_seen_ms = 0, last_seen_ms = 0, end
 struct Keyframe { std::int64_t t_ms = 0, room_key = -1; Pose2 pose; };
 // A move the memory holds (owner's choice B, spec 2026-11-15-changed-object): the memory continues as a live object
 // elsewhere. `from` is the memory's last keyframe when linked, `to` the live object's. Confirmed = the owner said yes.
-struct Move { std::int64_t t_ms = 0; std::uint64_t live_uid = 0; Keyframe from, to; bool confirmed = false; float prob = 0.f; };
+// question_stamp: the open question about this move (0 = none open); asked: a question about it was answered or closed,
+// so it is never asked again (one question per change).
+struct Move { std::int64_t t_ms = 0; std::uint64_t live_uid = 0; Keyframe from, to; bool confirmed = false; float prob = 0.f;
+              std::uint64_t question_stamp = 0; bool asked = false; };
 // The owner said the live object was NOT this memory: it is gone from that room (kept, so it can match elsewhere).
 struct GoneFromRoom { std::int64_t t_ms = 0, room_key = -1; std::string words; };
 struct Thumbnail { float score = 0.f; std::vector<std::uint8_t> jpeg; };
@@ -73,6 +76,11 @@ struct Entry
     std::vector<Move> moves;                     // on the memory; the last one is the current link while continued_by is set
     std::vector<GoneFromRoom> gone;
 };
+
+// A question to the person about a move (derived from the open Move; persisted with it). again = the memory already
+// holds a confirmed move (directly, or through the memory it continues).
+struct Question { std::uint64_t stamp = 0; std::uint64_t memory_uid = 0, live_uid = 0; std::int64_t room_key = -1;
+                  Keyframe old_kf, new_kf; bool again = false; };
 
 struct Changes { std::vector<std::uint64_t> born, reopened, died, owner_exited; };
 
@@ -104,9 +112,16 @@ public:
     void record_link(std::uint64_t memory_uid, std::uint64_t live_uid, std::int64_t now_ms, float prob = 0.f);
     void confirm_link(std::uint64_t memory_uid);
     void cut_link(std::uint64_t memory_uid, std::int64_t now_ms, std::string words);
+    // Open questions, keyed by stamp. One opens when a held, unconfirmed link's sighting says the old spot is empty
+    // (left_spot_prob > 1/2, the MAP of that binary) and its move was never asked; it closes when answered, when the
+    // link is cut, or when the live object's life ends.
+    std::map<std::uint64_t, Question> questions() const;
+    // Closes the question `stamp` on `memory_uid`'s move; false when it is not open (stale, answered, or no link).
+    bool close_question(std::uint64_t memory_uid, std::uint64_t stamp);
 
 private:
     void tend_links(std::span<const Sighting> alive, std::int64_t now_ms);
+    void close_questions_of_live(std::uint64_t live_uid);
     struct Pending { std::int64_t vanish_ms; };
     std::int64_t grace_ms_;
     std::map<std::uint64_t, Entry> entries_;

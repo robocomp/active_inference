@@ -1,9 +1,11 @@
 // Offline test of the identity link in the repertory (spec 2026-11-15-changed-object, owner's choice B): a live object
 // believed to be a remembered one that moved; the owner's "no" cuts it and marks the memory gone from that room.
+#include "../src/human.h"
 #include "../src/recall_select.h"
 #include "../src/repertory.h"
 #include "../src/repertory_io.h"
 
+#include <algorithm>
 #include <clocale>
 #include <filesystem>
 #include <fstream>
@@ -166,6 +168,172 @@ static void older_file_loads_without_links()
     fs::remove(f);
 }
 
+// ── Task 4: questions, the owner's answers, beliefs ──────────────────────────────────────────────────────────
+static Claim moved(const char* v, std::uint64_t q, std::uint64_t stamp, const char* words = "yes, I moved it")
+{
+    return Claim{ClaimKind::moved, std::string(v) + ":" + std::to_string(q), kMem, words, stamp};
+}
+static const Belief* belief(const HumanBook& b, std::string_view key)
+{
+    for (const auto& x : b.human().beliefs) if (x.key == key) return &x;
+    return nullptr;
+}
+static int count(const Belief* b, bool yes)
+{
+    if (b == nullptr) return 0;
+    return static_cast<int>(std::ranges::count_if(b->records, [&](const BeliefRecord& r) { return r.yes == yes; }));
+}
+static const std::string kGets50 = "gets_moved:" + std::to_string(kMem);
+
+static void no_question_before_old_spot_seen_empty()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.3f), 1000);
+    CHECK(r.questions().empty());
+    see(r, live(0.9f, 0.8f), 1100);
+    const auto q = r.questions();
+    CHECK(q.size() == 1);
+    if (q.size() == 1)
+    {
+        const Question& x = q.begin()->second;
+        CHECK(x.memory_uid == kMem and x.live_uid == kLive and x.room_key == 2);
+        CHECK(x.old_kf.pose.x == -2.57 and x.new_kf.pose.x == 1.2 and not x.again);
+        CHECK(x.stamp == 1100);
+    }
+    see(r, live(0.9f, 0.9f), 1200);
+    CHECK(r.questions().size() == 1);   // one question per change
+}
+static void question_names_link_winner()
+{
+    auto r = with_memory();
+    Entry dup; dup.uid = (1ull << 40) | 44; dup.cls = "chair"; dup.name = "chair_44";
+    dup.lives.push_back(Life{.end = End::death}); dup.keyframes = {kf(40, 2, -2.57, -0.61)};
+    r.insert_loaded(dup);
+    see(r, live(0.9f, 0.8f), 1000);    // the chair agent's MAP named chair_50, not the colourless duplicate
+    const auto q = r.questions();
+    CHECK(q.size() == 1 and q.begin()->second.memory_uid == kMem);
+}
+static void question_closes_when_live_dies()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    const std::vector<Sighting> none;
+    r.observe(none, {1}, {}, 1100);
+    r.observe(none, {1}, {}, 2500);   // past the grace: chair_57 dead
+    CHECK(r.questions().empty());
+}
+static void moved_yes_confirms_and_learns()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    CHECK(b.apply(moved("yes", 1000, 7), r, 1500).text == "recorded");
+    CHECK(r.questions().empty());
+    CHECK(r.entries().at(kMem).moves.back().confirmed);
+    CHECK(count(belief(b, "moves_things"), true) == 1);
+    CHECK(count(belief(b, kGets50), true) == 1);
+    const Belief* m = belief(b, "moves_things");
+    CHECK(m != nullptr and m->records.back().said.words == "yes, I moved it" and m->records.back().said.t_ms == 1500);
+    CHECK(m != nullptr and m->records.back().object_uid == kMem);
+    see(r, live(0.95f, 0.9f), 1600);
+    CHECK(r.questions().empty());   // answered: not asked again
+}
+static void moved_no_cuts_and_learns_no()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    CHECK(b.apply(moved("no", 1000, 7, "no, I didn't"), r, 1500).text == "recorded");
+    CHECK(not r.entries().at(kMem).continued_by.has_value());
+    CHECK(r.entries().at(kMem).gone.size() == 1 and r.entries().at(kMem).gone[0].words == "no, I didn't");
+    CHECK(count(belief(b, "moves_things"), false) == 1);
+    CHECK(belief(b, kGets50) == nullptr);
+    CHECK(r.questions().empty());
+}
+static void moved_unknown_closes_without_learning()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    CHECK(b.apply(moved("unknown", 1000, 7, "no sé"), r, 1500).text == "recorded");
+    CHECK(r.questions().empty());
+    CHECK(r.entries().at(kMem).continued_by == kLive);
+    CHECK(not r.entries().at(kMem).moves.back().confirmed);
+    CHECK(b.human().beliefs.empty());
+    see(r, live(0.9f, 0.9f), 1600);
+    CHECK(r.questions().empty());   // "I don't know" is an answer: the same move is not asked again
+}
+static void answer_to_closed_question_rejected()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    CHECK(b.apply(moved("yes", 999, 7), r, 1500).text.starts_with("rejected: "));   // stale stamp
+    CHECK(b.human().beliefs.empty());
+    CHECK(b.apply(moved("yes", 1000, 8), r, 1500).text == "recorded");
+    CHECK(b.apply(moved("no", 1000, 9), r, 1600).text.starts_with("rejected: "));   // already answered
+    CHECK(count(belief(b, "moves_things"), false) == 0);
+    CHECK(b.apply(Claim{ClaimKind::moved, "maybe:1000", kMem, "", 10}, r, 1600).text.starts_with("rejected: "));
+}
+static void second_move_question_is_again()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    b.apply(moved("yes", 1000, 7), r, 1500);
+    // Next visit: chair_57 is the memory now (it continues chair_50), and a new live chair_63 is linked to it.
+    const std::vector<Sighting> none;
+    r.observe(none, {1}, {}, 2000);
+    r.observe(none, {1}, {}, 3500);
+    constexpr std::uint64_t k63 = (1ull << 40) | 63;
+    Sighting s = live(0.9f, 0.8f); s.uid = k63; s.name = "chair_63"; s.pose.x = 2.0; s.link = LinkObs{kLive, 0.9f, 0.8f};
+    see(r, s, 4000);
+    const auto q = r.questions();
+    CHECK(q.size() == 1 and q.begin()->second.memory_uid == kLive and q.begin()->second.again);
+}
+static void forget_drops_records_keeps_note()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    b.apply(moved("yes", 1000, 7), r, 1500);
+    CHECK(b.apply(Claim{ClaimKind::forget, "moves_things", 0, "forget that", 8}, r, 1700).text == "recorded");
+    const Belief* m = belief(b, "moves_things");
+    CHECK(m != nullptr and m->records.empty() and m->forgotten.size() == 1 and m->forgotten[0].words == "forget that");
+    CHECK(count(belief(b, kGets50), true) == 1);   // only that belief
+    CHECK(b.apply(Claim{ClaimKind::forget, "no_such_belief", 0, "forget it", 9}, r, 1800).text.starts_with("rejected: "));
+}
+static void human_io_roundtrips_beliefs()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    b.apply(moved("yes", 1000, 7), r, 1500);
+    b.apply(Claim{ClaimKind::forget, kGets50, 0, "forget that", 8}, r, 1700);
+    const fs::path f = fs::temp_directory_path() / ("ltom_beliefs_" + std::to_string(::getpid()) + ".json");
+    CHECK(save_repertory(f, r, &b));
+    Repertory gr(1000);
+    HumanBook gb;
+    CHECK(load_repertory(f, gr, &gb) == LoadResult::loaded);
+    const Belief* m = belief(gb, "moves_things");
+    CHECK(m != nullptr and m->records.size() == 1 and m->records[0].yes and m->records[0].object_uid == kMem);
+    CHECK(m != nullptr and m->records[0].said.words == "yes, I moved it" and m->records[0].said.t_ms == 1500);
+    const Belief* g = belief(gb, kGets50);
+    CHECK(g != nullptr and g->records.empty() and g->forgotten.size() == 1 and g->forgotten[0].t_ms == 1700);
+    fs::remove(f);
+}
+static void open_question_survives_restart()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    const fs::path f = fs::temp_directory_path() / ("ltom_q_" + std::to_string(::getpid()) + ".json");
+    CHECK(save_repertory(f, r));
+    Repertory got(1000);
+    CHECK(load_repertory(f, got) == LoadResult::loaded);
+    CHECK(got.questions().size() == 1 and got.questions().begin()->first == 1000);
+    fs::remove(f);
+}
+
 int main()
 {
     std::setlocale(LC_ALL, "");   // the agents run under es_ES (CLAUDE.md)
@@ -178,6 +346,17 @@ int main()
     continued_offered_only_while_live_present();
     repertory_io_roundtrips_links_and_questions();
     older_file_loads_without_links();
+    no_question_before_old_spot_seen_empty();
+    question_names_link_winner();
+    question_closes_when_live_dies();
+    moved_yes_confirms_and_learns();
+    moved_no_cuts_and_learns_no();
+    moved_unknown_closes_without_learning();
+    answer_to_closed_question_rejected();
+    second_move_question_is_again();
+    forget_drops_records_keeps_note();
+    human_io_roundtrips_beliefs();
+    open_question_survives_restart();
     if (failures == 0) std::println("test_repertory_links: all passed");
     return failures == 0 ? 0 : 1;
 }

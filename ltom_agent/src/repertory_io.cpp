@@ -96,6 +96,8 @@ QJsonObject to_json(const Entry& e)
             j["to"] = kf_json(m.to);
             j["confirmed"] = m.confirmed;
             j["prob"] = static_cast<double>(m.prob);
+            if (m.question_stamp != 0) j["question_stamp"] = QString::number(m.question_stamp);
+            if (m.asked) j["asked"] = true;
             mv.append(j);
         }
         o["moves"] = mv;
@@ -171,6 +173,26 @@ QJsonObject to_json(const Human& h)
         things.append(j);
     }
     o["things"] = things;
+    QJsonArray beliefs;
+    for (const Belief& b : h.beliefs)
+    {
+        QJsonObject j;
+        j["key"] = QString::fromStdString(b.key);
+        QJsonArray recs;
+        for (const BeliefRecord& r : b.records)
+        {
+            QJsonObject x = said_json(r.said);
+            x["yes"] = r.yes;
+            x["object_uid"] = QString::number(r.object_uid);
+            recs.append(x);
+        }
+        j["records"] = recs;
+        QJsonArray fg;
+        for (const Said& f : b.forgotten) fg.append(said_json(f));
+        j["forgotten"] = fg;
+        beliefs.append(j);
+    }
+    if (not h.beliefs.empty()) o["beliefs"] = beliefs;
     return o;
 }
 
@@ -193,6 +215,23 @@ bool from_json(const QJsonObject& o, Human& h)
         t.said = said_from(j);
         if (j.contains("retracted")) t.retracted = said_from(j["retracted"].toObject());
         h.things.push_back(std::move(t));
+    }
+    for (const QJsonValue& v : o["beliefs"].toArray())   // absent (older file) = nothing learned yet
+    {
+        const QJsonObject j = v.toObject();
+        Belief b;
+        b.key = j["key"].toString().toStdString();
+        for (const QJsonValue& rv : j["records"].toArray())
+        {
+            const QJsonObject x = rv.toObject();
+            BeliefRecord r;
+            r.said = said_from(x);
+            r.yes = x["yes"].toBool();
+            if (not parse_uid(x["object_uid"].toString(), r.object_uid)) return false;
+            b.records.push_back(std::move(r));
+        }
+        for (const QJsonValue& fv : j["forgotten"].toArray()) b.forgotten.push_back(said_from(fv.toObject()));
+        h.beliefs.push_back(std::move(b));
     }
     return true;
 }
@@ -243,6 +282,8 @@ bool from_json(const QJsonObject& o, Entry& e)
         m.to = kf_from(j["to"].toObject());
         m.confirmed = j["confirmed"].toBool();
         m.prob = static_cast<float>(j["prob"].toDouble());
+        if (j.contains("question_stamp") and not parse_uid(j["question_stamp"].toString(), m.question_stamp)) return false;
+        m.asked = j["asked"].toBool();
         e.moves.push_back(m);
     }
     for (const QJsonValue& v : o["gone"].toArray())
