@@ -1162,12 +1162,12 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                 // across-wall state is d, the door plane's depth off the wall line; its posterior sd (Σ(3,3), recess_sd()) is the
                 // fit's own uncertainty of where across the wall the door is. One long-range view leaves it near its prior
                 // (sqrt(T²/12 + σ_b²)); a well-measured door collapses it.
-                inst.belief.prior = prior_of(inst, polygon, fit_.room_is_proto(), fit_.room_band(), before,
+                inst.belief.adopt_prior(prior_of(inst, polygon, fit_.room_is_proto(), fit_.room_band(), before,
                                              std::sqrt(std::max(0.0f, C(1, 1))), std::sqrt(std::max(0.0f, C(2, 2))), true, size_prior,
                                              inst.ai2_belief.recess_sd(),
                                              std::sqrt(std::max(0.0f, C(0, 0))),                                // the near jamb: s
                                              std::sqrt(std::max(0.0f, C(0, 0) + C(1, 1) + 2.0f * C(0, 1))),   // the far jamb: s + w
-                                             std::numeric_limits<float>::quiet_NaN(), nullptr, {});
+                                             std::numeric_limits<float>::quiet_NaN(), nullptr, {}));
                 if (cfg.exist_one_model) inst.belief.prior.base_rate = held_base;
             }
             const float act = std::exchange(inst.pending_actuation_llr, 0.0f);

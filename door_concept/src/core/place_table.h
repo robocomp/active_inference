@@ -34,6 +34,7 @@ struct PlaceRow
     Vec2f xy = Vec2f::Zero(); Eigen::Matrix2f cov = Eigen::Matrix2f::Identity(); float yaw = 0.f, width = 0.f, height = 0.f;
     float depth = 0.f;                    // the aperture's wall depth, set by the caller from the fit; 0 = unknown
     float height_sd = 0.f;                // the fit's posterior sd of `height` (m); 0 = unknown (a row loaded from the CSV, which has no column for it)
+    bool identity_only = false;           // one-model: the row carried no L (identity only): PlaceBelief::identity_only_g
     float L_evidence = 0.f;             // PlaceBelief::L_evidence(): everything but the structural prior
     float physical = 0.f;                 // PlaceBelief::Sp(): the physical part of L_evidence (what a memory keeps outside vision's saturation, place_belief.h)
     bool crossed = false;                 // proof, for ever: a crossed place has no delete line (place_belief.h)
@@ -197,6 +198,7 @@ public:
         r.cov = Eigen::Matrix2f::Identity() * sd * sd;
         if (i.pose) { r.yaw = i.pose->yaw; r.width = i.pose->width; r.height = i.pose->height; r.depth = i.pose->depth; }
         r.L_evidence = i.exist_logodds.value_or(0.f);
+        r.identity_only = one_model and not i.exist_logodds.has_value();
         r.visit = i.visit.value_or(0);
         r.last_seen_wall_ms = i.seen_wall_ms.value_or(0);
         r.removed_wall_ms = i.removed_ms;
@@ -225,6 +227,7 @@ public:
         b.lookalike = lookalike_;
         b.crossed = r.crossed;
         b.remember(float(double(r.L_evidence) * g), float(double(r.physical) * g));
+        if (r.identity_only) b.identity_only_g = r.last_seen_wall_ms > 0 ? g : 1.0;   // no age, no aging
     }
     [[nodiscard]] PlaceBelief restored_belief(const PlaceRow& r, std::int64_t now_wall_ms) const
     {

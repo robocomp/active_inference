@@ -681,6 +681,7 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& rest
     inst.belief.ledger = restored.ledger;
     inst.belief.lookalike = restored.lookalike;
     inst.belief.crossed = restored.crossed;
+    inst.belief.identity_only_g = restored.identity_only_g;
     // The door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
     // Task D-C round 2 (tour3C): the remembered place's precision seeds the belief's along-wall σ (DoorFit's lazy init).
     inst.remembered_place_sd = r.place_sd;

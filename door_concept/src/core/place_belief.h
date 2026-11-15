@@ -69,6 +69,23 @@ struct PlaceBelief
     //  WITHDRAWS (the robot never left) is the opposite proof (refute_crossing).
     bool crossing_pending = false;
 
+    /// ★AN IDENTITY-ONLY ROW (one-model; 11-15 e18, door_21): a remembered door whose row carries no L. Its evidence at writing was missing but
+    ///  BOUNDED: a row is written for a door believed to exist, so the posterior then was at least even (L_post >= 0). The least-informative evidence
+    ///  consistent with that is L_evidence = -prior (posterior exactly 0, P = 0.5), the prior being the structural prior of the room it is restored
+    ///  into, which only the first update knows. So the restore holds the row's age factor here (1 = no age) and adopt_prior() enters the evidence.
+    std::optional<double> identity_only_g;
+
+    /// The structural prior, REPLACED (never accumulated). The first adoption on an identity-only restore also enters its evidence, -g * prior
+    /// (aged as any remembered evidence: g = 1 without an age, so P = 0.5; an old row relaxes toward the prior), ON TOP of whatever the ledger holds.
+    void adopt_prior(const PlacePrior& p)
+    {
+        prior = p;
+        if (not identity_only_g.has_value()) return;
+        const double g = *identity_only_g;
+        identity_only_g.reset();
+        remember(float(double(L_evidence()) - g * double(p.total())), float(Sp()));
+    }
+
     /// The body went through this place: pending, unless the proof already stands.
     void note_crossing() { if (not crossed) crossing_pending = true; }
     /// The room switch stood: the pending crossing is proof. No-op without a pending crossing.
