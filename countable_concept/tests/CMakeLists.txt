@@ -97,3 +97,10 @@ add_executable(carve_replay ../tools/carve_replay.cpp)
 target_include_directories(carve_replay PRIVATE ../src ../../common)
 target_compile_options(carve_replay PRIVATE -O2)
 target_link_libraries(carve_replay PRIVATE Eigen3::Eigen)
+
+# Golden 40-frame fit trajectory (hex floats, bit-exact at -O2 for this compiler): the lidar-measures change must not move it.
+add_executable(lidar_golden_test lidar_golden_test.cpp ../src/countable_belief.cpp)
+target_include_directories(lidar_golden_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(lidar_golden_test PRIVATE -O2)
+target_link_libraries(lidar_golden_test PRIVATE Eigen3::Eigen)
+add_test(NAME lidar_golden_test COMMAND lidar_golden_test)
