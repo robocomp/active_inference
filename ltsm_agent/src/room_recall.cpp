@@ -142,20 +142,31 @@ int RoomRecall::step()
                     not added and hole->distance < it->second.first)
                     it->second = {hole->distance, door.id()};
 
+    // ★DIAGNOSTIC (11-15, ltom_recall_countable2_p1: the crossed door's mirror never got recall_room_1): why a door gets no recall,
+    //  logged once per change of reason per door; it decides nothing.
+    static std::unordered_map<std::uint64_t, std::string> last_skip;
+    const auto skip = [&](const DSR::Node &d, const std::string &why)
+    {
+        if (auto [it, added] = last_skip.try_emplace(d.id(), why); added or it->second != why)
+        {
+            it->second = why;
+            qInfo().noquote() << QString::fromStdString(std::format("[recall] {} gets no recall: {}", d.name(), why));
+        }
+    };
     for (const auto &door : doors)
     {
         if (not is_door(*live_, door)) continue;
         const auto room = room_of(*live_, door);
-        if (not room.has_value()) continue;
-        if (rc::exit_fact::is_archived(*live_, room->id())) continue;   // link 4: the room left; its owners are deleting it
+        if (not room.has_value()) { skip(door, "no live room above the door"); continue; }
+        if (rc::exit_fact::is_archived(*live_, room->id())) { skip(door, "its room is archived (left)"); continue; }   // link 4: the room left; its owners are deleting it
 
         // The hole memory already knows behind this door, BY PLACE (RoomEviction::remembered_hole): the door's NAME is a
         // label door_concept re-makes at every crossing (try28: door_37 in room_1 for the face r1_door_19), never the key.
         // A re-entered room is published in its own remembered frame, so the live door and its room's memory faces are
         // directly comparable; the name is consulted only when the door's pose in its room does not resolve.
         const auto hole = ev_.remembered_hole(door, /*staged_twin_ok=*/true);   // F3: see the face_room test below
-        if (not hole.has_value()) continue;
-        if (nearest.at(hole->face.id()).second != door.id()) continue;     // a nearer door holds this face
+        if (not hole.has_value()) { skip(door, "no remembered hole within half its width (or no memory twin of its room)"); continue; }
+        if (nearest.at(hole->face.id()).second != door.id()) { skip(door, std::format("a nearer live door holds face {}", hole->face.name())); continue; }     // a nearer door holds this face
         const auto &face = hole->face;
 
         // The passage's OTHER face: one in a DIFFERENT room. A passage written before 2026-10-18 can carry two faces of
@@ -169,7 +180,7 @@ int RoomRecall::step()
         // retired the recall back to the room just left, and a crossing back in that window birthed a NEW room.
         const bool own_twin = face_room.has_value()
             and face_room->name() == std::format("r{}_{}", live_->get_attrib_by_name<room_id_att>(room.value()).value_or(0), room->name());
-        if (face_room.has_value() and is_staged_room(*mem_, face_room.value()) and not own_twin) continue;
+        if (face_room.has_value() and is_staged_room(*mem_, face_room.value()) and not own_twin) { skip(door, std::format("face {} is in a staged room that is not its own twin", hole->face.name())); continue; }
         for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(hole->passage, "match"))
             if (e.to() != face.id())
                 if (const auto f = mem_->get_node(e.to()); f.has_value())
@@ -177,21 +188,22 @@ int RoomRecall::step()
                         fr.has_value() and not is_staged_room(*mem_, fr.value())
                         and (not face_room.has_value() or fr->id() != face_room->id()))
                         other = f;
-        if (not other.has_value()) continue;
+        if (not other.has_value()) { skip(door, std::format("passage of face {} has no other face in a settled room", hole->face.name())); continue; }
         const auto mroom = room_of(*mem_, other.value());
-        if (not mroom.has_value() or is_staged_room(*mem_, mroom.value())) continue;
+        if (not mroom.has_value() or is_staged_room(*mem_, mroom.value())) { skip(door, "the room behind is missing or staged"); continue; }
 
         // The remembered room's LIVE name: memory's name without its r<idx>_ prefix.
         std::string name = mroom->name();
         if (const auto us = name.find('_'); name.starts_with('r') and us != std::string::npos) name = name.substr(us + 1);
         // Already live (we are in it, or it was never evicted): nothing to recall.
-        if (live_->get_node(name).has_value()) continue;
+        if (live_->get_node(name).has_value()) { skip(door, std::format("the room behind ('{}') is live", name)); continue; }
 
         const auto px = mem_->get_attrib_by_name<delimiting_polygon_x_att>(mroom.value());
         const auto py = mem_->get_attrib_by_name<delimiting_polygon_y_att>(mroom.value());
         const auto T  = mie->get_transformation_matrix(other->name(), mroom->name());   // face <- room, in memory
-        if (not px.has_value() or not py.has_value() or not T.has_value()) continue;
+        if (not px.has_value() or not py.has_value() or not T.has_value()) { skip(door, "the room behind has no polygon or no face<-room transform"); continue; }
 
+        last_skip.erase(door.id());
         wanted.insert(door.id());
         const std::string rname = "recall_" + name;
         auto node = live_->get_node(rname);
