@@ -97,6 +97,7 @@
 #include "system_reader.h"
 #include "ollama_client.h"
 #include "topology.h"
+#include "whereabouts.h"
 #include "world_digest.h"
 
 namespace rc::chat
@@ -133,7 +134,8 @@ struct SessionConfig
     // agent_control (fleet_control.h): the agents the chat may start / stop, each as <fleet_dir>/<agent>/bin/<agent>
     std::string fleet_dir = "..";
     std::string fleet_agents = "room_concept,residual_concept,retina,door_concept,table_concept,chair_concept,"
-                               "bottle_concept,cabinet_concept,hood_concept,human_concept,refrigerator_concept,controller,"
+                               "bottle_concept,cabinet_concept,hood_concept,human_concept,refrigerator_concept,nightstand_concept,"
+                               "bed_concept,toilet_concept,controller,"
                                "ltsm_agent,episodic_agent";
     std::string fleet_confirm = "controller,retina";
     std::string fleet_lock;               ///< "" ⇒ $XDG_RUNTIME_DIR/ai_fleet_tour.lock (the tour scripts hold it)
@@ -185,6 +187,8 @@ private:
     QString answer_query(const QString& name, const QJsonObject& args);
     /// ltsm_agent's published memory summary (node ltsm_topology); nullopt when absent or unreadable.
     std::optional<rc::chat::Topology> remembered_topology() const;
+    /// where_was(ago_min | at): where the robot was then (whereabouts.h; tense spec 2026-11-14 §3).
+    [[nodiscard]] QString answer_where_was(const QJsonObject& args) const;
     /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
     QString do_look(const QJsonObject& args);
     /// show(name, args?, live?) / draw(script, title, live?) → the tool-result text; the picture goes to the canvas.
@@ -212,9 +216,10 @@ private:
     [[nodiscard]] QString planner_state() const;   ///< state_message() + the `ways from here` line (planner only)
     /// After a tool round of the model: re-ask to fix a failed draw, or one follow-up when it said nothing / saw a picture.
     void after_tool_round(bool had_words, bool image);
-    /// The words just shown claim a mission (planned / starts on yes / started) that has no card and sent nothing:
-    /// ask the model once more, then say so plainly (mission_plan.h check_mission_claim).
-    void check_claimed_mission(const QString& content);
+    /// The words just shown claim a mission or action (planned / starts on yes / started / sent) that has no card and
+    /// sent nothing (verdict from mission_plan.h check_mission_claim, not Fine): ask the model once more (Repair), then
+    /// say so plainly (Correct). The history already holds kUnbackedClaimNote in place of the words.
+    void handle_claimed_mission(const QString& content, MissionClaim verdict);
     [[nodiscard]] bool name_exists(std::string_view name) const;   ///< a node of the live graph or a remembered passage
     /// An object ltom remembers and the live graph does NOT have now: its last pose and the steps that bring it into view.
     [[nodiscard]] std::optional<rc::chat::RememberedPlace> remembered_place(std::string_view name) const;
@@ -282,6 +287,7 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI> inner_;
     WorldDigest digest_builder_;
     Digest digest_;
+    rc::chat::Whereabouts whereabouts_;   ///< where the robot has been since this chat started (fed by tick_digest)
     IntentionNode intention_;
     MissionWatch mission_watch_;   ///< the controller's controller_mission node → the plan window
     rc::mission::Progress mission_progress_;   ///< its last progress (the STATE's "controller mission now" line)

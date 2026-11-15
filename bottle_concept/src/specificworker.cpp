@@ -31,6 +31,8 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../../common/room_resolve/room_follow.h"        // rc::room::read_outline / drop_left_behind
+#include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict / outline_usable
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 
@@ -363,22 +365,31 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     phantom_log_.write(e);
 }
 
-// Load the room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted).
-// Mirrors refrigerator_concept::refresh_room_geometry. Leaves the polygon empty until room_concept
-// publishes, which is exactly the "impose no constraint" case rc::nbv::is_reachable expects.
+// Load the WORKING room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted) with
+// the shared reader. Used by the NBV's reachability, the existence wall line-of-sight, recall's room area and the
+// birth containment rule. ★Always the working room's own: empty until that room publishes one, so births WAIT then.
 void SpecificWorker::refresh_room_polygon()
 {
     if (not G or room_node_id_ == 0) return;
-    const auto room = G->get_node(room_node_id_);
-    if (not room.has_value()) return;
-    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
-    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
-    if (not px.has_value() or not py.has_value()) return;
-    const auto& xs = px->get(); const auto& ys = py->get();
-    const std::size_t n = std::min(xs.size(), ys.size());
-    if (n < 3) return;                       // degenerate ⇒ leave it empty rather than half-armed
-    std::vector<Eigen::Vector2f> poly; poly.reserve(n);
-    for (std::size_t i = 0; i < n; ++i) poly.emplace_back(xs[i], ys[i]);
+    auto poly = rc::room::read_outline(*G, room_node_id_);
+    if (not rc::room::outline_usable(poly)) poly.clear();
+    if (room_node_id_ != outline_room_ or poly.size() != room_polygon_.size())
+    {
+        if (poly.empty())
+            std::print("bottle_concept: [room] room {} has NO usable outline (none yet, or still a proto) — births WAIT\n", room_node_id_);
+        else
+        {
+            float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
+            for (const auto& v : poly)
+            {
+                xmin = std::min(xmin, v.x()); xmax = std::max(xmax, v.x());
+                ymin = std::min(ymin, v.y()); ymax = std::max(ymax, v.y());
+            }
+            std::print("bottle_concept: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
+                       room_node_id_, poly.size(), xmin, xmax, ymin, ymax);
+        }
+        outline_room_ = room_node_id_;
+    }
     room_polygon_ = std::move(poly);
 }
 
@@ -391,16 +402,13 @@ void SpecificWorker::compute()
     if (existence_) existence_->set_foreign_claims(&foreign_claims_);
     if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);   // the FIT judges the same geometry
 
-    refresh_room_polygon();   // NBV reachability needs the room; empty until room_concept publishes
     if (not G or not rt_api_)
         return;
 
-    if (room_node_id_ == 0)
-    {
-        const auto room = rc::room::current_room(*G);
-        if (not room.has_value()) return;
-        room_node_id_ = *room;
-    }
+    // The room this agent works in follows the robot, every cycle (was: latched at the first room). No room yet: wait.
+    room_node_id_ = rc::room::follow_current_room(room_node_id_, rc::room::current_room(*G));
+    if (room_node_id_ == 0) return;
+    refresh_room_polygon();   // the WORKING room's outline; empty until room_concept publishes it
 
     // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled rather than pushed
     // by update_node_attr_signal, which fires for every attribute change on every node in the shared graph.
@@ -447,6 +455,14 @@ void SpecificWorker::compute()
     // the main thread (ts=0 pose diff) before the per-instance loop; run_inference's confirm_only gate reads it.
     fitter_->update_ego_motion();
 
+    // The robot left a bottle's room (its parent chain — the table it stands on, or the room — names another room):
+    // fitting it here would corrupt the pose ltom remembers. ltom keeps it and offers it back on return.
+    rc::room::drop_left_behind(*G, "bottle", room_node_id_, [this](std::uint64_t id)
+    {
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            it->second.affordance.remove();
+        fitter_->forget_node(id);
+    });
     // Bottle instances are DSR `object` nodes named "bottle_*" (migrated from type "cylinder").
     for (const auto& node : G->get_nodes_by_type("object"))
         if (node.name().starts_with("bottle"))
@@ -736,7 +752,13 @@ void SpecificWorker::run_instance_tracker()
         }
     }
 
-    const auto res = tracker_.update(tracks, dets);
+    // WAIT: no usable outline for the working room ⇒ hold births (candidates keep their evidence; InstanceTracker).
+    const bool hold = not rc::room::outline_usable(room_polygon_);
+    if (hold != births_held_)
+        std::print("bottle_concept: [tracker] births {} — room {} {}\n", hold ? "HELD" : "released", room_node_id_,
+                   hold ? "has no outline yet (or is still a proto)" : "outline arrived");
+    births_held_ = hold;
+    const auto res = tracker_.update(tracks, dets, hold);
 
     // Diagnostic: how many bottle detections vs instances, and what the tracker decided. Throttled,
     // but always logged on a birth/death. Reveals "only 1 slice" (upstream) vs "2 slices, no birth".
@@ -790,6 +812,15 @@ void SpecificWorker::run_instance_tracker()
     for (const int d : res.births)
     {
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
+        // Room containment at BIRTH (shared rule): a bottle seen through a door belongs to the other room.
+        // Tolerance = the bottle's prior radius (its physical half-footprint).
+        {
+            const auto verdict = rc::room::birth_verdict(room_polygon_, Eigen::Vector2f(c.x(), c.y()), cfg_.prior_radius);
+            std::print("bottle_concept: [tracker] birth at ({:.2f},{:.2f}) room {} — {}\n", c.x(), c.y(), room_node_id_,
+                       verdict == rc::room::BirthVerdict::Admit ? "inside"
+                     : verdict == rc::room::BirthVerdict::Suppress ? "OUTSIDE — suppressed" : "no outline — deferred");
+            if (verdict != rc::room::BirthVerdict::Admit) continue;
+        }
         // Decide on the ROOM-frame centroid, before the support-surface decision re-parents and transforms it.
         float resurrect_p = 0.f;
         const auto resurrect = choose_resurrection(Eigen::Vector2f(c.x(), c.y()), resurrect_p);

@@ -15,7 +15,11 @@ Steps:
 - approach OBJECT: optionally add side=right
 - explore ROOM budget_s=60s: budget_s is required; optionally add until=explored(ROOM)>=0.9
 - wait s=5s: optionally add until=PRED
+- wait at=18:00: waits until that clock time (the next one: today if still ahead, else tomorrow); "in 10 minutes" is wait s=600s
 - move distance_m=1m turn_deg=90deg: turns first, then drives; either keyword alone is fine (move turn_deg=90deg). There is no op called turn
+- A door is crossed from in front of it. When its STATE entry says it is behind the robot (bearing behind, behind-left or behind-right), put `move turn_deg=N` (N from its `to face it:`, the words `to face it:` are not part of the step) as the first step, then `cross` it
+- watch seen(chair) continue each=c, with indented steps under it: while the steps AFTER it (at its own indent) run, every chair that comes into view runs the indented steps once, with $c = that chair. `continue` = react and carry on ("tell me about every chair on the way"); `stop` = end the watched steps when it fires ("stop as soon as you see a bottle"); put a stop watch at the top level. seen() takes chair, table, bottle, cabinet, refrigerator, hood, nightstand, bed, toilet, person, or an object name from the STATE; anything else (a cup) cannot be recognised: say so with ask:
+- if door_open(door_1)<0.5, with indented steps, then optionally `else` at the same indent as the if and its own indented steps: decided once, when the mission reaches it ("if it is shut open it, otherwise go through"). Use <0.5 for "shut", >=0.5 for "open" unless the person gives another
 - say "text": shown to the person
 - report "topic": the model describes the room the robot is in now
 - anchor NAME: a step; remembers this spot; return with go_to anchor:NAME
@@ -47,6 +51,24 @@ mission "explore until the room is known"
   say "done exploring"
 ```
 ```
+mission "go to room_3 and tell me the colour of every chair on the way"
+  watch seen(chair) continue each=c
+    report "the colour of $c"
+  cross door_22 expect=room_3 retry=2
+```
+```
+mission "explore and stop as soon as you see a bottle"
+  watch seen(bottle) stop each=b
+    report "where $b is"
+  explore room_1 budget_s=300s
+```
+```
+mission "go through door_1, opening it if it is shut"
+  if door_open(door_1)<0.5
+    open door_1
+  cross door_1 expect=room_2 retry=2
+```
+```
 mission "turn around and go to the table"
   move turn_deg=180deg
   approach table_1
@@ -63,6 +85,12 @@ mission "visit the rooms behind door_1 and door_0, report each, return"
   report "what is in the second room"
   cross door_0 expect=room_1 retry=2
   go_to anchor:home
+```
+"At 18:00 go through door_1" (a start time is a wait first):
+```
+mission "go through door_1 at 18:00"
+  wait at=18:00
+  cross door_1 retry=2
 ```
 An object remembered in this room, behind the robot, with the STATE line `remembered objects, NOT seen now (each may have moved): chair_34 in room_1 at pose:room_1(-1.72, -1.34), from here: move turn_deg=145deg`:
 ```

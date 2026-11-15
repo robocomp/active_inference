@@ -17,6 +17,7 @@
 #include <cmath>
 #include <vector>
 
+#include "../../common/nbv/countable_planner.h"        // rc::nbv::plan_countable — the shared countable planner core
 #include "refrigerator_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
 #include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope
 #include "../../common/nbv/viewpoint_score.h"           // rc::nbv — the shared detection-weighted NBV core

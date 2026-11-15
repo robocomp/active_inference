@@ -154,8 +154,12 @@ public:
     const TrackerParams& params() const { return params_; }
 
     // Run one cycle: gate → greedy 1-to-1 associate → negative-information death → persisted-candidate birth.
+    // `hold_births` (WAIT): candidates keep maturing and keep their evidence, but none is promoted this cycle — an
+    // agent holds births while it cannot yet decide where a birth would belong (no room outline). The first cycle
+    // the hold is lifted, a candidate that already carries birth_frames of evidence is born on its next detection.
     TrackerResult update(const std::vector<TrackView>& tracks,
-                         const std::vector<DetectionView>& dets)
+                         const std::vector<DetectionView>& dets,
+                         bool hold_births = false)
     {
         TrackerResult out;
         out.assignment.assign(dets.size(), -1);
@@ -279,7 +283,7 @@ public:
                     next_cand[k].sensor = dets[d].sensor;
                     fuse(next_cand[k]);
                     out.cand_of_det[d] = next_cand[k].id;
-                    if (next_cand[k].streak >= params_.birth_frames)
+                    if (next_cand[k].streak >= params_.birth_frames and not hold_births)
                     {
                         out.births.push_back(d);
                         out.birth_cand_ids.push_back(next_cand[k].id);
@@ -311,7 +315,7 @@ public:
             // This detection's evidence belongs to `cand` — the agent banks its mask cloud under this id.
             out.cand_of_det[d] = cand.id;
 
-            if (cand.streak >= params_.birth_frames)
+            if (cand.streak >= params_.birth_frames and not hold_births)
             {
                 out.births.push_back(d);                      // promote: spawn an instance from this det
                 out.birth_cand_ids.push_back(cand.id);        // …and hand over its accumulated burst

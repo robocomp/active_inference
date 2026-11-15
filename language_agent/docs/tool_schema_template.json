@@ -1,0 +1,121 @@
+{
+  "_comment": "Per-tool schema for the command taxonomy (docs/command_taxonomy.md §5). The first entry is the empty template; the rest are worked examples for existing tools on main db8d39e3.",
+  "template": {
+    "name": "",
+    "layer": "chat_tool | fast_path | mission_op",
+    "speech_act": "question | directive | informative | commissive | expressive",
+    "process_type": "relational | existential | mental_perceptual | material | verbal_semiotic",
+    "aspect": {
+      "class": "state | activity | accomplishment | achievement | semelfactive",
+      "telic": false,
+      "durative": false,
+      "goal_predicate": "",
+      "progress_signal": "",
+      "interrupt": ""
+    },
+    "manner_or_result": "manner | result | n/a",
+    "arguments": [
+      { "role": "Agent | Theme | Source | Goal | Path | Instrument | Manner | Recipient | Extent | Time", "param": "", "required": false, "notes": "" }
+    ],
+    "temporal": ["immediate", "absolute_deferred", "relative_deferred", "event_triggered", "recurring", "bounded_duration", "deadline"],
+    "mood_handling": "",
+    "clarification_policy": "",
+    "execution_contract": ""
+  },
+  "examples": [
+    {
+      "name": "approach_object",
+      "layer": "chat_tool (mission op: approach)",
+      "speech_act": "directive",
+      "process_type": "material",
+      "aspect": {
+        "class": "accomplishment",
+        "telic": true,
+        "durative": true,
+        "goal_predicate": "robot in front of the object at its stand-off, facing it (the object's own approach affordance holds)",
+        "progress_signal": "controller intention_state lines (orienting, driving to the standpoint, goal holds)",
+        "interrupt": "stop / para fast path; a new command supersedes it"
+      },
+      "manner_or_result": "result",
+      "arguments": [
+        { "role": "Agent", "param": "(the robot)", "required": true, "notes": "implicit" },
+        { "role": "Goal", "param": "object", "required": true, "notes": "a name (chair_1), a class (nearest), or 'my chair' (resolved through the person's owns edges)" },
+        { "role": "Manner", "param": "side", "required": false, "notes": "the person's words ('from behind', 'por la izquierda'); a side the object does not list is refused" }
+      ],
+      "temporal": ["immediate"],
+      "mood_handling": "imperative and indirect ('could you go to the chair', 'quiero que vayas a mi silla') read by the chat model; a remembered-only object goes through the code-built fast path (turn, wait, approach on_fail=skip, report)",
+      "clarification_policy": "missing object: ask which one; a class with several instances: the nearest, said in the reply; object not in the current room: plan_mission (cross legs first)",
+      "execution_contract": "claims the base; sends the controller an approach intention aimed at the object's aff_<name>_approach node; completion/failure arrive as intention_state lines and are said by the chat"
+    },
+    {
+      "name": "explore",
+      "layer": "mission_op",
+      "speech_act": "directive",
+      "process_type": "material (with perceptual side effect: the map and objects grow)",
+      "aspect": {
+        "class": "activity",
+        "telic": false,
+        "durative": true,
+        "goal_predicate": "none intrinsic; optional until=explored(room) >= p turns it telic",
+        "progress_signal": "explored(room) probability; mission wait/step notes",
+        "interrupt": "stop, pause, continue, cancel mission; budget_s ends it"
+      },
+      "manner_or_result": "manner",
+      "arguments": [
+        { "role": "Location", "param": "room", "required": true, "notes": "a room node, or a $var bound by an earlier cross" },
+        { "role": "Extent", "param": "budget_s", "required": true, "notes": "the validator REQUIRES the bound: an atelic step must end" },
+        { "role": "Goal", "param": "until", "required": false, "notes": "a predicate, e.g. explored(room_1)>=0.9" }
+      ],
+      "temporal": ["bounded_duration", "event_triggered (until)"],
+      "mood_handling": "via plan_mission; 'look around', 'explora la habitación', 'mira a ver qué hay'",
+      "clarification_policy": "no bound given: the planner picks the skill's default budget and the card shows it, so the person can change it before yes",
+      "execution_contract": "claims the base; the controller's exploration drive runs in the room until budget or predicate; result folded into the mission's wake summary"
+    },
+    {
+      "name": "where_is",
+      "layer": "chat_tool",
+      "speech_act": "question",
+      "process_type": "relational (and existential: 'is there a fridge?')",
+      "aspect": {
+        "class": "state",
+        "telic": false,
+        "durative": false,
+        "goal_predicate": "n/a (a read)",
+        "progress_signal": "n/a",
+        "interrupt": "n/a (synchronous)"
+      },
+      "manner_or_result": "n/a",
+      "arguments": [
+        { "role": "Theme", "param": "name", "required": true, "notes": "an object name, a class, a colour + class, or 'my chair'" }
+      ],
+      "temporal": ["immediate (present)", "past (LTOM: last seen in room_N, X ago)"],
+      "mood_handling": "interrogative; 'do you know where…', '¿sabes dónde está…?' are the same question",
+      "clarification_policy": "several matches: all are listed; nothing known: says it has not been perceived (never guesses)",
+      "execution_contract": "reads the live graph and the LTOM graph (domain 5); the answer is said verbatim when it comes from memory"
+    },
+    {
+      "name": "wait (at=)",
+      "layer": "mission_op",
+      "speech_act": "directive (temporal precondition of the rest of the mission)",
+      "process_type": "material (holds still)",
+      "aspect": {
+        "class": "state",
+        "telic": true,
+        "durative": true,
+        "goal_predicate": "wall clock >= at, or until=pred holds",
+        "progress_signal": "wait note 'until 18:00 (in 42 min)'",
+        "interrupt": "stop, cancel mission; a new mission supersedes it"
+      },
+      "manner_or_result": "n/a",
+      "arguments": [
+        { "role": "Time", "param": "at", "required": false, "notes": "absolute ISO local time with offset; the planner writes HH:MM and language_agent grounds it to the next occurrence" },
+        { "role": "Extent", "param": "s", "required": false, "notes": "relative: 'in 10 minutes' = s=600s" },
+        { "role": "Event", "param": "until", "required": false, "notes": "one of the IR predicates" }
+      ],
+      "temporal": ["absolute_deferred", "relative_deferred", "event_triggered", "bounded_duration"],
+      "mood_handling": "'a las 6 ve a la cocina', 'at 6 go to the kitchen', 'dentro de diez minutos…'",
+      "clarification_policy": "one of at / s / until is required; a time already past ends the wait at once (said on the card as the grounded date)",
+      "execution_contract": "claims the base (the robot holds still while waiting: the reason a reminder needs a non-claiming scheduler, proposal P3); not persisted across a controller restart"
+    }
+  ]
+}

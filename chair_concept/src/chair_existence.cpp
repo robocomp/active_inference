@@ -16,6 +16,7 @@
 #include <fstream>
 #include <print>
 #include <vector>
+#include "../../common/room_resolve/room_containment.h"   // rc::room::out_of_room_logodds
 
 namespace rc {
 
@@ -107,7 +108,7 @@ void ChairExistence::update_and_remove(ChairFitter& fitter, const Inputs& in,
                 // A containment violation is fully resolvable — the polygon is a trusted nominal model —
                 // so p_vis = 1 and the whole ratio applies. Through the shared policy like every other
                 // channel, so it inherits the clamp and the correlation handling.
-                inst.existence.integrate(1.0f, -cfg_.exist_out_of_room_gain);
+                inst.existence.integrate(1.0f, rc::room::out_of_room_logodds(false, cfg_.exist_out_of_room_gain));
                 inst.exist_logodds = inst.existence.logodds();
                 // A containment violation is fully resolvable — the polygon is a trusted nominal model — so
                 // this cycle is worth one IDEAL observation and the debounce advances at full weight. Same

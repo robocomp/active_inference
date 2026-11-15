@@ -100,8 +100,7 @@ EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
     const float R  = std::max(1e-6f, sigma_base * sigma_base);
     const auto  dI = belief.predicted_information(back_pts, R);
     const auto& Sigma = belief.covariance();
-    const float det = (Eigen::Matrix<float, 5, 5>::Identity() + Sigma * dI).determinant();
-    const float raw_gain = 0.5f * std::log(std::max(1e-9f, det));
+    const float raw_gain = rc::nbv::d_optimal_gain<5>(Eigen::Matrix<float, 5, 5>(Sigma), Eigen::Matrix<float, 5, 5>(dI));
 
     // ── Weight by the probability of ACTUALLY getting a detection ──────────────────────────────────────
     // raw_gain is the information a mask from the far side would yield. Publishing it unweighted asks the

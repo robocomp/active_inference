@@ -1,0 +1,24 @@
+newmtl frame
+Ka 0.05 0.05 0.05
+Kd 0.30 0.20 0.13
+d 1.0
+illum 1
+
+newmtl mattress
+Ka 0.05 0.05 0.05
+Kd 0.92 0.92 0.90
+d 1.0
+illum 1
+
+newmtl blanket
+Ka 0.05 0.05 0.05
+Kd 0.36 0.45 0.62
+d 1.0
+illum 1
+
+newmtl pillow
+Ka 0.05 0.05 0.05
+Kd 0.96 0.96 0.97
+d 1.0
+illum 1
+

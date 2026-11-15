@@ -471,6 +471,8 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
             "Each cycle carve the LiDAR sweep against the hood footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob");
     out.existence_removal_prob    = getf("HoodModel.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when L < log(p/(1−p))");
+    out.existence_out_of_room_gain = getf("HoodModel.ExistenceOutOfRoomGain", 1.5f,
+            "|dL| per evidence cycle while the hood centre is outside the room outline by more than half its depth");
     out.existence_frame_correlation = getf("HoodModel.ExistenceFrameCorrelation", 0.0f,
             "rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and the default); opt in only with a value MEASURED from…");
     out.existence_logodds_max     = getf("HoodModel.ExistenceLogoddsMax", 4.0f,

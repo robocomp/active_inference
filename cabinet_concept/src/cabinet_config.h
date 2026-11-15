@@ -289,6 +289,7 @@ struct CabinetConfig
     // deletes furniture); enable to replace merge-only removal.
     bool  existence_removal_enabled = false;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
+    float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and
     // the default); opt in only with a value MEASURED from this agent's own log. Added 2026-08-11
     // when the shared rc::exist::RemovalPolicy showed refrigerator and cabinet were the only two

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <expected>
@@ -102,6 +103,44 @@ inline std::optional<std::string> unknown_in_ref(const Ref& r, const std::functi
     return std::nullopt;
 }
 
+/// The object classes `seen(<class>)` may name: the subtypes the concept agents publish (find_objects' list).
+inline constexpr std::string_view kSeenClasses[] = {"chair", "table", "bottle", "cabinet", "refrigerator", "hood",
+                                                    "nightstand", "bed", "toilet", "person"};
+inline bool seen_class(std::string_view n) { return std::ranges::contains(kSeenClasses, n); }
+/// A node name's class: "chair_34" → "chair" (a trailing _<digits> dropped); a name without one is its own class.
+inline std::string_view class_of(std::string_view n)
+{
+    const auto u = n.rfind('_');
+    if (u == std::string_view::npos or u + 1 == n.size()) return n;
+    const bool digits = std::ranges::all_of(n.substr(u + 1), [](char c) { return c >= '0' and c <= '9'; });
+    return digits ? n.substr(0, u) : n;
+}
+
+/// The first `seen(X)` whose X is neither a class the robot recognises nor a live node.
+inline std::optional<std::string> unrecognised_seen(const std::vector<Step>& list,
+                                                    const std::function<bool(std::string_view)>& exists)
+{
+    for (const auto& s : list)
+    {
+        for (const auto& [key, v] : s.args)
+            if (const Pred* p = std::get_if<Pred>(&v); p != nullptr and p->name == "seen")
+                if (const auto w = p->refs.find("what"); w != p->refs.end() and w->second.kind == Ref::Kind::Node
+                                                          and not seen_class(w->second.name)
+                                                          and not (exists(w->second.name) and seen_class(class_of(w->second.name))))
+                    return w->second.name;
+        if (auto u = unrecognised_seen(s.steps, exists)) return u;
+    }
+    return std::nullopt;
+}
+
+/// True when step `id` lies inside a `watch`'s reaction body (its report is the watch's to tell, once per firing).
+inline bool inside_watch(const std::vector<Step>& steps, std::string_view id)
+{
+    for (std::size_t dot = id.find('.'); dot != std::string_view::npos; dot = id.find('.', dot + 1))
+        if (const Step* a = find_step(steps, id.substr(0, dot)); a != nullptr and a->op == "watch") return true;
+    return false;
+}
+
 inline std::optional<std::string> unknown_in(const std::vector<Step>& list,
                                              const std::function<bool(std::string_view)>& exists)
 {
@@ -117,7 +156,10 @@ inline std::optional<std::string> unknown_in(const std::vector<Step>& list,
             }
             else if (const Pred* p = std::get_if<Pred>(&v))
                 for (const auto& [pk, pr] : p->refs)
+                {
+                    if (p->name == "seen" and seen_class(pr.name)) continue;   // a class, not a node (unrecognised_seen)
                     if (auto u = unknown_in_ref(pr, exists)) return u;
+                }
         }
         if (auto u = unknown_in(s.steps, exists)) return u;
     }
@@ -254,15 +296,63 @@ inline std::string paused_at(const rc::mission::Progress& p)
     return a == std::string_view::npos ? std::string{} : std::string(q.substr(a));
 }
 
+/// `at=18:00` (a bare clock time, as the planner writes it) → `at="2026-11-14T18:00:00+01:00"`, its NEXT occurrence in
+/// local time (rc::mission::ground_clock), before the text is parsed: the IR only accepts an absolute `at`, so the
+/// controller never guesses a date (tense spec 2026-11-14 §1). Quoted or not; an ISO value and anything that is not a
+/// clock time are left as written (validate() then names the bad one).
+[[nodiscard]] inline std::string ground_clock_text(std::string_view text, std::int64_t now_ms)
+{
+    std::string out;
+    std::size_t i = 0;
+    while (i < text.size())
+    {
+        const std::size_t k = text.find("at=", i);
+        if (k == std::string_view::npos or (k > 0 and text[k - 1] != ' ' and text[k - 1] != '\t'))
+        {
+            const std::size_t stop = k == std::string_view::npos ? text.size() : k + 3;
+            out += text.substr(i, stop - i);
+            i = stop;
+            continue;
+        }
+        std::size_t v = k + 3;
+        const bool quoted = v < text.size() and text[v] == '"';
+        if (quoted) ++v;
+        std::size_t e = v;
+        while (e < text.size() and text[e] != ' ' and text[e] != '"' and text[e] != '\n' and text[e] != '\r') ++e;
+        const auto iso = rc::mission::parse_clock(text.substr(v, e - v)).has_value()
+                             ? rc::mission::ground_clock(text.substr(v, e - v), now_ms) : std::nullopt;
+        if (not iso.has_value())
+        {
+            out += text.substr(i, k + 3 - i);
+            i = k + 3;
+            continue;
+        }
+        out += text.substr(i, k + 3 - i);
+        out += '"' + *iso + '"';
+        i = e + (quoted and e < text.size() and text[e] == '"' ? 1 : 0);
+    }
+    return out;
+}
+
+[[nodiscard]] inline std::int64_t wall_now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 /// A planner reply → the mission language_agent may put on a card: fence stripped, parsed, validated, every name known,
 /// and every remembered object reached the missions skill's way (`remembered`, when given: see remembered_unreached).
 /// The error is ONE line the planner can act on (it is sent back to it to fix). Live 2026-11-10: the planner wrote a
 /// bare `approach chair_34` for a remembered chair; the controller refused it before anything moved.
 [[nodiscard]] inline std::expected<rc::mission::Mission, std::string> check_planned(
-    std::string_view reply, const std::function<bool(std::string_view)>& exists, const RememberedLookup& remembered = {})
+    std::string_view reply, const std::function<bool(std::string_view)>& exists, const RememberedLookup& remembered = {},
+    std::int64_t now_ms = wall_now_ms())
 {
-    auto m = parse_planned(strip_fence(reply));
+    auto m = parse_planned(ground_clock_text(strip_fence(reply), now_ms));
     if (not m.has_value()) return m;
+    if (const auto what = mission_plan_detail::unrecognised_seen(m->steps, exists); what.has_value())
+        return std::unexpected(std::format("I cannot recognise a {}: seen() takes one of chair, table, bottle, cabinet, "
+                                           "refrigerator, hood, nightstand, bed, toilet, person, or an object of the live map",
+                                           *what));
     if (const auto bad = unknown_name(*m, exists); bad.has_value())
         return std::unexpected(std::format("unknown name '{}': there is no such door, room or object in the live map now "
                                            "(a room not yet reached is named with cross ... bind=NAME, then $NAME)", *bad));
@@ -314,6 +404,9 @@ inline std::string paused_at(const rc::mission::Progress& p)
             out.push_back(std::format("→ {}/{} {}", top_index(v.id), total, label));
         // Why a running step WAITS (the controller's words): told when it changes, not when the wait ends — the step
         // goes on, and its own ✓/✗/⟳ line follows (chat 2026-11-12: minutes of exploring with no reason given).
+        if (v.op == "watch" and step != nullptr)   // each new firing (spec 2026-11-14): "watch seen(chair): chair_51"
+            for (std::size_t i = old ? old->fired.size() : 0; i < v.fired.size(); ++i)
+                out.push_back(std::format("watch {}: {}", rc::mission::text_detail::pred_text(*step->pred("when")), v.fired[i]));
         if (v.state == SS::Running and not v.note.empty() and (not old or old->note != v.note))
             out.push_back(std::format("… {} waits: {}", label, v.note));
         if (v.state == SS::Satisfied and was != SS::Satisfied)
@@ -347,10 +440,55 @@ inline std::string paused_at(const rc::mission::Progress& p)
     for (const auto& v : after.steps)
     {
         if (v.op != "report" or (v.state != SS::Running and v.state != SS::Satisfied)) continue;
+        if (inside_watch(m.steps, v.id)) continue;   // new_watch_reports tells it, once per firing
         const auto* old = view_of(before, v.id);
         if (old and (old->state == SS::Running or old->state == SS::Satisfied)) continue;
         if (const Step* s = find_step(m.steps, v.id))
             if (const auto t = s->string("text")) out.push_back(*t);
+    }
+    return out;
+}
+
+/// One firing of a watch whose body reports: the report's text with `$NAME` replaced by the node it fired on.
+struct WatchReport
+{
+    std::string topic, bound;
+};
+
+/// For every watch, one entry per node in `after.fired` beyond `before.fired` (in firing order), for each `report`
+/// in its body (spec 2026-11-14: the chat is woken per firing, about that object).
+[[nodiscard]] inline std::vector<WatchReport> new_watch_reports(const rc::mission::Progress& before,
+                                                                const rc::mission::Progress& after,
+                                                                const rc::mission::Mission& m)
+{
+    using namespace mission_plan_detail;
+    std::vector<WatchReport> out;
+    for (const auto& v : after.steps)
+    {
+        if (v.op != "watch") continue;
+        const Step* w = find_step(m.steps, v.id);
+        if (w == nullptr) continue;
+        const auto* old = view_of(before, v.id);
+        const std::string var = "$" + w->string("each").value_or("");
+        std::vector<std::string> texts;
+        const auto collect = [&texts](this const auto& self, const std::vector<Step>& list) -> void
+        {
+            for (const auto& s : list)
+            {
+                if (s.op == "report")
+                    if (const auto t = s.string("text")) texts.push_back(*t);
+                self(s.steps);
+            }
+        };
+        collect(w->steps);
+        for (std::size_t i = old ? old->fired.size() : 0; i < v.fired.size(); ++i)
+            for (std::string t : texts)
+            {
+                if (var.size() > 1)
+                    for (std::size_t at = t.find(var); at != std::string::npos; at = t.find(var, at + v.fired[i].size()))
+                        t.replace(at, var.size(), v.fired[i]);
+                out.push_back({.topic = std::move(t), .bound = v.fired[i]});
+            }
     }
     return out;
 }
@@ -482,7 +620,15 @@ struct IdleTurn
         "i will approach", "i'll approach", "i am approaching", "i'm approaching", "i am now approaching",
         "i will go ", "i'll go ", "i am going to", "i'm going to", "i am now going", "i am heading", "i'm heading",
         "i will cross", "i'll cross", "i am crossing", "i'm crossing", "i will move", "i'll move", "i am moving",
-        "i'm moving", "i will turn", "i'll turn", "i am turning", "i'm turning", "i am currently turning"};
+        "i'm moving", "i will turn", "i'll turn", "i am turning", "i'm turning", "i am currently turning",
+        // the fast path's own reply to a yes, copied by the model with nothing sent (chat_e2e21)
+        "sent to the controller", "i have sent", "i've sent",
+        // Spanish (chat_e2e21: "He planificado la misión … ¿Quieres que la empiece?" with no call). Questions such as
+        // "¿quieres que planifique…?" and facts such as "he llegado" / "he visto" are not claims and are not listed.
+        "he planificado", "he preparado la misi", "he iniciado", "he empezado", "he comenzado", "he enviado",
+        "enviado al controlador", "voy a planificar", "estoy planificando", "voy a cruzar", "estoy cruzando",
+        "voy a ir ", "voy hacia", "me dirijo", "estoy yendo", "voy a acercarme", "me estoy acercando", "me acerco",
+        "voy a girar", "estoy girando", "voy a moverme", "me estoy moviendo"};
     return std::ranges::any_of(kClaims, [&](std::string_view c) { return low.find(c) != std::string::npos; });
 }
 
@@ -496,6 +642,18 @@ enum class MissionClaim { Fine, Repair, Correct };
 {
     if (card_shown or sent_this_turn or not claims_mission(reply)) return MissionClaim::Fine;
     return repaired ? MissionClaim::Correct : MissionClaim::Repair;
+}
+
+/// What the history keeps in place of a reply that claimed an action no tool backs. The person already saw the words;
+/// the model must not: kept, they become the template for its next claim (chat_e2e21 copied "He planificado…" and then
+/// the fast path's "Sent to the controller: …", each time with no call).
+inline constexpr std::string_view kUnbackedClaimNote =
+    "(That reply called no tool: nothing was planned or sent, and the robot did not move.)";
+
+/// The words of a reply as the history keeps them: unchanged when they are true (Fine), the note otherwise.
+[[nodiscard]] inline std::string history_reply(std::string_view reply, MissionClaim verdict)
+{
+    return verdict == MissionClaim::Fine ? std::string(reply) : std::string(kUnbackedClaimNote);
 }
 
 /// A wake goes to the model as a user-role message that says it is NOT the person speaking.
@@ -607,7 +765,7 @@ inline constexpr std::string_view kWakeRefusal =
     static constexpr std::string_view kAllowed[] = {
         "stop", "cancel_passage", "plan_mission",                                                  // halt / propose
         "look", "find_objects", "where_is", "known_rooms", "route_to", "can_see", "imagine_view", "imagine", "agents", "sensors",        // read the world
-        "graph_summary", "inspect", "use_skill", "episodes", "episode", "outcome_stats", "last_episode",
+        "graph_summary", "inspect", "use_skill", "episodes", "episode", "outcome_stats", "last_episode", "where_was",
         "show", "draw", "table", "hide_canvas",                                                     // the side canvas
     };
     return std::ranges::find(kAllowed, tool) != std::ranges::end(kAllowed);

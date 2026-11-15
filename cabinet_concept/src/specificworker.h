@@ -186,6 +186,9 @@ private:
     // Read the room's delimiting polygon + interior centroid and push them to the fitter (wall-flush
     // factor + the C2v yaw canonicalize reference). Cheap; called each cycle once the room is known.
     void refresh_room_geometry();
+    uint64_t    outline_room_ = 0;      // last (room, outline size) logged — log on change
+    std::size_t outline_n_    = 0;
+    bool        births_held_  = false;  // WAIT episode (no outline) — logged on change
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     // Physical-exclusion invariant: two cabinets cannot share space. Collapse any pair of instances whose
     // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.

@@ -39,6 +39,7 @@
 
 #include <genericworker.h>   // ConfigLoader
 
+#include "back_panel.h"   // rc::manifest::load_back_panel (textual, Qt-free)
 #include "../config_report/config_read.h"   // rc::cfg::Reader / registry (SHARED)
 
 namespace rc::manifest {

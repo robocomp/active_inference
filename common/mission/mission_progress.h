@@ -9,6 +9,7 @@
  *                                     "iteration":0,"t0":…,"t1":0,"note":"","after":""}, …]}   — a snapshot, pre-order
  *     note: why a running step is WAITING, in words for the person (Interpreter LeafStatus::detail); after: on a retry,
  *     the outcome the previous attempt failed with. Both "" otherwise; a reader older than them ignores them.
+ *     fired: a watch's firings, the nodes it fired on in order (written only when it has fired, 2026-11-14).
  *
  * The snapshot is what chat's plan view animates (it already holds the IR, from current_intention, and matches steps
  * by id). What EM records is the controller's journal (common/episodic/em_journal.h), not this.
@@ -98,16 +99,25 @@ inline std::expected<Interpreter::StepState, std::string> state(const QJsonValue
     using namespace progress_detail;
     QJsonArray steps;
     for (const auto& v : in.steps())
-        steps.append(QJsonObject{{"id", q(v.id)},
-                                 {"op", q(v.op)},
-                                 {"state", step_state_word(v.state)},
-                                 {"outcome", q(v.outcome)},
-                                 {"attempt", v.attempt},
-                                 {"iteration", v.iteration},
-                                 {"t0", double(v.t0)},
-                                 {"t1", double(v.t1)},
-                                 {"note", q(v.note)},
-                                 {"after", q(v.after)}});
+    {
+        QJsonObject o{{"id", q(v.id)},
+                      {"op", q(v.op)},
+                      {"state", step_state_word(v.state)},
+                      {"outcome", q(v.outcome)},
+                      {"attempt", v.attempt},
+                      {"iteration", v.iteration},
+                      {"t0", double(v.t0)},
+                      {"t1", double(v.t1)},
+                      {"note", q(v.note)},
+                      {"after", q(v.after)}};
+        if (not v.fired.empty())   // a watch's firings, in order (spec 2026-11-14); absent = none
+        {
+            QJsonArray fired;
+            for (const auto& n : v.fired) fired.append(q(n));
+            o.insert("fired", fired);
+        }
+        steps.append(o);
+    }
     const auto [t0, t1] = in.span();
     const bool idle = in.state() == Interpreter::State::Idle;
     return compact(QJsonObject{{"serial", double(in.serial())},
@@ -141,6 +151,7 @@ inline std::expected<Interpreter::StepState, std::string> state(const QJsonValue
         p.steps.push_back({.id = s(k["id"]), .op = s(k["op"]), .state = *st, .outcome = s(k["outcome"]),
                            .t0 = ms(k["t0"]), .t1 = ms(k["t1"]), .attempt = k["attempt"].toInt(),
                            .iteration = k["iteration"].toInt(), .note = s(k["note"]), .after = s(k["after"])});
+        for (const auto& n : k["fired"].toArray()) p.steps.back().fired.push_back(s(n));
     }
     return p;
 }

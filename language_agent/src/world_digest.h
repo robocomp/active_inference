@@ -41,6 +41,8 @@ struct Digest
     std::uint64_t room_id = 0;            ///< current room node id (0 = unknown)
     std::vector<ObjectFact> objects;      ///< every object/person in the graph, any room (in_current_room marks ours)
     int n_obstacles = 0;                  ///< residual obstacles hanging from the current room
+    bool has_pose = false;                ///< the robot pose in the current room's frame (whereabouts.h)
+    double pose_x = 0, pose_y = 0, pose_yaw_deg = 0;
 };
 
 struct IntentionStatus

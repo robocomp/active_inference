@@ -48,6 +48,8 @@ struct RunHost final : rc::mission::Host
     std::optional<Pose> pose() override { return Pose{.room = "room_1", .x = 1.25, .y = -0.5, .yaw = 0.5}; }
     std::optional<std::string> current_room() override { return "room_1"; }
     std::optional<double> eval(const Pred&) override { return std::nullopt; }
+    std::vector<std::string> chairs;   // what seen(chair) matches now
+    std::vector<std::string> matches(const Pred& p) override { return p.name == "seen" ? chairs : std::vector<std::string>{}; }
 };
 }   // namespace
 
@@ -107,6 +109,32 @@ int main()
         CHECK(not decode_progress("{\"steps\":[{\"id\":\"1\",\"state\":\"flying\"}]}").has_value());
         CHECK(not decode_progress("not json").has_value());
         CHECK(not decode_progress("[]").has_value());   // an object is expected
+    }
+
+    // ── a watch's firings travel in the snapshot; a snapshot written before them decodes with none ─────────────
+    {
+        RunHost h;
+        Interpreter in(h);
+        in.start(parse_text("mission\n  watch seen(chair) continue each=c\n    report \"$c\"\n  cross door_22\n").value(), 0);
+        in.tick(0);
+        h.chairs = {"chair_51"};
+        in.tick(10);
+        h.chairs = {"chair_51", "chair_52"};
+        in.tick(20);
+        const auto p = decode_progress(encode_progress(in, "chat"));
+        CHECK(p.has_value());
+        if (p.has_value())
+        {
+            CHECK(p->steps.size() >= 1 and p->steps[0].op == "watch");
+            CHECK((p->steps[0].fired == std::vector<std::string>{"chair_51", "chair_52"}));
+            CHECK(p->steps.back().fired.empty());
+        }
+        CHECK(not encode_progress(in, "chat").contains(R"("fired":[])"));   // only a watch that fired writes the key
+        const auto old = decode_progress(
+            R"({"serial":3,"source":"chat","title":"t","status":"in_progress","t0":1,"t1":0,"line":"",)"
+            R"("steps":[{"id":"1","op":"cross","state":"running","outcome":"","attempt":1,"iteration":0,"t0":1,"t1":0,)"
+            R"("note":"","after":""}]})");
+        CHECK(old.has_value() and old->steps.size() == 1 and old->steps[0].fired.empty());
     }
 
     std::println("mission_progress_test: {} checks, {} failures", checks, failures);

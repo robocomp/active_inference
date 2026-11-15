@@ -31,6 +31,7 @@
 #include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered table at birth
 #include <set>
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
+#include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict
 
 // ─── Instance lifecycle: merge / tracker / birth ─────────────────────────────────────────────────
 
@@ -223,7 +224,13 @@ void SpecificWorker::run_instance_tracker()
     last_table_dets_xy_.clear();
     for (const auto& d : dets) last_table_dets_xy_.push_back(d.xy);
 
-    const auto res = tracker_.update(tracks, dets);
+    // WAIT: no usable outline for the working room ⇒ hold births (candidates keep their evidence; InstanceTracker).
+    const bool hold = not rc::room::outline_usable(room_polygon_);
+    if (hold != births_held_)
+        std::print("table_concept: [tracker] births {} — room {} {}\n", hold ? "HELD" : "released", room_node_id_,
+                   hold ? "has no outline yet (or is still a proto)" : "outline arrived");
+    births_held_ = hold;
+    const auto res = tracker_.update(tracks, dets, hold);
 
     // Diagnostic on any birth/death: reveals "1 slice" (upstream) vs "N slices, no birth".
     const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
@@ -273,6 +280,16 @@ void SpecificWorker::run_instance_tracker()
     for (const int d : res.births)
     {
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
+        // Room containment at BIRTH (shared rule): a table seen through a door belongs to the other room. Tolerance =
+        // half the birth footprint's short side (a table against a wall has its centre that far inside, at most).
+        {
+            const float tol = 0.5f * std::min(cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m);
+            const auto verdict = rc::room::birth_verdict(room_polygon_, Eigen::Vector2f(c.x(), c.y()), tol);
+            std::print("table_concept: [tracker] birth at ({:.2f},{:.2f}) room {} — {}\n", c.x(), c.y(), room_node_id_,
+                       verdict == rc::room::BirthVerdict::Admit ? "inside"
+                     : verdict == rc::room::BirthVerdict::Suppress ? "OUTSIDE — suppressed" : "no outline — deferred");
+            if (verdict != rc::room::BirthVerdict::Admit) continue;
+        }
         // RESURRECTION: only chooses which identity the newborn takes (birth stays tracker-only). MAP over
         // {recalled candidates, new} on position alone; measurement cov = DetectionNoiseM^2 I (the tracker's R).
         std::optional<rc::Resurrect> resurrect;

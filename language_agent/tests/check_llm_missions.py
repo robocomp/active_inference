@@ -361,6 +361,53 @@ CASES = [
      and (not any(o == "go_to" for o, _ in L) or len(crosses(L)) >= 2), False),
 ]
 
+# ── triggers and conditionals (spec 2026-11-14): watch / if / seen. Graded on the step lines with their depth. ────
+def watches(L, what, then):
+    """the watch steps on seen(<what>) with that ending: (index, depth)."""
+    return [(i, int(a["_d"])) for i, (o, a) in enumerate(L)
+            if o == "watch" and f"seen(node:{what})" in a.get("when", "") and a.get("then", "").strip('"') == then]
+
+
+def watch_then(L, what, then, body_op, after_op):
+    """a watch on seen(what) whose body has a `body_op` and which is followed, at its own depth, by an `after_op`."""
+    for i, d in watches(L, what, then):
+        body = [o for o, a in L[i + 1:] if int(a["_d"]) > d]
+        later = [o for o, a in L[i + 1:] if int(a["_d"]) == d]
+        if body_op in body[:len(body)] and after_op in later:
+            return True
+    return False
+
+
+def if_door_1_open_else_cross(L, need_else):
+    ifs = [(i, int(a["_d"])) for i, (o, a) in enumerate(L) if o == "if" and "door_open(node:door_1)" in a.get("cond", "")]
+    for i, d in ifs:
+        inner = [o for o, a in L[i + 1:] if int(a["_d"]) > d]
+        if "open" in inner and (not need_else or "cross" in inner or any(o == "cross" for o, a in L[i + 1:])):
+            return True
+    return False
+
+
+CASES_TRIGGERS = [
+    ("trig: chairs on the way (EN)", "Go through door_1 and tell me the colour of every chair you see on the way.",
+     lambda L: watch_then(L, "chair", "continue", "report", "cross"), False),
+    ("trig: sillas por el camino (ES)", "Cruza door_1 y dime de qué color es cada silla que veas por el camino.",
+     lambda L: watch_then(L, "chair", "continue", "report", "cross"), False),
+    ("trig: stop at a bottle (EN)", "Explore this room and stop as soon as you see a bottle.",
+     lambda L: watch_then(L, "bottle", "stop", "report", "explore") or watch_then(L, "bottle", "stop", "say", "explore")
+     or any(o == "explore" and "seen(node:bottle)" in a.get("until", "") for o, a in L), False),
+    ("trig: para en una botella (ES)", "Explora la habitación y para en cuanto veas una botella.",
+     lambda L: watch_then(L, "bottle", "stop", "report", "explore") or watch_then(L, "bottle", "stop", "say", "explore")
+     or any(o == "explore" and "seen(node:bottle)" in a.get("until", "") for o, a in L), False),
+    ("cond: shut -> open, else cross (EN)", "If door_1 is shut, open it; otherwise go through it.",
+     lambda L: if_door_1_open_else_cross(L, True), False),
+    ("cond: cerrada -> abre (ES)", "Si door_1 está cerrada, ábrela, y si no, crúzala.",
+     lambda L: if_door_1_open_else_cross(L, True), False),
+    # The skill says to ask; a plan that names seen(cup) anyway never reaches a card: check_planned refuses it
+    # ("I cannot recognise a cup", test_mission_plan) and sends the error back. Graded as production behaves.
+    ("trig: a cup cannot be seen (EN)", "Explore this room and stop when you see a cup.",
+     lambda L: any("seen(node:cup)" in a.get("when", "") + a.get("until", "") for _, a in L), "either"),
+]
+
 # ── remembered rooms (final review I6): the PRODUCTION planner STATE (STATE_REMEMBERED: ltsm remembers room_2 behind
 #    door_1 and room_3 beyond it), multi-room requests graded on the ordered legs. Kept apart so the old total stays
 #    comparable with earlier runs. Same tuple, the STATE last.
@@ -411,10 +458,11 @@ def main():
     if FORM == "json":
         system += "\n\n" + JSON_LINE
     results, lat, groups = [], [], {}
-    for case in CASES + CASES_REMEMBERED:
+    for case in CASES + CASES_REMEMBERED + CASES_TRIGGERS:
         label, request, chk, want_ask = case[:4]
         state = case[4] if len(case) > 4 else None
-        group = "remembered rooms (new, I6)" if state else ("anchor (new, I5)" if label.startswith("anchor:") else "old cases")
+        group = ("triggers (new, 11-14)" if label.startswith(("trig:", "cond:")) else
+                 "remembered rooms (new, I6)" if state else ("anchor (new, I5)" if label.startswith("anchor:") else "old cases"))
         for rep in range(REPEATS):
             t0 = time.monotonic()
             reply = unfence(ask_model(system, request, state))

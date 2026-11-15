@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "table_belief.h"                                  // AI2 belief: Σ + predicted_information for the NBV
+#include "../../common/nbv/countable_planner.h"        // rc::nbv::plan_countable — the shared countable planner core
 #include "../../common/nbv/viewpoint_score.h"               // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
 // ─── Proposal ────────────────────────────────────────────────────────────────

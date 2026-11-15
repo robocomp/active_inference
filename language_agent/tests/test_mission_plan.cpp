@@ -262,6 +262,46 @@ int main()
         }
     }
 
+    // ── chat_e2e19: `cross door_1 bind=a; cross door_1 expect=room_1; cross room_3` from room_1 — door_1 was LIVE at the
+    //    card, but step 2 runs in room_2, where door_1 is not in the graph. A door step after any cross is stale. ─────
+    {
+        auto m = parse_planned("mission\n  cross door_1 retry=2 bind=a\n  cross door_1 expect=room_1 retry=2\n"
+                               "  cross room_3 expect=room_3 retry=2\n");
+        CHECK(m.has_value());
+        if (m.has_value())
+        {
+            CHECK(rc::chat::doors_to_rooms(m->steps, {"door_1", "door_22"}) == 1);
+            const std::string out = rc::mission::print_text(*m);
+            CHECK(out.contains("cross door_1 retry=2 bind=a"));             // first step, live: kept
+            CHECK(out.contains("cross room_1 expect=room_1"));             // after a cross: the room it leads to
+        }
+        auto k = parse_planned("mission\n  open door_22\n  cross door_22 expect=room_3\n  report \"done\"\n");
+        CHECK(k.has_value());
+        if (k.has_value())
+        {   // open + cross of a live door before any cross: untouched
+            CHECK(rc::chat::doors_to_rooms(k->steps, {"door_1", "door_22"}) == 0);
+        }
+    }
+
+    // ── wait at= (tense spec 2026-11-14 §1): the planner writes a bare clock time; it is grounded to its next
+    //    occurrence before parsing, so the card and the controller only ever see an absolute date-time ──────────
+    {
+        const std::int64_t now = *rc::mission::parse_iso("2026-11-14T00:31:00Z");
+        const std::string t = rc::chat::ground_clock_text("mission \"at 18 go\"\n  wait at=18:00\n  cross room_3 expect=room_3\n", now);
+        CHECK(t.contains("wait at=\"") and not t.contains("at=18:00\n") and t.contains("T18:00:00"));
+        CHECK(rc::chat::ground_clock_text("  wait at=\"18:00\"\n", now).contains("T18:00:00"));          // quoted too
+        CHECK(rc::chat::ground_clock_text("  wait at=\"2026-11-14T18:00:00+01:00\"\n", now)
+              == "  wait at=\"2026-11-14T18:00:00+01:00\"\n");                                         // ISO kept
+        CHECK(rc::chat::ground_clock_text("  wait s=5s\n  say \"look at=this\"\n", now)
+              == "  wait s=5s\n  say \"look at=this\"\n");                                            // not a clock
+        const auto m = check_planned("mission \"at six\"\n  wait at=18:00\n  report \"x\"\n",
+                                     [](std::string_view) { return true; }, {}, now);
+        CHECK(m.has_value());
+        if (m.has_value()) CHECK(rc::mission::parse_iso(*m->steps[0].string("at")).has_value());
+        const auto bad = check_planned("mission \"x\"\n  wait at=25:00\n", [](std::string_view) { return true; }, {}, now);
+        CHECK(not bad.has_value());                                                                      // named, not guessed
+    }
+
     // ── the wakes' text ──────────────────────────────────────────────────────────────────────────────────────────
     {
         const std::string r = report_wake("objects here", "room_2", "2 objects perceived in room_2:\n- chair_1\n");
@@ -521,6 +561,25 @@ int main()
         CHECK(not claims_mission("Your name is Pablo."));
         CHECK(not claims_mission("I see a white table with a green bottle on it."));
         CHECK(not claims_mission("The mission \"cross door_22\" failed: the door is shut."));   // a report, not a claim
+        // chat_e2e21 (2026-11-15): two claims with no call that the English-only list let through, both copied later
+        CHECK(claims_mission("He planificado la misión para volver a la habitación 3, explorarla y detenerme en cuanto "
+                             "vea una silla. ¿Quieres que la empiece?"));
+        CHECK(claims_mission("Sent to the controller: cross door_21 to room_1, and stop as soon as a chair is seen"));
+        CHECK(claims_mission("He enviado la misión al controlador."));
+        CHECK(claims_mission("Voy a cruzar la puerta door_21 ahora."));
+        CHECK(claims_mission("Estoy cruzando door_16."));
+        CHECK(claims_mission("Me dirijo a la habitación 2."));
+        CHECK(not claims_mission("Para ir a la habitación 2, debo cruzar la puerta door_16. ¿Quieres que planifique esa misión?"));
+        CHECK(not claims_mission("He visto una silla (chair_55) y es de color amarillo."));
+        CHECK(not claims_mission("He llegado a la habitación 2."));   // a mission's closing line after a wake, a fact
+        CHECK(not claims_mission("No he percibido ninguna silla en la habitación actual."));
+
+        // What the history keeps of a reply: the words when they are true, else a plain note the model cannot copy as a
+        // template for its next claim (chat_e2e21: "He planificado…" copied once, then "Sent to the controller: …").
+        CHECK(history_reply("door_21 is 4.2 m away.", MissionClaim::Fine) == "door_21 is 4.2 m away.");
+        CHECK(history_reply("He planificado la misión.", MissionClaim::Repair) == kUnbackedClaimNote);
+        CHECK(history_reply("Sent to the controller: cross door_21", MissionClaim::Correct) == kUnbackedClaimNote);
+        CHECK(not claims_mission(kUnbackedClaimNote));   // the note itself is never taken for a claim
 
         using MC = MissionClaim;
         const std::string lie = "It will start when you say yes.";
@@ -529,6 +588,51 @@ int main()
         CHECK(check_mission_claim(lie, true, false, false) == MC::Fine);      // a card is shown: the words are true
         CHECK(check_mission_claim(lie, false, true, false) == MC::Fine);      // a command was sent this turn
         CHECK(check_mission_claim("Hello Pablo!", false, false, false) == MC::Fine);
+    }
+
+    // ── watch / if / seen (triggers-and-conditionals 2026-11-14) ──────────────────────────────────────────────
+    {
+        const auto live = [](std::string_view n) { return n == "door_22" or n == "room_3" or n == "chair_34"; };
+        const char* chairs = "mission\n  watch seen(chair) continue each=c\n    report \"the colour of $c\"\n  cross door_22 expect=room_3\n";
+        CHECK(check_planned(chairs, live).has_value());                                  // a class the robot knows
+        CHECK(check_planned("mission\n  watch seen(bed) stop\n    say bed\n  cross door_22\n", live).has_value());
+        CHECK(check_planned("mission\n  watch seen(chair_34) stop\n    say x\n  cross door_22\n", live).has_value());   // a live node
+        const auto cup = check_planned("mission\n  watch seen(cup) stop\n    say x\n  cross door_22\n", live);
+        CHECK(not cup.has_value() and cup.error().contains("I cannot recognise a cup"));
+        const auto cup_until = check_planned("mission\n  explore room_3 until=seen(cup) budget_s=60s\n", live);
+        CHECK(not cup_until.has_value() and cup_until.error().contains("I cannot recognise a cup"));
+        // Final review F4: a live node that is not an object or a person (a door) can never be "seen": refused
+        const auto door = check_planned("mission\n  watch seen(door_22) stop\n    say x\n  explore room_3 budget_s=60s\n", live);
+        CHECK(not door.has_value() and door.error().contains("door_22"));
+
+        const auto mw = parse_planned(chairs);
+        CHECK(mw.has_value());
+        if (mw.has_value())
+        {
+            using SS = rc::mission::Interpreter::StepState;
+            rc::mission::Progress before{.serial = 1, .status = "in_progress"}, after = before;
+            before.steps = {{.id = "1", .op = "watch", .state = SS::Running},
+                            {.id = "1.1", .op = "report", .state = SS::Pending},
+                            {.id = "2", .op = "cross", .state = SS::Running}};
+            after.steps = before.steps;
+            after.steps[0].fired = {"chair_51", "chair_52"};
+            after.steps[1].state = SS::Satisfied;
+            const auto w = new_watch_reports(before, after, *mw);
+            CHECK(w.size() == 2);
+            if (w.size() == 2)
+            {
+                CHECK(w[0].topic == "the colour of chair_51" and w[0].bound == "chair_51");
+                CHECK(w[1].topic == "the colour of chair_52" and w[1].bound == "chair_52");
+            }
+            CHECK(new_reports(before, after, *mw).empty());   // a report in a watch's body is the watch's to tell
+            auto third = after;
+            third.steps[0].fired.push_back("chair_53");
+            const auto w3 = new_watch_reports(after, third, *mw);
+            CHECK(w3.size() == 1 and w3[0].bound == "chair_53");
+            const auto lines = progress_lines(before, after, *mw);
+            CHECK(std::ranges::contains(lines, std::string("watch seen(chair): chair_51")));
+            CHECK(std::ranges::contains(lines, std::string("watch seen(chair): chair_52")));
+        }
     }
 
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");

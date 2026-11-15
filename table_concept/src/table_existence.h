@@ -41,6 +41,8 @@ public:
     // (one graph walk shared with the birth path). SHARED: a JUNIOR instance's occupancy is
     // discounted by how much of it a SENIOR object already explains — common/exclusion.
     void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { claims_ = c; }
+    // The working room's outline (room frame), for the out-of-room term. Empty/null ⇒ no containment evidence.
+    void set_room_polygon(const std::vector<Eigen::Vector2f>* p) { room_polygon_ = p; }
 
     TableExistence(std::shared_ptr<DSR::DSRGraph> graph, const TableConfig& cfg)
         : G_(std::move(graph)), cfg_(cfg) {}
@@ -75,6 +77,7 @@ public:
 
 private:
     const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
+    const std::vector<Eigen::Vector2f>* room_polygon_ = nullptr;
     std::shared_ptr<DSR::DSRGraph> G_;
     const TableConfig&             cfg_;
     rc::detect::DetectorEnvelope   det_env_{};

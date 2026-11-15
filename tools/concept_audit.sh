@@ -291,9 +291,14 @@ printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s
        agent room_poly any_usable contract "sigma*" envelope strip poll removal shared csv_rot manifest priors birth absence mask_src decision
 printf "  %s\n" "$(printf '%.0s-' {1..231})"
 
-skipped=()
+skipped=(); classes=()
 for d in *_concept; do
-    [[ -d "$d/src" ]] || continue
+    # A countable CLASS folder (nightstand, bed, toilet) has no src/: its bin/<folder> links to countable_concept, whose
+    # row audits the code they all run. Said once per folder below the table, never skipped silently.
+    if [[ ! -d "$d/src" ]]; then
+        [[ -L "$d/bin/$d" && "$(readlink "$d/bin/$d")" == *countable_concept* ]] && classes+=("$d")
+        continue
+    fi
     # An OBJECT-concept agent is one that owns instances of a class and publishes an affordance for them.
     # robot/room/residual are concept agents in NAME but model the robot, the room and the unexplained
     # remainder — not objects IN the room. They have no four-face viewpoint plan and no per-object contract,
@@ -308,6 +313,8 @@ for d in *_concept; do
     fi
 done
 [[ ${#skipped[@]} -gt 0 ]] && printf "\n  not object-concept agents (skipped): %s\n" "${skipped[*]}"
+[[ ${#classes[@]} -gt 0 ]] && echo
+for d in "${classes[@]}"; do printf "  %s: class of countable_concept (audited there)\n" "$d"; done
 
 echo
 if [[ $QUIET -eq 0 ]]; then

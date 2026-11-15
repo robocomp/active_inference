@@ -42,6 +42,8 @@
 #include <variant>
 #include <vector>
 
+#include "mission_time.h"
+
 namespace rc::mission
 {
 
@@ -218,7 +220,24 @@ inline std::optional<Error> check_repeat(const Step& s)
 }
 inline std::optional<Error> check_wait(const Step& s)
 {
-    if (not s.has("s") and not s.has("until")) return err("bad_value", s, "", "wait for what? give s or until");
+    if (not s.has("s") and not s.has("until") and not s.has("at"))
+        return err("bad_value", s, "", "wait for what? give s, until or at");
+    // `at` is ABSOLUTE (mission_time.h): a bare "18:00" is grounded by language_agent before it gets here.
+    if (const auto at = s.string("at"); at.has_value() and not parse_iso(*at).has_value())
+        return err("bad_value", s, "at", "needs a local date-time with its offset, e.g. 2026-11-14T18:00:00+01:00");
+    return std::nullopt;
+}
+inline std::optional<Error> check_watch(const Step& s)
+{
+    if (const auto t = s.string("then"); t.has_value() and *t != "continue" and *t != "stop")
+        return err("bad_value", s, "then", "a watch ends with continue (react and carry on) or stop");
+    return std::nullopt;
+}
+inline std::optional<Error> check_if(const Step& s)
+{
+    if (s.steps.size() > 2) return err("bad_value", s, "steps", "an if has its then and at most one else");
+    for (const auto& k : s.steps)
+        if (k.op != "seq") return err("bad_value", s, "steps", "an if's branches are seq steps");
     return std::nullopt;
 }
 inline std::optional<Error> check_move(const Step& s)
@@ -269,8 +288,10 @@ inline const std::vector<OpSpec>& ops()
          .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode, .positional = true},
                     {.name = "until", .type = Pred},
                     {.name = "budget_s", .type = Number, .required = true, .positive = true}}},
+        // `at` (2026-11-14, tense spec §1): ends at that wall-clock time (Host::wall_ms) — "at 18:00 go to room 3".
         {.name = "wait", .claims = kBase, .instant = false, .has_body = false,
-         .fields = {{.name = "s", .type = Number, .positive = true}, {.name = "until", .type = Pred}},
+         .fields = {{.name = "s", .type = Number, .positive = true}, {.name = "until", .type = Pred},
+                    {.name = "at", .type = String}},
          .check = check_wait},
         {.name = "say", .claims = kNone, .instant = true, .has_body = false,
          .fields = {{.name = "text", .type = String, .required = true, .positional = true}}},
@@ -283,6 +304,17 @@ inline const std::vector<OpSpec>& ops()
          .fields = {{.name = "distance_m", .type = Number}, {.name = "turn_deg", .type = Number}},
          .check = check_move},
         {.name = "stop", .claims = kNone, .instant = true, .has_body = false, .fields = {}},
+        // watch (spec 2026-11-14 triggers-and-conditionals): its body is the REACTION; its scope is the rest of the
+        // enclosing sequence. `each` names the object that made it fire, visible as $NAME in the body only.
+        {.name = "watch", .claims = kNone, .instant = false, .has_body = true,
+         .fields = {{.name = "when", .type = Pred, .required = true, .positional = true},
+                    {.name = "then", .type = String, .required = true, .positional = true},
+                    {.name = "each", .type = String}},
+         .check = check_watch},
+        // if: evaluated once on entry; steps = the then seq and an optional else seq
+        {.name = "if", .claims = kNone, .instant = false, .has_body = true,
+         .fields = {{.name = "cond", .type = Pred, .required = true, .positional = true}},
+         .check = check_if},
     };
     return table;
 }
@@ -302,6 +334,10 @@ inline const std::vector<PredSpec>& preds()
          .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode}}},
         {.name = "door_open", .probabilistic = true,  // door_open_prob
          .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor}}},
+        // seen(what): an object of that class (chair) or that node (chair_34) APPEARS after the step watching it
+        // started. A fact over a set (Host::matches); the interpreter computes "appears" as a difference.
+        {.name = "seen", .probabilistic = false,
+         .fields = {{.name = "what", .type = Ref, .required = true, .ref_kinds = kNode}}},
     };
     return table;
 }
@@ -369,8 +405,12 @@ public:
 
     std::optional<Error> steps(const std::vector<Step>& list)
     {
-        for (const auto& s : list)
-            if (auto e = step(s); e.has_value()) return e;
+        for (std::size_t i = 0; i < list.size(); ++i)
+        {
+            if (list[i].op == "watch" and i + 1 == list.size())
+                return err("bad_value", list[i], "", "a watch needs steps after it to watch");
+            if (auto e = step(list[i]); e.has_value()) return e;
+        }
         return std::nullopt;
     }
 
@@ -394,7 +434,12 @@ private:
             if (auto e = spec->check(s); e.has_value()) return e;
         if (s.bind.has_value()) vars_.insert(*s.bind);   // visible to later steps only, never to its own fields
         if (s.op == "anchor") anchors_.insert(*s.string("name"));   // defined from here on, in execution order
-        return steps(s.steps);
+        // a watch's `each` is bound inside its reaction body only
+        const auto each = s.op == "watch" ? s.string("each") : std::nullopt;
+        const bool added = each.has_value() and vars_.insert(*each).second;
+        auto body = steps(s.steps);
+        if (added) vars_.erase(*each);
+        return body;
     }
 
     template <class Args>

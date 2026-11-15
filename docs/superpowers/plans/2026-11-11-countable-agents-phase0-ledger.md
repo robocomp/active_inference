@@ -1,0 +1,291 @@
+# Countable concept agents Phase 0 — ledger
+
+Branch `feat/countable-phase0` (base 8a589262). Plain running record; later tasks append.
+
+## Baseline rates
+
+Live baseline (parked + one door crossing, three-room world) is run later by the controller with the user.
+"Provisional" is the last `Fps` / `[CTRL] fps=` line found in
+`room_concept/estimation_scripts/crossing/chat_e2e9/logs/<file>` (main checkout); not a substitute for the baseline.
+
+| agent | Fps (live baseline) | source | provisional (from chat_e2e9 logs) | provisional source |
+|---|---|---|---|---|
+| chair_concept | TBD | live run | none in log | chair_concept.log |
+| table_concept | TBD | live run | no log | - |
+| bottle_concept | TBD | live run | no log | - |
+| hood_concept | TBD | live run | no log | - |
+| refrigerator_concept | TBD | live run | no log | - |
+| cabinet_concept | TBD | live run | no log | - |
+| room_concept | TBD | live run | 20 (period 50 ms, cpu 60-64%) | room_concept.log |
+| controller | TBD | live run | 19.1-19.5 (period 51-52 ms, cpu 33-34%) | controller.log |
+| retina | TBD | live run | 40 (period 25 ms, cpu 137-148%) | retina.log |
+
+## Builds
+
+Unmodified agents in the worktree, `systemd-run --user --scope` (MemoryHigh 40G / Max 44G / Swap 8G), `cmake -B build && make -C build -j8`.
+
+| agent | result |
+|---|---|
+| chair_concept | OK (exit 0) |
+| table_concept | OK (exit 0) |
+| bottle_concept | OK (exit 0) |
+| hood_concept | OK (exit 0) |
+| refrigerator_concept | OK (exit 0) |
+| cabinet_concept | OK (exit 0) |
+
+## Findings (Task 2)
+
+- chair_39 was born in run rose_chair3 (2026-11-09) 2.8 s after the leg room_1 -> room_2, at room_2 (-2.49,-0.66) = world ~(-6.87,4.02): a genuine ROOM_1 chair seen back through the open door. Later lives are LTOM recalls of the same uid, not new births.
+- No INACTIVE / no-polygon line preceded the birth (grep count 0 in both logs); the gate is never inactive after startup because the fitter keeps the previous room's polygon when the new room has none (refresh_room_geometry returns early).
+- Two causes remain unsplit by the logs: (c1) stale room_1 polygon kept after the room switch (room_1 bbox x[-4.25,4.25] y[-4.63,4.63] numerically contains the point), or (b/c2) room_2's own recalled/proto outline contained it. Polygon values are not logged anywhere.
+- Hypothesis (a) of spec G2 (prior INACTIVE, no outline) is not supported.
+- To settle it live: log outline bbox + room id on change and the inside verdict at each birth.
+
+Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox + room id logged on change, inside verdict logged at birth — Task 4).
+
+## Behaviour differences
+
+### Task 4 — chair_concept
+
+1. **Births are held while the working room has no usable outline** (was: admitted; worse, judged against the PREVIOUS
+   room's polygon, which `refresh_room_geometry` kept on a room switch — the stale-polygon cause c1 of chair_39).
+   Mechanism: `InstanceTracker::update(..., hold_births)` — candidates keep maturing and keep their evidence; the
+   first detection after the outline arrives is born at once. Pinned by `chair_tracker_defer_test`. Only when
+   `Existence.RoomPrior` is on (default), as before.
+2. **The fitter's room polygon is cleared when the working room has none** (was: kept the previous room's). Side
+   effects, all of which already guard on `has_room_polygon()`: no out-of-room existence term, no wall line-of-sight in
+   P(detect), the NBV gets no reachable region, and recall uses the default room area — all for the interval until the
+   outline arrives.
+3. **New logs:** (room id, outline verts + bbox) on every change; every birth logs its inside/OUTSIDE verdict with the
+   room id; `births HELD` / `births released` per WAIT episode. These pin the chair_39 cause live (owner 11-11).
+4. (2026-11-13, owner) **A proto-room reads as NO outline** (`rc::room::read_outline`), so births WAIT and the out-of-room
+   term is silent until room_concept promotes the room — see Rulings 4. Applies to all six agents through the shared reader.
+5. Unchanged: Admit/Suppress wherever an outline exists (same rule — inside or within `Existence.RoomMarginM` of the
+   boundary — now `rc::room::birth_verdict`); the left-behind drop (now `rc::room::drop_left_behind`, same teardown,
+   same log text); the existence term value (`out_of_room_logodds(false, gain) = -gain`).
+5. Shared tracker change: `hold_births` defaults to false, so the other five agents are byte-for-byte unchanged until
+   their own tasks pass it.
+
+### Task 5 — table_concept
+
+1. **The room now follows the robot** (was: latched at the first room for the whole run; tables born after a crossing
+   were parented to the room just left). Uses `rc::room::follow_current_room` at the top of `compute()`.
+2. **Tables left behind in another room are dropped** (`rc::room::drop_left_behind`, teardown = affordance + fitter
+   forget) and recalled by LTOM on return (was: never dropped — kept and fitted in the wrong frame).
+3. **Out-of-room births are suppressed** (was: none). Tolerance = half the birth footprint's short side
+   (`0.5·min(Tracker.BirthWidthM, Tracker.BirthDepthM)` = 0.30 m), a physical dimension.
+4. **Births are held while the working room has no usable outline** (was: admitted). The polygon is dropped on a room
+   change and re-read each cycle until the new room publishes one (was: kept the old room's until the id changed, then
+   retried). While empty: no wall line-of-sight in the silhouette test, no NBV reachable region, default recall area.
+5. **New existence term: out-of-room** (was: none). A belief centre outside the outline by more than half its short side
+   draws `-ExistenceOutOfRoomGain` (1.5, chair's value) per EVIDENCE cycle at p_detect = 1, and skips the sensor
+   channels that cycle — as chair. Key is `TableModel.ExistenceOutOfRoomGain`, not the plan's `Existence.OutOfRoomGain`:
+   table keeps all existence keys under `[TableModel]`. It runs only on evidence cycles because
+   `update_and_remove` returns early when no channel has a fresh frame.
+6. Logs: (room, outline bbox) on change, each birth's inside/OUTSIDE verdict with the room id, HELD/released.
+
+### Task 6 — bottle_concept (+ shared `room_of`)
+
+0. **Shared helper change, found here:** a bottle's `parent` is the table it stands on, not the room, so the Task 3
+   `drop_left_behind` would have dropped EVERY bottle on a table. `rc::room::room_of` (room_follow.h) now walks
+   `parent` up to the `room` node before `left_behind` is asked. For chair/table (parent = room) nothing changes. A
+   parent that no longer exists is returned as-is ⇒ left behind ⇒ dropped (review focus 2). A bottle whose table was
+   dropped as left behind therefore drops too, the next cycle.
+1. **The room now follows the robot** (was: latched at the first room).
+2. **Bottles left behind in another room are dropped** (teardown = affordance + fitter forget) and recalled by LTOM.
+3. **Out-of-room births suppressed** (was: none); tolerance = `prior_radius` (0.035 m).
+4. **Births held while the working room has no usable outline** (was: admitted). The polygon is now the working
+   room's own and is cleared when it has none (was: kept the previous room's).
+5. **No out-of-room existence term — skipped as the plan says.** Why: a bottle's position is set by its support surface
+   (a table that is itself containment-checked) and its birth is checked; an out-of-room bottle after birth would need its
+   table to have left the room first, which the left-behind drop already handles. Open for the owner if wanted.
+6. Pre-existing, not Phase 0: `bottle_concept/tests/test_bottle_fit.cpp` does not compile on main either (uses
+   `BottleState`/`BottleModel` without `rc::`); untouched. `bottle_card_test` and `test_bottle_contour` pass.
+
+### Task 7 — hood_concept
+
+1. **The room now follows the robot** (was: latched at the first room).
+2. **Hoods left behind in another room are dropped** (affordance + fitter forget) and recalled by LTOM.
+3. **Out-of-room births suppressed** (was: none). WALL-MOUNTED (review focus 1): tolerance = prior depth / 2
+   (`AI2PriorDepthM`, else `AI2PriorFootprintM` = 0.60 ⇒ 0.30 m), so a hood whose centre sits just outside the wall line is
+   ADMITTED. Checked after the burst take, so a refused candidate's banked cloud is released.
+4. **Births held while the working room has no usable outline** (was: admitted).
+5. **Outline needs ≥ 3 vertices** (was: hood accepted n ≥ 2 for the wall-flush factor). A 2-vertex outline is now
+   treated as none (spec: degenerate ⇒ WAIT). Rooms publish ≥ 4, so this only matters for a malformed outline. The
+   polygon is cleared when the working room has none (was: kept the previous room's).
+6. **New existence term: out-of-room** (was: none), `HoodModel.ExistenceOutOfRoomGain = 1.5`, tolerance = belief depth / 2,
+   per evidence cycle at p_detect = 1, skipping the sensor channels that cycle.
+
+### Task 8 — refrigerator_concept
+
+Same structure as hood (hood was cloned from it); same six differences as Task 7, with these tolerances:
+birth = `0.5 · AI2PriorFootprintM` (0.30 m; the agent has no separate depth prior), existence = half the belief's short
+side `0.5·min(w,h)`. Key `RefrigeratorModel.ExistenceOutOfRoomGain = 1.5`. Outline now needs ≥ 3 vertices (was ≥ 2).
+
+### Task 9 — cabinet_concept
+
+Same six differences as Task 7 (room follows; left-behind drop; containment; WAIT; outline ≥ 3 vertices, was ≥ 2;
+out-of-room existence term `CabinetModel.ExistenceOutOfRoomGain = 1.5`), plus:
+- **Both birth paths are checked.** Tracker births: tolerance = `0.5·min(Tracker.BirthWidthM, BirthDepthM)`.
+  Residual-born runs (L-corner arms): tolerance = `0.5·min(seed.L, BirthDepthM)`; no outline ⇒ return with the
+  debounce INTACT (WAIT keeps the evidence); outside ⇒ the debounce is reset.
+- Existence tolerance = half the run's short side `0.5·min(L, d)`.
+- Cabinet nodes are `object` type (CLAUDE.md's "`box` nodes" note is stale), so the shared drop helper finds them.
+- `tests/kitchen_selftest.cpp` is not a CMake target anywhere (pre-existing); only `cabinet_card_test` runs, and passes.
+
+### Task 10 — shared countable planner core (`common/nbv/countable_planner.h`)
+
+No agent uses it yet (Tasks 11–15). One deviation from the plan's test list: `non_finite_gain_refused` as written
+(a raw gain returning NaN) cannot produce a non-finite proposal, because `plan_faces` scores `p_detect·max(0, raw)`
+and `std::max(0, NaN)` is 0. The core's non-finite guard is reached by a NaN from `useful()` (e.g. a NaN variance in
+the adequacy gap); the test pins that, plus "a NaN raw gain never bids > 0". `plan_faces` is unchanged.
+
+### Task 11 — chair planner on the shared core
+
+`EpistemicProposal` is now `rc::nbv::CountableProposal`; `compute()` keeps its signature, its Target, its raw gain
+(continuous D-optimal via `d_optimal_gain<3>` + discrete mode-entropy × view-novelty) and its log line, and calls
+`plan_countable` with `useful_fraction(kChairDofs, …)`. **No behaviour difference:** `planner_ab_test` compares it
+with a verbatim pre-task copy (`tests/legacy_epistemic_planner.*`) on 22 belief states (fresh priors at 4 yaws;
+1/5/30 updates from 2 bearings; mode-ambiguous ×2; one bearing exhausted; 2 bearing-only seeds; 3 near a wall;
+2 with a table off the +x face; wall + obstacle; boxed in) — 21 valid proposals, all identical (|Δ| < 1e-4,
+gain within 1e-5 relative); the boxed-in state is refused by both. `kExpectedDifferences` is empty.
+One cosmetic difference: the throttled `[epistemic-NBV]` log line now prints only for a finite proposal (it printed
+before the finite check).
+
+### Task 12 — table planner on the shared core
+
+**No behaviour difference:** `table_concept/tests/planner_ab_test` vs a verbatim pre-task copy, 21 belief states
+(fresh ×4; 1/5/30 updates ×2 bearings; near-square mode-ambiguous ×2; long table one bearing ×40; small square wide
+orbit; near a wall ×3; chair off the +x face ×2; wall + obstacle; boxed in) — 20 valid, every controller-read field
+identical (pose, gain, face_gains, standoff band, framing, chosen_*, vfov, σ*). Two deviations from the plan text:
+1. **Table keeps its own `EpistemicProposal` struct** (not `using = CountableProposal`): it carries the object-relative
+   constraint the controller reads (face_gains, standoff band, framing, chosen_*, σ*). The core's pose/gain fill it.
+2. **(RULED: table moves to the expectation form) — two adequacy bounds exist.** Table caps the expected gain at the gap:
+   `min(p·raw, gap)`. Chair's `useful_fraction` (now the core's) scales it: `p·raw · min(raw, gap)/raw`. They agree only
+   when p = 1 or the gap does not bind. Table passes `useful = 1` and keeps its own `min` after the core, so nothing
+   changed; unifying is a behaviour change and a modelling choice (cap the EXPECTED information at what is still
+   wanted, vs. discount it by the useful fraction of the RAW information), so it is not made here.
+
+### Task 13 — refrigerator planner on the shared core
+
+**No behaviour difference:** `planner_ab_test` (the table harness adapted: tall 0.7×0.65 box, no discrete mode call),
+21 states, 20 valid, every controller-read field identical. Refrigerator already used chair's useful-fraction form,
+without the `any_sigma_star` guard; it publishes σ* on every DOF, so the core's guard is inert and the number is the
+same. Keeps its own `EpistemicProposal` (object-relative fields), like table. Its early "incomplete sensor model" log is
+kept (plan_faces refuses the same case silently). Harness note: the near-wall room is 9 m deep because a 1.7 m box's
+stand-off does not fit in the 4 m room the table harness used (all three refused there, by both planners).
+
+### Task 14 — hood planner on the shared core — ⚠ STOPPED FOR THE OWNER (spec G3), two questions
+
+`planner_ab_test`: 24 states (the refrigerator set as a HANGING box, H = 2.05 m, extent 0.50 m, plus 3 wall-mounted
+hoods flush against a wall), 23 valid. Poses, face gains, stand-off band, framing and chosen_* are identical on every
+state. **One behaviour difference, on every valid state: `epistemic_gain`.**
+
+**Q1 (RULED: keep 0, see Rulings) — the hood's epistemic gain was ALWAYS 0 before this task (latent defect, now fixed by the core).** hood publishes no
+σ* (`kHoodDofs` all -1, deliberately: no consumer has a demand). The old planner bounded the gain by the adequacy gap
+WITHOUT chair's `any_sigma_star` guard; with no σ* the gap is an empty sum = 0, so gain = p·raw · min(raw, 0)/raw = 0
+on every state — a hood never bid for a viewpoint visit. `hood_dof.h` says -1 was meant to be read by
+`any_sigma_star()`, so the guarded form is the stated intent. With the core: gain = p·raw, UNBOUNDED (5–15 nats in the
+harness), like chair. Live consequence: hoods will now attract epistemic visits and, with no σ*, never stop attracting
+(chair's comment calls that coherent: no demand ⇒ "adequate" is undefined). Listed in `kExpectedDifferences` (harness
+still requires every other field identical and the legacy gain exactly 0). **Owner: keep the fix, or keep hood at 0
+(e.g. pass `useful = 0` until a consumer states a σ*)?**
+
+**Q2 (RULED: accepted) — G3: the model does NOT stand further back for a hood than for a chair-sized target.** Same wall spot, same
+sensor (hfov 70°, vfov 55°, camera 1.2 m), constant raw gain: hood → face −y, stand-off 1.55 m, 1.80 m from centre,
+0° off the wall normal; chair-sized (0.6×0.52, floor to 1.25 m) → face −y, stand-off 2.61 m, 2.87 m, 0°. Both are
+square-on; the hood is viewed CLOSER. Why: the vertical framing binds on the object's span relative to the camera
+height. The chair's bottom is the floor, 1.2 m below the camera (34° below the axis at 1.8 m, outside the 27.5°
+half-vfov), so it must back off; the hood spans only 0.35–0.85 m ABOVE the camera (11°–25° at 1.8 m), already inside
+the frame. All three wall-mounted proposals lie inside the room on the room side of the wall (asserted). No constant
+was added. Same before and after the move (the pose is identical).
+
+### Task 15 — bottle planner: shared type + formula, NOT plan_countable
+
+**Deviation from the plan:** bottle does not go through `plan_countable`. Its planner is not a four-face plan: it places
+ONE viewpoint on the far side of the bottle from the camera (the hidden arc of a rotation-symmetric cylinder) and scores
+that single candidate with `rc::nbv::score`. Routing it through `plan_faces` would replace that algorithm with a
+different one (four faces of the bounding square), i.e. a behaviour change, not a refactor. It takes what is genuinely
+shared: `EpistemicProposal = rc::nbv::CountableProposal` and `rc::nbv::d_optimal_gain<5>`. **No behaviour difference:**
+`planner_ab_test`, 21 states (fresh ×4 cameras; 1/5/30 updates ×2 cameras; close / far / short-look / one bearing ×40;
+far side behind a chair ×2; on its table; far side toward a wall, beyond the wall (refused), near a wall; degenerate
+camera-on-bottle) — 18 valid, all identical.
+**⚠ For the owner, not changed:** bottle declares σ* on cx, cy, cz, r (h: none) but its gain is NOT bounded by the
+adequacy gap — it never applies `useful_fraction`, so a well-resolved bottle keeps bidding p·raw. Every other agent with
+a σ* bounds it. Applying it is a behaviour change (bottle's bid falls to 0 once adequate).
+
+### Table gain formula (owner ruling 3, after Task 15)
+
+Table's scalar gain is now `p·min(raw, gap)` (the core's `useful_fraction`), replacing `min(p·raw, gap)`. **Behaviour
+difference, gain only:** in `planner_ab_test`, 18 of 20 valid states change; every one is LOWER (fresh priors 16.1 → 14.9;
+after 1 update 12.1 → 11.0 and 2.10 → 2.03; converged 0.476 → 0.459; small square table 0.997 → 0.693, the largest
+relative drop, −30%); the other 2 are identical (p = 1 or the gap does not bind). Poses, face gains, stand-off band,
+framing, chosen_* and σ* are identical on every state; the harness enforces "gain only, never higher" for listed states.
+Live effect: a table whose best face has a low P(detect) bids a little less for a visit.
+
+## Task 17 — live validation (2026-11-13)
+
+Two runs, Webots claimed from room-concept-d7 / chat and released after. Fleet = rt-build (room, controller, door,
+residual, ltsm) + retina; object agents chair, table, hood, refrigerator, cabinet from this worktree + main `ltom_agent`.
+Logs: `room_concept/estimation_scripts/crossing/{phase0_live1,phase0_warm1}/logs/` (main checkout).
+- **phase0_live1** — `explore_tour.sh`, Estimate mode, empty memory: room_1 → room_2 → room_3 → room_1 re-entered through a
+  second door (room_4 adopted as room_1 by recognition). DONE in 306 s.
+- **phase0_warm1** — `warm_start_tour.sh` with fixture `three_rooms_door0` (owner: load the stored layouts): room_1 → room_2 →
+  room_3 → room_2 → room_1, 4/4 legs. Object agents started late (the legs ran 30/19/20/36 s), so room_1 had little time.
+
+**Bottle NOT run:** it SIGSEGVs at load, in `libIceStorm.so.37` static init (`IceMX::TopicMetrics::ice_factory`), before
+`main`. The main checkout's bottle binary (built 11-10) crashes identically ⇒ environment, not Phase 0. Bottle is unvalidated live.
+
+(a) **Left-behind + recall: HOLDS.** live1: `chair_49` and `refrigerator_1` dropped on leaving room_1; on return
+`RESURRECT chair_49` (same uid 21990232555569, p .74) and `RESURRECT refrigerator_1` (uid 24189255811073, p .98). warm1:
+`chair_50` dropped twice and resurrected with the same uid both times. ⚠ `hood_1` (live1) was killed by the NEW out-of-room
+existence term (`[existence] OUTSIDE room at (-1.42,2.27) L=-4.00`) while room_1's Estimate-mode outline was still partial,
+then dropped; it was not recalled (no later hood birth). See finding 2.
+
+(b) **The chair_39 premise was WRONG — the births are correct.** Both runs re-born the chair at room_2 frame ≈(−2.5,−0.6)
+(`chair_50`) — the chair_39 spot. Ground truth (`wbt_rooms.rooms()`, Webots walls): `chair(3)` at world (−7.43, 8.51) lies INSIDE
+the room behind DOOR_1 (our room_2, the L room; wbt_rooms calls it room_3) — in the L's arm, x∈[−8.39,…] y∈[7.20,…]; it is in
+no ground-truth room_1. The stored room_2 layout (fixture) has that arm: (−3.57,−2.06)…(−1.6,−1.14) in room_2's frame, and
+the point is inside it. Task 2's "a room_1 chair seen through the door" came from the tour scripts' `side_of` rule (below the
+DOOR_1 line ⇒ room_1), which is wrong for the arm. No room_1 object was born in room_2 in either run.
+
+(c) **Not exercised at a crossing:** room_2 had an outline the moment it became the working room in both runs (a proto
+outline in Estimate mode, the stored layout in warm mode), so no crossing ever deferred. `births HELD` did fire when a room node
+lost its outline (live1 re-entry swap; both runs at shutdown) — `released` was not observed before the runs ended.
+
+(d) **Rates:** hood / refrigerator / cabinet median 11 Hz, p10 10 Hz (Compute period 100 ms ⇒ nominal 10); room_concept 20 Hz;
+retina 39–40 Hz; controller median 18.1–18.3 Hz, p10 17.1 (the provisional baseline line read 19.1–19.5). chair and table print
+no rate line in this config ⇒ unmeasured. The Task 1 unmodified-agent baseline was never run, so "no worse than baseline"
+is not established for the object agents.
+
+### Findings for the owner (live)
+
+1. **Estimate-mode outlines are partial, and the new containment treats them as the room.** live1: the re-entered room_1
+   (a proto) suppressed a real table at (−1.9,−1.9) ~40 times (`OUTSIDE — suppressed`, every maturation), and the out-of-room
+   existence term killed `hood_1` against room_1's growing outline. With stored layouts (warm1) neither happened. A proto /
+   still-growing outline is uncertain, and the rule uses it as exact. Model-level fix (not a gate): give the outline an
+   uncertainty (room_concept's own boundary σ, large for a proto) and make Suppress / out-of-room a PROBABILITY of being
+   outside under it, so a partial outline barely acts. Not done.
+2. **Log spam:** the "(room, outline) changed" line fires on every vertex-count change, many per second in Estimate mode.
+3. Kitchen cabinet run grows into the fridge (owner, live) — queued separately (memory: cabinet free space).
+
+**Phase 0 is NOT done by its own definition:** (a) holds; (b) holds trivially (its premise was wrong); (c) not exercised;
+(d) partly measured; bottle not run. Not merged.
+
+## Rulings
+
+Owner 2026-11-13, on the Task 14 questions:
+1. **Hood gain → 0 for Phase 0.** hood passes `useful = 0` ("no consumer ⇒ no epistemic bid"); the core keeps the
+   `any_sigma_star` guard. `planner_ab_test` is back to strict identity (no expected differences). What an object with
+   no consumer should bid is OPEN — settle before the mirror agent.
+2. **G3 accepted:** the hood is viewed closer than a chair-sized target because of vertical framing. Task 17 adds a
+   live check that hood masks are actually obtained from the proposed viewpoint (25° vs 27.5° half-vfov is near the edge,
+   and the harness assumed vfov 55°).
+3. **Table moves to the expectation form** `p·min(raw, gap)` (= the core's useful_fraction), as its own commit after
+   Task 15, with the A/B listing every changed state.
+4. **(owner 2026-11-13, after phase0_live1) Concept agents refrain until the room is stabilised.** A proto-room's outline is
+   what has been seen so far, not the walls. `rc::room::read_outline` returns no outline for a room carrying the `proto`
+   self-edge, so births WAIT (tracker hold, evidence kept) and the out-of-room existence term is silent until promotion. No σ,
+   no new attribute, no threshold: the structural fact room_concept already publishes. Side effects while the room is a proto:
+   no wall line-of-sight in P(detect), no NBV reachable region, default recall area. Left-behind drops are unaffected.
+   Expected live: the estimate-mode start room births nothing until it is promoted (~60 s in clean76).

@@ -30,12 +30,16 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <format>
 #include <map>
 #include <optional>
+#include <cctype>
 #include <ranges>
 #include <string>
+#include <deque>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -79,6 +83,21 @@ public:
     virtual void on_bind(const std::string& /*name*/, const std::string& /*room*/) {}
     /// A predicate's belief now: a probability, or 0 / 1 for a fact. nullopt = cannot be evaluated now.
     virtual std::optional<double> eval(const Pred& p) = 0;
+    /// A SET predicate's members now: for `seen(what)`, the object nodes of that class (or that node) present in the
+    /// graph. The interpreter turns "present now and not when the step started" into an appearance. Default: none
+    /// (a host that does not answer it makes `seen` never hold; budgets still end the step).
+    virtual std::vector<std::string> matches(const Pred& /*p*/) { return {}; }
+    /// May this started leaf be cancelled now by a watch's reaction? `restart` = it would be started again afterwards
+    /// (a moving `continue` reaction); false = it ends there (a `stop` watch). False while that would undo progress —
+    /// a door passage past its approach restarts at the approach (room review I1, 2026-11-14), and one that has already
+    /// succeeded must not be restarted at all (final review F1). The firing then waits until the leaf ends or becomes
+    /// interruptible. Default: always.
+    virtual bool interruptible(const Step& /*leaf*/, bool /*restart*/) { return true; }
+    /// The wall clock now, epoch ms, for `wait at=` (the `now` of tick() is the caller's steady clock: durations only).
+    virtual std::int64_t wall_ms()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
 };
 
 class Interpreter
@@ -97,6 +116,7 @@ public:
         int iteration = 0;              ///< repeat: iterations finished
         std::string note;               ///< running and waiting: why (LeafStatus::detail); "" otherwise
         std::string after;              ///< a retry: the outcome the previous attempt failed with; "" on attempt 1
+        std::vector<std::string> fired; ///< a watch: every node it fired on, in order (its size = the firing count)
     };
 
     /// One step attempt (or one repeat iteration) starting (state Running) or ending (its final state), for the
@@ -268,7 +288,7 @@ public:
             {
                 out.push_back({.id = k.step->id, .op = k.step->op, .state = k.state, .outcome = k.outcome, .t0 = k.t0,
                                .t1 = k.t1, .attempt = k.attempt, .iteration = k.iteration, .note = k.note,
-                               .after = k.last_failure});
+                               .after = k.last_failure, .fired = k.fired});
                 self(k);
             }
         };
@@ -309,6 +329,15 @@ private:
         std::string note{};          ///< leaf, running: why it waits (LeafStatus::detail; '|' replaced, bt_state is '|'-split)
         std::string last_failure{};  ///< the outcome the previous attempt failed with (kept across a retry's reset)
         Step resolved{};        ///< leaf: what the host was given
+        int branch = -1;        ///< if: the branch taken (0 then, 1 else); -1 = not decided yet
+        bool seen_armed = false;                ///< a `seen` until: its baseline is taken
+        std::set<std::string> seen_base{};      ///< the matches when it was taken
+        // watch: the nodes it fired on (in order), those still to react to, whether its reaction body runs now, and
+        // the scope's leaf it interrupted (restarted when the reaction ends)
+        std::vector<std::string> fired{};
+        std::deque<std::string> queue{};
+        bool body_running = false;
+        Run* interrupted = nullptr;
         std::vector<Run> kids{};
     };
 
@@ -321,6 +350,7 @@ private:
     Run root_{};
     std::uint64_t tick_ = 0;
     bool paused_ = false;
+    int in_reaction_ = 0;   ///< > 0 while a watch's reaction body advances (its failing steps are skipped: on_fail)
     std::uint64_t paused_at_ = 0;
     std::string paused_leaf_;
     std::vector<std::string> events_;
@@ -371,6 +401,13 @@ private:
         r.started = false;
         r.note.clear();
         r.last_failure.clear();
+        r.branch = -1;
+        r.seen_armed = false;
+        r.seen_base.clear();
+        r.fired.clear();
+        r.queue.clear();
+        r.body_running = false;
+        r.interrupted = nullptr;
         for (auto& k : r.kids) reset(k);
     }
 
@@ -389,15 +426,50 @@ private:
             if (not substitute(ref)) return false;
         return true;
     }
+    /// A text with every bound `$NAME` (a whole identifier after the `$`) replaced by its node; unbound names stay.
+    std::string substitute_text(std::string_view text) const
+    {
+        std::string out;
+        for (std::size_t i = 0; i < text.size();)
+        {
+            std::size_t j = i + 1;
+            if (text[i] == '$')
+                while (j < text.size() and (std::isalnum(static_cast<unsigned char>(text[j])) or text[j] == '_')) ++j;
+            const auto v = text[i] == '$' ? vars_.find(text.substr(i + 1, j - i - 1)) : vars_.end();
+            if (v != vars_.end()) out += v->second;
+            else out += text.substr(i, j - i);
+            i = j;
+        }
+        return out;
+    }
 
-    bool holds(const Pred& pred)
+    /// The decision a predicate gives now; nullopt = it cannot be evaluated (unbound name, host has no belief).
+    std::optional<bool> decide(const Pred& pred)
     {
         Pred p = pred;
-        if (not substitute(p)) return false;   // an unbound name is a belief that cannot be evaluated
+        if (not substitute(p)) return std::nullopt;   // an unbound name is a belief that cannot be evaluated
+        if (p.name == "seen") return not host_.matches(p).empty();   // in an `if`: is one there now
         const auto v = host_.eval(p);
-        if (not v.has_value()) return false;
+        if (not v.has_value()) return std::nullopt;
         if (not p.cmp.has_value()) return *v != 0.0;
         return p.cmp->op == Comparison::Op::Ge ? *v >= p.cmp->value : *v < p.cmp->value;
+    }
+    /// An `until`: true once it holds. `seen(what)` is an APPEARANCE: the first call on run `r` takes the baseline
+    /// (and is false), later calls are true when a node is there that was not then.
+    bool holds(const Pred& pred, Run* r = nullptr)
+    {
+        if (pred.name != "seen") return decide(pred).value_or(false);
+        if (r == nullptr) return false;
+        Pred p = pred;
+        if (not substitute(p)) return false;
+        const auto now = host_.matches(p);
+        if (not r->seen_armed)
+        {
+            r->seen_armed = true;
+            r->seen_base = {now.begin(), now.end()};
+            return false;
+        }
+        return std::ranges::any_of(now, [r](const std::string& n) { return not r->seen_base.contains(n); });
     }
 
     void satisfy(Run& r, std::uint64_t now, std::string why = {})
@@ -452,7 +524,9 @@ private:
             advance(r, now);   // bounded: each pass spends an attempt
             return;
         }
-        if (f.kind == OnFail::Kind::Skip)
+        // A reaction's step that fails is skipped unless it says otherwise: the watched steps carry on (final review F7:
+        // one unreachable chair failed "approach every chair on the way" before the robot reached the room).
+        if (f.kind == OnFail::Kind::Skip or (f.kind == OnFail::Kind::Abort and in_reaction_ > 0))
         {
             r.state = StepState::Skipped;
             event(std::format("step {}: skipped after {}", label(*r.step), r.outcome));
@@ -470,18 +544,24 @@ private:
             cancel_subtree_kids(r, now, "cancelled");
             return fail(r, now, "budget_exhausted", s.id);
         }
-        if (is_repeat and r.cur == 0 and r.kids.front().state == StepState::Pending and until.has_value() and holds(*until))
+        if (s.op == "if") return run_if(r, now);
+        if (not tend_watches(r, now)) return;   // a reaction runs (or a stop watch just ended the scope's steps)
+        if (is_repeat and r.cur == 0 and r.kids.front().state == StepState::Pending and until.has_value() and holds(*until, &r))
             return satisfy(r, now, "until");
         while (true)
         {
             if (r.cur == r.kids.size())
             {
+                // A firing held behind the last step (it could not be interrupted) runs now, before the watch closes
+                // (final review F2: it was dropped). Back here once its reaction has ended.
+                if (not tend_watches(r, now) or r.cur != r.kids.size()) return;
+                close_watches(r, now);   // a watch lives as long as the steps after it in this sequence
                 if (not is_repeat) return satisfy(r, now);
                 ++r.iteration;
                 if (const auto times = s.integer("times"); times.has_value() and r.iteration >= *times) return satisfy(r, now);
                 for (auto& k : r.kids) reset(k);
                 r.cur = 0;
-                if (until.has_value() and holds(*until)) return satisfy(r, now, "until");
+                if (until.has_value() and holds(*until, &r)) return satisfy(r, now, "until");
                 // The iteration that just finished ends here; the next one opens when its first step starts.
                 r.state = StepState::Satisfied;
                 r.outcome = "satisfied";
@@ -495,8 +575,16 @@ private:
                 r.iteration_tick = tick_;
                 if (r.open_iteration < 0) open(r, now);   // a repeat's next iteration (the first opened in advance())
             }
+            if (r.cur > 0 and not tend_watches(r, now)) return;   // a firing held while the step before ran acts now
+            if (r.cur == r.kids.size()) continue;                  // a stop watch just ended the sequence
             Run& k = r.kids[r.cur];
             k.outer = is_repeat ? r.iteration : r.outer;
+            if (k.step->op == "watch")
+            {
+                arm_watch(k, now);
+                ++r.cur;
+                continue;
+            }
             advance(k, now);
             if (k.state == StepState::Satisfied or k.state == StepState::Skipped)
             {
@@ -508,12 +596,175 @@ private:
         }
     }
 
+    // ── watch ──────────────────────────────────────────────────────────────────────────────────────────────────────
+    /// Armed when its sequence reaches it: Running, with the matches now as its baseline; the sequence moves on.
+    void arm_watch(Run& w, std::uint64_t now)
+    {
+        ++w.attempt;
+        w.t0 = w.began = now;
+        w.state = StepState::Running;
+        open(w, now);
+        Pred p = *w.step->pred("when");
+        if (substitute(p))
+            for (auto& n : host_.matches(p)) w.seen_base.insert(std::move(n));
+        event(std::format("step {}: watching", label(*w.step)));
+    }
+    /// The nodes that appeared since the watch was armed join its queue, once each. A class watch never forgets its
+    /// baseline; a node watch (seen(chair_34)) does when that node leaves the graph, so its return is seen anew.
+    void detect(Run& w)
+    {
+        Pred p = *w.step->pred("when");
+        if (not substitute(p)) return;
+        const auto now = host_.matches(p);
+        // A class watch keeps its baseline for life: an object known when it started never fires it, even when dropped
+        // from the map and seen again (owner 2026-11-15). Only a watch on that very node sees it anew when it returns.
+        const std::string& what = p.refs.at("what").name;
+        std::erase_if(w.seen_base, [&](const std::string& n) { return n == what and not std::ranges::contains(now, n); });
+        for (const auto& n : now)
+            if (not w.seen_base.contains(n) and not std::ranges::contains(w.fired, n))
+            {
+                w.fired.push_back(n);
+                w.queue.push_back(n);
+            }
+    }
+    /// The reaction body, as a seq over the watch's kids. True = it has ended (satisfied); false = still running or
+    /// failed (w.state tells which).
+    bool run_body(Run& w, std::uint64_t now)
+    {
+        while (w.cur < w.kids.size())
+        {
+            Run& k = w.kids[w.cur];
+            k.outer = w.outer;
+            ++in_reaction_;
+            advance(k, now);
+            --in_reaction_;
+            if (k.state == StepState::Satisfied or k.state == StepState::Skipped)
+            {
+                ++w.cur;
+                continue;
+            }
+            if (k.state == StepState::Failed) fail(w, now, k.outcome, k.origin);
+            return false;
+        }
+        return true;
+    }
+    /// Every armed watch of `r` (innermost scope = these kids before r.cur), in order: detect, then run its
+    /// reactions. False = the scope must not advance this tick (a reaction is running, the scope failed, or a stop
+    /// watch ended it — then r.cur is past the end and the caller's next pass closes the sequence).
+    bool tend_watches(Run& r, std::uint64_t now)
+    {
+        for (std::size_t i = 0; i < r.cur and i < r.kids.size(); ++i)
+        {
+            Run& w = r.kids[i];
+            if (w.step->op != "watch" or w.state != StepState::Running) continue;
+            detect(w);
+            const bool stop = w.step->string("then") == "stop";
+            while (true)
+            {
+                if (w.body_running)
+                {
+                    if (not run_body(w, now))
+                    {
+                        if (w.state == StepState::Failed) fail(r, now, w.outcome, w.origin);
+                        return false;
+                    }
+                    w.body_running = false;
+                    if (stop)
+                    {
+                        satisfy(w, now, "fired");
+                        r.cur = r.kids.size();
+                        return true;   // the loop closes the sequence (a repeat goes on to its next iteration)
+                    }
+                    if (w.interrupted != nullptr)
+                    {
+                        w.interrupted->began = now;   // the interrupted leaf restarts whole, no attempt spent
+                        event(std::format("step {}: restarted", label(*w.interrupted->step)));
+                        w.interrupted = nullptr;
+                    }
+                }
+                if (w.queue.empty()) break;
+                // A reaction that would cancel the scope's running leaf waits while that leaf must not be interrupted.
+                const bool interrupts = stop or (claims_of(*w.step) & kBase) != 0;
+                if (Run* l = scope_leaf(r);
+                    interrupts and l != nullptr and l->started and not host_.interruptible(l->resolved, not stop))
+                    break;
+                // One driver at a time (final review F3): it also waits while another watch's reaction of this scope runs.
+                const auto other_running = [&r, i](std::size_t j) { return j != i and r.kids[j].body_running; };
+                if (interrupts and std::ranges::any_of(std::views::iota(std::size_t{0}, r.kids.size()), other_running)) break;
+                const std::string name = w.queue.front();
+                w.queue.pop_front();
+                if (const auto each = w.step->string("each"); each.has_value()) vars_[*each] = name;
+                for (auto& k : w.kids) reset(k);
+                w.cur = 0;
+                w.body_running = true;
+                event(std::format("step {}: fired on {}", label(*w.step), name));
+                if (stop)
+                {
+                    const std::string why = "watch:" + w.step->pred("when")->name;
+                    for (std::size_t j = i + 1; j < r.kids.size(); ++j)
+                    {
+                        Run& k = r.kids[j];
+                        if (k.state == StepState::Running) cancel_subtree(k, now, why);
+                        else if (k.state == StepState::Pending)
+                        {
+                            k.state = StepState::Cancelled;
+                            k.outcome = why;
+                            k.t1 = now;
+                        }
+                    }
+                }
+                else if ((claims_of(*w.step) & kBase) != 0)
+                    if (Run* l = scope_leaf(r); l != nullptr and l->started)
+                    {
+                        host_.cancel(l->resolved);
+                        l->started = false;
+                        event(std::format("step {}: interrupted by {}", label(*l->step), label(*w.step)));
+                        w.interrupted = l;
+                    }
+            }
+        }
+        return true;
+    }
+    /// The leaf of r's current child that runs now (the child itself when it is a leaf); nullptr = none.
+    static Run* scope_leaf(Run& r)
+    {
+        if (r.cur >= r.kids.size()) return nullptr;
+        Run& k = r.kids[r.cur];
+        if (k.kids.empty()) return k.state == StepState::Running ? &k : nullptr;
+        return running_leaf(k);
+    }
+    void close_watches(Run& r, std::uint64_t now)
+    {
+        for (auto& w : r.kids)
+            if (w.step->op == "watch" and w.state == StepState::Running) satisfy(w, now, "scope ended");
+    }
+
+    /// `if`: decided once on entry, then the chosen branch runs like a seq; the other is Skipped.
+    void run_if(Run& r, std::uint64_t now)
+    {
+        if (r.branch < 0)
+        {
+            const Pred cond = *r.step->pred("cond");
+            const auto yes = decide(cond);
+            if (not yes.has_value()) return fail(r, now, "cannot_evaluate:" + cond.name, r.step->id);
+            r.branch = *yes ? 0 : 1;
+            for (std::size_t i = 0; i < r.kids.size(); ++i)
+                if (int(i) != r.branch) r.kids[i].state = StepState::Skipped;
+            if (std::size_t(r.branch) >= r.kids.size()) return satisfy(r, now, "else-none");
+        }
+        Run& k = r.kids[std::size_t(r.branch)];
+        k.outer = r.outer;
+        advance(k, now);
+        if (k.state == StepState::Satisfied or k.state == StepState::Skipped) return satisfy(r, now);
+        if (k.state == StepState::Failed) return fail(r, now, k.outcome, k.origin);
+    }
+
     void run_leaf(Run& r, std::uint64_t now)
     {
         const Step& s = *r.step;
         if (s.op == "say")
         {
-            host_.say(*s.string("text"));
+            host_.say(substitute_text(*s.string("text")));
             return satisfy(r, now);
         }
         if (s.op == "stop")
@@ -532,7 +783,7 @@ private:
         const auto until = s.pred("until");
         if (not r.started)
         {
-            if (until.has_value() and holds(*until)) return satisfy(r, now, "until");
+            if (until.has_value() and holds(*until, &r)) return satisfy(r, now, "until");
             auto resolved = resolve(s);
             if (not resolved.has_value()) return fail(r, now, resolve_failure_, s.id);
             r.resolved = std::move(*resolved);
@@ -541,9 +792,23 @@ private:
             event(std::format("step {}: started", label(s)));
         }
         const double elapsed_s = double(now - r.began) / 1000.0;
-        if (until.has_value() and holds(*until)) return finish_leaf(r, now, "until");
+        if (until.has_value() and holds(*until, &r)) return finish_leaf(r, now, "until");
         if (const auto secs = s.number("s"); s.op == "wait" and secs.has_value() and elapsed_s >= *secs)
             return finish_leaf(r, now, "satisfied");
+        const auto at = s.op == "wait" ? s.string("at") : std::nullopt;
+        const auto at_ms = at.has_value() ? parse_iso(*at) : std::nullopt;
+        if (at_ms.has_value())
+        {
+            const std::int64_t left_ms = *at_ms - host_.wall_ms();
+            if (left_ms <= 0) return finish_leaf(r, now, "satisfied");
+            // the wait note (StepView::note), as a LeafStatus detail would be: "until 18:00 (in 42 min)"
+            const std::int64_t min = (left_ms + 59'999) / 60'000;
+            r.note = min < 120 ? std::format("until {} (in {} min)", iso_hhmm(*at), min)
+                               : std::format("until {} on {} (in {} h)", iso_hhmm(*at), at->substr(0, 10), (min + 30) / 60);
+            const LeafStatus st = host_.poll(r.resolved);
+            if (st.state == LeafState::Failed) return fail(r, now, st.detail.empty() ? "failed" : st.detail, s.id);
+            return;
+        }
         if (const auto budget = s.number("budget_s"); budget.has_value() and elapsed_s >= *budget)
         {
             if (until.has_value())
@@ -638,8 +903,10 @@ private:
     template <class R>
     static R* running_child(R& r)
     {
+        for (auto& k : r.kids)   // a watch whose reaction runs comes first: that is what drives now
+            if (k.state == StepState::Running and k.step->op == "watch" and k.body_running) return &k;
         for (auto& k : r.kids)
-            if (k.state == StepState::Running) return &k;
+            if (k.state == StepState::Running and k.step->op != "watch") return &k;
         return nullptr;
     }
     static Run* running_leaf(Run& r)

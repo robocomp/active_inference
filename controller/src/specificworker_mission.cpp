@@ -527,6 +527,37 @@ std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred 
 	return std::nullopt;
 }
 
+std::vector<std::string> SpecificWorker::MissionHost::matches(const rc::mission::Pred &p)
+{
+	// seen(what): `what` names a class (chair) or a node (chair_34). The interpreter turns "present now and not when
+	// the step started" into an appearance; here only who is there now (spec 2026-11-14 triggers-and-conditionals).
+	std::vector<std::string> out;
+	const auto what = p.refs.find("what");
+	if (p.name != "seen" or what == p.refs.end() or w_.G == nullptr) return out;
+	for (const auto &n : w_.G->get_nodes_by_type("object"))
+		if (n.name() == what->second.name or w_.G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == what->second.name)
+			out.push_back(n.name());
+	// people are nodes of type "person" (human_concept), their class is "person" (final review F4: seen(person) never fired)
+	for (const auto &n : w_.G->get_nodes_by_type("person"))
+		if (n.name() == what->second.name or what->second.name == "person") out.push_back(n.name());
+	return out;
+}
+
+bool SpecificWorker::MissionHost::interruptible(const rc::mission::Step &leaf, bool restart)
+{
+	// A passage restarts at Approach (controller_door_passage.h start()): from the doorway that drives the robot back out
+	// and can write the exit fact twice. So a watch's reaction waits until the passage has ended or has not got past it.
+	// At Done (final review F1) a RESTART is refused: the interpreter tends watches before it polls the leaf, so a moving
+	// reaction would cancel a cross that has already succeeded and restart it from the far side; it runs after the next
+	// poll ends the leaf. A cancel WITHOUT a restart (a stop watch) goes through at Done (room re-review): the exit fact
+	// is written and there is nothing to undo, so "stop at a bottle" does not wait through a provisional-room survey.
+	// Known limitation: a moving continue reaction does wait through that survey.
+	if (leaf.op != "cross" and leaf.op != "open" and leaf.op != "close") return true;
+	using PS = rc::DoorPassage::Step;
+	const auto step = w_.session_.door_passage().view().step;
+	return step == PS::Idle or step == PS::Look or step == PS::Approach or (step == PS::Done and not restart);
+}
+
 // ── Worker side ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 std::optional<rc::mission::Error> SpecificWorker::start_mission(rc::mission::Mission m, const char *source)
