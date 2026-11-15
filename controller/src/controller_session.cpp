@@ -4612,7 +4612,15 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         // Final review I-1: past the room switch with nothing to carry the cross, the cross ENDS (rc::anchor_gone_action) —
         // never the room route, whose target is a pose in the room just left. Dropping `engaged` lets the passage take its
         // room-switch end on the next cycle (note_anchor → rc::anchor_cross_end == RoomSwitch); this cycle drives nothing.
-        if (rc::anchor_gone_action(/*gap_carries=*/false, door_passage_.clearing()) == rc::AnchorGoneAction::EndClearing)
+        const auto gone = rc::anchor_gone_action(/*gap_carries=*/false, door_passage_.clearing(), door_passage_.driving_in());
+        if (gone == rc::AnchorGoneAction::EndDriveIn)
+        {
+            std::println("[door-route] drive-in: the anchor of '{}' is gone past THROUGH — the drive-in ends here (never a room "
+                         "route on the room left's cross pose); the passage completes by the room switch", step.target.node_name);
+            door_passage_.note_drive_in_done();
+            cross_status_ = "drive-in ended: the anchor is gone past THROUGH";
+        }
+        if (gone == rc::AnchorGoneAction::EndClearing or gone == rc::AnchorGoneAction::EndDriveIn)
         {
             if (anchor_cross_engaged_)
                 std::println("[anchor] cross: the anchor of '{}' is gone past the room switch and no held gap carries the "
