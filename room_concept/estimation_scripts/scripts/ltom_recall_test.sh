@@ -23,7 +23,7 @@ cd $E; mkdir -p crossing/$NAME
 # The memory as it was before the test: archived, kept in the run dir, and PUT BACK at the end (the test's objects do not stay).
 [ -f $REP ] && cp $REP crossing/$NAME/repertory_before.json
 mkdir -p crossing/ltom_archive; [ -f $REP ] && cp $REP crossing/ltom_archive/ltom_repertory_before_${NAME}_$(date +%Y%m%d_%H%M%S).json
-trap '[ -f crossing/$NAME/repertory_before.json ] && cp crossing/$NAME/repertory_before.json $REP && echo "ltom repertory restored to its pre-test state"' EXIT
+trap 'LTOM=1 bash $S/concept_agents.sh stop; [ -f $REP ] && cp $REP crossing/$NAME/repertory_at_exit.json; [ -f crossing/$NAME/repertory_before.json ] && cp crossing/$NAME/repertory_before.json $REP && echo "ltom repertory restored to its pre-test state"' EXIT
 for pass in ${PASSES:-1 2}; do
   RUN=${NAME}_p$pass
   if [ $pass = 1 ]; then
@@ -40,7 +40,9 @@ PY
     cp crossing/$NAME/repertory_after_p1.json $REP
     echo "pass $pass (recall): ltom repertory = pass 1's ($(python3 -I -c "import json;print(len(json.load(open('$REP'))['entries']))") entries)"
   fi
-  ON_FLEET_UP="LTOM=1 bash $S/concept_agents.sh start $E/crossing/$RUN" bash $S/warm_start_tour.sh $RUN $FIX 2>&1 | tee crossing/$NAME/tour_p$pass.txt
+  # the agents' launcher must NOT inherit the tee pipe: ltom_agent outlives the fleet (it does not exit on peer loss), and while
+  # its launcher holds the pipe tee never sees EOF and the test hangs after the tour (ltom_recall_countable1, 11-14: 12 h)
+  ON_FLEET_UP="LTOM=1 bash $S/concept_agents.sh start $E/crossing/$RUN < /dev/null >> $E/crossing/$NAME/agents_p$pass.txt 2>&1" bash $S/warm_start_tour.sh $RUN $FIX 2>&1 | tee crossing/$NAME/tour_p$pass.txt
   LTOM=1 bash $S/concept_agents.sh stop
   cp $REP crossing/$NAME/repertory_after_p$pass.json 2>/dev/null
 done
