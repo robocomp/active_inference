@@ -462,7 +462,10 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
         // ★A HOLE HOLDS ONE DOOR, for the aperture mode as for the leaf mode below: a new door at the hole a live door stands in has the mass the live door leaves,
         //  (1 − r · overlap). Without it a mask exactly on a live door was shared with a duplicate label at the same hole (one currency, final review 9, makes the
         //  new place's perfect-fit density 1/√(2πR) against the door's R_eff, which the door's own larger prior r used to hide behind a constant).
-        model.log_birth = log_b + std::log(std::max(hole_free(typical_door_at(dv.xy, cfg.exist_typical_w_m, cfg.exist_typical_h_m, polygon).aperture, groups), 1e-300));   // 1e-300: numerical floor on a log
+        model.one_currency = cfg.exist_one_currency;
+        model.log_birth = cfg.exist_one_currency
+            ? log_b + std::log(std::max(hole_free(typical_door_at(dv.xy, cfg.exist_typical_w_m, cfg.exist_typical_h_m, polygon).aperture, groups), 1e-300))   // 1e-300: numerical floor on a log
+            : log_b;
         model.log_kappa = std::log(std::max(1e-9, static_cast<double>(dm.false_alarm)));
         model.log_pd_new = std::log(std::max(1e-9, static_cast<double>(dm.hit_rate)));
         model.along_len_m = wall_len;
@@ -585,12 +588,17 @@ const rc::door::RegisteredSweep& DoorCore::registered(const rc::door::Aperture& 
     return reg_cache_.back().second;
 }
 
-// The share of the aperture's span NO live door stands in: Π_i (1 − r_i · overlap_i) over the live doors on the same wall, r_i the door's last-cycle
-// existence probability and overlap_i the fraction of the (mean) width the two spans share along the wall, max(0, 1 − |Δ| / w̄). Continuous (no radius).
+// The share of the aperture's span NO live door stands in: Π_i (1 − r_i · P(overlap_i)) over the live doors on the same wall, r_i the door's last-cycle existence
+// probability and P(overlap_i) the probability that the two apertures overlap along the wall: a hole holds one door, so the two are disjoint exactly when the
+// separation of their centres is at least the mean width w̄, and the live door's centre is known only to its own sd along the wall (σ, the fit's s variance plus the
+// pose chain's): with Δ the offset of the new centre from the door's, P(disjoint) = Φ((Δ − w̄)/σ) + Φ((−Δ − w̄)/σ). Continuous, no radius; σ → 0 recovers "overlap iff |Δ| < w̄"
+// (before: the linear share max(0, 1 − |Δ|/w̄), which at half a width left a door half-free beside a CERTAIN door and so let a duplicate label form beside every displaced door).
 double DoorCore::hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const
 {
     const auto& polygon = fit_.room_polygon();
     const int wall = wall_of(ap.centre_xy(), polygon, groups);
+    const float rn2 = cfg_.door.tracker_detection_noise_m * cfg_.door.tracker_detection_noise_m;
+    const auto phi = [](double z) { return 0.5 * std::erfc(-z / std::numbers::sqrt2); };
     double free = 1.0;
     for (const auto& [id, st] : world_->fit_states())
     {
@@ -598,8 +606,16 @@ double DoorCore::hole_free(const rc::door::Aperture& ap, const std::vector<int>&
         const auto it = last_p_door_.find(id);
         if (it == last_p_door_.end() or wall_of(st->aperture.centre_xy(), polygon, groups) != wall) continue;
         const double wbar = 0.5 * (ap.w + st->aperture.w);
-        const double d = std::abs((st->aperture.centre_xy() - ap.centre_xy()).dot(ap.wall_u));
-        free *= 1.0 - static_cast<double>(it->second) * std::max(0.0, 1.0 - d / std::max(1e-3, wbar));
+        const double delta = (ap.centre_xy() - st->aperture.centre_xy()).dot(ap.wall_u);
+        if (not cfg_.door.exist_one_currency)
+        {   // the linear share of the mean width the two spans share (the earlier form: Task 9)
+            free *= 1.0 - static_cast<double>(it->second) * std::max(0.0, 1.0 - std::abs(delta) / std::max(1e-3, wbar));
+            continue;
+        }
+        const double var = st->ai2_initialized ? std::max(0.0f, st->ai2_belief.covariance()(0, 0)) + st->chain_cov_xx : rn2;
+        const double sd = std::sqrt(std::max(1e-12, var));   // 1e-12: numerical floor on a variance
+        const double disjoint = phi((delta - wbar) / sd) + phi((-delta - wbar) / sd);
+        free *= 1.0 - static_cast<double>(it->second) * (1.0 - disjoint);
     }
     return free;
 }

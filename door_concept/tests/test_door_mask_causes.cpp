@@ -56,9 +56,10 @@ static std::vector<V3> leaf_points(const rc::DoorBelief& door, rc::door::HingeSi
 static const rc::DoorBeliefParams kBP{};
 static const double kLogKappa = std::log(0.194), kLogPd = std::log(0.938);
 
-static MaskCauses explain(const std::vector<V3>& pts, const std::vector<DoorCauseInput>& doors, double log_birth)
+static MaskCauses explain(const std::vector<V3>& pts, const std::vector<DoorCauseInput>& doors, double log_birth, bool one_currency = false)
 {
     MaskCauseModel m;
+    m.one_currency = one_currency;
     m.log_birth = log_birth; m.log_kappa = kLogKappa; m.log_pd_new = kLogPd; m.along_len_m = 5.5;
     return causes_of_mask(0, pts, kR, doors, m, kBP);
 }
@@ -123,7 +124,9 @@ int main()
         const double ra = mc.rho_door(1), rb = mc.rho_door(2);
         std::printf("shared mask: rho door1 %.3f door2 %.3f new %.3f\n", ra, rb, mc.rho_kind(CauseKind::NewDoor));
         CHECK(std::abs(ra - 0.5 * (ra + rb)) < 0.05 and std::abs(rb - 0.5 * (ra + rb)) < 0.05);
-        CHECK(ra + rb > 0.7);   // (the doors carry a 10 cm sd across the wall, so clutter and a new place keep a share of a mask: all four are densities in one currency)
+        CHECK(ra + rb > 0.9);
+        const auto mc1 = explain(pts, {da, db}, log_birth_second, true);   // one currency: the doors' 10 cm sd across the wall costs them against a perfect-fit new place
+        CHECK(mc1.rho_door(1) + mc1.rho_door(2) > 0.7);
     }
 
     // one_currency (final review 9): a door's cause and a new door's are densities in the same two quantities (across the surface and along the wall), so a door
@@ -141,7 +144,7 @@ int main()
         {
             DoorCauseInput d; d.id = 7; d.belief = &door; d.leaf = &ch; d.log_r = std::log(r); d.log_pd = kLogPd;
             d.along_offset_m = 0.0f; d.along_var = sd_along * sd_along;
-            const auto mc = explain(pts, {d}, std::log(b));
+            const auto mc = explain(pts, {d}, std::log(b), true);
             const double odds = mc.rho_kind(CauseKind::NewDoor) / std::max(1e-300, mc.rho_door(7));
             const double want = (b / Lambda) / (r / std::sqrt(2.0 * M_PI * double(d.along_var)));
             std::printf("one currency, along sd %.2f: rho door %.4f new %.4f clutter %.4f; odds new:door %.4f (formula %.4f)\n", sd_along, mc.rho_door(7), mc.rho_kind(CauseKind::NewDoor), mc.rho_kind(CauseKind::Clutter), odds, want);
@@ -151,13 +154,13 @@ int main()
         }
         // the new-door and clutter causes carry the same perfect-fit density: their odds are the prior odds b p_D / kappa, whatever R is
         DoorCauseInput d; d.id = 7; d.belief = &door; d.leaf = &ch; d.log_r = std::log(r); d.log_pd = kLogPd; d.along_var = 0.36f;
-        const auto mc = explain(pts, {d}, std::log(b));
+        const auto mc = explain(pts, {d}, std::log(b), true);
         const double ratio = mc.rho_kind(CauseKind::NewDoor) / std::max(1e-300, mc.rho_kind(CauseKind::Clutter)), want = b * 0.938 / 0.194;
         std::printf("  new / clutter = %.3f (b p_D / kappa = %.3f)\n", ratio, want);
         CHECK(std::abs(ratio / want - 1.0) < 0.02);
         // a broad door does not out-weigh a sharp one's share of the same mask: breadth is paid for
         DoorCauseInput sharp = d, broad = d; sharp.along_var = 0.0025f; broad.along_var = 0.36f;
-        CHECK(explain(pts, {broad}, std::log(b)).rho_door(7) < explain(pts, {sharp}, std::log(b)).rho_door(7));
+        CHECK(explain(pts, {broad}, std::log(b), true).rho_door(7) < explain(pts, {sharp}, std::log(b), true).rho_door(7));
     }
 
     // clutter takes a mask nobody explains

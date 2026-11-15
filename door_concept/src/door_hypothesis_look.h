@@ -629,7 +629,7 @@ template <class Undecided>
         std::vector<const Opt*> pick(opts.size(), nullptr);
         const auto same_hole = [](const Aperture& a, const Aperture& b)
         { return (a.centre_xy() - b.centre_xy()).norm() < 0.5f * std::min(a.w, b.w); };
-        const auto emit = [&]
+        const auto add_hyp = [&]
         {
             Hyp h; h.w = 1.0;
             for (const Opt* x : pick) { h.w *= x->w; if (not x->none) { h.apertures.push_back(x->ap); h.leaves.push_back(x->lf); } }
@@ -637,7 +637,7 @@ template <class Undecided>
         };
         const auto walk = [&](auto&& self, std::size_t k, double partial) -> void
         {
-            if (k == opts.size()) { emit(); return; }
+            if (k == opts.size()) { add_hyp(); return; }
             for (std::size_t c = 0; c < opts[k].size(); ++c)
             {
                 const double pp = partial * prob[k][c];
