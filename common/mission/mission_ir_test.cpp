@@ -222,6 +222,65 @@ int main()
         CHECK(not validate(m).has_value());
     }
 
+    // ── watch / if / seen (triggers-and-conditionals spec 2026-11-14) ─────────────────────────────────────────────
+    {
+        const auto mission = [](std::string_view steps) { return std::format(R"({{"v":1,"steps":[{}]}})", steps); };
+        const std::string seen_chair = R"({"p":"seen","what":{"node":"chair"}})";
+        const std::string watch_c = std::format(
+            R"({{"id":"1","op":"watch","when":{},"then":"continue","each":"c",)"
+            R"("steps":[{{"id":"1.1","op":"report","text":"the colour of $c"}}]}})", seen_chair);
+        const std::string cross22 = R"({"id":"2","op":"cross","door":{"node":"door_22"},"expect":"room_3"})";
+        // valid: a watch followed by the steps it watches
+        CHECK(rejected(mission(watch_c + "," + cross22)).empty());
+        // a watch must have steps after it to watch
+        {
+            const auto m = decode_json(mission(watch_c));
+            CHECK(not m.has_value() and m.error().code == "bad_value" and m.error().text.contains("needs steps after it"));
+        }
+        // then is continue | stop
+        CHECK(rejected(mission(std::format(R"({{"id":"1","op":"watch","when":{},"then":"maybe",)"
+                                           R"("steps":[{{"id":"1.1","op":"say","text":"x"}}]}},{})", seen_chair, cross22)))
+              == "bad_value");
+        // $c only inside the watch's body
+        CHECK(rejected(mission(std::format(R"({{"id":"1","op":"watch","when":{},"then":"continue","each":"c",)"
+                                           R"("steps":[{{"id":"1.1","op":"approach","object":{{"var":"c"}}}}]}},{})",
+                                           seen_chair, cross22)))
+                  .empty());
+        CHECK(rejected(mission(watch_c + "," + R"({"id":"2","op":"approach","object":{"var":"c"}})")) == "unbound");
+        // seen is a fact: no boundary
+        CHECK(rejected(mission(std::format(R"({{"id":"1","op":"watch","when":{{"p":"seen","what":{{"node":"chair"}},"ge":0.5}},)"
+                                           R"("then":"stop","steps":[{{"id":"1.1","op":"say","text":"x"}}]}},{})", cross22)))
+              == "bad_value");
+        // if: one or two seq children
+        const std::string cond = R"({"p":"door_open","door":{"node":"door_1"},"lt":0.5})";
+        const std::string then_seq = R"({"id":"1.1","op":"seq","steps":[{"id":"1.1.1","op":"open","door":{"node":"door_1"}}]})";
+        const std::string else_seq = R"({"id":"1.2","op":"seq","steps":[{"id":"1.2.1","op":"cross","door":{"node":"door_1"}}]})";
+        CHECK(rejected(mission(std::format(R"({{"id":"1","op":"if","cond":{},"steps":[{}]}})", cond, then_seq))).empty());
+        CHECK(rejected(mission(std::format(R"({{"id":"1","op":"if","cond":{},"steps":[{},{}]}})", cond, then_seq, else_seq))).empty());
+        CHECK(rejected(mission(std::format(R"({{"id":"1","op":"if","cond":{},"steps":[]}})", cond))) == "bad_value");
+        {
+            const std::string third = R"({"id":"1.3","op":"seq","steps":[{"id":"1.3.1","op":"stop"}]})";
+            const auto m = decode_json(mission(std::format(R"({{"id":"1","op":"if","cond":{},"steps":[{},{},{}]}})", cond,
+                                                           then_seq, else_seq, third)));
+            CHECK(not m.has_value() and m.error().code == "bad_value" and m.error().text.contains("at most one else"));
+        }
+        CHECK(rejected(mission(std::format(R"({{"id":"1","op":"if","cond":{},"steps":[{{"id":"1.1","op":"stop"}}]}})", cond)))
+              == "bad_value");   // a child that is not a seq
+        // JSON round trip of both shapes
+        for (const std::string& text : {mission(watch_c + "," + cross22),
+                                        mission(std::format(R"({{"id":"1","op":"if","cond":{},"steps":[{},{}]}})", cond,
+                                                            then_seq, else_seq))})
+        {
+            const auto m = decode_json(text);
+            CHECK(m.has_value());
+            if (m.has_value())
+            {
+                const auto back = decode_json(encode_json(*m));
+                CHECK(back.has_value() and *back == *m);
+            }
+        }
+    }
+
     std::println("mission_ir_test: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

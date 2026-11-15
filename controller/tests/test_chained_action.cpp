@@ -85,6 +85,10 @@ int main()
         std::vector<Step> nested{Step{.id = "1", .op = "seq", .steps = {Step{.id = "1.1", .op = "cross"}, Step{.id = "1.2", .op = "open"}}}};
         CHECK(ch::next_step(nested, "1.1") != nullptr and ch::next_step(nested, "1.1")->id == "1.2");
     }
+    {   // a watch has no standpoint and does not block its sequence: the look-ahead passes it (room review I2, 2026-11-14)
+        std::vector<rc::mission::Step> steps{{.id = "1", .op = "cross"}, {.id = "2", .op = "watch"}, {.id = "3", .op = "cross"}};
+        CHECK(ch::next_step(steps, "1") != nullptr and ch::next_step(steps, "1")->id == "3");
+    }
     std::println("test_chained_action: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

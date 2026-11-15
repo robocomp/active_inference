@@ -571,6 +571,51 @@ int main()
         CHECK(check_mission_claim("Hello Pablo!", false, false, false) == MC::Fine);
     }
 
+    // ── watch / if / seen (triggers-and-conditionals 2026-11-14) ──────────────────────────────────────────────
+    {
+        const auto live = [](std::string_view n) { return n == "door_22" or n == "room_3" or n == "chair_34"; };
+        const char* chairs = "mission\n  watch seen(chair) continue each=c\n    report \"the colour of $c\"\n  cross door_22 expect=room_3\n";
+        CHECK(check_planned(chairs, live).has_value());                                  // a class the robot knows
+        CHECK(check_planned("mission\n  watch seen(bed) stop\n    say bed\n  cross door_22\n", live).has_value());
+        CHECK(check_planned("mission\n  watch seen(chair_34) stop\n    say x\n  cross door_22\n", live).has_value());   // a live node
+        const auto cup = check_planned("mission\n  watch seen(cup) stop\n    say x\n  cross door_22\n", live);
+        CHECK(not cup.has_value() and cup.error().contains("I cannot recognise a cup"));
+        const auto cup_until = check_planned("mission\n  explore room_3 until=seen(cup) budget_s=60s\n", live);
+        CHECK(not cup_until.has_value() and cup_until.error().contains("I cannot recognise a cup"));
+        // Final review F4: a live node that is not an object or a person (a door) can never be "seen": refused
+        const auto door = check_planned("mission\n  watch seen(door_22) stop\n    say x\n  explore room_3 budget_s=60s\n", live);
+        CHECK(not door.has_value() and door.error().contains("door_22"));
+
+        const auto mw = parse_planned(chairs);
+        CHECK(mw.has_value());
+        if (mw.has_value())
+        {
+            using SS = rc::mission::Interpreter::StepState;
+            rc::mission::Progress before{.serial = 1, .status = "in_progress"}, after = before;
+            before.steps = {{.id = "1", .op = "watch", .state = SS::Running},
+                            {.id = "1.1", .op = "report", .state = SS::Pending},
+                            {.id = "2", .op = "cross", .state = SS::Running}};
+            after.steps = before.steps;
+            after.steps[0].fired = {"chair_51", "chair_52"};
+            after.steps[1].state = SS::Satisfied;
+            const auto w = new_watch_reports(before, after, *mw);
+            CHECK(w.size() == 2);
+            if (w.size() == 2)
+            {
+                CHECK(w[0].topic == "the colour of chair_51" and w[0].bound == "chair_51");
+                CHECK(w[1].topic == "the colour of chair_52" and w[1].bound == "chair_52");
+            }
+            CHECK(new_reports(before, after, *mw).empty());   // a report in a watch's body is the watch's to tell
+            auto third = after;
+            third.steps[0].fired.push_back("chair_53");
+            const auto w3 = new_watch_reports(after, third, *mw);
+            CHECK(w3.size() == 1 and w3[0].bound == "chair_53");
+            const auto lines = progress_lines(before, after, *mw);
+            CHECK(std::ranges::contains(lines, std::string("watch seen(chair): chair_51")));
+            CHECK(std::ranges::contains(lines, std::string("watch seen(chair): chair_52")));
+        }
+    }
+
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");
     return failures ? 1 : 0;
 }

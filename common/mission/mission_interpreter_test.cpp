@@ -42,6 +42,8 @@ struct FakeHost final : Host
     std::optional<std::string> room = "room_1";    // the room the robot is in now
     std::vector<std::string> evaled;               // pred_text of every predicate eval() saw
     std::int64_t wall = 0;                         // wall_ms(): the clock `wait at=` reads
+    std::map<std::string, std::vector<std::string>> present;   // matches(): by the `what` of seen(what), the nodes there now
+    std::map<std::string, bool> busy;              // interruptible(): by step id, true = it must not be interrupted now
 
     std::optional<std::string> start(const Step& s) override
     {
@@ -69,6 +71,17 @@ struct FakeHost final : Host
         const auto it = belief.find(text_detail::pred_text(Pred{.name = p.name, .refs = p.refs}));
         return it == belief.end() ? std::nullopt : std::optional<double>(it->second);
     }
+
+    std::vector<std::string> matches(const Pred& p) override
+    {
+        const auto w = p.refs.find("what");
+        if (p.name != "seen" or w == p.refs.end()) return {};
+        const auto it = present.find(w->second.name);
+        return it == present.end() ? std::vector<std::string>{} : it->second;
+    }
+
+    std::map<std::string, bool> busy_restart;      // interruptible(): true = it may end now but must not be restarted
+    bool interruptible(const Step& s, bool restart) override { return not busy[s.id] and not (restart and busy_restart[s.id]); }
 
     void done(const std::string& id) { leaf[id] = {.state = LeafState::Succeeded}; }
     void fail(const std::string& id, std::string why) { leaf[id] = {.state = LeafState::Failed, .detail = std::move(why)}; }
@@ -169,6 +182,356 @@ void test_transitions_close_every_open_step()
         CHECK((txs(in) == std::vector<std::string>{"1.1 explore a1 i0 cancelled superseded @5",
                                                    "1 seq a1 i0 cancelled superseded @5"}));
     }
+}
+/// The outcome steps() reports for step `id` ("" = no such step).
+std::string outcome_of(const Interpreter& in, std::string_view id)
+{
+    for (const auto& v : in.steps())
+        if (v.id == id) return v.outcome;
+    return {};
+}
+Interpreter::StepState state_of(const Interpreter& in, std::string_view id)
+{
+    for (const auto& v : in.steps())
+        if (v.id == id) return v.state;
+    return Interpreter::StepState::Pending;
+}
+
+// ── if (triggers-and-conditionals 2026-11-14): evaluated once on entry ──────────────────────────────────────────
+constexpr const char* kIfElse = "mission\n  if door_open(door_1)<0.5\n    open door_1\n  else\n    cross door_1\n";
+
+void if_true_runs_then()
+{
+    FakeHost h;
+    h.belief["door_open(door_1)"] = 0.2;
+    Interpreter in(h);
+    in.start(parse(kIfElse), 0);
+    in.tick(0);
+    CHECK(h.count("start 1.1.1:open") == 1 and h.count("start 1.2.1:cross") == 0);
+    h.done("1.1.1");
+    in.tick(10);
+    CHECK(in.state() == S::Completed);
+    CHECK(state_of(in, "1.2") == Interpreter::StepState::Skipped);
+}
+void if_false_runs_else()
+{
+    FakeHost h;
+    h.belief["door_open(door_1)"] = 0.9;
+    Interpreter in(h);
+    in.start(parse(kIfElse), 0);
+    in.tick(0);
+    CHECK(h.count("start 1.2.1:cross") == 1 and h.count("start 1.1.1:open") == 0);
+    CHECK(state_of(in, "1.1") == Interpreter::StepState::Skipped);
+    h.done("1.2.1");
+    in.tick(10);
+    CHECK(in.state() == S::Completed);
+}
+void if_false_no_else_satisfied()
+{
+    FakeHost h;
+    h.belief["door_open(door_1)"] = 0.9;
+    Interpreter in(h);
+    in.start(parse("mission\n  if door_open(door_1)<0.5\n    open door_1\n  say done\n"), 0);
+    in.tick(0);
+    CHECK(h.count("start 1.1.1:open") == 0 and h.count("say done") == 1);
+    CHECK(outcome_of(in, "1") == "else-none");
+    CHECK(in.state() == S::Completed);
+}
+void if_unknown_fails_cannot_evaluate()
+{
+    {
+        FakeHost h;   // no belief about door_1
+        Interpreter in(h);
+        in.start(parse(kIfElse), 0);
+        in.tick(0);
+        CHECK(in.state() == S::Failed and outcome_of(in, "1") == "cannot_evaluate:door_open");
+        CHECK(h.count("start 1.1.1:open") == 0 and h.count("start 1.2.1:cross") == 0);
+    }
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  if door_open(door_1)<0.5 on_fail=skip\n    open door_1\n  say next\n"), 0);
+        in.tick(0);
+        CHECK(state_of(in, "1") == Interpreter::StepState::Skipped and h.count("say next") == 1);
+    }
+}
+
+// ── seen() in an until: a node that APPEARS after the step started ──────────────────────────────────────────────
+void explore_until_seen_new_object()
+{
+    FakeHost h;
+    h.present["bottle"] = {"bottle_3"};   // known before the step starts: not "seen"
+    Interpreter in(h);
+    in.start(parse("mission\n  explore room_1 until=seen(bottle) budget_s=60s\n"), 0);
+    in.tick(0);
+    in.tick(10);
+    CHECK(in.state() == S::Running);
+    h.present["bottle"] = {"bottle_3", "bottle_7"};
+    in.tick(20);
+    CHECK(in.state() == S::Completed and outcome_of(in, "1") == "until");
+    CHECK(h.count("cancel 1:explore") == 1);
+}
+void until_seen_never_holds_budget_ends()
+{
+    FakeHost h;   // the host matches nothing (an old controller): the budget still ends it
+    Interpreter in(h);
+    in.start(parse("mission\n  explore room_1 until=seen(bottle) budget_s=60s\n"), 0);
+    in.tick(0);
+    in.tick(60'001);
+    CHECK(in.state() == S::Failed and outcome_of(in, "1") == "budget_exhausted");
+}
+// ── watch (triggers-and-conditionals 2026-11-14) ─────────────────────────────────────────────────────────────────
+std::vector<std::string> fired_of(const Interpreter& in, std::string_view id)
+{
+    for (const auto& v : in.steps())
+        if (v.id == id) return v.fired;
+    return {};
+}
+constexpr const char* kWatchChairs =
+    "mission\n  watch seen(chair) continue each=c\n    report \"the colour of $c\"\n  cross door_22 expect=room_3\n";
+
+void watch_ignores_known_objects()
+{
+    FakeHost h;
+    h.present["chair"] = {"chair_34"};
+    h.belief["in_room(room_3)"] = 1;
+    Interpreter in(h);
+    in.start(parse(kWatchChairs), 0);
+    in.tick(0);
+    in.tick(10);
+    h.done("2");
+    in.tick(20);
+    CHECK(in.state() == S::Completed and fired_of(in, "1").empty());
+}
+void watch_continue_report_every_new()
+{
+    FakeHost h;
+    h.belief["in_room(room_3)"] = 1;
+    Interpreter in(h);
+    in.start(parse(kWatchChairs), 0);
+    in.tick(0);
+    h.present["chair"] = {"chair_51"};
+    in.tick(10);
+    h.present["chair"] = {"chair_51", "chair_52"};
+    in.tick(20);
+    CHECK((fired_of(in, "1") == std::vector<std::string>{"chair_51", "chair_52"}));
+    CHECK(h.count("cancel 2:cross") == 0 and h.count("start 2:cross") == 1);
+    h.done("2");
+    in.tick(30);
+    CHECK(in.state() == S::Completed);
+}
+void watch_class_fires_once_per_object()
+{
+    FakeHost h;
+    h.belief["in_room(room_3)"] = 1;
+    Interpreter in(h);
+    in.start(parse(kWatchChairs), 0);
+    in.tick(0);
+    h.present["chair"] = {"chair_51"};
+    in.tick(10);
+    h.present["chair"] = {};
+    in.tick(20);
+    h.present["chair"] = {"chair_51"};
+    in.tick(30);
+    CHECK((fired_of(in, "1") == std::vector<std::string>{"chair_51"}));
+}
+void watch_continue_moving_body_pauses_and_resumes()
+{
+    FakeHost h;
+    h.belief["in_room(room_3)"] = 1;
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(chair) continue each=c\n    approach $c\n  cross door_22 expect=room_3\n"), 0);
+    in.tick(0);
+    CHECK(h.count("start 2:cross") == 1);
+    h.present["chair"] = {"chair_51"};
+    in.tick(10);
+    CHECK(h.count("cancel 2:cross") == 1 and h.count("start 1.1:approach") == 1);
+    CHECK(not h.started.empty() and h.started.back().ref("object")->name == "chair_51");
+    h.done("1.1");
+    in.tick(20);
+    CHECK(h.count("start 2:cross") == 2);
+    for (const auto& v : in.steps())
+        if (v.id == "2") CHECK(v.attempt == 1);
+    h.done("2");
+    in.tick(30);
+    CHECK(in.state() == S::Completed);
+}
+void watch_queue_in_order()
+{
+    FakeHost h;
+    h.belief["in_room(room_3)"] = 1;
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(chair) continue each=c\n    approach $c\n  cross door_22 expect=room_3\n"), 0);
+    in.tick(0);
+    h.present["chair"] = {"chair_51", "chair_52"};
+    in.tick(10);
+    CHECK(h.count("start 1.1:approach") == 1 and h.started.back().ref("object")->name == "chair_51");
+    h.done("1.1");
+    in.tick(20);
+    CHECK(h.count("start 1.1:approach") == 2 and h.started.back().ref("object")->name == "chair_52");
+    h.done("1.1");
+    in.tick(30);
+    CHECK(h.count("start 2:cross") == 2);   // the scope resumes once the queue is empty
+    CHECK((fired_of(in, "1") == std::vector<std::string>{"chair_51", "chair_52"}));
+}
+void watch_stop_cancels_scope_mission_completes()
+{
+    FakeHost h;
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(bottle) stop each=b\n    report \"where $b is\"\n"
+                   "  explore room_1 budget_s=300s\n  say after\n"),
+             0);
+    in.tick(0);
+    CHECK(h.count("start 2:explore") == 1);
+    h.present["bottle"] = {"bottle_7"};
+    in.tick(10);
+    CHECK(h.count("cancel 2:explore") == 1 and h.count("say after") == 0);
+    CHECK(state_of(in, "2") == Interpreter::StepState::Cancelled and outcome_of(in, "2") == "watch:seen");
+    CHECK(state_of(in, "1.1") == Interpreter::StepState::Satisfied);
+    CHECK(in.state() == S::Completed and in.status() == "completed");
+}
+void watch_in_repeat_rearms()
+{
+    FakeHost h;
+    Interpreter in(h);
+    in.start(parse("mission\n  repeat 2\n    watch seen(chair) continue each=c\n      report \"$c\"\n    wait s=1s\n"), 0);
+    in.tick(0);
+    h.present["chair"] = {"chair_51"};
+    in.tick(500);
+    CHECK((fired_of(in, "1.1") == std::vector<std::string>{"chair_51"}));
+    in.tick(1'000);   // iteration 1 ends; iteration 2 re-arms with chair_51 in its baseline
+    in.tick(1'100);
+    in.tick(1'500);
+    CHECK(fired_of(in, "1.1").empty());   // re-armed: chair_51 was there when iteration 2 began
+    h.present["chair"] = {"chair_51", "chair_60"};
+    in.tick(1'600);
+    CHECK((fired_of(in, "1.1") == std::vector<std::string>{"chair_60"}));
+}
+void watch_scope_ends_with_siblings()
+{
+    FakeHost h;
+    h.belief["in_room(room_3)"] = 1;
+    Interpreter in(h);
+    in.start(parse("mission\n  seq\n    watch seen(chair) continue each=c\n      say \"$c\"\n    cross door_22 expect=room_3\n"
+                   "  wait s=5s\n"),
+             0);
+    in.tick(0);
+    h.done("1.2");
+    in.tick(10);
+    CHECK(state_of(in, "1.1") == Interpreter::StepState::Satisfied);
+    h.present["chair"] = {"chair_70"};
+    in.tick(20);
+    CHECK(fired_of(in, "1.1").empty() and h.count("say chair_70") == 0);
+}
+/// Room review I1: a cross past its approach must not be interrupted (a restart begins at Approach and would drive the
+/// robot back out of the doorway): the firing waits in the queue until the leaf is interruptible or has ended.
+void watch_waits_while_leaf_not_interruptible()
+{
+    for (const char* mode : {"continue", "stop"})
+    {
+        FakeHost h;
+        h.belief["in_room(room_3)"] = 1;
+        h.belief["in_room(room_2)"] = 1;
+        Interpreter in(h);
+        in.start(parse(std::format("mission\n  watch seen(chair) {} each=c\n    approach $c\n"
+                                   "  cross door_22 expect=room_3\n  cross door_1 expect=room_2\n", mode)),
+                 0);
+        in.tick(0);
+        h.busy["2"] = true;   // in the doorway
+        h.present["chair"] = {"chair_51"};
+        in.tick(10);
+        CHECK(h.count("cancel 2:cross") == 0 and h.count("start 1.1:approach") == 0);
+        CHECK((fired_of(in, "1") == std::vector<std::string>{"chair_51"}));   // noticed, not yet acted on
+        h.done("2");
+        in.tick(20);   // the cross ends: the reaction runs before the next cross starts
+        CHECK(h.count("start 1.1:approach") == 1 and h.count("start 3:cross") == 0);
+    }
+}
+/// Final review F2: a firing held behind the scope's LAST leaf (not interruptible) runs once that leaf ends, before
+/// the scope closes; it is not dropped.
+void watch_queue_drains_before_scope_ends()
+{
+    FakeHost h;
+    h.belief["in_room(room_3)"] = 1;
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(chair) continue each=c\n    approach $c\n  cross door_22 expect=room_3\n"), 0);
+    in.tick(0);
+    h.busy["2"] = true;
+    h.present["chair"] = {"chair_1"};
+    in.tick(10);
+    CHECK(h.count("start 1.1:approach") == 0);
+    h.done("2");   // still not interruptible as it ends (a passage at Done, F1): the queue drains after it
+    in.tick(20);
+    CHECK(h.count("start 1.1:approach") == 1 and in.state() == S::Running);
+    h.done("1.1");
+    in.tick(30);
+    CHECK(in.state() == S::Completed);
+}
+/// Room re-review of F1: a passage that has succeeded (surveying a provisional room) must not be RESTARTED, but a stop
+/// watch only ends it — that goes through at once instead of waiting through the survey; a moving continue waits.
+void watch_stop_goes_through_where_restart_waits()
+{
+    for (const char* mode : {"stop", "continue"})
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse(std::format("mission\n  watch seen(bottle) {} each=b\n    approach $b\n  cross door_22\n", mode)), 0);
+        in.tick(0);
+        h.busy_restart["2"] = true;   // at Done, surveying the room it crossed into
+        h.present["bottle"] = {"bottle_7"};
+        in.tick(10);
+        const bool stop = std::string_view(mode) == "stop";
+        CHECK(h.count("cancel 2:cross") == (stop ? 1 : 0) and h.count("start 1.1:approach") == (stop ? 1 : 0));
+    }
+}
+/// Final review F3: one driver at a time — while one watch's moving reaction runs, another watch's moving reaction
+/// waits for it.
+void two_watches_one_driver()
+{
+    FakeHost h;
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(chair) continue each=c\n    approach $c\n"
+                   "  watch seen(table) continue each=t\n    approach $t\n  explore room_1 budget_s=300s\n"),
+             0);
+    in.tick(0);
+    h.present["table"] = {"table_6"};
+    in.tick(10);
+    CHECK(h.count("start 2.1:approach") == 1);
+    h.present["chair"] = {"chair_1"};
+    in.tick(20);
+    CHECK(h.count("start 1.1:approach") == 0);   // the table's approach still drives
+    h.done("2.1");
+    in.tick(30);
+    in.tick(40);
+    CHECK(h.count("start 1.1:approach") == 1);
+}
+/// Final review F5: `$NAME` is substituted in a say text (spec "Settled", first bullet).
+void watch_say_substitutes_each()
+{
+    FakeHost h;
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(chair) continue each=c\n    say \"I see $c\"\n  explore room_1 budget_s=300s\n"), 0);
+    in.tick(0);
+    h.present["chair"] = {"chair_51"};
+    in.tick(10);
+    CHECK(h.count("say I see chair_51") == 1);
+}
+/// Final review F7: a reaction step that fails (no on_fail given) is skipped; the mission carries on
+/// ("approach every chair on the way" with one unreachable chair still reaches the room).
+void watch_failed_reaction_is_skipped()
+{
+    FakeHost h;
+    Interpreter in(h);
+    in.start(parse("mission\n  watch seen(chair) continue each=c\n    approach $c\n  explore room_1 budget_s=300s\n"), 0);
+    in.tick(0);
+    h.present["chair"] = {"chair_1"};
+    in.tick(10);
+    CHECK(h.count("start 1.1:approach") == 1);
+    h.fail("1.1", "unreachable");
+    in.tick(20);
+    CHECK(state_of(in, "1.1") == Interpreter::StepState::Skipped and in.state() == S::Running);
+    in.tick(30);
+    CHECK(h.count("start 2:explore") == 2);   // the interrupted explore resumes
 }
 }   // namespace
 
@@ -700,6 +1063,27 @@ int main()
     test_transitions_per_attempt();
     test_transitions_per_iteration();
     test_transitions_close_every_open_step();
+
+    if_true_runs_then();
+    if_false_runs_else();
+    if_false_no_else_satisfied();
+    if_unknown_fails_cannot_evaluate();
+    explore_until_seen_new_object();
+    until_seen_never_holds_budget_ends();
+    watch_ignores_known_objects();
+    watch_continue_report_every_new();
+    watch_class_fires_once_per_object();
+    watch_continue_moving_body_pauses_and_resumes();
+    watch_queue_in_order();
+    watch_stop_cancels_scope_mission_completes();
+    watch_in_repeat_rearms();
+    watch_scope_ends_with_siblings();
+    watch_waits_while_leaf_not_interruptible();
+    watch_queue_drains_before_scope_ends();
+    two_watches_one_driver();
+    watch_stop_goes_through_where_restart_waits();
+    watch_say_substitutes_each();
+    watch_failed_reaction_is_skipped();
 
     std::println("mission_interpreter_test: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
