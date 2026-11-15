@@ -13,6 +13,10 @@ namespace ltom
 {
 struct Pose2 { double x = 0, y = 0, yaw = 0; double vx = 0, vy = 0, vyaw = 0; };   // room frame, m/rad; variances
 
+// The identity link a concept agent publishes on a live object (same_as_uid / same_as_prob / left_spot_prob): the live
+// object is believed to be the remembered `memory_uid`, moved (common/recall_match/identity_link.h).
+struct LinkObs { std::uint64_t memory_uid = 0; float same_prob = 0.f, left_spot_prob = 0.f; };
+
 struct Sighting
 {
     std::uint64_t uid = 0;
@@ -24,6 +28,7 @@ struct Sighting
     std::string color_name;   // the owner's colour name (color_name attr); "" = not measured
     float color_prob = 0;
     std::optional<float> exist_prob;   // the owner's P(exists) (obj_exist_prob); nullopt = not stated
+    std::optional<LinkObs> link;       // the owner's identity link; nullopt = none published
 };
 
 enum class End { alive, death, owner_exit, gap };
@@ -42,6 +47,11 @@ inline const char* end_name(End e)
 
 struct Life { std::int64_t born_ms = 0, first_seen_ms = 0, last_seen_ms = 0, end_ms = -1; End end = End::alive; };
 struct Keyframe { std::int64_t t_ms = 0, room_key = -1; Pose2 pose; };
+// A move the memory holds (owner's choice B, spec 2026-11-15-changed-object): the memory continues as a live object
+// elsewhere. `from` is the memory's last keyframe when linked, `to` the live object's. Confirmed = the owner said yes.
+struct Move { std::int64_t t_ms = 0; std::uint64_t live_uid = 0; Keyframe from, to; bool confirmed = false; float prob = 0.f; };
+// The owner said the live object was NOT this memory: it is gone from that room (kept, so it can match elsewhere).
+struct GoneFromRoom { std::int64_t t_ms = 0, room_key = -1; std::string words; };
 struct Thumbnail { float score = 0.f; std::vector<std::uint8_t> jpeg; };
 
 struct Entry
@@ -58,6 +68,10 @@ struct Entry
     std::vector<Life> lives;
     std::vector<Keyframe> keyframes;
     std::map<int, Thumbnail> thumbs;   // viewing-angle bin -> the best view of the object from there
+    std::optional<std::uint64_t> continued_by;   // on a memory: the live uid it continues as (an open or confirmed move)
+    std::optional<std::uint64_t> continues;      // on the live uid's entry: the memory it continues
+    std::vector<Move> moves;                     // on the memory; the last one is the current link while continued_by is set
+    std::vector<GoneFromRoom> gone;
 };
 
 struct Changes { std::vector<std::uint64_t> born, reopened, died, owner_exited; };
@@ -84,7 +98,15 @@ public:
     bool dirty() const { return dirty_; }
     void clear_dirty() { dirty_ = false; }
 
+    // The identity link (spec 2026-11-15-changed-object). record: both sides + an unconfirmed Move (from = the
+    // memory's last keyframe, to = the live object's). confirm: the owner's yes. cut: the link is undone and its
+    // unconfirmed Move dropped; with the owner's words (their "no") the memory is also marked gone from its room.
+    void record_link(std::uint64_t memory_uid, std::uint64_t live_uid, std::int64_t now_ms, float prob = 0.f);
+    void confirm_link(std::uint64_t memory_uid);
+    void cut_link(std::uint64_t memory_uid, std::int64_t now_ms, std::string words);
+
 private:
+    void tend_links(std::span<const Sighting> alive, std::int64_t now_ms);
     struct Pending { std::int64_t vanish_ms; };
     std::int64_t grace_ms_;
     std::map<std::uint64_t, Entry> entries_;

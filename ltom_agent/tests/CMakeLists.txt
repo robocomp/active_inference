@@ -15,6 +15,10 @@ add_executable(test_repertory_io test_repertory_io.cpp ../src/repertory_io.cpp .
 set_target_properties(test_repertory_io PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_link_libraries(test_repertory_io PRIVATE Qt6::Core)
 
+add_executable(test_repertory_links test_repertory_links.cpp ../src/repertory.cpp ../src/recall_select.cpp ../src/repertory_io.cpp ../src/human.cpp)
+set_target_properties(test_repertory_links PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_link_libraries(test_repertory_links PRIVATE Qt6::Core)
+
 add_executable(test_human test_human.cpp ../src/human.cpp ../src/repertory.cpp)
 set_target_properties(test_human PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
