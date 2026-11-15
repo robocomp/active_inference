@@ -113,7 +113,7 @@ def wall_position(B, lab, cx, cy, yaw, w, h):
     cands.sort(key=lambda c: c[0])
     for _, pos in cands:
         if not overlaps(B[solid], footprint_aabb(pos[0], pos[1], yaw, w, h)): return pos
-    return cands[0][1]
+    return None
 
 
 def pack(name, box, std, origin, pts):
@@ -132,24 +132,31 @@ def main():
     gt = np.array([(int(r['t_ms']), float(r['x']), float(r['y']), float(r['yaw']))
                    for r in csv.DictReader(open(f'{a.run}/gt_pose.tsv'), delimiter='\t')])
     XF = room_transforms()
-    out = open(a.out, 'wb'); total = collections.Counter()
+    out = open(a.out, 'wb'); total = collections.Counter(); wall_warned = set()
     for cls, room in ROOM_OF.items():
         R, t, dth = XF[room]
         by = collections.defaultdict(list)
         for r in csv.DictReader(open(f'{a.run}/{cls}_ai2_log.csv')): by[r['node']].append(r)
         for node, rs in by.items():
             if len(rs) < 200: continue
-            prev = None; n = 0; fdisp = None
+            prev = None; n = 0; fdisp = None; cand = []
             for i, r in enumerate(rs):
                 try:
-                    L = float(r['ex_L']); ts = int(float(r['pkt_ts']))
-                    cx, cy, yaw, w, h, H = (float(r[k]) for k in ('cx', 'cy', 'yaw', 'w', 'h', 'H'))
-                    sx, sy = float(r['std_cx']), float(r['std_cy']); lfe = float(r['ex_lfree_eff'])
+                    L = float(r['ex_L']); lfe = float(r['ex_lfree_eff'])
                 except (ValueError, KeyError):
                     prev = None; continue
                 drop = prev is not None and L < prev - 1e-4 and lfe > 0; prev = L
-                if not drop or i % 2: continue
-                if a.max_cycles and n >= a.max_cycles: break
+                if drop and i % 2 == 0: cand.append(i)
+            if a.max_cycles and len(cand) > a.max_cycles:          # N cycles EVENLY across the run
+                cand = [cand[int(j * len(cand) / a.max_cycles)] for j in range(a.max_cycles)]
+            for i in cand:
+                r = rs[i]
+                try:
+                    ts = int(float(r['pkt_ts']))
+                    cx, cy, yaw, w, h, H = (float(r[k]) for k in ('cx', 'cy', 'yaw', 'w', 'h', 'H'))
+                    sx, sy = float(r['std_cx']), float(r['std_cy'])
+                except (ValueError, KeyError):
+                    continue
                 rp = robot_world(gt, ts)
                 if rp is None: continue
                 (px, py), th = rp
@@ -162,9 +169,18 @@ def main():
                 if a.phantoms:
                     if fdisp is None: fdisp = floor_displacement(B, cw[0], cw[1], yw, w, h) or (0.0, 0.0)
                     out.write(pack('phantom_floor_' + node, (cw[0] + fdisp[0], cw[1] + fdisp[1], yw, w, h, H), std, O, P))
-                    wx, wy = wall_position(B, lab, cw[0], cw[1], yw, w, h)
-                    out.write(pack('phantom_wall_' + node, (wx, wy, yw, w, h, H), std, O, P))
-                    total['phantom_floor_' + node] += 1; total['phantom_wall_' + node] += 1
+                    wp = wall_position(B, lab, cw[0], cw[1], yw, w, h)
+                    if wp is None:
+                        if node not in wall_warned:
+                            print(f'WARNING {node}: every wall candidate overlaps a non-wall GT box, NO wall phantom', file=sys.stderr)
+                            wall_warned.add(node)
+                    else:
+                        if node not in wall_warned:
+                            print(f'phantom_wall_{node}: centred on a wall inner face at ({wp[0]:.3f}, {wp[1]:.3f})', file=sys.stderr)
+                            wall_warned.add(node)
+                        out.write(pack('phantom_wall_' + node, (wp[0], wp[1], yw, w, h, H), std, O, P))
+                        total['phantom_wall_' + node] += 1
+                    total['phantom_floor_' + node] += 1
                 n += 1
     out.close()
     for k, v in total.items(): print(f'{k}: {v} cycles', file=sys.stderr)
