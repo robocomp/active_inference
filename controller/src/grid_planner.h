@@ -341,10 +341,13 @@ public:
     // FORWARD headings (the grid's heading index convention, as pose_free). The arc is sampled at the angle at
     // which the footprint's farthest covered cell moves one grid cell, so no heading bucket the body passes
     // through can be skipped. `headings_blocked` counts the buckets of the arc that are blocked.
-    // ★ THE BODY IS ALREADY WHERE IT STANDS: an occupied cell under the footprint at the CURRENT heading is not a
-    //   cell the turn newly sweeps into (the grid's footprint carries a safety margin and 8 buckets, so a robot
-    //   parked 0.40 m from a stray cell reads as "colliding" at its own heading). Those cells are excluded; any
-    //   other cell the arc reaches blocks it. A set difference, not a tolerance.
+    // ★ THE BODY IS ALREADY WHERE IT STANDS: an occupied cell under the footprint at the CURRENT heading is forgiven
+    //   (the grid's footprint carries a safety margin and 8 buckets, so a robot parked 0.40 m from a stray cell reads as
+    //   "colliding" at its own heading) — but only while the turn does not go DEEPER into it: its clearance (distance to the
+    //   cell minus the footprint's support toward it, the same footprint geometry, no new margin) at every sampled yaw of the
+    //   arc must be at least what it is at the current yaw. A cell the turn presses into is blocked like any other.
+    //   Limit: the check is only as good as the 8 quantised footprints for the NEW cells, so for a short arc it tests the
+    //   1-2 buckets it enters, where the old all-round test covered all 8.
     [[nodiscard]] TurnBlock why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const;
 
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
@@ -386,7 +389,8 @@ public:
 private:
     static constexpr int kHeadings = 8;
     // the shared body of why_cannot_turn / why_cannot_sweep: which of `headings` are blocked at pos_room, and by what
-    TurnBlock turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings, int standing_heading = -1) const;
+    TurnBlock turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings,
+                              const std::vector<float>& arc_yaws = {}) const;
 
     bool  in_bounds(int ix, int iy) const { return ix >= 0 and ix < w_ and iy >= 0 and iy < h_; }
     int   idx(int ix, int iy) const { return iy * w_ + ix; }

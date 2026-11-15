@@ -353,6 +353,8 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         if (not door_route_leg_.has_value() or door_route_leg_->key != door_route_key_)
         {
             door_route_active_ = false;
+            door_face_yaw_.reset();
+            door_face_turning_key_.clear();
             if (door_route_installed_)
             {
                 path_controller.stop();
@@ -3881,34 +3883,43 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                     const auto gs = rc::policy::reaim_place_goal(rp, ra.p_robot, ra.yaw_robot, 0.f, 0.f);
                     door_reaim_goal_ = std::make_pair(gs.goal.p, gs.goal.yaw.value_or(0.f));
                 }
-                // ★ AT THE VANTAGE, FACING AWAY (chat_e2e20): no fresh anchor to re-aim on, so turn in place to the door's heading
-                //   in the room frame (controller_anchor_servo.h should_face_door). The swept arc is checked first.
-                const float face_err = rc::door_heading_err(step.robot_pose.theta, leg.approach_yaw);
-                if (rc::should_face_door(vact, route_arrived, face_err))
+                // ★ AT THE VANTAGE, FACING AWAY (chat_e2e20): no fresh anchor to re-aim on, so turn in place to the DOOR'S heading
+                //   (the anchor's normal) — see controller_anchor_servo.h face_decision. The swept arc is checked first.
                 {
                     const float yaw_now = step.robot_pose.theta + 0.5f * static_cast<float>(M_PI);
-                    if (const auto blk = grid_planner_.why_cannot_sweep(step.robot_pose.pos, yaw_now, leg.approach_yaw); blk.blocked)
+                    const float yaw_door = rc::interaction::wrap_pi(yaw_now + g.heading_err);
+                    const bool turning = door_face_turning_key_ == leg.key;
+                    const auto blk = grid_planner_.why_cannot_sweep(step.robot_pose.pos, yaw_now, yaw_door);
+                    const auto fd = rc::face_decision(vact, route_arrived, yaw_now, g.heading_err, turning, blk.blocked);
+                    if (fd.kind == rc::FaceKind::Turn)
                     {
-                        if (door_face_logged_ != leg.key + "!")
-                        {
-                            door_face_logged_ = leg.key + "!";
-                            std::println("[door-route] {}: at the vantage facing {:+.0f} deg off the door, but the body cannot sweep the turn "
-                                         "({}/8 headings of the arc blocked by {} cell(s), nearest {:.2f} m at bearing {:.0f} deg) — holding, "
-                                         "not turning", leg.door, face_err * 57.2958f, blk.headings_blocked, blk.cells_blocked,
-                                         blk.nearest_m, blk.nearest_bearing_deg);
-                        }
-                        cross_status_ = "at the vantage facing away from the door, the turn is blocked: " + why_not;
-                    }
-                    else
-                    {
-                        door_face_yaw_ = leg.approach_yaw;
+                        door_face_yaw_ = fd.yaw;
+                        door_face_turning_key_ = leg.key;
                         if (door_face_logged_ != leg.key)
                         {
                             door_face_logged_ = leg.key;
                             std::println("[door-route] {}: at the vantage but facing {:+.0f} deg off the door (no fresh anchor to re-aim on) — "
-                                         "turning in place to face it", leg.door, face_err * 57.2958f);
+                                         "turning in place to face it", leg.door, g.heading_err * 57.2958f);
                         }
                     }
+                    else if (fd.kind == rc::FaceKind::Report)
+                    {
+                        // a blocked arc ends in a report and a hand-back, as the re-aim's unreachable goal does — never a silent wait
+                        const std::string why = std::format("at the vantage facing {:+.0f} deg off the door, the body cannot sweep the turn "
+                                                            "({}/8 headings of the arc blocked by {} cell(s), nearest {:.2f} m at bearing {:.0f} deg)",
+                                                            g.heading_err * 57.2958f, blk.headings_blocked, blk.cells_blocked, blk.nearest_m,
+                                                            blk.nearest_bearing_deg);
+                        std::println("[door-route] {}: {} — the route is blocked", leg.door, why);
+                        door_face_turning_key_.clear();
+                        door_route_active_ = false;
+                        door_route_failed_ms_ = now;
+                        door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Failed, why);
+                        path_controller.stop();
+                        motion_commander.stop_robot();
+                        cross_status_ = why;
+                        return false;
+                    }
+                    else door_face_turning_key_.clear();
                 }
                 if (not front_of_open)
                     why_not = std::format("P(open) {:.2f}{} · seen {} · s {:+.2f} m{} · e {:+.2f} m of ±{:.2f}{} · heading {:+.0f} deg{}",

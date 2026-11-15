@@ -731,13 +731,18 @@ GridPlanner::TurnBlock GridPlanner::why_cannot_sweep(const Eigen::Vector2f& pos_
     const float d_theta = reach > 0.f ? std::min(cell_ / reach, two_pi / kHeadings) : two_pi / kHeadings;
     const int n = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / d_theta)));
     std::set<int> buckets;
+    std::vector<float> yaws;   // yaws[0] is the current yaw
     for (int i = 0; i <= n; ++i)
-        buckets.insert(heading_bucket(yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n))));
-    return turn_block_over(pos_room, std::vector<int>(buckets.begin(), buckets.end()), heading_bucket(yaw_from));
+    {
+        const float y = yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n));
+        yaws.push_back(y);
+        buckets.insert(heading_bucket(y));
+    }
+    return turn_block_over(pos_room, std::vector<int>(buckets.begin(), buckets.end()), yaws);
 }
 
 GridPlanner::TurnBlock GridPlanner::turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings,
-                                                    int standing_heading) const
+                                                    const std::vector<float>& arc_yaws) const
 {
     TurnBlock b;
     int ix, iy;
@@ -745,10 +750,27 @@ GridPlanner::TurnBlock GridPlanner::turn_block_over(const Eigen::Vector2f& pos_r
     const_cast<GridPlanner*>(this)->rebuild_offsets();
     if (offsets_.size() != kHeadings) { b.blocked = true; return b; }
 
-    // the cells under the footprint at the heading the body already has: not newly swept (see why_cannot_sweep)
+    // the cells under the footprint at the heading the body already has are forgiven while the turn does not go DEEPER into
+    // them (see why_cannot_sweep): clearance = distance to the cell - the footprint's support toward it, at the yaw sampled
     std::set<std::pair<int, int>> standing;
-    if (standing_heading >= 0 and standing_heading < kHeadings)
-        for (const auto& o : offsets_[standing_heading]) standing.insert({ix + o.x(), iy + o.y()});
+    if (not arc_yaws.empty())
+    {
+        const auto clearance = [&](const Eigen::Vector2f& w, float yaw)
+        {
+            const Eigen::Vector2f d = w - pos_room;
+            const float r = d.norm();
+            return r < 1e-6f ? 0.f : r - footprint.support_radius_yaw(yaw, d / r);
+        };
+        for (const auto& o : offsets_[heading_bucket(arc_yaws.front())])
+        {
+            const int nx = ix + o.x(), ny = iy + o.y();
+            if (not in_bounds(nx, ny) or not occ_[idx(nx, ny)]) continue;
+            const auto w = cell_to_world(nx, ny);
+            const float c0 = clearance(w, arc_yaws.front());
+            const bool deeper = std::ranges::any_of(arc_yaws, [&](float y) { return clearance(w, y) < c0; });
+            if (not deeper) standing.insert({nx, ny});
+        }
+    }
 
     float best = std::numeric_limits<float>::max();
     // A cell can sit under several headings' footprints; count it once so "cells_blocked" reads as the

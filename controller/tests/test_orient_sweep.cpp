@@ -42,16 +42,17 @@ int main()
 {
     const Eigen::Vector2f robot(3.f, 3.f);
     // obstacle 0.40 m from the centre, straight behind the robot (the robot faces yaw 0 = +x, so behind = bearing 180 deg)
-    auto p = planner_with_wall(robot, 180.f * kDeg, 0.40f, 3);
+    auto p = planner_with_wall(robot, 180.f * kDeg, 0.40f, 1);   // 3 cells across, as the log's "2 cell(s)" at bearing 176
     const auto full = p.why_cannot_turn(robot);
     std::printf("  full circle: %d/8 headings blocked, %d cell(s)\n", full.headings_blocked, full.cells_blocked);
     check(full.blocked, "the OLD question (all the way round) refuses: the cells behind block some heading");
 
     // The onemodeloff01 case: cells 0.40 m behind (bearing 180) block the DIAGONAL headings 1,3,5,7 of the 8-heading grid ("4/8
-    // headings blocked, nearest 0.40 m, bearing 176"). The robot stands at yaw -56 deg (bucket 7, a blocked one: the grid's footprint
-    // has a margin and the robot is physically there), the door asks for +6 deg: a 62 deg turn through buckets 7 -> 0, away from them.
-    const auto a = p.why_cannot_sweep(robot, -56.f * kDeg, 6.f * kDeg);
-    check(not a.blocked, "A1: the 62 deg orient (the cells it never reaches are behind it) is feasible");
+    // headings blocked, nearest 0.40 m, bearing 176"). The robot stands at yaw -30 deg (bucket 7, a blocked one: the grid's footprint
+    // has a margin and the robot is physically there), the door asks for +18 deg: buckets 7 -> 0, the body turning AWAY from the cells.
+    // (ruling 2: from -56 the body's diagonal swings 7 mm closer to the cells mid-arc, at -40 -- that arc is refused, by design.)
+    const auto a = p.why_cannot_sweep(robot, -30.f * kDeg, 18.f * kDeg);
+    check(not a.blocked, "A1: a 48 deg orient from the margin-blocked bucket 7 into free bucket 0 is feasible (the clearance to the cells only grows)");
     check(not p.why_cannot_sweep(robot, 0.f, 0.f).blocked, "A1': no turn at all is feasible");
     check(not p.why_cannot_sweep(robot, -56.f * kDeg, -56.f * kDeg).blocked,
           "A1'': a body standing in a margin-blocked bucket may stay there (cells under its own footprint are not newly swept)");
@@ -69,6 +70,16 @@ int main()
     auto q = planner_with_wall(robot, 0.f, 0.40f, 3);
     check(q.why_cannot_sweep(robot, 100.f * kDeg, -100.f * kDeg).blocked == q.why_cannot_sweep(robot, -100.f * kDeg, 100.f * kDeg).blocked,
           "A3': the short way round is symmetric in its endpoints");
+
+    // RULING 2: a standing cell is forgiven only while the turn does not go DEEPER into it. The robot sits at yaw 0 with a cell just
+    // inside its margin at bearing 90 deg (beside its flank); turning to 90 deg swings the long axis toward the cell: refused.
+    // Turning the OTHER way (-60) swings away from it: the clearance only grows: allowed.
+    {
+        auto w = planner_with_wall(robot, 90.f * kDeg, 0.40f, 0);
+        check(w.why_cannot_sweep(robot, 0.f, -60.f * kDeg).headings_blocked <= w.why_cannot_sweep(robot, 0.f, 60.f * kDeg).headings_blocked,
+              "R2: turning away from a standing cell is no worse than turning into it");
+        check(w.why_cannot_sweep(robot, 0.f, 90.f * kDeg).blocked, "R2': a turn that presses deeper into a standing cell is refused");
+    }
 
     // a body hemmed in closely is refused any arc that reaches cells its own footprint does not already cover
     auto boxed = planner_with_wall(robot, 45.f * kDeg, 0.33f, 6);

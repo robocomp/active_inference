@@ -933,10 +933,24 @@ bool ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         }
         if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_ and door_face_yaw_.has_value())
         {
-            // at the vantage, facing away from the door with no fresh anchor: turn in place to the door's heading (drive_door_route,
-            // should_face_door). A Heading goal holds the position, so this is a pure rotation.
+            // at the vantage, facing away from the door with no fresh anchor: turn in place to the DOOR's heading (drive_door_route,
+            // face_decision). A Heading goal holds the position, so this is a pure rotation. The verdict is handled as the re-aim's is.
             const auto goal = rc::policy::heading_goal(robot_pose.pos, *door_face_yaw_, gp.tol_yaw, gp.tol_xy);
-            policy_tick(goal, std::format("door face {}", door_route_leg_->door), cpose, obstacle_tracker, motion_commander, now);
+            const std::string who = std::format("door face {}", door_route_leg_->door);
+            const auto tick = policy_tick(goal, who, cpose, obstacle_tracker, motion_commander, now);
+            const bool no_route = no_route_outlasted(tick);
+            if (tick.verdict == PolicyVerdict::Arrived) door_face_turning_key_.clear();   // reached: the turn is over
+            if (tick.verdict == PolicyVerdict::Unreachable or no_route)
+            {
+                const std::string why = tick.verdict == PolicyVerdict::Unreachable ? tick.why : no_route_why;
+                std::println("[door-route] {}: {} cannot be done ({}) — the route is blocked", door_route_leg_->door, who, why);
+                door_face_turning_key_.clear();
+                door_route_active_ = false;
+                door_route_failed_ms_ = now;
+                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, why);
+                policy_reset();
+                stop_here(rc::why::Cause::NoRoute, std::format("door face for '{}': blocked", door_route_leg_->door));
+            }
             return false;
         }
         if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_ and door_reaim_goal_.has_value())

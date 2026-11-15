@@ -119,18 +119,23 @@ enum class VantageAction { Servo, HoldNoMouth, ReAim, RouteDrives };
 // The robot stood 1.45 m in front of an open door, heading -176 deg from its normal, for 50+ s: the route had ARRIVED (distance), the
 // servo's start check failed on `facing`, and the re-aim needs a FRESH anchor — which a body facing away from the door cannot have.
 // Each rule waited for the other. The crossing includes turning to face the door and the planner must not need to know, so the
-// passage turns the body itself, in the ROOM frame: the route's vantage heading (the door's forward heading, door_route::Target::yaw)
-// against the body's own (forward heading = theta + pi/2). The facing test is the one the servo's start check already uses
-// (`facing`: |heading error| < 90 deg) — no new angle. The turn itself is checked against the grid first (GridPlanner::why_cannot_sweep)
-// and a refusal is reported, not repaired by moving anything.
-[[nodiscard]] inline float door_heading_err(float robot_theta, float door_forward_yaw)
+// passage turns the body itself. THE GOAL IS THE DOOR'S HEADING (the anchor's normal: robot forward + heading_err), not "under 90 deg":
+// the turn, once begun, runs until the servo's own start condition can hold (the anchor's `facing` is |heading_err| < 90 deg, the
+// test the servo already uses) or the Heading goal reports reached — no hysteresis constant of its own. The swept arc is checked
+// against the grid first; a blocked arc is REPORTED (the passage fails the route), never waited on.
+enum class FaceKind { Proceed, Turn, Report };
+struct FaceDecision { FaceKind kind = FaceKind::Proceed; float yaw = 0.f; };   // yaw: the forward heading to turn to (Turn / Report)
+// robot_yaw: the body's forward heading (theta + pi/2); heading_err: the anchor's, CCW from forward to the door normal (it is propagated
+// by odometry, so it is meaningful while stale); `turning`: this leg's turn has begun; arc_blocked: GridPlanner::why_cannot_sweep.
+[[nodiscard]] inline FaceDecision face_decision(VantageAction vact, bool route_arrived, float robot_yaw, float heading_err, bool turning,
+                                                bool arc_blocked)
 {
-    return rc::interaction::wrap_pi(door_forward_yaw - (robot_theta + 0.5f * static_cast<float>(M_PI)));
-}
-// Only where nothing else already acts at the vantage: the servo drives, a fresh anchor re-aims, a placed body holds.
-[[nodiscard]] inline bool should_face_door(VantageAction vact, bool route_arrived, float room_heading_err)
-{
-    return vact == VantageAction::RouteDrives and route_arrived and std::abs(room_heading_err) >= 0.5f * static_cast<float>(M_PI);
+    // the servo drives, a fresh anchor re-aims, a placed body holds; before the route has arrived it drives
+    if (vact != VantageAction::RouteDrives or not route_arrived) return {};
+    const bool facing = std::abs(heading_err) < 0.5f * static_cast<float>(M_PI);   // the servo's own `facing`
+    if (facing and not turning) return {};
+    const float yaw = rc::interaction::wrap_pi(robot_yaw + heading_err);
+    return {arc_blocked ? FaceKind::Report : FaceKind::Turn, yaw};
 }
 // The re-aim goal in the ROBOT frame: the point on the anchor's axis at the robot's current progress s (robot − e·a), facing
 // along the normal (the robot turns by heading_err). The anchor is already a filter (σ_lat); it is not re-filtered here.
