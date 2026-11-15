@@ -1,6 +1,6 @@
 # Cost-based removal: keep or remove an object by what each mistake costs
 
-Date: 2026-11-15. Status: DRAFT rev 2 (owner picked approach A and the cost unit, 11-15; then "Do 1": fix the absence
+Date: 2026-11-15. Status: rev 2 APPROVED by the owner 11-15 (rev 2.1: four corrections made with the plan, marked ★) (owner picked approach A and the cost unit, 11-15; then "Do 1": fix the absence
 evidence first, and A for that fix too). Nothing built.
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`, from main 91784311).
 
@@ -149,14 +149,14 @@ push only when the owner asks. Webots is shared: claim it from the chat and room
   entry; through if the beam exits every part it entered and returns beyond, weighted by (1 − surface weight).
   `n_reached` is the reached mass over parts, so `coverage` keeps its meaning.
 - **Parts in the manifest:** a `[shape.parts]` table per class, each part as fractions of the fitted (w, h, H) plus
-  its z band; default = one part = the whole box (so a class without the table behaves as a 3-D cuboid). First tables:
+  its z band; default = one part = the whole box (so a class without the table behaves as a 3-D cuboid). First tables
+  (★2.1: the fractions are MEASURED numbers, as the manifests already carry; no Webots asset is copied):
   nightstand body (z 0.66..1.0 of H) on four legs; bed mattress (z 0.38..1.0 of H) + footboard + the existing
-  `[prior.headboard]` panel; toilet pedestal + bowl + tank. Fractions come from the class's typical mesh, not Webots
-  assets (licence), and say so in `why`.
+  `[prior.headboard]` panel; toilet pedestal + bowl + tank; each `why` says where its numbers were measured.
 - **Q2 (my call): costs.** Until the cost script has samples for a class, its line uses door's logged pair, labelled
   `compiled_default:door_logged` in every removal log line.
 - **Q3 (my call): a rival's inhibition alone never removes.** The class factor counts as "argued against" only when its
-  own shape evidence says so (Λ − singleton < 0). A cycle on which the class factor fell only because a rival class
+  own shape evidence says so: its Λ < 0 (★2.1: the earlier "Λ − singleton < 0" contradicted this rule). A cycle on which the class factor fell only because a rival class
   claimed the object (the singleton term) does not execute a removal, even if the product is below the line.
 - **Order:** G0 (carve) commits first and runs live alone (objects_live7a, today's debounce); the costed line follows
   (objects_live7b).
@@ -171,12 +171,13 @@ push only when the owner asks. Webots is shared: claim it from the chat and room
   nothing; a return on the front of a 10 cm panel with σ = 5 cm is not through; a box over empty floor and a box drawn
   over a wall both get net AGAINST (phantoms still die); a single-part manifest reproduces the 3-D cuboid.
 - **Carve replay** (the 11-15 script, rebuilt as `tools/carve_replay.py`): on objects_live6's drop cycles the new carve's
-  ΔL is ≥ 0 for bed_10, nightstand_6, nightstand_7, toilet_6, and < 0 for bed_8 (live5, the phantom in front of the
-  blackboard).
-- **Replay:** the objects_live4–6 countable traces through the new decision: every real object kept, and each removal the
+  ΔL is ≥ 0 for bed_10, nightstand_6, nightstand_7, toilet_6, and < 0 for synthetic phantoms (each real box moved onto
+  empty floor, and onto a wall) (★2.1: bed_8 lives in room_1, whose frame the logs cannot tie to the world).
+- **Replay** (★2.1: on objects_live7a — the live4–6 traces carry the broken carve, under which every real object sits at
+  −4): the countable traces through the new decision: every real object kept, and each removal the
   old rule made (bed_8 occupancy removal, live5) still made, with the time shown.
-- **Silhouette diagnostic (live7a):** log the silhouette's per-cycle absence split by whether the pixels fall inside the
-  projected parts or only inside the projected cuboid; if a real object's L still falls on silhouette absence, that
+- **Silhouette diagnostic (live7a)** (★2.1: the share of silhouette vs LiDAR absence on each real object's drop cycles,
+  from the existing columns — a split by projected parts needs a projection the code does not have); if a real object's L still falls on silhouette absence, that
   channel gets the parts too (a follow-up, owner decides).
 - **Live 7a** (carve only, same tour as objects_live6): the real bed, both nightstands and the toilet never go below
   L = 0 on LiDAR evidence; ~10 Hz.
