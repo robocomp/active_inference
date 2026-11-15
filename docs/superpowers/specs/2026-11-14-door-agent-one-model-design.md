@@ -511,3 +511,37 @@ Open items:
   density would favour every door cause.
 - The core test of a second door 1.0 m along from a σ_along 0.6 m door is a regression guard only, because its scene does not
   reach that σ. The live series must watch for it.
+
+### 13.6 Outcome (2026-11-15): merged with Existence.OneModel = false
+
+The owner decided to stop the fix cycle and merge the branch with the flag OFF (default), keeping the controller fixes on
+for everyone. With the flag off the door agent is bit-identical to the baseline on tape_dm, tape_e2e18 and tape_e2e19,
+re-checked after every change.
+
+Live acceptance, threerooms-piso, from-scratch memory:
+
+| Arm | Tours | Result | door_concept period (mean / p99) |
+|---|---|---|---|
+| Flag off (onemodeloff02-04) | 3 | 2 PASS. onemodeloff04 stopped: door_5 and door_6 vanished just before their crossings, then room recognition failed in the big room. | 112 / 171-182 ms |
+| Flag on (onemodel01-05) | 5 | 4 PASS. onemodel02 FAIL: the bath's second door was never born. | 126-197 / 230-553 ms, cpu 95-102% |
+
+Why the flag stays off:
+1. **Rate.** The flag-on agent does not hold its 100 ms period live. This is a fail under the rates-before-features rule.
+2. **Candidate label churn.** The p-weighted candidate association (5da7ba0d) lets one sliver frame sink a label, and the
+   next mask then opens a new label. Seen live in onemodel02 (9 labels, 1 view each) and in replay on tape_dm (7 labels at
+   one hole). The replay acceptance counted births and removes, not labels per hole, so the churn went unseen.
+   A revert to the position gate is kept as a finding, not applied:
+   door_concept/tools/findings/2026-11-15-position-gated-candidates.patch.
+   - On tape_dm it gives 1 label per hole and the same 5 doors.
+   - On tape_e2e19 it never bears door_21 (DOOR_0 at cycle 7499).
+3. **Restore.** Identity-only remembered rows were restored at the new-door prior, and a remembered door was removed in
+   the chat e18 rerun. Fixed in be6dfe29 and 238f49ce, but not verified live.
+
+Also merged:
+- Controller (on for everyone): an orient checks the arc it actually turns through, using the planner's hull against
+  residual cells at their true extent, and the door passage turns the robot to face the door at the vantage
+  (89531725..9accdaa3). These cured a stall seen with the flag off (onemodeloff01).
+- Tools: door_replay with wall seeding, door_truth_scan, label_door_views, the detector fitters, existence_channels.py.
+
+For a later attempt: rates first (profile the flag-on step live); position-gated association; a labels-per-hole count in
+the replay acceptance; a three-tour live smoke test after each model task.
