@@ -1,6 +1,7 @@
 # Camera attributes, LiDAR measures: the LiDAR updates the countable belief on gated mask cycles
 
-Date: 2026-11-15. Status: APPROVED by the owner 11-15 ("Approved, after lidar": the cabinet exit-release fix comes after this). Nothing built.
+Date: 2026-11-15. Status: APPROVED by the owner 11-15 ("Approved, after lidar": the cabinet exit-release fix comes after this); §7b and §8
+amended 11-15 after Fable's plan review (owner: C1 = A, C2 = two-sided). Nothing built.
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
@@ -48,7 +49,7 @@ pass the real objects and fail the phantoms (`docs/superpowers/results/2026-11-1
 - **G2. Attribution by the mask itself.** Each selected return is projected into the ZED image with the extrinsic at the
   mask's capture timestamp. Its precision is multiplied by its membership weight m ∈ [0, 1]: m = Φ(s / σ_px), s the
   signed pixel distance to the mask boundary (positive inside), σ_px the projection's own pixel uncertainty —
-  σ_px² = (f / z)² (σ_range² + σ_chain²) + q², with f the focal length, z the return's camera depth, σ_range the LiDAR
+  σ_px² = (f / z)² (σ_range² + σ_chain² + mot_pos_var) + q² (mot_pos_var added in §7b, 11-15), with f the focal length, z the return's camera depth, σ_range the LiDAR
   range σ (`ExistenceSensorSigmaM`), σ_chain the pose-chain σ at the object (`compute_chain_cov`, already per frame) and
   q the mask pixel stride (the ingestor's grid). No new constant. A return that projects outside the image, or behind the
   camera, has m = 0.
@@ -103,27 +104,51 @@ Commits local on `feat/cost-removal`; Webots shared (claim from chat and room, F
   slice's bounding region (+ the projection's 3σ_px margin) is built once per instance per cycle on the compute thread.
 - **Time:** the sweep is in the room frame at its own capture time; the world is static, so projecting a room-frame
   return with the camera extrinsic at the mask stamp is exact up to localisation error at the two stamps, which σ_chain
-  (the pose-chain covariance at the object, already per frame) carries. No separate timing term.
+  (the pose-chain covariance at the object, already per frame) carries; the mask's own ego-motion displacement is
+  `mot_pos_var` (see "Ego-motion in σ_px" below).
 - **q:** the slice's measured pixel spacing (1 px for a dense mask); f and the image size from the same CameraAPI path
   the silhouette channel uses, including its intrinsic-size vs delivered-frame handling.
-- **The LiDAR-only frame:** the same factor set as a camera frame MINUS the terms that are camera data (the mask-point
-  data term, the moment/second-moment terms, `z_top_obs` and the top-no-float anchor, the per-point azimuth terms). The
-  structural priors (wall flush / no-cross, room-axis alignment, footprint/height priors, clearance) stay, as they do in
-  every update. All six DOFs are free; what the rays observe is decided by the engine's Jacobians, not by a list.
+- **The LiDAR-only frame (amended 11-15 after Fable's plan review, owner ruling C1 = A):** it carries ONLY the
+  factors that are functions of its own data — the mask-weighted LiDAR rays — plus the ONE-SIDED constraints that are
+  zero unless violated (wall no-cross, short-height). The Gaussian class anchors (footprint, height prior, wall
+  flush / parallel, room-axis alignment) are NOT added: the predicted belief already holds them from every earlier
+  camera frame, and re-adding them on a frame without camera data counts the prior as a measurement (700 times per
+  run on the nightstand: mean relaxed to the class prior, σ_H ≈ 2 cm with no height datum). As Σm → 0 the update
+  tends continuously to a predict, with no switch. The camera-data terms (mask points, moments, `z_top_obs` /
+  top-no-float, per-point azimuth) are out as before. All six DOFs are free; what the rays observe is decided by the
+  engine's Jacobians. Consequences: the depth-unobserved boost (`two_sided_along`, footprint + wall-flush only) does
+  not enter, because neither term is in the frame; the volatility estimate ω is NOT updated on a LiDAR-only frame
+  (it stays inferred from camera-measured cycles, as today — my call: a weak ray update's δθ ≈ 0 would otherwise
+  read as "never moves").
+- **Common mode of the LiDAR-only frame (my call, Fable I2):** Σc = the config floors + the pose-chain covariance
+  (`chain_cov_xx/yy/yaw`) + the ego-motion terms. The camera deprojection terms (range lateral/size, obliquity yaw
+  cap, moment variance) model the camera and stay out; at 2.5 m the size term alone would cap the per-frame H
+  information at 25 /m² and the LiDAR could not move H. The admissible frame's fill is unchanged.
+- **Ego-motion in σ_px (my call, Fable I3; replaces "no separate timing term"):** the gated frames are the moving
+  ones, and the fitter already models the mask's displacement on them as a shared error (`mot_pos_var`, from
+  `MotionCmPosGain`). σ_px² = (f / z)² (σ_range² + σ_chain² + mot_pos_var) + q². No new constant.
+- **Pixel frames (Fable I6):** mask pixels are in the DELIVERED image on the slice's grid (stride q from the bbox
+  corner); the projection is in the intrinsic frame. col, row and f are scaled to the delivered size taken from the
+  staged RGB frame, as the contour path does. Delivered size unknown ⇒ no membership ⇒ predict on a gated cycle,
+  unweighted rays on an admissible one.
 - **m and the down-weights:** m multiplies each ray's precision BEFORE the ray-count and coverage down-weights, and the
   ray count is Σ m (effective rays), so a mostly-outside set gets little coverage credit.
 - **Divergence net:** the existing snapshot-and-reject around the update applies to LiDAR-only updates too.
 
 ## 8. Pass
 
-- **Unit:** membership m = 1 well inside, 0.5 on the boundary, → 0 outside, symmetric in s; σ_px grows with 1/z; a
+- **Unit:** a LiDAR-only frame whose memberships all vanish leaves the belief at the prediction (state, Σ and ω);
+  repeated LiDAR-only sweeps settle Σ at a pinned, analytically checked value; a wall behind the object does not
+  pull it when the mask covers only the object; membership m = 1 well inside, 0.5 on the boundary, → 0 outside, symmetric in s; σ_px grows with 1/z; a
   return behind the camera or outside the image has m = 0; with `LidarMeasuresOnGated = false` a recorded fit trajectory
   is unchanged.
 - **Live objects_live8** (same tour as objects_live6, the room session's validated fleet set):
   - per real object (bed, both nightstands, toilet): final centre error ≤ objects_live6's (5.5 cm, 2–6 cm, 23 cm);
     |H − true top| smaller than live6 for bed and nightstands;
-  - honest Σ: over each object's run, the logged std_cx, std_cy, std_H stay within 3× the true error's rms and never
-    exceed 0.15 m once the object has been seen from within 2.5 m;
+  - honest Σ, TWO-SIDED (owner ruling C2, 11-15): over each object's run, the logged std_cx, std_cy, std_H stay
+    within a factor 3 of the true error's rms in BOTH directions (rms/3 ≤ std ≤ 3·rms) and never exceed 0.15 m once
+    the object has been seen from within 2.5 m. A std below rms/3 (overconfidence from correlation ACROSS sweeps,
+    which the per-frame Woodbury cap does not cover) is a FAIL reported to the owner as a model question, not tuned;
   - no drift: no real object's centre moves more than 10 cm toward a wall or a neighbour between consecutive looks;
   - ~10 Hz per class.
 - **Then** the removal spec's G0b replay (Task 4c rev 2) runs on objects_live8: real objects ≥ 0, phantoms < 0.
