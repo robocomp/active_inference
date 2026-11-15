@@ -6,8 +6,12 @@
  */
 #pragma once
 
+#include <cmath>
 #include <format>
+#include <fstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 #include "back_panel.h"
 
@@ -49,7 +53,13 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
         Raw& r = raws.back();
         if (key == "name") { r.name = val; continue; }
         for (int i = 0; i < 6; ++i)
-            if (key == keys[i]) { r.v[i] = val; r.has[i] = true; }
+            if (key == keys[i])
+            {
+                if (r.has[i])
+                    throw std::runtime_error(std::format("{}: [[shape.part]] '{}': duplicate key {}",
+                                                         path, r.name.empty() ? std::format("#{}", r.index) : r.name, keys[i]));
+                r.v[i] = val; r.has[i] = true;
+            }
     }
     std::vector<ShapePart> out;
     for (const Raw& r : raws)
@@ -61,7 +71,7 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
             if (not r.has[i])
                 throw std::runtime_error(std::format("{}: [[shape.part]] '{}': missing key {}", path, who, keys[i]));
             const auto p = detail::parse_float(r.v[i]);
-            if (not p)
+            if (not p or not std::isfinite(*p))
                 throw std::runtime_error(std::format("{}: [[shape.part]] '{}': key {} is not a number ('{}')", path, who, keys[i], r.v[i]));
             x[i] = *p;
         }
