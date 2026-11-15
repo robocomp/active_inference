@@ -107,6 +107,8 @@ void Repertory::tend_links(std::span<const Sighting> alive, std::int64_t now_ms)
         const bool says_same = s.link.has_value() and s.link->same_prob > 0.5f and s.link->memory_uid != s.uid;
         if (says_same)
         {
+            // The owner said this live object was not moved here: it is new, whichever memory the MAP names now.
+            if (const auto me = entries_.find(s.uid); me != entries_.end() and me->second.said_new) continue;
             const auto m = entries_.find(s.link->memory_uid);
             if (m == entries_.end()) continue;
             // The owner said no for that room: a stale link still on the node (one cycle) must not re-link it.
@@ -219,7 +221,11 @@ void Repertory::cut_link(std::uint64_t memory_uid, std::int64_t now_ms, std::str
     const auto m = entries_.find(memory_uid);
     if (m == entries_.end() or not m->second.continued_by.has_value()) return;
     Entry& mem = m->second;
-    if (const auto l = entries_.find(*mem.continued_by); l != entries_.end()) l->second.continues.reset();
+    if (const auto l = entries_.find(*mem.continued_by); l != entries_.end())
+    {
+        l->second.continues.reset();
+        if (not words.empty()) l->second.said_new = true;   // the owner's "no": the live object is new
+    }
     mem.continued_by.reset();
     if (not mem.moves.empty() and not mem.moves.back().confirmed) mem.moves.pop_back();   // it never happened
     if (not words.empty() and not mem.keyframes.empty())

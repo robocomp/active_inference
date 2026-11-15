@@ -373,9 +373,44 @@ static void owner_exit_keeps_question_askable()   // F6: the chair agent restart
     CHECK(r.questions().size() == 1);
 }
 
+// Live run moved_chair_4 (2026-11-16): after "no" for chair_50 the chair agent's MAP went to chair_44, a colourless
+// duplicate at the same old spot, and the robot asked again about "the chair in room 2". The owner is the only one
+// who moves things (spec), so "no, I didn't move it" says the LIVE chair is new: no memory may continue it.
+static void no_settles_live_as_new()
+{
+    auto r = with_memory();
+    constexpr std::uint64_t k44 = (1ull << 40) | 44;
+    Entry dup; dup.uid = k44; dup.cls = "chair"; dup.name = "chair_44";
+    dup.lives.push_back(Life{.end = End::death}); dup.keyframes = {kf(40, 2, -2.58, -0.62)};
+    r.insert_loaded(dup);
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    CHECK(b.apply(moved("no", 1000, 7, "no"), r, 1500).text == "recorded");
+    Sighting s = live(0.67f, 0.96f); s.link = LinkObs{k44, 0.67f, 0.96f};
+    see(r, s, 1600);
+    CHECK(not r.entries().at(k44).continued_by.has_value());
+    CHECK(not r.entries().at(kLive).continues.has_value());
+    CHECK(r.questions().empty());
+}
+static void said_new_survives_restart()
+{
+    auto r = with_memory();
+    see(r, live(0.9f, 0.8f), 1000);
+    HumanBook b;
+    CHECK(b.apply(moved("no", 1000, 7, "no"), r, 1500).text == "recorded");
+    const fs::path f = fs::temp_directory_path() / std::format("ltom_said_new_{}.json", ::getpid());
+    CHECK(save_repertory(f, r));
+    Repertory back(1000);
+    CHECK(load_repertory(f, back) == LoadResult::loaded);
+    fs::remove(f);
+    CHECK(back.entries().at(kLive).said_new);
+}
+
 int main()
 {
     std::setlocale(LC_ALL, "");   // the agents run under es_ES (CLAUDE.md)
+    no_settles_live_as_new();
+    said_new_survives_restart();
     record_link_keeps_old_keyframe();
     below_map_no_link();
     link_dropped_below_map_cuts_without_gone();

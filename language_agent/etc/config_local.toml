@@ -160,3 +160,11 @@ MessageSizeMax = "20004800"
 # "" disables it. Which Webots door: the nearest by place, through the sim ground-truth pose (src/sim_door.h).
 endpoint = "doorcontrol:tcp -h localhost -p 10017"
 match_max_m = 1.0
+
+[Questions]
+# Changed object (spec 2026-11-15-changed-object): ask the person about a moved object, or report it. Report when a
+# wrong "I assume you moved it" costs less in expectation than a question: (1 - P)*CostWrong < CostAsk, where P is the
+# mean of Beta(1 + yes, 1 + no) over their answers. With these values one "yes" tips it (P 2/3 -> 0.33 < 0.4;
+# no answers yet -> 0.5 > 0.4).
+CostAsk = 0.4
+CostWrong = 1.0

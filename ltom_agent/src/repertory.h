@@ -76,6 +76,9 @@ struct Entry
     std::optional<std::uint64_t> continues;      // on the live uid's entry: the memory it continues
     std::vector<Move> moves;                     // on the memory; the last one is the current link while continued_by is set
     std::vector<GoneFromRoom> gone;
+    // On a live uid's entry: the owner said they did not move it (their "no"). The owner is the only one who moves
+    // things, so it is NEW: no memory may continue it, whichever the chair agent's MAP names next (moved_chair_4).
+    bool said_new = false;
 };
 
 // A question to the person about a move (derived from the open Move; persisted with it). again = the memory already
