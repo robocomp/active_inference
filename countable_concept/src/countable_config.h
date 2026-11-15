@@ -322,6 +322,7 @@ struct CountableConfig
     // when P(occupied) < removal_prob. Evidence-based, not a miss counter. OFF by default (a mis-removal
     // deletes furniture); enable to replace merge-only removal.
     bool  existence_removal_enabled = false;
+    bool  existence_carve_parts     = false;  // LiDAR carve against the class's composed parts, not the solid fitted box
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
     float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and

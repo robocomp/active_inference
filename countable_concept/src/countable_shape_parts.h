@@ -7,7 +7,7 @@
 #include <span>
 #include <vector>
 #include "existence_belief/existence_belief.h"
-#include "shape_parts.h"
+#include "../../common/concept_manifest/shape_parts.h"
 
 namespace rc::countable {
 
