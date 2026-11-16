@@ -15,10 +15,12 @@
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -57,6 +59,9 @@ public:
         // Ricoh slices are bearing-only and never fitted (see observe_slice / process_ricoh_bearings): a
         // peripheral 360 detection has a reliable DIRECTION but a biased centroid/extent, so it only drives
         // the attention path and never contributes candidate/residual points to a belief update.
+        // The ZED slice this observation came from (index into the current MasksPacket); −1 = none (observe(), ricoh).
+        // run_inference reads its pixels to attribute LiDAR returns (Model.LidarMeasuresOnGated, spec lidar-measures G2).
+        int slice_index = -1;
     };
 
     CountableFitter(std::shared_ptr<DSR::DSRGraph> graph,
@@ -230,6 +235,37 @@ private:
     Eigen::Vector2f                room_interior_ = Eigen::Vector2f::Zero();   // polygon centroid: picks the BACK face
     std::vector<Eigen::Vector2f>   room_polygon_;                              // room walls: wall-flush factor
     bool                           have_room_geometry_ = false;
+
+    // ── Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 lidar-measures §7c) ──────────
+    // Read once per cycle in update_ego_motion() (flag on only): the robot node's odometry (typed speed attributes) and
+    // the current robot pose in the room (from the same room_T_zed the fit uses; the body centre and the Helios position
+    // follow from the ZED/Helios mounts of ROBOT_GEOMETRY.md).
+    std::uint64_t   robot_node_id_ = 0;              // cached id of the "robot" node (Shadow)
+    float           odo_adv_ = 0.0f, odo_side_ = 0.0f;   // m/s, robot frame (+y forward, +x right)
+    std::uint64_t   odo_ts_  = 0;                    // robot_current_speed_timestamp (epoch ms); 0 ⇒ no odometry
+    bool            have_pose_now_ = false;
+    Eigen::Vector2f robot_xy_now_  = Eigen::Vector2f::Zero();   // body centre, room frame
+    float           robot_yaw_now_ = 0.0f;           // room yaw of the robot's +y (forward) axis, CCW
+    Eigen::Vector2f zed_xy_now_    = Eigen::Vector2f::Zero();
+    Eigen::Vector3f helios_now_    = Eigen::Vector3f::Zero();
+    float           helios_ring_gap_rad_ = 0.0f;     // max_ring_gap_rad of the Helios SensorModel; ≤ 0 ⇒ absent ⇒ ρ_L = 1
+    void read_odometry_and_pose(const std::optional<Eigen::Matrix4d>& room_T_zed);   // fills the members above
+    // Per instance, every run_inference call (stale ones included): integrate the odometry since inst.last_odo_ts into
+    // the camera and LiDAR viewpoint paths and into the chain's odometry displacement.
+    void integrate_odometry(CountableInstance& inst);
+    // The persistent-path inputs of a frame (ρ per channel from the paths, latent marginals, fresh ego-motion variances).
+    struct LatentInputs
+    {
+        std::array<float, 6> sig2_cam{}, sig2_L{}, fresh{};
+        std::array<float, 2> sig2_chain{};
+    };
+    void stage_persistent(CountableInstance& inst, CountableFrame& frame, const LatentInputs& li) const;
+    // After an ACCEPTED persistent update: reset the path of each channel that measured, and the chain's reference pose.
+    void consume_paths(CountableInstance& inst, bool camera, bool lidar);
+    // The camera's membership m(p) for this cycle's slice (empty ⇒ unavailable: no slice, no camera, no delivered size).
+    std::function<float(const Eigen::Vector3f&)> build_membership(const CountableInstance& inst, int slice_index,
+                                                                   const Eigen::Matrix4f& zed_T_room, bool have_cam,
+                                                                   float mot_pos_var);
 
     // Ego-motion state (camera pose deltas → robot speed), updated once per cycle in update_ego_motion().
     // (Ported 1:1 from chair_concept — the "be-still-to-update" signal source.)

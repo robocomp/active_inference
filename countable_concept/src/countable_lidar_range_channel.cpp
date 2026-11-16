@@ -34,7 +34,9 @@ CountableLidarRangeChannel::SelectBox CountableLidarRangeChannel::select_box() c
 
 int CountableLidarRangeChannel::select_into(const CountableInstance& inst, const Eigen::Vector3f& centroid,
                                         const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
-                                        float precision_base, rc::ai::LidarRays& out, float* cov_ang) const
+                                        float precision_base, rc::ai::LidarRays& out, float* cov_ang,
+                                        const std::function<float(const Eigen::Vector3f&)>* membership,
+                                        float* m_sum) const
 {
     // The selection loop and the two down-weights are SHARED (common/lidar_select) — they were byte-identical
     // between bed and table and 98% across all four. What stays per-object is select_box(): WHERE
@@ -42,6 +44,9 @@ int CountableLidarRangeChannel::select_into(const CountableInstance& inst, const
     const auto [rxy, z_lo, z_hi] = select_box();
     const rc::lidar_select::Box box{rxy, z_lo, z_hi};
     const rc::lidar_select::Weights w{cfg_.lidar_coverage_n0, cfg_.lidar_coverage_ang_power, cfg_.lidar_robust_c_m};
+    if (membership and *membership)   // camera attributes (spec lidar-measures G2): each return weighted by its m
+        return rc::lidar_select::select_into_weighted(sweep, origin, {centroid.x(), centroid.y()}, box,
+                                                      precision_base, w, *membership, out, cov_ang, m_sum);
     return rc::lidar_select::select_into(sweep, origin, {centroid.x(), centroid.y()}, box,
                                          precision_base, w, out, cov_ang);
 }
@@ -55,8 +60,12 @@ int CountableLidarRangeChannel::select_into(const CountableInstance& inst, const
 // segmentation-independent surfaces that attack the mask-erosion under-size. Final membership is the factor's
 // own sphere-trace hit test (a ray must actually cross the model SDF), so this box is only a work bound +
 // neighbour reject. Its radius/height margins (m = cfg.lidar_select_margin_m) are the SELECT-BOX thresholds.
-void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& frame) const
+void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& frame,
+                                      std::span<const Eigen::Vector3f> anchor_cloud,
+                                      const std::function<float(const Eigen::Vector3f&)>& membership) const
 {
+    const auto* mem = membership ? &membership : nullptr;   // empty ⇒ today's unweighted selection
+    inst.dbg_lidar_msum = 0.0f;
     inst.dbg_lidar_rays = 0;
     inst.dbg_lidar_raw  = 0;
     inst.dbg_lidar_resid_m = -1.0f;
@@ -67,15 +76,15 @@ void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& f
     const bool helios_on = (cfg_.lidar_precision > 0.0f or cfg_.free_space_precision > 0.0f)
                            and lidar_have_sweep_ and not lidar_sweep_room_.empty();
     const bool bpearl_on = cfg_.lidar_bpearl_precision > 0.0f and lidar_have_bpearl_ and not lidar_sweep_bpearl_.empty();
-    if ((not helios_on and not bpearl_on) or frame.points.empty())
+    if ((not helios_on and not bpearl_on) or anchor_cloud.empty())
         return;
 
     // Anchor XY on this cycle's fresh mask-cloud centroid (shared by both devices; NOT the fitted state, which a
     // diverging fit would drag into empty space, starving LiDAR exactly when it is most needed). Footprint select
     // box + z-band are the BIRTH dims (floor-referenced band spans the LEGS + rim) — see select_into().
     Eigen::Vector3f c = Eigen::Vector3f::Zero();
-    for (const auto& p : frame.points) c += p;
-    c /= static_cast<float>(frame.points.size());
+    for (const auto& p : anchor_cloud) c += p;
+    c /= static_cast<float>(anchor_cloud.size());
     const auto& s = inst.ai2_belief.state();
 
     // ── Primary: helios (high 360) → frame.lidar (range factor AND free-space VACATE) + z-cal / coverage diag ──
@@ -83,7 +92,7 @@ void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& f
     {
         float cov_ang = 1.0f;
         const int n = select_into(inst, c, lidar_sweep_room_, lidar_origin_room_, cfg_.lidar_precision,
-                                  frame.lidar, &cov_ang);
+                                  frame.lidar, &cov_ang, mem, &inst.dbg_lidar_msum);
         inst.dbg_lidar_rays    = n;
         inst.dbg_lidar_cov_ang = cov_ang;
 
@@ -113,7 +122,9 @@ void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& f
     if (bpearl_on)
     {
         rc::ai::LidarRays bp;
-        const int nbp = select_into(inst, c, lidar_sweep_bpearl_, lidar_origin_bpearl_, cfg_.lidar_bpearl_precision, bp);
+        // The same camera membership weights the bpearl set (off for nightstand/bed/toilet, spec §9).
+        const int nbp = select_into(inst, c, lidar_sweep_bpearl_, lidar_origin_bpearl_, cfg_.lidar_bpearl_precision, bp,
+                                    nullptr, mem);
         if (nbp > 0) frame.lidar_extra.push_back(std::move(bp));
         inst.dbg_lidar_bpearl_rays = nbp;
     }

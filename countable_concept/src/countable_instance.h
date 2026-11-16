@@ -19,6 +19,7 @@
 
 #include "countable_model.h"        // CountableModel / CountableState
 #include "countable_belief.h"       // AI2 full-covariance belief (COUNTABLE.md)
+#include "countable_viewpoint.h"    // rc::ViewpointPath (lidar-measures §7c.2: ρ from odometry)
 #include "countable_class_evidence.h"   // class factor + existence_product
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/existence_belief/existence_belief.h"
@@ -66,6 +67,25 @@ struct CountableInstance
     float dbg_lidar_floorz_m = -1.0f;   // mean z of the LOWEST 20% ≈ floor; should read ~0 if z-calib OK
     float dbg_lidar_cov_ang  = -1.0f;   // angular-coverage weight (1−R)^p ∈[0,1]; low ⇒ one-sided sweep
     int   dbg_lidar_bpearl_rays = 0;    // low-bpearl returns staged into the extra ray-set this frame (0 = OFF/none)
+
+    // ── Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 lidar-measures §7c.2). Read and
+    //    written only when the flag is on. ───────────────────────────────────────────────────────────────────────────
+    // Odometry path of each sensor about this object since its channel last updated the instance (ρ_cam, ρ_L).
+    rc::ViewpointPath path_cam, path_L;
+    // Robot pose (room frame, body centre) at the last update of the chain latent, and the odometry displacement integrated
+    // since then: ρ_chain = exp(−½cᵀΣ⁻¹c), c = (pose now − last_pose_xy) − odo_since_chain (the localiser's own correction).
+    Eigen::Vector2f last_pose_xy = Eigen::Vector2f::Zero();
+    float           last_pose_yaw = 0.0f;
+    bool            have_last_pose = false;
+    Eigen::Vector2f odo_since_chain = Eigen::Vector2f::Zero();
+    std::uint64_t   last_odo_ts = 0;           // robot_current_speed_timestamp of the last integrated odometry sample
+    int   dbg_lidar_only  = 0;                 // 1 ⇔ this cycle's update was a LiDAR-only frame (a gated camera cycle)
+    float dbg_lidar_msum  = 0.0f;              // Σ membership of the staged helios rays (0 = no membership this cycle)
+    float dbg_rho_cam = 1.0f, dbg_rho_L = 1.0f, dbg_rho_chain = 1.0f;   // ρ used at the last update (cx component)
+    float dbg_dphi_cam = 0.0f, dbg_dz_cam = 0.0f;   // the camera path consumed by that ρ (rad, m)
+    int   dbg_ray_n = 0;                       // rays in the frame the belief was updated with this cycle
+    float dbg_itr_cam = 0.0f, dbg_itr_L = 0.0f;   // trace of each channel's information I_ch at the last accepted update
+    bool  dbg_rhoL_absent_logged = false;      // "no Helios SensorModel ⇒ ρ_L = 1" printed once per instance
 
     // ── Divergence safety net (mirrors bottle) ────────────────────────────────────────────────────
     // Consecutive frames whose centre GN step was rejected as an outlier (exceeded cfg.max_step_m). Non-zero

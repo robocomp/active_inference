@@ -17,6 +17,9 @@
 #include "countable_support_bank.h"
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/object_anchor/ray_anisotropic_cov.h"
+#include "../../common/media_transport/media_transport.h"   // rc::media::sensor_model_from_graph, max_ring_gap_rad
+#include "countable_mask_membership.h"   // rc::MaskMembership, make_membership (lidar-measures G2)
+#include "countable_viewpoint.h"         // ρ from odometry (lidar-measures §7c.2)
 
 #include <algorithm>
 #include <chrono>
@@ -57,6 +60,7 @@ void CountableFitter::update_ego_motion()
 {
     const auto M = projection_->room_T_zed_matrix(0);   // camera→room (ts=0 = current robot pose)
     const auto now = std::chrono::steady_clock::now();
+    if (cfg_.lidar_measures_on_gated) read_odometry_and_pose(M);   // lidar-measures §7c.2: odometry + pose for ρ
     if (not M.has_value())
     {
         have_prev_cam_ = false;   // pose chain unavailable → can't judge motion; reset the baseline
@@ -78,6 +82,187 @@ void CountableFitter::update_ego_motion()
         ego_ang_radps_ = std::acos(cang) / dt;
     }
     prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
+}
+
+// ─── Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 lidar-measures §7c) ────────────
+
+// Sensor mounts on the body frame (ROBOT_GEOMETRY.md, from robot_concept/shadow.json; body x-right, y-forward, z-up):
+// zed T[0, −0.075, +0.945], helios T[0, −0.155, +1.075]. Only their offsets from the ZED are used here, because the pose
+// comes from room_T_zed: the body centre is the ZED minus its mount, the Helios the body plus its mount.
+namespace {
+constexpr float kZedMountY      = -0.075f;
+constexpr float kHeliosMountY   = -0.155f;
+constexpr float kHeliosAboveZed =  1.075f - 0.945f;
+Eigen::Vector2f rotate_yaw(float yaw, const Eigen::Vector2f& v)
+{
+    const float c = std::cos(yaw), s = std::sin(yaw);
+    return {c * v.x() - s * v.y(), s * v.x() + c * v.y()};
+}
+}  // namespace
+
+// Once per cycle (main/compute thread): the robot's odometry from the robot node's TYPED speed attributes, the current
+// robot pose (room frame) from the same room_T_zed the fit uses, and the Helios ring gap from its media descriptor.
+void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d>& M)
+{
+    have_pose_now_ = false;
+    odo_ts_ = 0;
+    if (not G_) return;
+    if (M.has_value())
+    {
+        const Eigen::Vector3f zed(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)),
+                                  static_cast<float>(M->coeff(2, 3)));
+        // zed +y is the forward axis and the zed mount has no rotation (ROBOT_GEOMETRY.md), so it is the robot's +y.
+        const float fx = static_cast<float>(M->coeff(0, 1)), fy = static_cast<float>(M->coeff(1, 1));
+        robot_yaw_now_ = std::atan2(-fx, fy);   // R(yaw)·(0, 1) = (−sin yaw, cos yaw) = forward
+        zed_xy_now_    = zed.head<2>();
+        robot_xy_now_  = zed_xy_now_ - rotate_yaw(robot_yaw_now_, {0.0f, kZedMountY});
+        const Eigen::Vector2f hel = robot_xy_now_ + rotate_yaw(robot_yaw_now_, {0.0f, kHeliosMountY});
+        helios_now_    = Eigen::Vector3f(hel.x(), hel.y(), zed.z() + kHeliosAboveZed);
+        have_pose_now_ = true;
+    }
+    // The robot node (Shadow, type "robot"): found once by type, then read by id (no per-cycle copy of every robot node).
+    std::optional<DSR::Node> robot;
+    if (robot_node_id_ != 0) robot = G_->get_node(robot_node_id_);
+    if (not robot.has_value())
+    {
+        const auto robots = G_->get_nodes_by_type("robot");
+        if (not robots.empty()) { robot = robots.front(); robot_node_id_ = robots.front().id(); }
+    }
+    if (robot.has_value())
+    {
+        const auto adv  = G_->get_attrib_by_name<robot_current_advance_speed_att>(robot.value());
+        const auto side = G_->get_attrib_by_name<robot_current_side_speed_att>(robot.value());
+        const auto ts   = G_->get_attrib_by_name<robot_current_speed_timestamp_att>(robot.value());
+        if (adv.has_value() and side.has_value() and ts.has_value())
+        { odo_adv_ = adv.value(); odo_side_ = side.value(); odo_ts_ = static_cast<std::uint64_t>(ts.value()); }
+    }
+    // The Helios beam pattern (spec §7c.2: g = max_ring_gap_rad of its SensorModel). It can be advertised late, so it is
+    // looked up every cycle until found; absent ⇒ ρ_L = 1 (logged per instance in stage_persistent).
+    if (helios_ring_gap_rad_ <= 0.0f)
+        if (const auto sm = rc::media::sensor_model_from_graph(*G_, "helios"); sm.has_value())
+            if (const auto g = rc::media::max_ring_gap_rad(*sm); g.has_value())
+            {
+                helios_ring_gap_rad_ = *g;
+                std::print("[lidar-measures] Helios SensorModel: max ring gap {:.4f} rad\n", *g);
+            }
+}
+
+// Integrate the odometry since this instance's last sample into the two viewpoint paths and the chain's odometry
+// displacement. dt is the speed-timestamp difference: a stale or absent speed gives no step (fails closed, ρ → 1).
+void CountableFitter::integrate_odometry(CountableInstance& inst)
+{
+    if (odo_ts_ == 0 or not have_pose_now_) return;
+    if (inst.last_odo_ts != 0 and odo_ts_ > inst.last_odo_ts)
+    {
+        const float dt = static_cast<float>(odo_ts_ - inst.last_odo_ts) * 1e-3f;
+        const Eigen::Vector2f step = rc::odometry_step_room(odo_adv_, odo_side_, robot_yaw_now_, dt);
+        const auto& s = inst.ai2_belief.state();
+        const Eigen::Vector2f centre(s.cx, s.cy);
+        rc::accumulate_path(inst.path_cam, zed_xy_now_, step, centre);
+        rc::accumulate_path(inst.path_L, helios_now_.head<2>(), step, centre);
+        inst.odo_since_chain += step;
+    }
+    if (odo_ts_ > inst.last_odo_ts) inst.last_odo_ts = odo_ts_;
+}
+
+// Stage the persistent-path inputs on a frame: ρ of each latent from the paths accumulated since its channel's last update
+// (§7c.2), the latents' marginals and the fresh ego-motion variances. Pure function of the instance + this cycle's pose.
+void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& frame, const LatentInputs& li) const
+{
+    const auto& s = inst.ai2_belief.state();
+    const Eigen::Vector2f c(s.cx, s.cy);
+    // Camera: ρ_cam = exp(−|Δφ|/atan(w⊥/2z) − |Δz|/z), w⊥ = the box's extent across the line of sight.
+    float rho_cam = 1.0f;
+    if (have_pose_now_)
+    {
+        const Eigen::Vector2f r = zed_xy_now_ - c;
+        const float z = r.norm();
+        if (z > 0.0f)
+        {
+            const Eigen::Vector2f t(-r.y() / z, r.x() / z);
+            const Eigen::Vector2f ux(std::cos(s.yaw), std::sin(s.yaw)), uy(-std::sin(s.yaw), std::cos(s.yaw));
+            const float w_perp = s.w * std::abs(ux.dot(t)) + s.h * std::abs(uy.dot(t));
+            if (w_perp > 0.0f) rho_cam = rc::rho_camera(inst.path_cam, z, w_perp);   // degenerate geometry ⇒ parked
+        }
+    }
+    // LiDAR: lateral DOFs and yaw by the ring gap; H by the ring ε that grazes the top moving over it with range.
+    float rho_lat = 1.0f, rho_H = 1.0f;
+    if (helios_ring_gap_rad_ > 0.0f and have_pose_now_)
+    {
+        const float zl = (helios_now_.head<2>() - c).norm();
+        rho_lat = rc::rho_lidar_lateral(inst.path_L, helios_ring_gap_rad_);
+        if (zl > 0.0f)
+            rho_H = rc::rho_lidar_height(inst.path_L, zl, std::atan2(s.H - helios_now_.z(), zl), helios_ring_gap_rad_);
+    }
+    else if (helios_ring_gap_rad_ <= 0.0f and not inst.dbg_rhoL_absent_logged)
+    {
+        std::print("[{}] [lidar-measures] no Helios SensorModel on the graph ⇒ ρ_L = 1\n", inst.node_name);
+        inst.dbg_rhoL_absent_logged = true;
+    }
+    // Chain: ρ_chain = exp(−½cᵀΣ⁻¹c), c = the localiser's correction = pose increment ⊖ odometry increment since the chain
+    // latent's last update (a relocalisation jump gives ρ ≈ 0 by the formula itself).
+    float rho_ch = 1.0f;
+    if (inst.have_last_pose and have_pose_now_)
+        rho_ch = rc::rho_chain((robot_xy_now_ - inst.last_pose_xy) - inst.odo_since_chain,
+                               inst.chain_cov_xx, inst.chain_cov_yy);
+    frame.rho_cam.fill(rho_cam);
+    frame.rho_L   = {rho_lat, rho_lat, rho_H, rho_lat, rho_lat, rho_lat};
+    frame.rho_chain = {rho_ch, rho_ch};
+    frame.sig2_cam   = li.sig2_cam;
+    frame.sig2_L     = li.sig2_L;
+    frame.sig2_chain = li.sig2_chain;
+    frame.fresh_cam  = li.fresh;
+    frame.fresh_L    = li.fresh;
+    inst.dbg_rho_cam = rho_cam; inst.dbg_rho_L = rho_lat; inst.dbg_rho_chain = rho_ch;
+    inst.dbg_dphi_cam = inst.path_cam.dphi_rad; inst.dbg_dz_cam = inst.path_cam.dz_m;
+}
+
+// After an ACCEPTED persistent update: the measuring channels' paths restart, and the chain's reference pose moves here.
+void CountableFitter::consume_paths(CountableInstance& inst, bool camera, bool lidar)
+{
+    if (camera) inst.path_cam = {};
+    if (lidar)  inst.path_L   = {};
+    if (camera or lidar)
+    {
+        inst.last_pose_xy    = robot_xy_now_;
+        inst.last_pose_yaw   = robot_yaw_now_;
+        inst.have_last_pose  = have_pose_now_;
+        inst.odo_since_chain = Eigen::Vector2f::Zero();
+    }
+}
+
+// The camera's membership m(p) for this cycle's assigned ZED slice (spec G2, §7b): the slice's pixels (delivered image),
+// the return projected with the extrinsic at the MASK stamp (zed_T_room), σ_px from the projection's own uncertainty.
+// Binds the CameraAPI explicitly (CountableProjection::ensure_camera) — project_to_zed / focal_px never bind. Any input
+// missing ⇒ an empty function (no membership: predict on a gated cycle, unweighted rays on an admissible one).
+std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(const CountableInstance& inst,
+                                                                                int slice_index,
+                                                                                const Eigen::Matrix4f& zed_T_room,
+                                                                                bool have_cam, float mot_pos_var)
+{
+    if (slice_index < 0 or not have_cam or not mask_ingestor_ or rgb_frame_.empty())
+        return {};
+    const auto& pkt = mask_ingestor_->packet();
+    if (not pkt.valid or slice_index >= static_cast<int>(pkt.slices.size()))
+        return {};
+    const auto& sl = pkt.slices[slice_index];
+    const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
+    const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
+    if (e <= b or not projection_->ensure_camera())
+        return {};
+    const int cols = rgb_frame_.cols, rows = rgb_frame_.rows;   // the DELIVERED image size (mask pixels live there)
+    const float f = projection_->focal_px(cols, rows);
+    if (not (f > 0.0f))
+        return {};
+    const auto mm = rc::MaskMembership::build(std::span<const Eigen::Vector2f>(pkt.mask_pixels.data() + b, e - b));
+    if (mm.empty())
+        return {};
+    const CountableProjection* proj = projection_.get();
+    rc::Projector project = [proj, zed_T_room, cols, rows](const Eigen::Vector3f& p)
+    { return proj->project_to_zed(zed_T_room, p, cols, rows); };
+    const float sigma_chain = std::sqrt(std::max(0.0f, 0.5f * (inst.chain_cov_xx + inst.chain_cov_yy)));
+    return rc::make_membership(std::move(project), mm, f, cfg_.existence_sensor_sigma_m, sigma_chain, mot_pos_var,
+                               sl.confidence);
 }
 
 // Robust combined ego-motion magnitude (m/s): the per-mask corruption speed OR'd with the robot's own measured
@@ -415,6 +600,7 @@ CountableFitter::CountableObservation CountableFitter::observe_slice(CountableIn
     // fitted). Defensive — run_instance_tracker also skips ricoh from assignment, so this normally isn't reached.
     if (slice.depth_var > 0.0f)
         return observation;   // has_fresh_data=false ⇒ no fit
+    observation.slice_index = slice_index;   // its pixels attribute the LiDAR returns (lidar-measures G2)
     // A slice assigned to this bed ⇒ detection is alive; latch its per-slice R inputs.
     inst.frames_since_detection = 0;
     inst.last_mask_confidence   = slice.confidence;
@@ -765,6 +951,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.plaus_fe_ref            = cfg_.plaus_fe_ref;
         p.plaus_fe_scale          = cfg_.plaus_fe_scale;
         p.plaus_height_prior_gain = cfg_.countable_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
+        p.persistent = cfg_.lidar_measures_on_gated;   // persistent shared errors + class prior once (spec §7c.1–7c.2)
         inst.ai2_belief = CountableBelief(s0, p);
         inst.ai2_initialized = true;
         std::print("[{}] cold-start state: cx={:.2f} cy={:.2f} H={:.2f} w={:.2f} h={:.2f} yaw={:.2f}\n",
@@ -779,6 +966,13 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // SHAPES (round vs square) from an accumulated cloud rather than one frame's partial view.
         inst.last_residual_pts = observation.residual_pts;   // model-unexplained points for the viewer layer
     }
+
+    // lidar-measures (spec 2026-11-15 §7c.2): the odometry since this instance's last call goes into the viewpoint paths on
+    // EVERY call, stale ones included (aged and predict-only cycles add up). Flag off: nothing read, nothing integrated.
+    inst.dbg_lidar_only = 0;
+    inst.dbg_ray_n = 0;
+    inst.dbg_itr_cam = 0.0f; inst.dbg_itr_L = 0.0f;
+    if (cfg_.lidar_measures_on_gated) integrate_odometry(inst);
 
     const auto now = std::chrono::steady_clock::now();
 
@@ -873,8 +1067,140 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     }
 
     float energy = inst.dbg_energy;   // default = HOLD last FE (a gated / rejected cycle took no measurement)
+
+    // ── Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 §7c). Flag off: membership stays
+    //    empty, latent_inputs / stage_persistent are never called, and both branches below run exactly as before. ──
+    // The camera's membership m(p) of THIS slice (extrinsic at the mask stamp); empty ⇒ unavailable.
+    std::function<float(const Eigen::Vector3f&)> membership;
+    if (cfg_.lidar_measures_on_gated)
+        membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var);
+    // The latents' marginals (§7c.2): b_chain = the localisation part of the chain cov; b_cam = the config floors + range
+    // lateral/size + the obliquity yaw cap (today's camera fill WITHOUT chain and ego-motion); b_L = the config floors.
+    // The ego-motion terms are FRESH every frame (ρ = 0), marginalised inside each channel.
+    const auto latent_inputs = [&](float obliquity_yaw_var)
+    {
+        const float p2 = cfg_.ai2_common_mode_pos_std  * cfg_.ai2_common_mode_pos_std;
+        const float s2 = cfg_.ai2_common_mode_size_std * cfg_.ai2_common_mode_size_std;
+        const float y2 = cfg_.ai2_common_mode_yaw_std  * cfg_.ai2_common_mode_yaw_std;
+        LatentInputs li;
+        li.sig2_cam = {p2 + range_lat_var, p2 + range_lat_var, s2 + range_size_var, s2 + range_size_var,
+                       s2 + range_size_var, y2 + range_yaw_var + obliquity_yaw_var};
+        li.sig2_L   = {p2, p2, s2, s2, s2, y2};
+        li.sig2_chain = {std::max(0.0f, inst.chain_cov_xx), std::max(0.0f, inst.chain_cov_yy)};
+        li.fresh    = {mot_pos_var, mot_pos_var, mot_size_var, mot_size_var, mot_size_var, mot_yaw_var};
+        return li;
+    };
+    const auto rays_usable = [](const CountableFrame& f)
+    {
+        const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
+        return usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);
+    };
+    const auto ray_count = [](const CountableFrame& f)
+    {
+        int n = static_cast<int>(f.lidar.endpoints.size());
+        for (const auto& r : f.lidar_extra) n += static_cast<int>(r.endpoints.size());
+        return n;
+    };
+    // After an ACCEPTED flag-on update: the measuring channels' paths restart, and each channel's information is logged.
+    const auto record_channels = [&](const CountableFrame& f, bool camera, bool lidar)
+    {
+        consume_paths(inst, camera, lidar);
+        const auto itr = [](const Eigen::Matrix<float, 6, 6>& Id, const std::array<float, 6>& fresh)
+        {
+            Eigen::Matrix<float, 6, 6> Sf = Eigen::Matrix<float, 6, 6>::Zero();
+            for (int i = 0; i < 6; ++i) Sf(i, i) = std::max(0.0f, fresh[i]);
+            return static_cast<float>(rc::ai::persistent::marginalise_fresh<6>(Id, Eigen::Matrix<float, 6, 1>::Zero(), Sf)
+                                          .I.trace());
+        };
+        inst.dbg_itr_cam = camera ? itr(inst.ai2_belief.dbg_Id_cam(), f.fresh_cam) : 0.0f;
+        inst.dbg_itr_L   = lidar  ? itr(inst.ai2_belief.dbg_Id_L(),   f.fresh_L)   : 0.0f;
+    };
+
+    // WALL-FLUSH factor: give the interior (picks the BACK face) to the belief and stage the nearest room
+    // wall to the bed's BACK-face centre. Inert (ok=false) unless a room polygon was pushed this session.
+    const auto stage_room = [&](CountableFrame& frame)
+    {
+        if (have_room_geometry_)
+        {
+            inst.ai2_belief.set_room_interior(room_interior_);
+            const auto& bs_now = inst.ai2_belief.state();
+            frame.wall = nearest_wall(inst.ai2_belief.back_centre(bs_now));
+            if (const auto ax = room_axis(); ax) { frame.room_axis_ok = true; frame.room_axis = *ax; }
+        }
+    };
+
+    // Divergence safety net (mirrors bottle): snapshot state+Σ, run the update, and if the centre teleports
+    // beyond a physical bound in one frame (corrupted mask cloud / one-sided LiDAR runaway → the cx=−200m
+    // event) REJECT it — restore the snapshot, widen Σ via a predict so the next good frame re-associates,
+    // and accrue frames_diverged. A non-finite state is treated the same. 0 disables. NOT a magic gate: a
+    // static bed cannot physically move max_step_m in one frame, so such a step is definitionally spurious.
+    // Shared by the admissible (camera + rays) and the LiDAR-only update. Returns true ⇔ the update was accepted.
+    const auto update_guarded = [&](const CountableFrame& frame) -> bool
+    {
+        const CountableBelief pre_belief = inst.ai2_belief;   // value copy (state + Σ + prior + flip_evidence)
+        const auto&       ps         = pre_belief.state();
+        energy = inst.ai2_belief.update(frame);
+        const auto& ns = inst.ai2_belief.state();
+        // Full-state jump: centre (cx,cy,H) AND EXTENT (w,h). A static bed can't grow/shrink its extent by
+        // max_step_m in one frame any more than it can teleport — a close-range OVER-SEGMENTED mask (floor/wall
+        // points) + the grow-only coverage term used to inflate w→5 m in a couple of frames, unguarded because
+        // the old step omitted w,h. Now that blow-up is a definitionally-spurious frame → rejected.
+        const float step = std::sqrt((ns.cx - ps.cx) * (ns.cx - ps.cx) + (ns.cy - ps.cy) * (ns.cy - ps.cy)
+                                   + (ns.H  - ps.H)  * (ns.H  - ps.H)
+                                   + (ns.w  - ps.w)  * (ns.w  - ps.w) + (ns.h - ps.h) * (ns.h - ps.h));
+        const bool bad = not (std::isfinite(ns.cx) and std::isfinite(ns.cy) and std::isfinite(ns.H)
+                              and std::isfinite(ns.w) and std::isfinite(ns.h) and std::isfinite(ns.yaw));
+        if (cfg_.max_step_m > 0.0f and (bad or step > cfg_.max_step_m))
+        {
+            std::print("[{}] AI2 step-bound REJECT: state moved {:.2f}m (>{:.2f}){} — outlier frame dropped (w={:.2f} h={:.2f})\n",
+                       inst.node_name, step, cfg_.max_step_m, bad ? " [non-finite]" : "", ns.w, ns.h);
+            inst.ai2_belief = pre_belief;     // reject the corrupted update (restore state + Σ)
+            inst.ai2_belief.predict();        // widen Σ so the next good frame re-associates
+            energy = inst.dbg_energy;         // HOLD last FE — a rejected outlier frame took no valid measurement
+            ++inst.frames_diverged;
+            return false;
+        }
+        inst.frames_diverged = 0;
+        return true;
+    };
+
     if (gated)
-        inst.ai2_belief.predict();   // Σ inflates, mean unchanged
+    {
+        // G1 (lidar-measures): a gated camera cycle with an assigned mask still lets the LiDAR measure. The frame carries the
+        // mask-weighted rays only — no camera points, z_top_obs = −1 — plus the room context the one-sided constraints read.
+        // The select box is anchored on the slice's mask cloud (candidate ∪ residual), which is NOT fed to the engine (§7b).
+        // No membership (flag off, no slice/camera/delivered size) or no usable rays ⇒ exactly today's predict.
+        bool lidar_updated = false;
+        if (cfg_.lidar_measures_on_gated and membership)
+        {
+            CountableFrame frame;
+            frame.lidar_only = true;
+            std::vector<Eigen::Vector3f> anchor;
+            anchor.reserve(static_cast<std::size_t>(npts));
+            anchor.insert(anchor.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+            anchor.insert(anchor.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+            // §7b: the LiDAR-only frame's common mode = pose chain + ego-motion (no camera deprojection terms). Read only
+            // by the per-frame Woodbury path; the persistent path takes the latents' inputs staged below.
+            frame.chain_cov_xx   = inst.chain_cov_xx + mot_pos_var;
+            frame.chain_cov_yy   = inst.chain_cov_yy + mot_pos_var;
+            frame.chain_cov_yaw  = mot_yaw_var;
+            frame.chain_cov_size = mot_size_var;
+            stage_room(frame);
+            stage_persistent(inst, frame, latent_inputs(0.0f));
+            lidar_channel_.feed(inst, frame, anchor, membership);
+            if (rays_usable(frame))
+            {
+                lidar_updated = true;
+                inst.dbg_lidar_only = 1;
+                inst.dbg_ray_n = ray_count(frame);
+                if (update_guarded(frame)) record_channels(frame, false, true);
+                // Energy, FE baseline, surprise, resolve_orientation and resolve_front are camera quantities: untouched.
+                energy = inst.dbg_energy;
+            }
+        }
+        if (not lidar_updated)
+            inst.ai2_belief.predict();   // Σ inflates, mean unchanged
+    }
     else
     {
         CountableFrame frame;
@@ -975,17 +1301,16 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // YOLO-independent LiDAR range channel: stage returns landing on the legs/rim. No-op if precision==0
         // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in CountableBelief::accumulate_extra)
         // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
-        lidar_channel_.feed(inst, frame);
+        // Flag on: the persistent latents' inputs (ρ from the odometry paths, marginals, fresh ego-motion) and the camera's
+        // membership on the rays (empty ⇒ today's unweighted selection, bit for bit).
+        if (cfg_.lidar_measures_on_gated)
+            stage_persistent(inst, frame, latent_inputs(cfg_.footprint_residual
+                                                         ? 0.0f : obliquity_yaw_std * obliquity_yaw_std));
+        lidar_channel_.feed(inst, frame, frame.points, membership);
+        inst.dbg_ray_n = ray_count(frame);
 
-        // WALL-FLUSH factor: give the interior (picks the BACK face) to the belief and stage the nearest room
-        // wall to the bed's BACK-face centre. Inert (ok=false) unless a room polygon was pushed this session.
-        if (have_room_geometry_)
-        {
-            inst.ai2_belief.set_room_interior(room_interior_);
-            const auto& bs_now = inst.ai2_belief.state();
-            frame.wall = nearest_wall(inst.ai2_belief.back_centre(bs_now));
-            if (const auto ax = room_axis(); ax) { frame.room_axis_ok = true; frame.room_axis = *ax; }
-        }
+        // WALL-FLUSH factor (see stage_room above).
+        stage_room(frame);
 
         // Stage 1 (PRECISION_AS_INFORMATION.md): replace the scalar per-point R with the anisotropic deprojection
         // noise projected on the SDF normal. Ego-motion variance is preserved as an isotropic floor (Stage 2 will
@@ -995,36 +1320,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // (the footprint residual runs inside ai2_belief.update via accumulate_footprint; its tilt→yaw common-mode
         //  was folded into frame.chain_cov_yaw above so the engine Woodbury caps the total yaw information)
 
-        // Divergence safety net (mirrors bottle): snapshot state+Σ, run the update, and if the centre teleports
-        // beyond a physical bound in one frame (corrupted mask cloud / one-sided LiDAR runaway → the cx=−200m
-        // event) REJECT it — restore the snapshot, widen Σ via a predict so the next good frame re-associates,
-        // and accrue frames_diverged. A non-finite state is treated the same. 0 disables. NOT a magic gate: a
-        // static bed cannot physically move max_step_m in one frame, so such a step is definitionally spurious.
-        const CountableBelief pre_belief = inst.ai2_belief;   // value copy (state + Σ + prior + flip_evidence)
-        const auto&       ps         = pre_belief.state();
-        energy = inst.ai2_belief.update(frame);
-        const auto& ns = inst.ai2_belief.state();
-        // Full-state jump: centre (cx,cy,H) AND EXTENT (w,h). A static bed can't grow/shrink its extent by
-        // max_step_m in one frame any more than it can teleport — a close-range OVER-SEGMENTED mask (floor/wall
-        // points) + the grow-only coverage term used to inflate w→5 m in a couple of frames, unguarded because
-        // the old step omitted w,h. Now that blow-up is a definitionally-spurious frame → rejected.
-        const float step = std::sqrt((ns.cx - ps.cx) * (ns.cx - ps.cx) + (ns.cy - ps.cy) * (ns.cy - ps.cy)
-                                   + (ns.H  - ps.H)  * (ns.H  - ps.H)
-                                   + (ns.w  - ps.w)  * (ns.w  - ps.w) + (ns.h - ps.h) * (ns.h - ps.h));
-        const bool bad = not (std::isfinite(ns.cx) and std::isfinite(ns.cy) and std::isfinite(ns.H)
-                              and std::isfinite(ns.w) and std::isfinite(ns.h) and std::isfinite(ns.yaw));
-        if (cfg_.max_step_m > 0.0f and (bad or step > cfg_.max_step_m))
+        // Divergence safety net: see update_guarded above (snapshot, update, step-bound reject).
+        if (update_guarded(frame))
         {
-            std::print("[{}] AI2 step-bound REJECT: state moved {:.2f}m (>{:.2f}){} — outlier frame dropped (w={:.2f} h={:.2f})\n",
-                       inst.node_name, step, cfg_.max_step_m, bad ? " [non-finite]" : "", ns.w, ns.h);
-            inst.ai2_belief = pre_belief;     // reject the corrupted update (restore state + Σ)
-            inst.ai2_belief.predict();        // widen Σ so the next good frame re-associates
-            energy = inst.dbg_energy;         // HOLD last FE — a rejected outlier frame took no valid measurement
-            ++inst.frames_diverged;
-        }
-        else
-        {
-            inst.frames_diverged = 0;
+            if (cfg_.lidar_measures_on_gated) record_channels(frame, not frame.points.empty(), rays_usable(frame));
             // Log the TRUE free energy (mean −log mixture likelihood, clutter included) at the converged state —
             // the engine's return zeroed misfit via clutter (read ≈0 even on a bad fit). This is a meaningful F.
             energy = inst.ai2_belief.mean_energy(frame.points, inst.ai2_belief.state(), R);
@@ -1120,7 +1419,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
 
     if (should_log(inst))
         std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} mom={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} bp{} resid={:.3f}m topz={:.3f}(H={:.3f}) floorz={:.3f} covA={:.2f} div={}\n",
-                   inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
+                   inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac,
+                   std::string(gated ? " GATED" : "") + (inst.dbg_lidar_only ? " LIDAR-ONLY" : ""),
                    inst.ai2_belief.last_moment_pts(),
                    energy, inst.fe_baseline, inst.fe_surprise,
                    bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw,
@@ -1200,7 +1500,15 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  // the likelihood-only (H, w, h) size summary the class factor scores (final review m3): its mean, its
                  // per-variable std 1/sqrt(info diag) (inf when the data inform that variable not at all), and Λ (nats,
                  // the last class_log_evidence; it may lag this row by one cycle)
-                 << "lik_H,lik_w,lik_h,lik_sd_H,lik_sd_w,lik_sd_h,lam\n";
+                 << "lik_H,lik_w,lik_h,lik_sd_H,lik_sd_w,lik_sd_h,lam,"
+                 // Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 §7c.2 "Log per cycle").
+                 // lidar_only = this cycle's update was a LiDAR-only frame; lidar_msum = Σ membership of the staged rays
+                 // (0 = no membership); rho_* = the lag-1 correlation used (cx component); dphi_cam/dz_cam = the camera path
+                 // that ρ_cam consumed; b* / sb* = latent means / stds (chain on cx,cy; cam and LiDAR on H); ray_n = rays in
+                 // the updating frame; Itr_* = trace of each channel's information after its fresh marginalisation.
+                 // All zero / ρ = 1 with the flag off.
+                 << "lidar_only,lidar_msum,rho_cam,rho_L,rho_chain,dphi_cam,dz_cam,bchain_x,bchain_y,bcam_H,bL_H,"
+                 << "sbcam_H,sbL_H,ray_n,Itr_cam,Itr_L\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1258,7 +1566,18 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
         const auto lsd = [&](int i)
         { return lik.info(i, i) > 0.0f ? 1.0f / std::sqrt(lik.info(i, i)) : std::numeric_limits<float>::infinity(); };
         ai2_csv_ << ',' << lik.mean(0) << ',' << lik.mean(1) << ',' << lik.mean(2)
-                 << ',' << lsd(0) << ',' << lsd(1) << ',' << lsd(2) << ',' << inst.class_lambda << '\n';
+                 << ',' << lsd(0) << ',' << lsd(1) << ',' << lsd(2) << ',' << inst.class_lambda;
+    }
+    {
+        using B = CountableBelief;
+        const auto& b  = inst.ai2_belief.latent_mean();
+        const auto  sb = inst.ai2_belief.latent_std();
+        ai2_csv_ << ',' << inst.dbg_lidar_only << ',' << inst.dbg_lidar_msum
+                 << ',' << inst.dbg_rho_cam << ',' << inst.dbg_rho_L << ',' << inst.dbg_rho_chain
+                 << ',' << inst.dbg_dphi_cam << ',' << inst.dbg_dz_cam
+                 << ',' << b(B::kChain) << ',' << b(B::kChain + 1) << ',' << b(B::kCam + 2) << ',' << b(B::kL + 2)
+                 << ',' << sb(B::kCam + 2) << ',' << sb(B::kL + 2)
+                 << ',' << inst.dbg_ray_n << ',' << inst.dbg_itr_cam << ',' << inst.dbg_itr_L << '\n';
     }
     ai2_csv_.flush();
 }

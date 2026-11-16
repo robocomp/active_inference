@@ -477,6 +477,15 @@ rc::edges::ContourSet CountableProjection::compute_contour_set(const CountableIn
 
 // ─── Appearance-based FRONT (door) detection ──────────────────────────────────────────────────────
 
+bool CountableProjection::ensure_camera()
+{
+    if (camera_api_) return true;
+    const auto zed = G_->get_node("zed");
+    if (not zed.has_value()) return false;
+    camera_api_ = G_->get_camera_api(zed.value());
+    return camera_api_ != nullptr;
+}
+
 std::optional<Eigen::Vector3f> CountableProjection::project_to_zed(const Eigen::Matrix4f& zed_T_room,
                                                                       const Eigen::Vector3f& p_room,
                                                                       int frame_cols, int frame_rows) const

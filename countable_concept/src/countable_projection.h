@@ -142,9 +142,17 @@ public:
     rc::edges::ContourSet compute_contour_set(const CountableInstance& inst, std::uint64_t stamp_ms,
                                               int frame_cols, int frame_rows);
 
+    // Bind the ZED CameraAPI if it is not bound yet (the lazy bind compute_projected_roi, compute_silhouette_existence and
+    // compute_contour_set each do on entry). Returns whether a CameraAPI is bound. Main/compute thread only.
+    bool ensure_camera();
+
     // A room point in the DELIVERED image: (col, row, depth) with depth = the camera-frame forward coordinate, scaled
     // intrinsic->delivered exactly as compute_contour_set. nullopt when depth < 0.20 m (near clip), the point is
-    // outside the image, there is no CameraAPI (not bound yet; this method never binds), or a size is <= 0.
+    // outside the image, there is no CameraAPI (not bound yet), or a size is <= 0.
+    // ★THIS METHOD AND focal_px NEVER BIND THE CameraAPI. The binders are ensure_camera() (above),
+    // compute_projected_roi, compute_silhouette_existence and compute_contour_set. CountableFitter::run_inference calls
+    // ensure_camera() explicitly before building the LiDAR membership (Model.LidarMeasuresOnGated), so the membership
+    // never depends on which of the others happened to run first.
     std::optional<Eigen::Vector3f> project_to_zed(const Eigen::Matrix4f& zed_T_room, const Eigen::Vector3f& p_room,
                                                   int frame_cols, int frame_rows) const;
     // Mean focal length in DELIVERED pixels, 1/2 (fx*sx + fy*sy); 0 when unavailable.

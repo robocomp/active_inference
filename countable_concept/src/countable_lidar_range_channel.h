@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include <functional>
+#include <span>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -35,8 +37,12 @@ public:
     // clear() each cycle first so a stale sweep never leaks into a frame with no fresh LiDAR.
     void clear() { lidar_have_sweep_ = false; lidar_have_bpearl_ = false; }
 
-    // Select this cycle's LiDAR returns landing on THIS bed and stage them on the frame's range channel(s).
-    void feed(CountableInstance& inst, CountableFrame& frame) const;
+    // Select this cycle's LiDAR returns landing on THIS bed and stage them on the frame's range channel(s). The select box
+    // is anchored on `anchor_cloud` (this cycle's mask cloud; on a LiDAR-only frame the camera points that are NOT fed to
+    // the engine, spec §7b). An empty `membership` ⇒ select_into (today's selection, bit for bit); else every return
+    // carries the camera's m(p) as a weight (select_into_weighted) and Σm goes to inst.dbg_lidar_msum.
+    void feed(CountableInstance& inst, CountableFrame& frame, std::span<const Eigen::Vector3f> anchor_cloud,
+              const std::function<float(const Eigen::Vector3f&)>& membership = {}) const;
 
 private:
     // Select returns from `sweep` (sensor at `origin`) that land on this bed into `out`, with the two
@@ -44,7 +50,9 @@ private:
     // staged ray count; writes the angular-coverage weight to *cov_ang (if non-null). Shared by helios + bpearl.
     int select_into(const CountableInstance& inst, const Eigen::Vector3f& centroid,
                     const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
-                    float precision_base, rc::ai::LidarRays& out, float* cov_ang = nullptr) const;
+                    float precision_base, rc::ai::LidarRays& out, float* cov_ang = nullptr,
+                    const std::function<float(const Eigen::Vector3f&)>* membership = nullptr,
+                    float* m_sum = nullptr) const;
 
     // Birth-footprint select box: rotation-agnostic circumscribed XY radius + floor-referenced z-band (spans the
     // legs + rim). Fixed from the BIRTH dims (never the fitted w/h, so a blown-up extent can't explode the region).

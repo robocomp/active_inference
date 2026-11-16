@@ -51,7 +51,9 @@ static void stride_of_subsampled_mask()
     const auto mm = MaskMembership::build(rect(99, 51, 42, 30, 3));   // columns/rows every 3 px
     CHECK(mm.stride_px() == 3.f);
     const float q = mm.stride_px();
-    CHECK(std::abs(mm.signed_distance_px(99 + 3 * 13, 51 + 3 * 5) - (0.5f * q)) > -1.f);   // inside, well-defined
+    CHECK(std::abs(mm.signed_distance_px(99 + 3 * 13, 51 + 3 * 5) - 0.5f * q) < 0.05f);   // right edge sample: +q/2
+    // interior sample (cell 7,5 of the 14x10 grid): 5 cells to the nearest outside cell ⇒ 5q − q/2
+    CHECK(std::abs(mm.signed_distance_px(99 + 3 * 6, 51 + 3 * 4) - (5.f * q - 0.5f * q)) < 0.05f);
     CHECK(std::abs(mm.signed_distance_px(99, 60) - 0.5f * q) < 0.05f);                      // left edge sample
     CHECK(mm.signed_distance_px(120, 66) > 0.f);
     CHECK(mm.signed_distance_px(80, 66) < 0.f);
