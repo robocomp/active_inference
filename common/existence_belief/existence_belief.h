@@ -35,6 +35,7 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -212,6 +213,93 @@ inline float hollow_delta(const Evidence& ev, const SensorModel& p)
     const float pd = std::clamp(p.detection_prob, 1e-3f, 1.0f - 1e-3f);
     const float pc = std::clamp(p.clutter_prob,   1e-3f, 1.0f - 1e-3f);
     return saturate(ev.e_occ * std::log(pd / pc), std::log(pd / pc));
+}
+
+// ── MODALITY 1b: 3-D carve against a UNION of part boxes ───────────────────────────────────────────────────
+// ★11-15 finding (docs/superpowers/results/2026-11-15-carve-replay.md): carve_box tests surface-vs-interior in
+// x–y only, with one z test at mid-chord. The Helios looks DOWN on furniture below its mount, so most returns land
+// on the TOP face, decimetres-to-metres behind the near side face, and were scored "interior" (evidence AGAINST):
+// 1640 of 1744 against-units on the bed came from the real mattress top. A thin part (headboard) also leaked
+// "came out the back" through Φ((1−t_far)/σ_t) on a genuine front-face hit.
+// Here every part is a full 3-D box (slab test on x, y AND z), and the depth is measured to the part the return
+// lies IN, so a top-face return has depth ≈ 0 ⇒ surface. The through term is discounted by (1−ws) so a surface
+// hit on a part thinner than σ_surf does not also count as "through".
+// Parts live in the object frame (centre offset, full sizes, z band with floor = 0); (cx,cy,yaw) place the object.
+struct BoxPart { float cx, cy, sx, sy, z0, z1; };
+
+inline Evidence carve_parts(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& sweep,
+                            float cx, float cy, float yaw, std::span<const BoxPart> parts,
+                            float surface_sigma_m, const SensorModel& p)
+{
+    Evidence ev;
+    if (parts.empty() or sweep.empty()) return ev;
+
+    const float cyaw = std::cos(yaw), syaw = std::sin(yaw);
+    const auto  phi  = [](float x) { return 0.5f * std::erfc(-x * 0.70710678f); };   // Φ(x) = ½·erfc(−x/√2)
+    const float sigma_surf = std::sqrt(p.sensor_sigma_m * p.sensor_sigma_m + surface_sigma_m * surface_sigma_m);
+
+    const float odx = origin.x() - cx, ody = origin.y() - cy;
+    const Eigen::Vector3f O(cyaw * odx + syaw * ody, -syaw * odx + cyaw * ody, origin.z());
+
+    float E_occ = 0.0f, E_free = 0.0f, E_int = 0.0f, reached_mass = 0.0f;
+    for (const auto& q : sweep)
+    {
+        const float pdx = q.x() - cx, pdy = q.y() - cy;
+        const Eigen::Vector3f P(cyaw * pdx + syaw * pdy, -syaw * pdx + cyaw * pdy, q.z());
+        const Eigen::Vector3f dir = P - O;
+        const float len = dir.norm();
+        if (len < 1e-4f) continue;
+        const float sigma_t = sigma_surf / len;
+
+        float reached = 0.0f, tf_max = -std::numeric_limits<float>::max();
+        float tn_in_max = -std::numeric_limits<float>::max();   // max tn_k ≤ 1 : the part the return lies in
+        float tn_min = std::numeric_limits<float>::max();
+        bool any = false;
+        for (const auto& part : parts)
+        {
+            const float lo[3] = {part.cx - 0.5f * part.sx, part.cy - 0.5f * part.sy, part.z0};
+            const float hi[3] = {part.cx + 0.5f * part.sx, part.cy + 0.5f * part.sy, part.z1};
+            float tn = -std::numeric_limits<float>::max(), tf = std::numeric_limits<float>::max();
+            bool miss = false;
+            for (int a = 0; a < 3 and not miss; ++a)
+            {
+                const float o = O(a), dd = dir(a);
+                if (std::abs(dd) < 1e-6f) { if (o < lo[a] or o > hi[a]) miss = true; }
+                else
+                {
+                    float t1 = (lo[a] - o) / dd, t2 = (hi[a] - o) / dd;
+                    if (t1 > t2) std::swap(t1, t2);
+                    tn = std::max(tn, t1);
+                    tf = std::min(tf, t2);
+                }
+            }
+            if (miss or tn > tf or tf < 0.0f or tn < 0.0f) continue;   // miss / behind / origin inside this part
+
+            any = true;
+            reached   = std::max(reached, phi((1.0f - tn) / sigma_t));
+            tf_max    = std::max(tf_max, tf);
+            tn_min    = std::min(tn_min, tn);
+            if (tn <= 1.0f) tn_in_max = std::max(tn_in_max, tn);
+        }
+        if (not any or reached < 1e-3f) continue;
+
+        const float t_last = (tn_in_max > -std::numeric_limits<float>::max()) ? tn_in_max : tn_min;
+        const float depth  = std::max(0.0f, (1.0f - t_last) * len);
+        const float ws     = std::exp(-0.5f * (depth * depth) / std::max(1e-6f, sigma_surf * sigma_surf));
+        const float through = phi((1.0f - tf_max) / sigma_t);
+        const float inside  = std::max(0.0f, reached - through);
+
+        E_occ  += inside * ws;
+        E_int  += inside * (1.0f - ws);
+        E_free += through * (1.0f - ws);
+        reached_mass += reached;
+    }
+
+    ev.e_occ = E_occ; ev.e_free = E_free; ev.e_interior = E_int;
+    ev.n_reached = static_cast<int>(std::lround(reached_mass));
+    if (ev.n_reached == 0) return ev;
+    ev.log_odds_delta = solid_delta(ev, p);
+    return ev;
 }
 
 // HOLLOW-object guard: while the object is actively OBSERVED this cycle, beams passing through its interior

@@ -78,6 +78,7 @@ inline int select_into(const std::vector<Eigen::Vector3f>& sweep, const Eigen::V
 {
     const float r2 = box.radius_xy * box.radius_xy;
     out.endpoints.clear();
+    out.weights.clear();                      // unweighted selection ⇒ every ray weighs 1
     out.endpoints.reserve(256);
     double bear_c = 0.0, bear_s = 0.0;
     for (const auto& p : sweep)
@@ -100,6 +101,53 @@ inline int select_into(const std::vector<Eigen::Vector3f>& sweep, const Eigen::V
         out.robust_c_m = w.robust_c_m;
     }
     if (cov_ang) *cov_ang = ca;
+    return n;
+}
+
+// select_into with a per-return MEMBERSHIP m(p) in [0, 1] (the probability the return belongs to THIS object, e.g. from
+// the camera masks). Same loop and box as select_into; a return with m <= 0 is not staged (it would carry no term), the
+// others are staged with weight m. The ray-count coverage then counts Σm instead of n (a return that is 30% this object is
+// 0.3 of a ray), and the bearing resultant is m-weighted: R = |Σ m·e^{iφ}| / Σm. precision = base · coverage · ca when
+// Σm > 0, else 0 (the factor is then skipped). *m_sum receives Σm. With m ≡ 1 this is select_into bit for bit.
+inline int select_into_weighted(const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
+                                const Eigen::Vector2f& centroid_xy, const Box& box,
+                                float precision_base, const Weights& w,
+                                const std::function<float(const Eigen::Vector3f&)>& membership,
+                                rc::ai::LidarRays& out, float* cov_ang = nullptr, float* m_sum = nullptr)
+{
+    const float r2 = box.radius_xy * box.radius_xy;
+    out.endpoints.clear();
+    out.weights.clear();
+    out.endpoints.reserve(256);
+    out.weights.reserve(256);
+    double bear_c = 0.0, bear_s = 0.0, msum = 0.0;
+    for (const auto& p : sweep)
+    {
+        const float dx = p.x() - centroid_xy.x(), dy = p.y() - centroid_xy.y();
+        if (dx * dx + dy * dy > r2 or p.z() < box.z_lo or p.z() > box.z_hi) continue;
+        const float m = membership(p);
+        if (not (m > 0.0f)) continue;
+        out.endpoints.push_back(p);
+        out.weights.push_back(m);
+        const float phi = std::atan2(dy, dx);
+        bear_c += m * std::cos(phi); bear_s += m * std::sin(phi);
+        msum += m;
+    }
+    const int n = static_cast<int>(out.endpoints.size());
+    float ca = 1.0f;
+    if (msum > 0.0)
+    {
+        const float coverage = std::min(1.0f, static_cast<float>(msum) / std::max(1.0f, w.coverage_n0));
+        const float R        = static_cast<float>(std::hypot(bear_c, bear_s) / msum);
+        ca = std::pow(std::max(0.0f, 1.0f - R), w.coverage_ang_power);
+        out.origin     = origin;
+        out.precision  = precision_base * coverage * ca;
+        out.robust_c_m = w.robust_c_m;
+    }
+    else
+        out.precision = 0.0f;
+    if (cov_ang) *cov_ang = ca;
+    if (m_sum)   *m_sum   = static_cast<float>(msum);
     return n;
 }
 

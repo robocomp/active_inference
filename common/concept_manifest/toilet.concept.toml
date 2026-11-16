@@ -111,3 +111,35 @@ peripheral = "ricoh.bearing"
 
 [display]
 mesh = "meshes/toilet.obj"
+
+# ── Solid parts (fractions of the fitted w, h, H; H = true top 1.02) ──
+
+[[shape.part]]
+name = "tank"
+x_f = 0.0
+y_f = 0.349
+w_f = 1.0
+h_f = 0.3
+z0_f = 0.233
+z1_f = 1.0
+why = "numbers measured on the Webots model (threerooms-piso)"
+
+[[shape.part]]
+name = "bowl"
+x_f = 0.0
+y_f = -0.153
+w_f = 0.83
+h_f = 0.696
+z0_f = 0.235
+z1_f = 0.451
+why = "numbers measured on the Webots model (threerooms-piso)"
+
+[[shape.part]]
+name = "pedestal"
+x_f = 0.0
+y_f = -0.033
+w_f = 0.62
+h_f = 0.682
+z0_f = 0.0
+z1_f = 0.235
+why = "numbers measured on the Webots model (threerooms-piso)"

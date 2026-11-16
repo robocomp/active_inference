@@ -87,6 +87,7 @@ BedModel.DetectMinFill -> Model.DetectMinFill
 BedModel.DetectSoft -> Model.DetectSoft
 BedModel.ExistenceAbsenceRangePower -> Model.ExistenceAbsenceRangePower
 BedModel.ExistenceAbsenceRangeRefM -> Model.ExistenceAbsenceRangeRefM
+BedModel.ExistenceCarveParts -> Model.ExistenceCarveParts
 BedModel.ExistenceClutterProb -> Model.ExistenceClutterProb
 BedModel.ExistenceDetectionProb -> Model.ExistenceDetectionProb
 BedModel.ExistenceFrameCorrelation -> Model.ExistenceFrameCorrelation

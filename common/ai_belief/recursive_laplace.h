@@ -161,8 +161,16 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
     using MatN  = Eigen::Matrix<float, N, N>;
 
     predict<N>(m, Sigma, state, prior_mean);
+    // A frame with no points is predict-only — unless the model says the frame still carries data (the countable belief's
+    // LiDAR-only frame: rays, no camera points). Detected via C++23 requires, so a model without the hook is unchanged.
     if (frame.points.empty())
-        return 0.0f;
+    {
+        bool has_data = false;
+        if constexpr (requires { m.has_extra_data(frame); })
+            has_data = m.has_extra_data(frame);
+        if (not has_data)
+            return 0.0f;
+    }
 
     const float sig2 = m.sigma2();
     const auto  R_of = [&](std::size_t i) -> float
@@ -233,6 +241,9 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
 
     accumulate(state.vec());    // data information at the converged state
     Sigma = (P0 + saturate<N>(Id, bd, Scinv).first).inverse();
+
+    if (frame.points.empty())
+        return 0.0f;            // data-only-by-extra-factors frame: no per-point energy to average
 
     double energy = 0.0;
     for (std::size_t i = 0; i < frame.points.size(); ++i)

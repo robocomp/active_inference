@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <vector>
 #include <cmath>
 #include <Eigen/Dense>
@@ -45,6 +46,10 @@ struct LidarRays
 {
     Eigen::Vector3f              origin    = Eigen::Vector3f::Zero();  // sensor centre (room frame)
     std::vector<Eigen::Vector3f> endpoints;                           // returns (room frame)
+    // Per-ray MEMBERSHIP weight in [0, 1] multiplying `precision` for that ray: the probability the return belongs to
+    // THIS object. Empty ⇒ 1 per ray (every existing caller); else size() == endpoints.size(). A weight of exactly 1
+    // is bit-exact, so an unweighted call and an all-ones call give identical normal equations.
+    std::vector<float>           weights;
     float precision   = 0.0f;    // base per-ray precision 1/m² (0 ⇒ OFF). Match the depth term (≈1/σ²)
     float robust_c_m  = 0.05f;   // Cauchy scale (m): returns this far off the model surface fade out
 
@@ -163,9 +168,12 @@ void accumulate_lidar_rays(const Model& m, const State& s, const LidarRays& rays
         return d;
     };
 
-    for (const auto& ep : rays.endpoints)
+    assert(rays.weights.empty() or rays.weights.size() == rays.endpoints.size());
+    for (std::size_t i = 0; i < rays.endpoints.size(); ++i)
     {
-        Eigen::Vector3f dir = ep - rays.origin;
+        const float wi = rays.weights.empty() ? 1.0f : rays.weights[i];
+        if (wi <= 0.0f) continue;                         // a ray that belongs to nothing here carries no term
+        Eigen::Vector3f dir = rays.endpoints[i] - rays.origin;
         const float rho_obs = dir.norm();
         if (rho_obs < 1e-4f) continue;
         dir /= rho_obs;                                   // unit viewing direction
@@ -197,7 +205,7 @@ void accumulate_lidar_rays(const Model& m, const State& s, const LidarRays& rays
 
         // Continuous Cauchy responsibility: a return far off the surface (background / a different object)
         // fades out smoothly. No association gate; the grazing 1/(n̂·dir) blow-up is already carried in J.
-        const float w = rays.precision / (1.0f + (e * e) / c2);
+        const float w = wi * (rays.precision / (1.0f + (e * e) / c2));
         Id.noalias() += w * (J * J.transpose());
         bd.noalias() += -w * J * e;
     }

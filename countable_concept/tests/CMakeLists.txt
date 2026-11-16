@@ -81,3 +81,40 @@ target_include_directories(class_factor_test PRIVATE ../src ../../common ../../c
 target_compile_options(class_factor_test PRIVATE -O2)
 target_link_libraries(class_factor_test PRIVATE Eigen3::Eigen)
 add_test(NAME class_factor_test COMMAND class_factor_test)
+
+# [[shape.part]] of the class manifests + the countable layout on a fitted box (feeds the 3-D LiDAR existence carve).
+# Run: LANG=es_ES.UTF-8 ./shape_parts_test
+add_executable(shape_parts_test shape_parts_test.cpp)
+target_include_directories(shape_parts_test PRIVATE ../src ../../common ../../common/concept_manifest)
+target_compile_definitions(shape_parts_test PRIVATE MANIFEST_DIR="${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest")
+target_compile_options(shape_parts_test PRIVATE -O2)
+target_link_libraries(shape_parts_test PRIVATE Eigen3::Eigen)
+add_test(NAME shape_parts_test COMMAND shape_parts_test)
+
+# Offline carve replay (tools/carve_replay_rays.py -> RAYS.bin): scores simulated LiDAR sweeps with the agent's own
+# carve_box and carve_parts through solid_delta. Run: ./carve_replay RAYS.bin ../../common/concept_manifest
+add_executable(carve_replay ../tools/carve_replay.cpp)
+target_include_directories(carve_replay PRIVATE ../src ../../common)
+target_compile_options(carve_replay PRIVATE -O2)
+target_link_libraries(carve_replay PRIVATE Eigen3::Eigen)
+
+# Golden 40-frame fit trajectory (hex floats, bit-exact at -O2 for this compiler): the lidar-measures change must not move it.
+add_executable(lidar_golden_test lidar_golden_test.cpp ../src/countable_belief.cpp)
+target_include_directories(lidar_golden_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(lidar_golden_test PRIVATE -O2)
+target_link_libraries(lidar_golden_test PRIVATE Eigen3::Eigen)
+add_test(NAME lidar_golden_test COMMAND lidar_golden_test)
+
+# Per-ray membership weights on the ray factor + the weighted LiDAR selection (spec 2026-11-15 lidar-measures G2).
+add_executable(lidar_weights_test lidar_weights_test.cpp ../src/countable_belief.cpp)
+target_include_directories(lidar_weights_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(lidar_weights_test PRIVATE -O2)
+target_link_libraries(lidar_weights_test PRIVATE Eigen3::Eigen)
+add_test(NAME lidar_weights_test COMMAND lidar_weights_test)
+
+# The LiDAR-only frame (spec 2026-11-15 lidar-measures §7b, C1 = A): rays + one-sided constraints, no re-added class anchors.
+add_executable(lidar_only_update_test lidar_only_update_test.cpp ../src/countable_belief.cpp)
+target_include_directories(lidar_only_update_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(lidar_only_update_test PRIVATE -O2)
+target_link_libraries(lidar_only_update_test PRIVATE Eigen3::Eigen)
+add_test(NAME lidar_only_update_test COMMAND lidar_only_update_test)

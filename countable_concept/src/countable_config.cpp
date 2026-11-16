@@ -149,6 +149,12 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         out.ai2_headboard_t_m = bp->thickness_m;
         std::print("[manifest] {} back panel: height {:.2f} m, thickness {:.2f} m\n", out.concept_class, bp->height_m, bp->thickness_m);
     }
+    try { out.shape_parts = rc::manifest::load_shape_parts(manifest_path); }
+    catch (const std::exception& e)
+    {
+        throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
+    }
+    std::print("[manifest] {} shape: {} part(s)\n", out.concept_class, out.shape_parts.size());
     {   // π_cls: a CLASS fact too. Absent ⇒ 0.8 (said so); present but outside the open (0,1) ⇒ refuse (logit is ±inf).
         const auto pl = rc::manifest::load_class_prior(manifest_path);
         if (pl)
@@ -433,6 +439,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     // ─── Existence / removal ───────────────────────────────────────────────────
     out.existence_removal_enabled = getb("Model.ExistenceRemovalEnabled", false,
             "Each cycle carve the LiDAR sweep against the bed footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob");
+    out.existence_carve_parts     = getb("Model.ExistenceCarveParts", false,
+            "LiDAR existence carve against the class's composed parts (shape.part + back panel) instead of the solid fitted box");
     out.existence_removal_prob    = getf("Model.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when L < log(p/(1−p))");
     out.existence_out_of_room_gain = getf("Model.ExistenceOutOfRoomGain", 1.5f,

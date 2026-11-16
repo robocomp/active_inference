@@ -12,12 +12,14 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <print>
 #include <utility>
 #include <vector>
 
 #include "countable_fitter.h"                                       // rc::CountableFitter (instances, silhouette)
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                              // rc::ConceptLidarIngestor (per-plane sweeps)
+#include "countable_shape_parts.h"                                // carve_parts_for (Model.ExistenceCarveParts)
 #include "countable_model.h"                                       // CountableModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
 #include "../../common/detectability/detectability.h"          // rc::detect — the detector INVERSE model
@@ -89,6 +91,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         // outside that block, so the two must not share a scope.
         bool  doomed_now = false;
         if (not inst.ai2_initialized) continue;
+        inst.occ_delta_cycle = 0.0f;   // this cycle's pre-clamp existence increment (sum over every integrate below)
         rc::exist::arm(inst.existence, policy);
         const auto& bs = inst.ai2_belief.state();
         const auto& S  = inst.ai2_belief.covariance();
@@ -101,6 +104,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
                 == rc::room::BirthVerdict::Suppress)
         {
             inst.existence.integrate(1.0f, rc::room::out_of_room_logodds(false, cfg_.existence_out_of_room_gain));
+            inst.occ_delta_cycle += inst.existence.last_increment();
             if (fitter.should_log(inst))
                 std::print("[{}] [existence] OUTSIDE room at ({:.2f},{:.2f}) L={:.2f}\n",
                            inst.node_name, bs.cx, bs.cy, inst.existence.logodds());
@@ -244,6 +248,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
                 // to 1.0 tells the belief every miss was a maximally unambiguous look, so correlated misses
                 // count as independent. Inert while ExistenceFrameCorrelation is 0; wrong once it is measured.
                 inst.existence.integrate(ev_sil, p_confirm);
+                inst.occ_delta_cycle += inst.existence.last_increment();
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
                 // builds up, the bed is flagged for verification (the epistemic planner drives the robot to a
@@ -332,6 +337,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
             if (ev_c.n_reached > 0)
             {
                 inst.existence.integrate(ev_c, 1.0f);
+                inst.occ_delta_cycle += inst.existence.last_increment();
                 integrated = true;
             }
         }
@@ -344,14 +350,29 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         // massively-hit solid body contributed NO confirmation and ex_locc swung erratically between 0.03 and 70
         // depending on whether a ring happened to graze a fake leg. See [[bed-table-geometry-churn]].
         // Both LiDARs are carved: the low bpearl strikes the bed body low, the high helios mid/upper.
+        // With Model.ExistenceCarveParts the carve uses the class's composed parts (carve_parts) instead of this one solid box.
         if (sweep)
         {
-            rc::exist::Evidence ev = rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
-                                                          0.0f, bs.H, surf_sigma, sm);
+            // Model.ExistenceCarveParts: carve the class's composed parts (headboard, legs, tank, …) instead of the
+            // one solid fitted box. The parts depend on this cycle's fitted state, so they are laid out per instance.
+            std::vector<rc::exist::BoxPart> carve_parts;
+            if (cfg_.existence_carve_parts)
+            {
+                std::optional<rc::manifest::BackPanel> panel;
+                if (cfg_.ai2_headboard_h_m > 0.0f)
+                    panel = rc::manifest::BackPanel{cfg_.ai2_headboard_h_m, cfg_.ai2_headboard_t_m};
+                carve_parts = rc::countable::carve_parts_for(bs.w, bs.h, bs.H, cfg_.shape_parts, panel);
+            }
+            rc::exist::Evidence ev = cfg_.existence_carve_parts
+                ? rc::exist::carve_parts(origin, *sweep, bs.cx, bs.cy, bs.yaw, carve_parts, surf_sigma, sm)
+                : rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
+                                       0.0f, bs.H, surf_sigma, sm);
             if (sweep_bp != nullptr)   // second ray-set, own origin (occlusion-aware first-hit) — occupancy only
             {
-                const rc::exist::Evidence bp = rc::exist::carve_box(origin_bp, *sweep_bp, bs.cx, bs.cy, bs.yaw,
-                                                                    bs.w, bs.h, 0.0f, bs.H, surf_sigma, sm);
+                const rc::exist::Evidence bp = cfg_.existence_carve_parts
+                    ? rc::exist::carve_parts(origin_bp, *sweep_bp, bs.cx, bs.cy, bs.yaw, carve_parts, surf_sigma, sm)
+                    : rc::exist::carve_box(origin_bp, *sweep_bp, bs.cx, bs.cy, bs.yaw,
+                                           bs.w, bs.h, 0.0f, bs.H, surf_sigma, sm);
                 ev.e_occ += bp.e_occ; ev.n_reached += bp.n_reached;
             }
             // ★MUTUAL EXCLUSION (SHARED, common/exclusion). Returns coming from a volume a SENIOR object
@@ -457,6 +478,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
                 // Same correction as the silhouette channel above: interpolate from ZERO.
                 ev.log_odds_delta = p_detect_lidar * l_full;
                 inst.existence.integrate(ev, p_detect_lidar);   // see the note at the silhouette integrate
+                inst.occ_delta_cycle += inst.existence.last_increment();
                 integrated = true;
             }
         }

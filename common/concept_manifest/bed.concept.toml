@@ -119,3 +119,25 @@ peripheral = "ricoh.bearing"
 
 [display]
 mesh = "meshes/bed.obj"
+
+# ── Solid parts; the headboard comes from [prior.headboard], not from here ──
+
+[[shape.part]]
+name = "mattress"
+x_f = 0.0
+y_f = 0.0
+w_f = 1.0
+h_f = 1.0
+z0_f = 0.38
+z1_f = 1.0
+why = "numbers measured on the Webots model (threerooms-piso)"
+
+[[shape.part]]
+name = "footboard"
+x_f = 0.0
+y_f = -0.476
+w_f = 1.0
+h_f = 0.048
+z0_f = 0.0
+z1_f = 1.28
+why = "numbers measured on the Webots model (threerooms-piso)"

@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+#include "../../common/concept_manifest/shape_parts.h"
 
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
@@ -91,6 +93,7 @@ struct CountableConfig
     float class_alt_std_m           = 1.0f;    // "other furniture" size std (m) per variable, about the class mean
     float birth_height_noise_m      = 0.05f;   // birth height noise σ_z (m)
     float birth_height_outlier_frac = 0.05f;   // birth mask-bleed outlier fraction ε
+    std::vector<rc::manifest::ShapePart> shape_parts;   // [[shape.part]] of the class manifest (empty = whole box)
     float ai2_headboard_t_m       = 0.10f;   // headboard panel thickness (m)
     float ai2_wall_flush_prior    = 0.0f;    // class P(stands against a wall) — furniture prior
     float ai2_room_axis_std_deg   = 0.0f;    // room-axis alignment std (deg); <=0 = off
@@ -319,6 +322,7 @@ struct CountableConfig
     // when P(occupied) < removal_prob. Evidence-based, not a miss counter. OFF by default (a mis-removal
     // deletes furniture); enable to replace merge-only removal.
     bool  existence_removal_enabled = false;
+    bool  existence_carve_parts     = false;  // LiDAR carve against the class's composed parts, not the solid fitted box
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
     float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and
