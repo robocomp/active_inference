@@ -1005,16 +1005,52 @@
   \lesson{KL is zero for a perfect match and grows as the beliefs differ, in place or in width.}
 \end{frame}
 
-\begin{frame}{Split the KL: the part we can compute is $F$}
+\begin{frame}{We want to make $q$ and $p(s\given o)$ as close as possible}
   \centering
-  \vspace{1.2em}
-  {\normalsize Closeness $= \KL{q}{p(s\given o)} \ge 0$ \;--- but it needs $\textcolor{accent}{p(s\given o)}$, which we cannot compute.}
+  \vspace{2.5em}
+  {\Large $\begin{array}{r@{\;}l}
+    \KL{q}{p(s\given o)} &= \displaystyle\int q(s)\,\ln\frac{q(s)}{\textcolor{accent}{p(s\given o)}}\,\mathrm{d}s\\[1.2em]
+    &= \displaystyle\int q(s)\,\big[\ln q(s) - \ln \textcolor{accent}{p(s\given o)}\big]\,\mathrm{d}s
+  \end{array}$}\\[0.8em]
+  {\small log-ratio, then the same as a difference \quad--- but $\textcolor{accent}{p(s\given o)}$ is what we cannot compute}
+  \vfill
+  \lesson{The KL compares $q$ with $\ln p(s\given o)$, and that is the term we do not have.}
+\end{frame}
 
-  \vspace{1.8em}
-  {\Large $\KL{q}{p(s\given o)} \;=\; \underbrace{\int q(s)\ln\frac{q(s)}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s}_{\textstyle F[q,o]}
+\begin{frame}{Bayes in logs: the posterior is the model minus a constant}
+  \centering
+  \vspace{2.5em}
+
+  {\large Bayes:}\quad {\Large $\textcolor{accent}{p(s\given o)} = \dfrac{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}{\textcolor{muted}{p(o)}}$}
+  \\[1.2em]$\big\downarrow\;\ln$\\[1.0em]
+  {\Large $\ln\textcolor{accent}{p(s\given o)} = \ln \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)} - \ln\textcolor{muted}{p(o)}$}\\[0.6em]
+  {\small the log turns the division into a subtraction}
+  \vfill
+  \lesson{In logs, the posterior is the model minus one number, $\ln p(o)$.}
+\end{frame}
+
+\begin{frame}{Substitute: $\ln p(o)$ leaves the integral}
+  \centering
+  \vspace{0.3em}
+  {\large
+  \[
+  \begin{array}{r@{\;}l@{\quad}l}
+    D_{\mathrm{KL}} &= \displaystyle\int q(s)\,\big[\ln q(s) \underbrace{- \ln \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)} + \ln\textcolor{muted}{p(o)}}_{\textstyle -\ln \textcolor{accent}{p(s\given o)}\text{, by Bayes}}\big]\,\mathrm{d}s & \text{\small substitute}\\[2.4em]
+    \uncover<2->{&= \displaystyle\int q(s)\ln\frac{q(s)}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s \;+\; \ln\textcolor{muted}{p(o)} \int q(s)\,\mathrm{d}s & \text{\small $\ln p(o)$ has no $s$: out}}\\[1.3em]
+    \uncover<3->{&= \displaystyle\int q(s)\ln\frac{q(s)}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s \;+\; \ln\textcolor{muted}{p(o)} & \text{\small $\textstyle\int q = 1$}}
+  \end{array}
+  \]}
+  \vfill
+  \uncover<3->{\lesson{The unknown posterior is gone: what is left is the model and one constant.}}
+\end{frame}
+
+\begin{frame}{The part we can compute: the variational free energy $F$}
+  \centering
+  \vspace{1.5em}
+  {\Large $\KL{q}{p(s\given o)} \;=\; \underbrace{\int q\ln\frac{q}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s}_{\textstyle F[q,o]\text{: free energy}}
   \;+\; \underbrace{\ln \textcolor{muted}{p(o)}}_{\textstyle\text{constant}}$}
 
-  \vspace{1.2em}
+  \vspace{1.5em}
   \begin{minipage}[t]{0.45\textwidth}\centering
    $F$: needs only $q$ and the model\\ $\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$, which we wrote
   \end{minipage}\hfill
@@ -1051,15 +1087,25 @@
 \end{frame}
 
 \begin{frame}{Complexity minus accuracy}
+  \centering
+  \vspace{1em}{\small the same $F$, split the other way:}\\[0.6em]
+  {\large $\displaystyle\int q\ln\frac{q}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s
+   = \int q\ln\frac{q}{\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s - \int q\ln \textcolor{good!70!black}{p(o\given s)}\,\mathrm{d}s$}
   \begin{center}\large
     $F[q,o] = \underbrace{\textcolor{cool!80!black}{\KL{q(s)}{p(s)}}}_{\text{complexity: far from the prior}}
              \;-\; \underbrace{\textcolor{good!70!black}{\E_q\!\left[\ln p(o\given s)\right]}}_{\text{accuracy: explains the reading}}$
   \end{center}
-  \centering
-  \includegraphics[width=0.7\textwidth]{d1_complexity.pdf}
   \vfill
-  {\footnotesize\color{muted} Units: nats ($-\ln p$). A difference of $k$ nats is odds of $e^k$ to 1.}
-  \lesson{The wall again: the belief settles at 2.52, where the two pulls balance.}
+  \lesson{Complexity: how far the belief moved from the prior. Accuracy: how well it fits $o$.}
+\end{frame}
+
+\begin{frame}{$F$ as the energy of two springs: the wall}
+  \centering
+  \includegraphics[width=0.68\textwidth]{d1_complexity.pdf}
+
+  {\footnotesize\color{muted} spring energy $=\frac12\,$stiffness$\,\times\,$stretch$^2$, stiffness = precision (4 and 25);\; inaccuracy $= -$accuracy.}
+  \vfill
+  \lesson{$F$ is the energy of two springs: the belief rests where they balance, near the stiffer one.}
 \end{frame}
 
 % removed for now (user, 2026-11-15); bring back by deleting the \iffalse/\fi
@@ -1076,7 +1122,7 @@
 \fi
 
 % =================================================================================================
-\section{The Laplace approximation}
+\section{\texorpdfstring{The Laplace approximation\\[0.4em]{\normalsize\mdseries\color{muted} We need a simple $q$}}{The Laplace approximation}}
 % =================================================================================================
 
 \begin{frame}{Laplace: read a Gaussian belief off the bottom of the bowl}

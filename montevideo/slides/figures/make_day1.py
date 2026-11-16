@@ -235,27 +235,43 @@ axes[2].text(0.85, 0.75, f"${post_m:.2f}\\pm{np.sqrt(post_v):.2f}$ m", fontsize=
 fig.tight_layout(w_pad=0.6); fig.savefig(OUT / "d1_bayes_ops.pdf"); plt.close(fig)
 print(f"bayes ops: evidence p(o=2.6) = {evidence:.3f}")
 
-# 8. complexity against inaccuracy along the belief's mean (the Kalman example, r = 0.2^2).
+# 8. complexity against inaccuracy along the belief's mean (wall example); constants dropped so each bowl is 0 at its anchor.
 m, p_, y, r = mu_s, sd_s ** 2, o_star, sd_o ** 2
-Sig = 1 / (1 / p_ + 1 / r)
-mus = np.linspace(1.9, 2.85, 400)
-complexity = 0.5 * ((Sig + (mus - m) ** 2) / p_ - 1 + np.log(p_ / Sig))
-inaccuracy = ((y - mus) ** 2 + Sig) / (2 * r)                     # -E_q ln p(o|s), constant dropped
+mus = np.linspace(1.8, 2.85, 400)
+complexity = 0.5 * (mus - m) ** 2 / p_            # 0 at the prior mean
+inaccuracy = 0.5 * (y - mus) ** 2 / r             # 0 at the reading
 F = complexity + inaccuracy
 mu_star = (m / p_ + y / r) / (1 / p_ + 1 / r)
 assert abs(mus[np.argmin(F)] - mu_star) < 0.01
-fig, ax = plt.subplots(figsize=(7.0, 3.0))
-ax.plot(mus, complexity, color=COOL, lw=2, ls="--"); ax.plot(mus, inaccuracy, color=GOOD, lw=2, ls=":")
-ax.plot(mus, F, color=ACCENT, lw=2.5)
-ax.axvline(mu_star, color=MUTED, lw=0.8)
-ax.plot(mu_star, F.min(), "o", color=ACCENT, ms=8, mec="white", mew=1.5, zorder=5)
-ax.text(mu_star + 0.02, 5.4, f"belief {mu_star:.2f}", ha="left", fontsize=13, color="0.25")
-ax.text(1.94, 0.12, "complexity", fontsize=13, color=COOL)
-ax.text(2.64, 0.12, "inaccuracy", fontsize=13, color=GOOD)
-ax.text(2.24, 3.6, r"$F$", fontsize=16, color=ACCENT)
-ax.set_xlim(1.9, 2.85); ax.set_ylim(0, 6)
-ax.set_xlabel(r"belief mean $\mu$ (m): prior 2.0, reading 2.6", fontsize=13); ax.set_ylabel("nats", fontsize=13); ax.tick_params(labelsize=11)
-fig.tight_layout(); fig.savefig(OUT / "d1_complexity.pdf"); plt.close(fig)
+def spring(ax_, x0, x1, y0, n, amp, **kw):
+    xs_ = np.linspace(x0, x1, 2 * n + 1); ys_ = y0 + amp * np.array([0] + [(-1) ** k for k in range(2 * n - 1)] + [0])
+    ax_.plot(xs_, ys_, **kw)
+
+
+fig, (ax0, ax) = plt.subplots(2, 1, figsize=(7.0, 4.3), sharex=True, gridspec_kw={"height_ratios": (1.0, 2.3)})
+# top: the belief as a block held by two springs, a soft one to the odometry estimate and a stiff one to the LiDAR reading
+ax0.axis("off"); ax0.set_ylim(-1, 1.6)
+spring(ax0, m, mu_star - 0.02, 0, 7, 0.35, color=COOL, lw=1.4)
+spring(ax0, mu_star + 0.02, y, 0, 4, 0.35, color=GOOD, lw=3.2)
+for x_, c_ in ((m, COOL), (y, GOOD)):
+    ax0.plot([x_, x_], [-0.6, 0.6], color=c_, lw=4)
+ax0.add_patch(plt.Rectangle((mu_star - 0.02, -0.35), 0.04, 0.7, color=ACCENT, zorder=5))
+ax0.text(m, 0.85, "odometry says 2.0 m\n(±0.5: soft spring)", color=COOL, ha="center", va="bottom", fontsize=11)
+ax0.text(y + 0.02, 0.85, "LiDAR says 2.6 m\n(±0.2: stiff spring)", color=GOOD, ha="center", va="bottom", fontsize=11)
+ax0.text(mu_star - 0.03, -0.75, "belief", color=ACCENT, ha="right", va="center", fontsize=11)
+# bottom: the energy in each spring and their sum
+ax.plot(mus, complexity, color=COOL, lw=2.5, ls="--"); ax.plot(mus, inaccuracy, color=GOOD, lw=2.5, ls=":")
+ax.plot(mus, F, color=ACCENT, lw=3)
+ax.axvline(mu_star, color=ACCENT, lw=0.8, ls=":")
+ax.plot(mu_star, F.min(), "o", color=ACCENT, ms=10, mec="white", mew=1.5, zorder=7)
+ax.text(mu_star - 0.02, 3.9, f"belief {mu_star:.2f}:\nbottom of $F$", fontsize=12, color=ACCENT, va="top", ha="right")
+ax.text(1.83, 0.75, "complexity:\nsoft-spring energy", fontsize=12, color=COOL, va="bottom")
+ax.text(2.84, 3.9, "inaccuracy:\nstiff-spring energy", fontsize=12, color=GOOD, ha="right", va="top")
+ax.text(2.2, 2.55, r"$F$ = total", fontsize=14, color=ACCENT)
+ax.set_xlim(1.8, 2.85); ax.set_ylim(0, 4.0); ax.set_yticks([])
+ax.set_xticks([2.0, 2.2, 2.4, 2.6, 2.8]); ax.tick_params(labelsize=11)
+ax.set_xlabel(r"distance to the wall $\mu$ (m)", fontsize=12); ax.set_ylabel("energy (nats)", fontsize=12)
+fig.tight_layout(h_pad=0.2); fig.savefig(OUT / "d1_complexity.pdf"); plt.close(fig)
 
 # 9. Laplace: the bottom of the bowl is the mean, its curvature the precision.
 x = np.linspace(-1.6, 1.6, 500)
