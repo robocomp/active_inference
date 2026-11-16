@@ -165,6 +165,7 @@ static void lidar_only_saturates()
     // (ruling T3-a') A front view makes Id large on every diagonal but near-singular along coupled directions ((cy,h), (cx,w)),
     // so a per-DOF x10/x1 test cannot hold. Two statements instead: (2) the model, (3) the data-dominated whitened directions.
     // (2) posterior Sigma == (Sigma_pred^-1 + Ieff_k)^-1, Ieff_k = saturate(Id_k, bd_k, Sc^-1) at the converged state.
+    Mat6 Id1 = Mat6::Zero(); int Wn09[2] = {0, 0};
     for (int k : {1, 10})
     {
         const CountableBelief& b = (k == 1) ? a1 : a10;
@@ -175,6 +176,18 @@ static void lidar_only_saturates()
         const Vec6 sck = invdiag(b, fk);
         const Mat6 Ieff = rc::ai::saturate<6>(Idk, bdk, Mat6(sck.asDiagonal())).first;
         const Mat6 model = (pred.covariance().inverse() + Ieff).inverse();
+        if (k == 1) Id1 = Idk;
+        {   // the saturation statement: W_k = Sc^1/2 Ieff_k Sc^1/2 has every eigenvalue <= 1 (ruling T3-a'')
+            const Vec6 hf = sck.cwiseInverse().cwiseSqrt();
+            const Mat6 W = hf.asDiagonal() * Ieff * hf.asDiagonal();
+            const auto ev = Eigen::SelfAdjointEigenSolver<Mat6>(0.5f * (W + W.transpose())).eigenvalues();
+            int n09 = 0; for (int j = 0; j < 6; ++j) if (ev(j) >= 0.9f) ++n09;
+            std::printf("  saturates: x%-2d whitened Ieff eigenvalues:", k);
+            for (int j = 0; j < 6; ++j) std::printf(" %.5f", ev(j));
+            std::printf("   (%d >= 0.9)\n", n09);
+            CHECK(ev.maxCoeff() <= 1.0f + 1e-4f);
+            Wn09[k == 1 ? 0 : 1] = n09;
+        }
         for (int i = 0; i < 6; ++i)
         {
             const float rel = std::abs(b.covariance()(i, i) / model(i, i) - 1.0f);
@@ -185,22 +198,24 @@ static void lidar_only_saturates()
     // per-DOF diagonal ratios (printed only)
     for (int i = 0; i < 6; ++i)
         std::printf("  saturates: diag %d  x10/x1 = %.4f\n", i, a10.covariance()(i, i) / a1.covariance()(i, i));
-    // (3) whitened eigen-directions of M = Sc^1/2 Id_10 Sc^1/2 with eigenvalue > 10
+    // (ii) non-vacuity: at least as many whitened-Ieff eigenvalues reach 0.9 as Sc^1/2 Id_1 Sc^1/2 has eigenvalues > 10.
     {
         const Vec6 half = sc.cwiseInverse().cwiseSqrt();                      // diag of Sc^1/2
+        const Mat6 M1 = half.asDiagonal() * Id1 * half.asDiagonal();
+        const auto ev1 = Eigen::SelfAdjointEigenSolver<Mat6>(0.5f * (M1 + M1.transpose())).eigenvalues();
+        int n10 = 0; for (int j = 0; j < 6; ++j) if (ev1(j) > 10.0f) ++n10;
+        std::printf("  saturates: Sc^1/2 Id_1 Sc^1/2 has %d eigenvalues > 10; whitened Ieff has %d (x1) / %d (x10) >= 0.9\n", n10, Wn09[0], Wn09[1]);
+        CHECK(n10 >= 1);
+        CHECK(Wn09[0] >= n10 and Wn09[1] >= n10);
+        // information only: posterior ratios along the whitened Id_10 directions
         const Mat6 M = half.asDiagonal() * Id * half.asDiagonal();
         Eigen::SelfAdjointEigenSolver<Mat6> es(0.5f * (M + M.transpose()));
-        int n_dir = 0;
         for (int j = 5; j >= 0; --j)
         {
-            const float lam = es.eigenvalues()(j);
             Vec6 u = half.cwiseProduct(es.eigenvectors().col(j)); u.normalize();
-            const float rr = (u.dot(a10.covariance() * u)) / (u.dot(a1.covariance() * u));
-            const bool dom = lam > 10.0f;
-            std::printf("  saturates: whitened eig %.3e  direction x10/x1 = %.4f  %s\n", lam, rr, dom ? "(asserted)" : "(weak, not asserted)");
-            if (dom) { ++n_dir; CHECK(std::abs(rr - 1.0f) < 0.05f); }
+            std::printf("  saturates: (info) whitened Id_10 eig %.3e  posterior direction x10/x1 = %.4f\n", es.eigenvalues()(j),
+                        (u.dot(a10.covariance() * u)) / (u.dot(a1.covariance() * u)));
         }
-        CHECK(n_dir >= 1);
     }
 }
 
