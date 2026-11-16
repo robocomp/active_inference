@@ -1035,6 +1035,9 @@ PoseDriftTimeS = 115.0
 # facing_yaw_to_theta), which requires room_concept from THIS branch (afford_calib publishes bearing + pi/2); and the
 # helios far floor is cut from the contact band (only the policy reads it).
 Enabled = true
+# The HYBRID (2026-11-16, owner): a plain PLACE is the spline chain's (planner -> spline -> plain tracker, chain monitors);
+# a tight stretch is handed to the policy as an EPISODE; recovery re-plans with failure marks or WAITS. Needs ChainMonitor.Enabled (default true).
+HybridChain = true
 # The two stated risk levels (local_policy.h PolicyParams): acceptable P(contact) per Drive decision; a Release only if
 # more likely contact-free than not.
 RiskEps = 0.01
