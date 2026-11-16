@@ -11,7 +11,7 @@ LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock
 if [ -s $LOCK ] && ps -p $(cat $LOCK) >/dev/null 2>&1; then echo "tour lock held by $(cat $LOCK)"; exit 3; fi
 echo $$ > $LOCK
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$RUN/logs
-export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build}   # env WT overrides (door-memory A/B)
+export WT=${WT:-$B}   # env WT overrides (door-memory A/B)
 export WT_AGENTS="controller door_concept room_concept residual_concept ltsm_agent"
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
 RC_CFG=$WT/room_concept/etc/config.toml
@@ -45,7 +45,7 @@ now_ms() { date +%s%3N; }
 nl() { wc -l < $L/$1.log 2>/dev/null || echo 0; }
 # GROUND TRUTH at 1 Hz (as warm_start_tour.sh): wall ms, Webots pose, every agent log's line count
 GT=crossing/$RUN/gt_pose.tsv; printf 't_ms\tx\ty\tyaw\troom_concept\tltsm_agent\tdoor_concept\tcontroller\n' > $GT
-( while [ -f $LOCK ]; do
+( while [ "$(cat $LOCK 2>/dev/null)" = "$$" ]; do
     p=$(python3 scripts/tp.py get 2>/dev/null | tail -1 | awk '{print $1"\t"$2"\t"$5}')
     [ -n "$p" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' $(now_ms) "$p" $(nl room_concept) $(nl ltsm_agent) $(nl door_concept) $(nl controller) >> $GT
     sleep 1
