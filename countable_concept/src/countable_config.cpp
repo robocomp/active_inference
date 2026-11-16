@@ -441,6 +441,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "Each cycle carve the LiDAR sweep against the bed footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob");
     out.existence_carve_parts     = getb("Model.ExistenceCarveParts", false,
             "LiDAR existence carve against the class's composed parts (shape.part + back panel) instead of the solid fitted box");
+    out.lidar_measures_on_gated   = getb("Model.LidarMeasuresOnGated", false,
+            "camera attributes, LiDAR measures (spec 2026-11-15 lidar-measures §7c): persistent shared errors + class prior once, mask-attributed LiDAR-only updates on gated cycles");
     out.existence_removal_prob    = getf("Model.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when L < log(p/(1−p))");
     out.existence_out_of_room_gain = getf("Model.ExistenceOutOfRoomGain", 1.5f,

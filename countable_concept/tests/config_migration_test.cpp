@@ -132,7 +132,9 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
     const std::set<std::string> excluded = {word + "Model.HeadboardHeightM", word + "Model.HeadboardThickM"};
     // keys born after the migration base (class existence, spec 2026-11-14), not renames of an old one
     std::set<std::string> produced = {"Concept.Class", "Model.ClassAltStdM", "Model.BirthHeightNoiseM", "Model.BirthHeightOutlierFrac",
-                                      "Tracker.BirthAdmitPlausibility"};   // final review I1: admission gate off
+                                      "Tracker.BirthAdmitPlausibility",    // final review I1: admission gate off
+                                      "Model.ExistenceCarveParts",         // carve-parts (2026-11-15), no old key
+                                      "Model.LidarMeasuresOnGated"};       // lidar-measures (spec 2026-11-15 §7c), no old key
     // keys removed by the class factor (spec 2026-11-14 countable class existence): the plaus_evidence accumulator's
     // clamp, its tanh gain into the existence log-odds, and the shape LLR's alternative footprint (class_log_evidence
     // reads the manifest's class prior and Model.ClassAltStdM instead). Present in the old config, ABSENT in the new.

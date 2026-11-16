@@ -325,6 +325,10 @@ struct CountableConfig
     // deletes furniture); enable to replace merge-only removal.
     bool  existence_removal_enabled = false;
     bool  existence_carve_parts     = false;  // LiDAR carve against the class's composed parts, not the solid fitted box
+    // Camera attributes, LiDAR measures (spec 2026-11-15 lidar-measures §7c, rev 3): the belief carries persistent shared
+    // errors (CountableBeliefParams::persistent), counts the class prior once, and on a GATED camera cycle with an assigned
+    // mask runs a LiDAR-only update whose rays are weighted by the mask's membership. false ⇒ byte-identical to before.
+    bool  lidar_measures_on_gated   = false;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
     float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and
