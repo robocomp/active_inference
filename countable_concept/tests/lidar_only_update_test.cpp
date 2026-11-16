@@ -162,18 +162,46 @@ static void lidar_only_saturates()
         std::printf("  saturates: whitened min eig of (Sigma_post - bound) = %.4f\n", lmin);
         CHECK(lmin > -0.01f);
     }
-    // The x10/x1 ratio is asserted only on data-dominated DOFs (raw Id_ii of the x10 frame above 10 * Sc^-1_ii); the others
-    // (w, h under a one-sided view) are prior/process-noise dominated and are printed only (ruling T3-a).
-    int n_dom = 0;
-    for (int i = 0; i < 6; ++i)
+    // (ruling T3-a') A front view makes Id large on every diagonal but near-singular along coupled directions ((cy,h), (cx,w)),
+    // so a per-DOF x10/x1 test cannot hold. Two statements instead: (2) the model, (3) the data-dominated whitened directions.
+    // (2) posterior Sigma == (Sigma_pred^-1 + Ieff_k)^-1, Ieff_k = saturate(Id_k, bd_k, Sc^-1) at the converged state.
+    for (int k : {1, 10})
     {
-        const float r = a10.covariance()(i, i) / a1.covariance()(i, i);
-        const bool dom = Id(i, i) > 10.0f * sc(i);
-        std::printf("  saturates: diag %d  x10/x1 = %.4f  (raw Id %.3e vs 10 Sc^-1 %.3e: %s)\n", i, r, Id(i, i), 10.0f * sc(i),
-                    dom ? "data-dominated, asserted" : "not asserted");
-        if (dom) { ++n_dom; CHECK(std::abs(r - 1.0f) < 0.05f); }
+        const CountableBelief& b = (k == 1) ? a1 : a10;
+        const CountableFrame& fk = (k == 1) ? f1 : f10;
+        Mat6 Idk = Mat6::Zero(); Vec6 bdk = Vec6::Zero();
+        CountableBelief tmp = b;
+        tmp.accumulate_extra(b.state(), fk, Idk, bdk);
+        const Vec6 sck = invdiag(b, fk);
+        const Mat6 Ieff = rc::ai::saturate<6>(Idk, bdk, Mat6(sck.asDiagonal())).first;
+        const Mat6 model = (pred.covariance().inverse() + Ieff).inverse();
+        for (int i = 0; i < 6; ++i)
+        {
+            const float rel = std::abs(b.covariance()(i, i) / model(i, i) - 1.0f);
+            std::printf("  saturates: x%-2d diag %d  Sigma %.4e  model (Sp^-1+Ieff)^-1 %.4e  rel %.2e\n", k, i, b.covariance()(i, i), model(i, i), rel);
+            CHECK(rel < 0.01f);
+        }
     }
-    CHECK(n_dom >= 1);                                                // non-vacuous
+    // per-DOF diagonal ratios (printed only)
+    for (int i = 0; i < 6; ++i)
+        std::printf("  saturates: diag %d  x10/x1 = %.4f\n", i, a10.covariance()(i, i) / a1.covariance()(i, i));
+    // (3) whitened eigen-directions of M = Sc^1/2 Id_10 Sc^1/2 with eigenvalue > 10
+    {
+        const Vec6 half = sc.cwiseInverse().cwiseSqrt();                      // diag of Sc^1/2
+        const Mat6 M = half.asDiagonal() * Id * half.asDiagonal();
+        Eigen::SelfAdjointEigenSolver<Mat6> es(0.5f * (M + M.transpose()));
+        int n_dir = 0;
+        for (int j = 5; j >= 0; --j)
+        {
+            const float lam = es.eigenvalues()(j);
+            Vec6 u = half.cwiseProduct(es.eigenvectors().col(j)); u.normalize();
+            const float rr = (u.dot(a10.covariance() * u)) / (u.dot(a1.covariance() * u));
+            const bool dom = lam > 10.0f;
+            std::printf("  saturates: whitened eig %.3e  direction x10/x1 = %.4f  %s\n", lam, rr, dom ? "(asserted)" : "(weak, not asserted)");
+            if (dom) { ++n_dir; CHECK(std::abs(rr - 1.0f) < 0.05f); }
+        }
+        CHECK(n_dir >= 1);
+    }
 }
 
 static void lidar_only_repeated_sweeps()
