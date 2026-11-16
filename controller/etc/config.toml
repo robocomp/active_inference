@@ -698,14 +698,12 @@ PoseXYStdGrowthPerMps = 0.1
 PoseThetaStdGrowthPerRps = 1.0
 AdvRotationCouplingExponent = 0.5
 TemporaryObstacleHistoryScans = 5
-TemporaryObstacleOcclusionDepth = 0.35
 
 # Min lidar points for a cluster to be admitted as a temporary obstacle (both the total-unexplained
 # early-bail and the per-cluster gate). 12 was too high — a thin chair at range sits right on it, so
 # obstacle creation was intermittent/late and it drove through on a miss (proximity CSV: n_obst stayed
 # 0 through the approach, obstacle only appeared at 0.73 m). 6 makes small objects cluster reliably and
 # earlier; the tracker's existence log-odds filter prunes transient false positives.
-TemporaryObstacleMinPoints = 6
 
 # LiDAR height band (m, ≈ height above floor). Min is a floor-plane reject cutoff: the lowest beam
 # grazes the floor into a dense ring at ~0.11-0.18 m, so this MUST stay above it (0.20 known-good).
@@ -724,24 +722,11 @@ TemporaryObstacleMinPoints = 6
 # The escape maneuver (reverse + turn out) still runs; only the map pollution is gone.
 # residual_concept is now the sole obstacle source. Set back to true if it is down — with both off the
 # controller has NO unmodelled-obstacle awareness and will drive into anything the concept agents don't model.
-ObstacleCreationEnabled = false
 TemporaryObstacleMinHeight = 0.20
 TemporaryObstacleMaxHeight = 1.8
 
 # Same band for the proactive unmodelled-obstacle scan (room frame).
-UnmodelledScanMinZ = 0.10
-UnmodelledScanMaxZ = 1.50
-TemporaryObstacleRobustLoss = "huber"
-TemporaryObstacleRobustLossScale = 0.08
-TemporaryObstacleExistenceInitLogOdds = 1.6
-TemporaryObstacleExistenceMinLogOdds = -4.0
-TemporaryObstacleExistenceMaxLogOdds = 4.0
 TemporaryObstacleExistenceRemoveThresholdLogOdds = -2.2
-TemporaryObstacleExistenceObservationBias = 0.30
-TemporaryObstacleExistenceSupportGain = 0.06
-TemporaryObstacleExistenceRememberedGain = 0.02
-TemporaryObstacleExistenceWeakMissPenalty = 0.04
-TemporaryObstacleExistenceAbsencePenalty = 0.65
 # (GoalClearanceRelaxDist / GoalObstacleMargin / GoalClearanceMinRatio /
 # StraightSpeedHeadingThreshold / StraightSpeedClearanceMargin / StraightSpeedMinGoalDist
 # were here. REMOVED 2026-09-09: all six loaded into TrackerParams and were read only by the

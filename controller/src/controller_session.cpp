@@ -6040,16 +6040,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         current_plan_.reset();
         plan_spline_valid_ = false;
     }
-    if (!params_ || params_->obstacle_creation_enabled)
-        obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
-    // Proactive scene-level "model anything the concept agents don't" is now owned by the dedicated
-    // `residual_concept` agent (the residual/null concept: LiDAR residual-filter → 3D DBSCAN → box belief
-    // → "obstacle" nodes). Its obstacles arrive via the graph and are consumed by read_obstacle_polygons
-    // exactly like the reactive ones, so the planner still avoids them. HYBRID phase: the controller keeps
-    // only the fast in-loop REACTIVE blockage reflex below (create_temporary_lidar_obstacle) for
-    // collision safety with zero DDS latency; the proactive full-scene scan is DISABLED here. Re-enable
-    // by uncommenting the call if residual_concept is not running.
-    // obstacle_tracker.scan_for_unmodelled_obstacles(time_source(), robot_pose, path_controller);
+    // Unmodelled obstacles are residual_concept's: they arrive through the graph (read_obstacle_polygons). The controller
+    // creates none of its own.
 
     // ── THE PANEL MUST NAME THE AFFORDANCE IN EVERY STATE, INCLUDING THE ONES THAT RETURN EARLY ──
     // ★★★MEASURED 2026-08-24: the window's first row read "no affordance yet" for the whole of an
