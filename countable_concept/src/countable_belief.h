@@ -444,13 +444,16 @@ public:
     const VecKd&  latent_mean() const { return b_; }
     VecKd         latent_std()  const { return P_.diagonal().tail<K>().cwiseMax(0.0).cwiseSqrt(); }
     const Mat20d& joint_covariance() const { return P_; }
-    // The relational class anchors (wall flush/parallel, room axis) have entered this belief (first admissible camera
-    // update). A recall (LTOM/LTSM) restores a belief with it set; sanitize_covariance clears it (the prior re-enters once).
-    bool prior_added() const { return prior_added_; }
-    void set_prior_added(bool v) { prior_added_ = v; }
+    // The relational class anchors, ONE FLAG PER ANCHOR (ruling T6-1): wall flush/parallel and room axis each enter once, on
+    // the first admissible camera update whose frame stages their context (f.wall.ok / f.room_axis_ok); the flag is set only
+    // then, so an object first seen without a wall still gets the wall prior when the wall becomes known. A recall
+    // (LTOM/LTSM) restores a belief with them set; sanitize_covariance clears both (the prior re-enters once).
+    bool wall_prior_added() const { return wall_prior_added_; }
+    bool axis_prior_added() const { return axis_prior_added_; }
+    void set_prior_added(bool wall, bool axis) { wall_prior_added_ = wall; axis_prior_added_ = axis; }
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
     // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the ray-sets; θ-only = (2b), (2c) and,
-    // on the first admissible camera update only (not prior_added_), wall flush/parallel (1) + the room axis. Each channel
+    // on an admissible camera update whose anchor is not yet in (per-anchor flags), wall flush/parallel (1) / the room axis. Each channel
     // is linearised at its own state: s_th = θ_k, s_cam = θ_k + E b̄_chain + b̄_cam, s_L = θ_k + E b̄_chain + b̄_L.
     void accumulate_channels(const CountableBeliefState& s_th, const CountableBeliefState& s_cam,
                              const CountableBeliefState& s_L, const CountableFrame& f,
@@ -678,13 +681,14 @@ private:
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
 
     // Persistent joint state (params.persistent): P_ over x = (θ, b), b_ the latent mean, sig_prev_ the σ each latent was
-    // last predicted at (0 ⇒ never measured: the next predict draws it as a new source), prior_added_ = the relational
+    // last predicted at (0 ⇒ never measured: the next predict draws it as a new source), wall_/axis_prior_added_ = the relational
     // anchors have entered. Sigma_ mirrors P_'s θθ block in float for every reader of covariance().
     Mat20d P_ = Mat20d::Zero();
     VecKd  b_ = VecKd::Zero();
     VecKd  sig_prev_ = VecKd::Zero();
     bool   joint_init_  = false;
-    bool   prior_added_ = false;
+    bool   wall_prior_added_ = false;   // flush + parallel have entered (T6-1)
+    bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
     std::vector<Eigen::Matrix<float, 6, 1>> dbg_iterates_;
     Eigen::Matrix<float, 6, 6> dbg_Pbar_tt_ = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_th_   = Eigen::Matrix<float, 6, 6>::Zero();

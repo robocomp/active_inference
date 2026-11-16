@@ -143,7 +143,7 @@ static void rho0_equals_engine(bool camera)
     // legitimately live around the converged state, and it enters unsaturated here but saturated in the engine.
     p.wall_no_cross_precision = 0.0f;
     CountableBelief fx = make_belief(0.05f, -0.04f, 0.03f, p);
-    fx.set_prior_added(true);
+    fx.set_prior_added(true, true);
     CountableFrame f = camera ? camera_frame() : lidar_frame(two_face_rays());
     set_latents(f, 0.0f, 2.5e-4f);
     // the summed marginals of what the channel measures: chain (cx, cy) + the channel's own latent
@@ -189,28 +189,87 @@ static void rho0_equals_engine(bool camera)
 static void prior_added_once()
 {
     // (2c) no-cross off so the θ-only channel holds exactly the relational anchors: the flush truth box keeps the one-sided
-    // term live near convergence (it is every-frame by design, and is not what this test is about).
+    // term live near convergence (it is every-frame by design, and is not what this test is about). Ruling T6-1: one flag
+    // per anchor, each set only on an admissible camera update that stages its context.
     CountableBeliefParams p = params();
     p.wall_no_cross_precision = 0.0f;
     CountableBelief b = make_belief(0.05f, -0.04f, 0.03f, p);
     CountableFrame fl = lidar_frame(two_face_rays()); set_latents(fl, 1.0f);
     CountableFrame fc = camera_frame();               set_latents(fc, 1.0f);
+    CountableFrame fn = fc; fn.wall = WallRef{};       // same camera frame, no wall staged (room axis still staged)
     b.update(fl);
     const float n0 = b.dbg_Id_th().norm();
-    std::printf("  prior_added_once: after LiDAR-only prior_added=%d  |Id_th| %.3e\n", int(b.prior_added()), n0);
-    CHECK(not b.prior_added());
+    std::printf("  prior_added_once: after LiDAR-only wall=%d axis=%d  |Id_th| %.3e\n", int(b.wall_prior_added()), int(b.axis_prior_added()), n0);
+    CHECK(not b.wall_prior_added() and not b.axis_prior_added());
     CHECK(n0 == 0.0f);
+    b.update(fn);
+    const Mat6 I0 = b.dbg_Id_th();
+    std::printf("  prior_added_once: camera, no wall: wall=%d axis=%d  Id_th(1,1) %.3e (flush)  Id_th(5,5) %.3e (axis)  |Id_th| %.3e\n",
+                int(b.wall_prior_added()), int(b.axis_prior_added()), I0(1, 1), I0(5, 5), I0.norm());
+    CHECK(not b.wall_prior_added() and b.axis_prior_added());
+    CHECK(I0(5, 5) > 0.0f);
+    {   // only the axis term: (5,5) and nothing else
+        Mat6 rest = I0; rest(5, 5) = 0.0f;
+        CHECK(rest.norm() == 0.0f);
+    }
     b.update(fc);
     const Mat6 I1 = b.dbg_Id_th();
-    std::printf("  prior_added_once: after camera #1 prior_added=%d  |Id_th| %.3e  Id_th(1,1) %.3e (flush)  Id_th(5,5) %.3e (axis+parallel)\n",
-                int(b.prior_added()), I1.norm(), I1(1, 1), I1(5, 5));
-    CHECK(b.prior_added());
-    CHECK(I1(1, 1) > 0.0f and I1(5, 5) > 0.0f);
+    std::printf("  prior_added_once: camera, wall staged: wall=%d axis=%d  Id_th(1,1) %.3e (flush)  Id_th(5,5) %.3e (parallel)\n",
+                int(b.wall_prior_added()), int(b.axis_prior_added()), I1(1, 1), I1(5, 5));
+    CHECK(b.wall_prior_added() and b.axis_prior_added());
+    CHECK(I1(1, 1) > 0.0f);
     b.update(fc);
     const float n2 = b.dbg_Id_th().norm();
-    std::printf("  prior_added_once: after camera #2 |Id_th| %.3e\n", n2);
+    std::printf("  prior_added_once: camera, wall staged again: |Id_th| %.3e\n", n2);
     CHECK(n2 == 0.0f);
-    CHECK(b.prior_added());
+}
+
+// Under persistent, (2c) wall no-cross is a θ-only term every frame: a belief whose back face is 3 cm THROUGH the wall is
+// pushed back toward the legal side, by a camera update and by a LiDAR-only update. Isolated: the relational anchors are
+// already in (flags set), the depth boost is off, and both views look at the LEFT face (x = const), which says nothing about
+// the depth direction (cy, h); control = the same update with (2c) off.
+static void no_cross_pushes_back_persistent()
+{
+    const float cy = 0.03f - 0.5f * tw;                                       // back face at y = +0.03 (wall at y = 0)
+    auto gap = [](const CountableBelief& b) { return 0.0f - (b.state().cy + 0.5f * b.state().h); };
+    CountableFrame fcam;                                                      // left face only, truth box
+    for (int i = 0; i < 8; ++i) for (int j = 0; j < 10; ++j)
+        fcam.points.emplace_back(tx - 0.5f * tw, ty - 0.5f * tw + tw * (i + 0.5f) / 8.0f, tH * (j + 0.5f) / 10.0f);
+    fcam.R.assign(fcam.points.size(), params().sigma_base_m * params().sigma_base_m);
+    stage_wall(fcam);
+    CountableFrame flid = lidar_frame(scene_rays(Eigen::Vector3f(tx - 0.5f * tw - 1.5f, ty, 1.1075f), ty, 0.10f));
+    for (const bool camera : {true, false})
+    {
+        CountableFrame f = camera ? fcam : flid; set_latents(f, 1.0f);
+        float g[2], th = 0.0f;
+        float g_off = 0.0f;
+        {   // diagnostic: the flag-off path on the same update
+            CountableBeliefParams p = params(); p.persistent = false; p.depth_unobs_precision = 0.0f;
+            CountableBelief b(CountableBeliefState{tx, cy, tH, tw, tw, 0.0f}, p);
+            b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+            b.update(f);
+            g_off = gap(b);
+        }
+        for (const bool on : {true, false})
+        {
+            CountableBeliefParams p = params();
+            p.depth_unobs_precision = 0.0f;
+            if (not on) p.wall_no_cross_precision = 0.0f;
+            CountableBelief b(CountableBeliefState{tx, cy, tH, tw, tw, 0.0f}, p);
+            b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+            b.set_prior_added(true, true);
+            b.update(f);
+            g[on ? 0 : 1] = gap(b);
+            if (on) th = b.dbg_Id_th().norm();
+        }
+        std::printf("  no_cross (%s, %zu data): start gap -0.03000 ; after one update gap %.5f with (2c), %.5f without ; |Id_th| %.3e ; flag-off path %.5f\n",
+                    camera ? "camera" : "LiDAR-only", camera ? f.points.size() : f.lidar.endpoints.size(), g[0], g[1], th, g_off);
+        // camera: the view says nothing about depth, so the whole move is (2c)'s and it is toward the legal side. LiDAR-only:
+        // this sweep's rays (left face + top, belief 3 cm off) themselves push the box deeper; (2c) must counter that push.
+        if (camera) CHECK(g[0] > -0.03f + 0.005f);
+        CHECK(g[0] - g[1] > 0.005f);          // the (2c)-attributable move toward the legal side
+        CHECK(th > 0.0f);
+    }
 }
 
 static void aged_belief_returns_to_class_P()
@@ -264,6 +323,18 @@ static void wall_behind_does_not_pull()
     }
     CHECK(std::isfinite(g0) and std::isfinite(g01));
     CHECK(std::abs(g01 - g0) < 0.005f);
+    {   // self-control: the SAME scene on the flag-off path at wall weight 1 moves the gap (Task 3 recorded +0.209 m), so the
+        // test can see a pull when there is one
+        CountableBeliefParams p = params(); p.persistent = false;
+        CountableBelief b(CountableBeliefState{tx, cy, tH, tw, tw, 0.0f}, p);
+        b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+        CountableFrame f = lidar_frame(r);
+        f.lidar.weights.assign(r.endpoints.size(), 1.0f);
+        for (int k = 0; k < 2000; ++k) b.update(f);
+        const float g = gap(b);
+        std::printf("    self-control (flag off, wall weight 1): gap %.5f m  diff vs persistent baseline %+.5f m\n", g, g - g0);
+        CHECK(std::abs(g - g0) > 0.01f);
+    }
 }
 
 static void physical_lidar_only_sigma_bounded()
@@ -345,7 +416,7 @@ static void sanitize_reseeds()
     CountableBelief b = make_belief();
     CountableFrame f = camera_frame(); set_latents(f, 1.0f); f.lidar = two_face_rays();
     b.update(f);
-    CHECK(b.prior_added());
+    CHECK(b.wall_prior_added() and b.axis_prior_added());
     b.joint_covariance_for_test()(0, 0) = std::numeric_limits<double>::quiet_NaN();
     b.sanitize_covariance();
     const auto& P = b.joint_covariance();
@@ -356,10 +427,10 @@ static void sanitize_reseeds()
                                       f.sig2_cam[4], f.sig2_cam[5], f.sig2_L[0], f.sig2_L[1], f.sig2_L[2], f.sig2_L[3], f.sig2_L[4], f.sig2_L[5]};
     for (int j = 0; j < 14; ++j) lat_ok = lat_ok and std::abs(P(6 + j, 6 + j) / double(m2[j]) - 1.0) < 1e-6;
     for (int r = 0; r < 20; ++r) for (int c = 0; c < 20; ++c) if (r != c) cross_ok = cross_ok and P(r, c) == 0.0;
-    std::printf("  sanitize: thetatheta = P %d ; latents = marginals %d ; cross 0 %d ; prior_added %d ; b = 0 %d\n",
-                int(th_ok), int(lat_ok), int(cross_ok), int(b.prior_added()), int(b.latent_mean().isZero(0.0)));
+    std::printf("  sanitize: thetatheta = P %d ; latents = marginals %d ; cross 0 %d ; wall/axis added %d/%d ; b = 0 %d\n",
+                int(th_ok), int(lat_ok), int(cross_ok), int(b.wall_prior_added()), int(b.axis_prior_added()), int(b.latent_mean().isZero(0.0)));
     CHECK(th_ok and lat_ok and cross_ok);
-    CHECK(not b.prior_added());
+    CHECK(not b.wall_prior_added() and not b.axis_prior_added());
     CHECK(b.latent_mean().isZero(0.0));
     CHECK(b.covariance().allFinite());
 }
@@ -429,6 +500,7 @@ int main()
     rho0_equals_engine(true);
     rho0_equals_engine(false);
     prior_added_once();
+    no_cross_pushes_back_persistent();
     aged_belief_returns_to_class_P();
     wall_behind_does_not_pull();
     physical_lidar_only_sigma_bounded();

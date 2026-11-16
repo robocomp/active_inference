@@ -707,11 +707,11 @@ void CountableBelief::accumulate_channels(const CountableBeliefState& s_th, cons
     // LIDAR: the ray-sets, through b_L.
     accumulate_rays(s_L, f, Id_L, bd_L);
     // θ-ONLY, unsaturated: the biases cannot absorb a wall crossing or the class's relational prior.
-    if (admissible and not prior_added_ and not size_prior_off_)
-    {   // the relational class prior, once: flush/parallel (its anchor share) and the room axis
+    // The relational class prior, once PER ANCHOR (T6-1): each only when its context is staged on this admissible frame.
+    if (admissible and not size_prior_off_ and f.wall.ok and not wall_prior_added_)
         accumulate_wall(s_th, f, Id_th, bd_th, /*base*/ true, /*boost*/ false, /*parallel*/ true);
+    if (admissible and not size_prior_off_ and f.room_axis_ok and not axis_prior_added_)
         accumulate_room_axis(s_th, f, Id_th, bd_th);
-    }
     accumulate_short_height(s_th, Id_th, bd_th);
     accumulate_no_cross(s_th, f, Id_th, bd_th);
 }
@@ -727,7 +727,7 @@ void CountableBelief::ensure_joint()
 }
 
 // sanitize_covariance under persistent: the same self-sealing hazard, on P_. Re-seed θθ to the class P, each latent to its
-// last marginal (σ_prev²), cross terms 0, b = 0, and clear prior_added_ so the relational prior re-enters once.
+// last marginal (σ_prev²), cross terms 0, b = 0, and clear both anchor flags so the relational prior re-enters once.
 void CountableBelief::sanitize_joint()
 {
     ensure_joint();
@@ -739,7 +739,8 @@ void CountableBelief::sanitize_joint()
     P_.diagonal().head<N>() = prior_cov_diag().cast<double>();
     P_.diagonal().tail<K>() = sig_prev_.cwiseProduct(sig_prev_);
     b_.setZero();
-    prior_added_ = false;
+    wall_prior_added_ = false;
+    axis_prior_added_ = false;
     Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
     omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();
     size_lik_ = {};
@@ -851,10 +852,16 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     b_ = b_post;
     Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
     dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
-    if (camera and not f.lidar_only) prior_added_ = true;              // the relational prior has entered, once
+    if (camera and not f.lidar_only)                                   // each relational anchor has entered, once
+    {
+        if (f.wall.ok)      wall_prior_added_ = true;
+        if (f.room_axis_ok) axis_prior_added_ = true;
+    }
 
     if (not camera) return 0.0f;
-    // Per-point energy at what the camera measures (θ + E b_chain + b_cam, posterior b), as the engine's surface energy.
+    // Per-point energy evaluated at what the camera MEASURES, θ + E b_chain + b_cam (posterior b), not at the state θ — the
+    // engine's surface energy, on the biased quantity. Diagnostic only: the fitter overwrites the returned value with
+    // mean_energy() at the state.
     const auto s_cam = CountableBeliefState::from_vec((state_.vec().cast<double>() + B_cam * b_).cast<float>());
     const float sig2 = sigma2();
     double energy = 0.0;
