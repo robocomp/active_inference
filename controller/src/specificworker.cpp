@@ -1427,7 +1427,6 @@ void SpecificWorker::load_params()
 			             "'mppi' was removed 2026-09-09.", mode);
 		path_controller_.set_control_mode(plain ? rc::TrajectoryController::ControlMode::PLAIN
 		                                        : rc::TrajectoryController::ControlMode::PD);
-		session_.set_route_tracker(plain, path_controller_.params.plain_rot_headroom);
 		if (plain)
 			std::println("[control] mode = PLAIN tracker (curvature FF + Frenet feedback; NO avoidance — "
 			             "the band and the planner own that)   (L={:.2f} m, T_lag={:.2f} s, g_dc={:.3f}, "

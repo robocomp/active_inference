@@ -233,7 +233,7 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
                     if (c.odo_valid and c.odo_v > 0.05f) r += std::format(", about {:.0f} s left", left / c.odo_v);
                     L.push_back(std::move(r));
                 }
-                else L.push_back(std::format("Route: {:.1f} m{}", c.route_len, c.route_on_mission ? " (mission)" : ""));
+                else L.push_back(std::format("Route: {:.1f} m{}", c.route_len, ""));
             }
             else if (c.no_route_for_ms > 0.f)
                 L.push_back(std::format("No route found for {:.1f} s.", c.no_route_for_ms * 1e-3f));

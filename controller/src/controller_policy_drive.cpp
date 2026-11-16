@@ -744,7 +744,6 @@ bool ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         if (step.finished)
         {
             mission_.stop("completed", time_source());
-            route_active_ = false;
             policy_route_index_ = -1;
             policy_reset();
             stop_here(rc::why::Cause::MissionDone, std::format("mission '{}' completed (local policy)", mission_.selected_name()));

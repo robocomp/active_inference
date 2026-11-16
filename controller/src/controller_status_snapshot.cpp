@@ -72,10 +72,8 @@ rc::ControllerStatusSnapshot ControllerSession::status_snapshot(const std::optio
     if (const auto curve = driven_curve(); curve.valid())
     {
         s.route_valid = true;
-        s.route_on_mission = curve.on_mission();
         s.route_len = curve.spline->length();
         if (chain_have_s_) { s.route_s_known = true; s.route_s = chain_s_prog_; }
-        else if (curve.on_mission()) { s.route_s_known = true; s.route_s = route_.progress(); }
         if (s.route_s_known and robot_pose.has_value())
         {
             const float sp = std::clamp(s.route_s, 0.f, s.route_len);

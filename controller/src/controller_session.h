@@ -261,8 +261,6 @@ public:
     // ROUTE mode: the tracker supplies its own turn rate from route curvature, so the curvature speed
     // limit must leave it headroom (see the note in route_speed_limit). Inert in PD/MPPI mode, which
     // have no feedforward to saturate.
-    void set_route_tracker(bool active, float rot_headroom)
-    { route_tracker_active_ = active; rot_headroom_ = std::clamp(rot_headroom, 0.1f, 1.0f); }
 
     void set_route_reverse(bool reverse) { route_reverse_ = reverse; }
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
@@ -559,8 +557,6 @@ private:
     // Base speed (room frame) for the contract stillness gate, plus the previous pose it differences.
     float base_speed_lin_ = 0.0f;                  // m/s   (EMA-smoothed)
     float base_speed_ang_ = 0.0f;                  // rad/s (EMA-smoothed)
-    bool  route_tracker_active_ = false;   // see set_route_tracker
-    float rot_headroom_ = 0.70f;
     ControllerRoomVelocity room_vel_;              // room-frame base velocity (EMA), for overlay dead-reckoning
     std::uint64_t overlay_now_ms_ = 0;             // current compute time (overlay extrapolation target)
     std::optional<std::uint64_t> overlay_lidar_ts_ms_;  // last lidar stamp (overlay extrapolation base time)
@@ -898,7 +894,7 @@ private:
     rc::chain::ProgressMonitor chain_progress_;
     float chain_s_prog_ = 0.f, chain_last_t_s_ = 0.f;
     bool chain_have_s_ = false;
-    std::uint64_t chain_last_gen_ = 0; int chain_last_owner_ = -1;
+    std::uint64_t chain_last_gen_ = 0; 
     Eigen::Vector2f chain_last_mark_at_{1e9f, 1e9f};
     double chain_xt_w2_ = 0.0, chain_yaw_w2_ = 0.0, chain_xt_m_ = 0.0;   ///< sum x^2 ds, sum dyaw^2 ds, sum ds (driven along the route)
     // the marks' relocalisation carry: odometry integrated from odo_v_/odo_w_, and last cycle's (believed, odometry) poses
@@ -1321,7 +1317,6 @@ private:
     bool  plan_spline_valid_ = false;
     std::uint64_t plan_spline_gen_ = 0;   // bumped on every new fit of plan_spline_ (the object is reused in place)
     float plan_progress_s_ = 0.f;      // robot's arc length along plan_spline_, forward-only
-    rc::RouteFollower route_;
 public:
     [[nodiscard]] float session_distance_m() const { return session_distance_m_; }
     [[nodiscard]] float session_elapsed_s() const
@@ -1344,7 +1339,7 @@ private:
     // cycle. A mission route and a point-target plan are the SAME TYPE reached by different paths, so
     // nothing in the type system was ever going to catch that. This seam is what catches it: no consumer
     // may pick a curve, so no consumer can pick a different one.
-    enum class DriveOwner { None, MissionRoute, PointPlan };
+    enum class DriveOwner { None, PointPlan };
     struct DrivenCurve
     {
         DriveOwner owner = DriveOwner::None;
@@ -1352,7 +1347,6 @@ private:
         const std::vector<Eigen::Vector2f> *samples = nullptr;   // deformed in place; stays current
         std::size_t control_count = 0;
         [[nodiscard]] bool valid() const { return owner != DriveOwner::None and spline != nullptr; }
-        [[nodiscard]] bool on_mission() const { return owner == DriveOwner::MissionRoute; }
     };
     [[nodiscard]] DrivenCurve driven_curve() const;
 
@@ -1370,7 +1364,6 @@ private:
     long long band_cycle_ = 0;
     // ── Task 6: the near field and [Route] BandDrivesCross ──
     float band_solve_ms_ = 0.f;              // this cycle's band wall time (band_diag.csv solve_ms)
-    bool route_active_ = false;
     // ── Live tracking accumulator (see live_tracking) ──────────────────────────────────────────────
     // Deliberately NOT hosted in MissionRunner. Sampling that outside a run would fold idle affordance
     // driving into the stats the run is graded on, and its clearance vector — copied and SORTED by
@@ -1414,7 +1407,6 @@ private:
     // disc) and consumed in the continuous-route branch of ensure_current_plan. Without it those
     // reflexes are inert in route mode: they create the obstacle and reset current_plan_, but the route
     // branch re-installs the SAME curve, so the robot backs off and drives at the blocker again.
-    bool          route_repair_pending_ = false;
     std::uint64_t last_route_repair_ms_ = 0;
     // Fit the C2 curve to ANY planned polyline — a click target and an affordance target deserve the
     // same smooth path a mission gets. Returns the polyline unchanged if smoothing is off or fails.

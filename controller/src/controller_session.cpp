@@ -2826,8 +2826,7 @@ std::optional<float> ControllerSession::clearance_speed_limit(const DrivenCurve 
     const float support = path_controller.body_extent_max();
     // Where the robot is along the curve: the mission tracks it; a plan is projected FORWARD-ONLY from
     // the last known progress, for the same reason the follower and the band do.
-    const float s_now = curve.on_mission() ? route_.progress()
-                                           : sp.project(robot_pose.pos, plan_progress_s_, 3.0f);
+    const float s_now = sp.project(robot_pose.pos, plan_progress_s_, 3.0f);
     const float horizon = v_cap * v_cap / (2.f * a_dec) + support;
     const Eigen::Affine2f pose = robot_pose.as_transform();
     const Eigen::Matrix2f Rt = pose.linear().transpose();
@@ -5466,11 +5465,7 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
 
 ControllerSession::DrivenCurve ControllerSession::driven_curve() const
 {
-    // A MISSION route lives in route_; every point target — click or affordance — lives in plan_spline_.
-    // Mission wins when it is running, which is the same precedence every consumer used to implement
-    // for itself.
-    if (route_active_ and mission_.running() and route_.valid())
-        return {DriveOwner::MissionRoute, &route_.spline(), &route_.path(), route_.control_count()};
+    // The one curve the tracker drives: the point plan (click or affordance) fitted in plan_spline_.
     if (plan_spline_valid_ and plan_spline_.valid())
         return {DriveOwner::PointPlan, &plan_spline_, &plan_spline_.samples(),
                 plan_spline_.control_points().size()};
@@ -5493,7 +5488,6 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     // where a one-shot fit is weakest, so this is where the continuous version earns its keep, on either
     // owner's curve.
     if (not curve.valid()) return;
-    const bool on_mission = curve.on_mission();
     const rc::RouteSpline &spline = *curve.spline;
     const std::size_t M = curve.control_count;
     // optimize_route's own minimum (M >= 4; endpoints pinned, so the smallest problem is 2 points).
@@ -5543,9 +5537,8 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     // Where the robot is along the curve. A mission tracks this itself; a plan does not, so it is
     // projected here with a FORWARD-ONLY hint for the same reason the follower does — a path that
     // crosses itself would otherwise teleport progress to the wrong branch.
-    if (not on_mission)
-        plan_progress_s_ = spline.project(robot_pose.pos, plan_progress_s_, 3.0f);
-    const float progress = on_mission ? route_.progress() : plan_progress_s_;
+    plan_progress_s_ = spline.project(robot_pose.pos, plan_progress_s_, 3.0f);
+    const float progress = plan_progress_s_;
     const float frac = std::clamp(progress / len, 0.f, 1.f);
     const float h = std::max(0.05f, spline.control_spacing());
     const auto i_robot = static_cast<std::size_t>(frac * static_cast<float>(M));
@@ -5595,12 +5588,6 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     const auto band_t0 = std::chrono::steady_clock::now();
 
     rc::RouteOptimizerReport rep;
-    if (on_mission)
-    {
-        rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
-                                   params_->band_iterations, params_->band_clearance_weight);
-    }
-    else
     {
         // A plan has no authored waypoints, so it carries NO anchor likelihood — and it does not need
         // one: optimize_route always pins the endpoints, which is exactly the requirement ("still start
@@ -6252,7 +6239,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     {
         current_plan_.reset();
         plan_spline_valid_ = false;
-        route_repair_pending_ = true;
         std::println("[chain] re-plan on map + {} marks (plan-first)", chain_marks_.marks.size());
         note_mode("recover", [&]{ return std::format("plan-first: the window ahead fails on unmapped returns, re-plan on map + {} marks", chain_marks_.marks.size()); });
     }
@@ -6291,7 +6277,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // metrics describe what happened rather than what was planned. The clearance recorded is the gap between
     // the BODY and the nearest obstacle — the ESDF measures from the rotation centre, and reporting that
     // would flatter every run by one body radius.
-    if (route_active_ and not mission_.running()) route_active_ = false;
     // The L-adaptation panel's objective, on the SAME gate as the CSV below and for the same reason:
     // the deviation a click target or an affordance is driving with is the deviation L is adapted on.
     sample_live_tracking(path_controller.is_active(), robot_pose, control_output.cross_track_m,
@@ -6312,8 +6297,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // ★Same quantity the mission sampler already derives below (ref_kappa); computed here rather
         // than hoisted because that block sits inside a different guard. If these ever disagree, one of
         // them is wrong — they read the same spline at the same arc length.
-        const float kappa_here = (route_active_ and route_.valid())
-                               ? route_.spline().curvature_at(route_.progress()) : -999.f;
+        const float kappa_here = -999.f;   // a mission route's curvature; there is none on the tracker any more (column kept)
         // Localisation sigma, so "is the pose noisy right now" is a MEASUREMENT and not an inference.
         // It only lived in profile.csv, which is gated on a mission running, so during affordance
         // driving — the mode being developed — it was invisible exactly when it was being blamed.
@@ -6359,43 +6343,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             prev_cmd_rot_sign_ = rot_sign;
     }
 
-    if (route_active_ and mission_.running())
-    {
-        // Progress is a scalar that only increases. Legs are read OFF it rather than driven by it.
-        route_.advance(robot_pose.pos);
-        // ── A LAP RESTARTED: THE ARC LENGTH JUMPED BACKWARDS ON PURPOSE ─────────────────────────
-        // Laps are restarts of one curve now, so completing a lap rewinds progress_ to the lap start.
-        // The TRACKER's own projection is monotone within one traversal and knows nothing about that:
-        // left alone it would sit at the end of the route while the robot drives the start of the next
-        // lap — the same staleness that once pointed the tracker at the route's end point after a
-        // restart, with the robot driving into a wall. force_reset makes it re-acquire, which is
-        // exactly what a restart is.
-        if (route_.rewound())
-        {
-            // ★SEED, DO NOT RE-ACQUIRE. force_reset made the tracker search the WHOLE curve for its
-            // nearest point, and on this tour that landed 18 m from where the robot actually was
-            // (follower at 0.95 m, tracker at 17.90 m on a 35.6 m route): it then steered at a
-            // different part of the route and the robot drove backwards after lap 1. The curve has not
-            // changed across a rewind — only the position on it — and the follower knows exactly what
-            // that position is, so it is handed over rather than searched for.
-            path_controller.resume_route_at(route_.progress());
-            std::println("[route] lap {} of {} complete — restarting the same curve at {:.2f} m",
-                         route_.laps_done(), route_.laps_total(), route_.progress());
-        }
-        // ★TOTAL, not progress(). progress_ rewinds every lap, so it is no longer the distance the run
-        // has covered; the mission's metrics want the cumulative figure across laps.
-        mission_.note_progress(route_.total_progress(), route_.total_length(), route_.laps_done());
-        if (route_.finished(robot_pose.pos))
-        {
-            mission_.stop("completed", time_source());
-            route_active_ = false;
-            path_controller.stop();
-            note_why(rc::why::Cause::MissionDone, std::format("mission '{}' completed", mission_.selected_name()));
-            note_no_command(); motion_commander.stop_robot();
-            return;
-        }
-    }
-
     if (mission_.running())
     {
         const float esdf_here = path_controller.clearance_at(0.f, 0.f);
@@ -6416,27 +6363,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // reference (a click target has no route), and the stats skip it rather than inventing a zero.
         float cross_track = std::numeric_limits<float>::quiet_NaN();
         float heading_err = 0.f, ref_kappa = 0.f;
-        // ★SCORE THE RUN ON THE PROJECTION THAT STEERED IT. PlainTracker publishes the Frenet pair it
-        // actually used (out.cross_track_m, out.carrot_bearing_rad at its own s_hint_); recomputing it
-        // here at route_.progress() scored the run on the OTHER projection — the one measured jumping
-        // 2.98 m against the tracker's 0.73 m. cross_track_rms is the objective tools/adapt_L.py
-        // minimises, so it must be the tracker's error, not a bystander's.
-        if (route_tracker_active_ and route_active_ and std::isfinite(control_output.cross_track_m))
-        {
-            cross_track = control_output.cross_track_m;
-            heading_err = control_output.carrot_bearing_rad;
-            ref_kappa = route_.valid() ? route_.spline().curvature_at(route_.progress()) : 0.f;
-        }
-        else if (route_active_)
-        {
-            const float s_now = route_.progress();
-            const Eigen::Vector2f ref = route_.spline().position_at(s_now);
-            const float ref_h = route_.spline().heading_at(s_now);
-            const Eigen::Vector2f d = robot_pose.pos - ref;
-            cross_track = -std::sin(ref_h) * d.x() + std::cos(ref_h) * d.y();   // signed, left positive
-            heading_err = std::atan2(std::sin(robot_pose.theta - ref_h), std::cos(robot_pose.theta - ref_h));
-            ref_kappa = route_.spline().curvature_at(s_now);
-        }
         mission_.sample(robot_pose.pos, control_output.rot, std::abs(control_output.adv),
                         body_clearance, control_output.safety_guard_triggered,
                         cross_track, heading_err, ref_kappa, time_source());
@@ -7952,8 +7878,6 @@ void ControllerSession::abort(rc::TrajectoryController &path_controller,
     affordance_dwell_deadline_ms_ = 0;
     dwell_mask_hits_ = 0;
     dwell_logged_ = false;
-    route_active_ = false;
-    route_repair_pending_ = false;
     current_plan_.reset();
     plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
     active_target_id_ = 0;

@@ -107,12 +107,10 @@ ControllerSession::ChainAction ControllerSession::step_chain_monitor(const Contr
     // reused object (plan_spline_), so a re-plan is invisible by address: live chain1 (2026-11-11) kept projecting from the
     // OLD arc length onto the new curve — |cross| 2.3 m, most hand-off verdicts and monitor fails were that artefact.
     // The plan's generation counter says when the curve is new; the projection then starts again from the route start.
-    const bool mission = curve.on_mission();
-    const bool fresh = not chain_have_s_ or chain_last_owner_ != int(mission) or (not mission and chain_last_gen_ != plan_spline_gen_);
+    const bool fresh = not chain_have_s_ or chain_last_gen_ != plan_spline_gen_;
     if (fresh) chain_progress_.clear();   // the monitor's history is arc length along the OLD curve
-    if (mission) chain_s_prog_ = route_.progress();
-    else chain_s_prog_ = spline.project(bel.p, fresh ? 0.f : chain_s_prog_, 3.0f);
-    chain_have_s_ = true; chain_last_gen_ = plan_spline_gen_; chain_last_owner_ = int(mission);
+    chain_s_prog_ = spline.project(bel.p, fresh ? 0.f : chain_s_prog_, 3.0f);
+    chain_have_s_ = true; chain_last_gen_ = plan_spline_gen_;
     const float s_prog = chain_s_prog_;
     const float hd = spline.heading_at(s_prog);
     const Eigen::Vector2f d = bel.p - spline.position_at(s_prog);
@@ -206,7 +204,7 @@ ControllerSession::ChainAction ControllerSession::step_chain_monitor(const Contr
     const float cost_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t_start).count();
     if (chain_csv_.is_open())
     {
-        chain_csv_ << now_ms << ',' << (curve.on_mission() ? 1 : 0) << ',' << s_prog << ',' << spline.length() << ',' << cross << ','
+        chain_csv_ << now_ms << ',' << 0 << ',' << s_prog << ',' << spline.length() << ',' << cross << ','
                    << xtrack_rms << ',' << sigma_track << ',' << sigma_loc << ',' << pose_age_s * 1e3f << ',' << odo_v_ << ',' << odo_w_ << ','
                    << cells.size() << ',' << n_unmapped_2m << ',' << win.lp_worst << ',' << win.first_bad << ',' << s_bad << ',' << reach_m << ','
                    << verdict << ',' << pass_blocked << ',' << chain_marks_.marks.size() << ',' << chain_marks_.fail.size() << ','
