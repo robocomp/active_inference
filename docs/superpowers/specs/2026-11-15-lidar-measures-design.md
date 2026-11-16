@@ -182,7 +182,7 @@ with the room axis) are prior knowledge too, and enter on the same footing.
 - **Birth.** The belief is born as today (`birth_on_priors`: data-seeded mean, Σ = `prior_cov_diag` = the class P,
   R2-M3). That Σ₀ IS the class's size/pose prior, counted once (stated limit: it is centred on the data-seeded mean,
   not on the class mean). The FIRST ADMISSIBLE CAMERA update of the instance (not a LiDAR-only or gated one; a
-  `prior_added` flag in the belief) adds the RELATIONAL anchors once — wall flush/parallel (1) and the room axis —
+  `prior_added` flag PER relational anchor: wall flush/parallel and room axis each enter once, at the first admissible camera update on which their context (wall, room axis) is staged — ruling T6-1) adds the RELATIONAL anchors once — wall flush/parallel (1) and the room axis —
   in a θ-only, unsaturated channel; the footprint (2) and height (2a) anchors are not added (Σ₀ already carries the
   class, R3-I2). The flush responsibility is evaluated at that pose only (stated: an object born mid-room that later
   settles on a wall never gets the term). `sanitize_covariance` re-seeds Σ to P and clears `prior_added` (the prior
@@ -249,7 +249,7 @@ localisation error, with the same deprojection and mask bias as frame t−1. 100
 
 **Dynamics.** Per latent and per DOF: b_t = ρ_t D_t b_{t−1} + w_t, D_t = σ_t / σ_{t−1} (one source per latent, so the
 rescale is physical: a deprojection bias scales with its σ), w_t ~ N(0, (1 − ρ_t²) σ_t²). Marginal exactly σ_t²,
-lag-1 correlation exactly ρ_t; D = 1 when σ_{t−1} = 0. ρ = 0 for all three is today's Woodbury: the regression test. The θ–b and b–b cross
+lag-1 correlation exactly ρ_t; when σ_{t−1} = 0 the source is new: ρ = 0 for that transition (variance σ_t², ruling T4-1c). ρ = 0 for all three is today's Woodbury: the regression test. The θ–b and b–b cross
 blocks are propagated with the same F = blockdiag(I, ρD) (the b_cam–b_L block included, R2-C3).
 
 **ρ (R2-C2; decision: camera scale from the object's angular size).** Viewpoint change is measured from ODOMETRY, not
