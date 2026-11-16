@@ -395,8 +395,6 @@ struct ControllerParams
     bool  policy_affordance_facing = true;      // Task R: a Doorway plan is scored by log P(facing the gap) at its end
     float policy_pose_drift_sigma_m = 0.064f;   // absolute pose error as OU: stationary std — PROGRESS MONITOR
     float policy_pose_drift_time_s = 115.f;     //   and correlation time
-    // Task 8 ([Policy], config.toml carries the provenance): the local policy drives the base; the old chain is OFF.
-    bool  policy_enabled = false;               // default OFF in code: the config turns it on
     float policy_risk_eps = 0.01f;
     // [ChainMonitor] (port step 2, 2026-11-11): the chain's monitors judge and LOG (chain_monitor.csv), never act
     bool  chain_monitor_enabled = true;

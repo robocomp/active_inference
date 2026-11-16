@@ -293,7 +293,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             door_passage_.note_robot(rp.has_value() ? std::optional<Eigen::Vector2f>(rp->pos) : std::nullopt,
                                      path_controller.goal_threshold());
         }
-        door_passage_.set_look_enabled(policy_enabled());   // Task E: the look-vs-step choice belongs to the [Policy] chain
+        door_passage_.set_look_enabled(true);   // Task E: the look-vs-step choice belongs to the [Policy] chain
         door_passage_.note_room_id(world_model.graph_state().room_id);
         door_passage_.note_archived_room_id(world_model.graph_state().archived_room_id);
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
@@ -561,7 +561,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     //   cells (a live return in the body band this cycle, or no belief) are occupied whatever caused them and stay hard
     //   (fix round 1, I-1). Only in the room frame the leaf was taken in (a room switch drops it: policy_reset). The radius
     //   is the BARE body's inscribed radius — the one the field's free test uses (M-4).
-    const bool leaf_explains = policy_enabled() and not policy_leaf_.empty() and policy_leaf_room_ == current_room_name_;
+    const bool leaf_explains = not policy_leaf_.empty() and policy_leaf_room_ == current_room_name_;
     policy_leaf_evidence_.reset();
     if (leaf_explains)
     {
@@ -582,7 +582,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     else policy_leaf_mass_logged_ = -1.f;
     // clean18: the door the robot has just come through is a known obstacle for the planner, in the room frame it was taken in.
     // Not during a cross: there the opening is the goal, and the leaf's hypotheses are priced by its own model above.
-    const bool passed_leaf_known = policy_enabled() and not anchor_cross_.has_value() and not policy_passed_leaf_.empty()
+    const bool passed_leaf_known = not anchor_cross_.has_value() and not policy_passed_leaf_.empty()
                                    and policy_passed_leaf_room_ == current_room_name_;
     ControllerPolygons polygons_with_leaf;
     if (passed_leaf_known)
@@ -1827,7 +1827,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // Here — every cycle, at any range — only causes that do not come and go hand back; a cell hard only from a live
         // return this cycle is left to the windowed recheck, where the LiDAR measures the spot.
         const auto standpoint_decision = rc::standpoint::decide_standpoint(
-            grid_planner_, step.target.room_pos, will_rotate_here, policy_enabled(), target_contract_known_,
+            grid_planner_, step.target.room_pos, will_rotate_here, /*policy_on=*/true, target_contract_known_,
             target_contract_.policy == rc::affordance::Policy::Reach, rc::standpoint::Stage::Planning);
         const bool object_standpoint_under_policy = standpoint_decision.action != rc::standpoint::Action::LegacyRepair;
         if (object_standpoint_under_policy)
@@ -3234,8 +3234,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     {
         // Task 8 ruling 1: with the local policy driving, the tour's waypoints are its successive place goals
         // (drive_with_policy) — no arc-length curve is built or followed.
-        if (policy_enabled()) return true;
-        return drive_mission_route(step, path_controller, motion_commander, time_source);
+        return true;
     }
     if (door_route_leg_.has_value())
         return drive_door_route(step, path_controller, motion_commander, time_source);
@@ -4014,7 +4013,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     //   refuses (the bare hull near a wall, inside the margin) therefore still drives.
     // PORT STEP 5: in the HYBRID a plain Place (drive_with_policy's PLACE branch, last cycle) is planned the CHAIN's way below:
     // smoothed, fitted to plan_spline_, with the marks and the WAIT.
-    if (policy_enabled() and not (chain_hybrid_on() and chain_hybrid_place_))
+    if (not (chain_hybrid_on() and chain_hybrid_place_))
     {
         if (step.target_changed or not current_plan_.has_value())
         {
@@ -4368,7 +4367,6 @@ std::optional<ControllerRobotPose> ControllerSession::policy_pose_at(std::int64_
 
 void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
 {
-    if (not policy_enabled()) return;
     const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
     // ★ Task 3f (d) (tour3A leg 1: "RE-INITIALISED (2.23 m, -13.0 deg) — P(anchor lost) 0.031 -> 1.000" at the room switch): the
     //   ring's poses and the last block are in the frame of the room they were recorded in; across a room switch they are
@@ -4942,7 +4940,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
         // the hypotheses' P. (M-1) P(through) is kept every clearing cycle, near side seen or not: the passage asks it before
         // closing a door on a clearing that was given up. (M-8) σ_r = the pose σ latched at the switch.
         double p_through = -1.0;
-        if (policy_enabled() and door_passage_.clearing() and drive_pose.x.allFinite() and drive_pose.P.allFinite())
+        if (door_passage_.clearing() and drive_pose.x.allFinite() and drive_pose.P.allFinite())
         {
             const auto g = rc::anchor_cross_geometry(drive_pose);
             const float sigma_s = std::sqrt(std::max(0.f, g.n.dot(drive_pose.P.topLeftCorner<2, 2>() * g.n)));
@@ -6766,11 +6764,9 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                    robot_pose.theta, orient_overlay_visible_);
     };
 
-    // ── Task 8: THE LOCAL POLICY DRIVES ([Policy] Enabled). Dispatched BEFORE every branch below — the escape, the
-    //    returns' backoff, the anchor servo, lock-on and orient motion, the band, the clearance ceiling, the tracker's
-    //    command path and its caps, the uncertainty limiter — none of which runs, so none can write the base. The
-    //    protocol halves they carried (arrival, the cross's completion, the lock-on / orient predicates) are shared.
-    if (policy_enabled())   // C1: the policy drives the WHOLE door passage too (approach, hold at the vantage, cross)
+    // ── THE LOCAL POLICY IS ASKED FIRST, every cycle. It owns the cycle (returns false) for a cross, a door route, a lock-on,
+    //    an orient, a mission tour, an episode and a WAIT; for a HYBRID plain PLACE with a fitted route it returns true and
+    //    the spline chain's tracker path below runs (band, clearance ceiling, tracker, live-returns net, stall judge).
     {
         // PORT STEP 5: the HYBRID's chain drives a plain Place — drive_with_policy says so and the tracker path below runs
         const bool chain_drives = drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display,

@@ -156,7 +156,7 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
 
     // ── who drives
     section("WHO DRIVES");
-    const bool policy_driving = c.policy_enabled and (not c.hybrid_on or c.episode_active or not c.hybrid_place);
+    const bool policy_driving = not c.hybrid_on or c.episode_active or not c.hybrid_place;
     if (not in.mission.driving)
         L.push_back(std::format("Nobody: driving is {} (press Run or click a target).", in.mission.paused ? "PAUSED" : "off"));
     else if (not c.armed)
@@ -177,11 +177,8 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
     }
     else if (c.hybrid_on and c.hybrid_place)
         L.emplace_back("The spline chain (route → spline → tracker); the policy stands by.");
-    else if (c.policy_enabled)
-        L.emplace_back("The local policy.");
     else
-        L.push_back(std::string("The spline chain (route → spline → tracker)")
-                    + (c.marks_drive ? "; obstacles not on the map are marked for the planner." : "."));
+        L.emplace_back("The local policy.");
     if (not c.handoff_requested.empty() and not c.episode_active)
         L.push_back("Handing over to the policy next cycle: " + handoff_words(c.handoff_requested) + ".");
     if (not in.hold_reason.empty() and not c.chain_wait)

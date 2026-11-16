@@ -1118,8 +1118,6 @@ void SpecificWorker::load_params()
          "absolute pose error as an OU process: stationary std (m) — tools/pose_error_stats.py");
 	cfgr.opt_cast<double>("Policy.PoseDriftTimeS", params.policy_pose_drift_time_s,
          "absolute pose error as an OU process: correlation time (s) — tools/pose_error_stats.py");
-	cfgr.opt("Policy.Enabled", params.policy_enabled,
-         "Task 8: the local look-ahead policy drives every motion; the old chain (escape, backoff, caps, band, tracker, servo) is OFF");
 	cfgr.opt("Policy.HybridChain", params.policy_hybrid_chain,
          "port step 5: with Policy.Enabled, a plain PLACE is driven by the spline chain; the policy takes the stretches the chain's window hands it (episodes) and every door passage / orient / lock-on as before");
 	cfgr.opt_cast<double>("Policy.RiskEps", params.policy_risk_eps, "acceptable P(contact) per Drive decision");
@@ -2248,7 +2246,7 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	else if (not grid.has_world() or room.size() < 3) why = "there is no map of the room yet to check the way is clear";
 	// ★ Task 8: with the local policy driving, a relative move NEVER re-arms the base — the operator's Stop always wins (the
 	//   probe's rule, Task 7 review): a disarmed / paused base refuses the move with the reason.
-	else if (session_.policy_enabled() and (not motion_commander_.output_enabled() or not driving_enabled_ or paused_))
+	else if (not motion_commander_.output_enabled() or not driving_enabled_ or paused_)
 		why = paused_ ? "the base is paused — press Pause again to resume first"
 		              : "the base is disarmed (Stop) — press Run first; a move order never re-arms it";
 	if (why.empty())
@@ -2275,12 +2273,6 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	// ★A RELATIVE MOVE IS A "GO", like a click: it arms the base output (Stop disarmed it). Small moves are sent
 	// by language_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
 	// ★ Task 8: NOT with the local policy driving (refused above when disarmed) — there is nothing to arm here then.
-	if (not session_.policy_enabled())
-	{
-		paused_ = false;
-		motion_commander_.set_output_enabled(true);
-		driving_enabled_ = true;
-	}
 	hibernationTick();
 	const auto v = relative_motion_.view();
 	std::println("[{}] mission '{}' -> RELATIVE MOTION #{} '{}' from ({:.2f},{:.2f}) yaw {:.0f} deg", source, t, v.id,
@@ -2418,7 +2410,6 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 	}
 	// ★ Task 8: with the local policy driving, the step is a GOAL for it (RelativeMotion::policy_goal) — its control law and
 	//   its own lookahead free tests are off; the policy judges contact. Completion stays RelativeMotion's own tolerance.
-	if (session_.policy_enabled())
 	{
 		const auto g = relative_motion_.policy_goal();
 		if (g.has_value())
@@ -2446,21 +2437,6 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		update_custom_widget(*pose);
 		return true;
 	}
-	const auto &grid = session_.grid_planner();
-	const auto free = [&grid](const Eigen::Vector2f &p, float yaw) { return grid.has_world() and grid.pose_free(p, yaw); };
-	const auto cmd = relative_motion_.step(pose->pos, pose->theta, now_ms, free);
-	if (relative_motion_.active())
-		motion_commander_.send_speed_command(cmd.adv, 0.f, cmd.rot);
-	else
-	{
-		motion_commander_.stop_robot();
-		const auto v = relative_motion_.view();
-		std::println("[move] relative motion #{} '{}' {}: {} — at ({:.2f},{:.2f}) yaw {:.0f} deg", v.id, v.text,
-		             rc::RelativeMotion::phase_name(v.phase), v.last_event, pose->pos.x(), pose->pos.y(),
-		             rc::policy::to_policy_pose(*pose).yaw * 180.0 / M_PI);
-	}
-	update_custom_widget(*pose);
-	return true;
 }
 
 // ── BASE PROBE (controller_base_probe.h, Task 7) ───────────────────────────────────────────────────────────────────

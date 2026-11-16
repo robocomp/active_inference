@@ -1005,13 +1005,6 @@ SigmaRelYawRad = 0.013
 # is the robust number. The latest door-crossing runs (try102-107) drift more: sigma 0.08-0.20 m, T 90-320 s.
 PoseDriftSigmaM = 0.064
 PoseDriftTimeS = 115.0
-# ── Task 8: the local policy DRIVES the base (controller_policy_drive.cpp). true = ONE authority: escape, backoff,
-# make-room, the returns caps, the band, the tracker's command path, the anchor servo, lock-on/orient motion, the
-# uncertainty limiter and the clearance ceiling are switched OFF (not deleted). false = the old chain drives again, but NOT
-# exactly as before Task 8: step_orient now reads the target yaw as the FORWARD heading (one convention, goal_adapter.h
-# facing_yaw_to_theta), which requires room_concept from THIS branch (afford_calib publishes bearing + pi/2); and the
-# helios far floor is cut from the contact band (only the policy reads it).
-Enabled = true
 # The HYBRID (2026-11-16, owner): a plain PLACE is the spline chain's (planner -> spline -> plain tracker, chain monitors);
 # a tight stretch is handed to the policy as an EPISODE; recovery re-plans with failure marks or WAITS. Needs ChainMonitor.Enabled (default true).
 HybridChain = true

@@ -193,11 +193,9 @@ public:
               std::source_location loc = std::source_location::current());
 
     // ── Task 8: ONE LOCAL POLICY DRIVES EVERY MOTION (controller_policy_drive.cpp) ─────────────────────────────────────────
-    // [Policy] Enabled: execute_plan hands the cycle to drive_with_policy BEFORE the escape / backoff / anchor servo /
-    // lock-on / orient / band / tracker branches, which then do not run; ensure_current_plan skips escape and backoff. The
-    // old chain is switched OFF, not deleted. The protocol halves (arrival → finalize_reached, the cross's through /
-    // hand-back, the lock-on and orient completion predicates, Unreachable) are unchanged and shared.
-    [[nodiscard]] bool policy_enabled() const { return params_ != nullptr and params_->policy_enabled; }
+    // execute_plan hands every cycle to drive_with_policy first. It returns true only for a HYBRID plain PLACE, where the
+    // spline chain's tracker path then runs; everything else (a cross, a door route, lock-on, orient, a mission tour, an
+    // episode) is the local policy's.
     // One policy tick toward `spec` (also the relative-motion path, SpecificWorker::step_relative_motion): builds the
     // input, keeps the Navigator's goal (set_goal only when the goal moved beyond its own tolerance), steps it, sends the
     // command, logs policy_decisions.csv and a [policy] line per mode change. `who` names the goal's owner in the logs.
@@ -867,7 +865,7 @@ private:
     bool chain_wait_ = false;
     // ── PORT STEP 5 — THE HYBRID (Policy.HybridChain; controller_chain_hybrid.cpp) ──
     [[nodiscard]] bool chain_hybrid_on() const
-    { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled and policy_enabled(); }
+    { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled; }
     bool chain_hybrid_place_ = false;          ///< drive_with_policy reached its PLACE branch last cycle (the chain plans for it)
     bool plan_is_policy_stub_ = false;         ///< current_plan_ is the policy branch's unsmoothed display route, not the chain's
     struct ChainEpisode
