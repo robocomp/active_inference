@@ -57,6 +57,8 @@ struct ObjectFact
     std::string color_name{};            ///< color_name: the owner's measured colour name, "" = not measured
     float color_prob = 0.f;              ///< color_prob: its posterior probability
     std::uint64_t uid = 0;               ///< object_uid (LTOM's stable id); 0 = not published
+    std::uint64_t same_as_uid = 0;       ///< same_as_uid: the remembered object it is believed to be, moved (0 = none)
+    float same_as_prob = 0.f;            ///< same_as_prob: that belief's probability (1 = the person confirmed it)
     std::string owner{};                 ///< ", Pablo's" | ", yours" | "" — set by mark_owned()
 };
 
@@ -100,7 +102,13 @@ inline std::string owner_words(std::uint64_t uid, const HumanFacts& h)
 /// Fills `owner` on every fact (live or remembered) from the human's links.
 template <typename Facts> void mark_owned(Facts& v, const HumanFacts& h)
 {
-    for (auto& o : v) o.owner = owner_words(o.uid, h);
+    for (auto& o : v)
+    {
+        o.owner = owner_words(o.uid, h);
+        // Changed object: a live object believed (the MAP, p > 1/2) to be an owned memory that moved is theirs too.
+        if constexpr (requires { o.same_as_uid; })
+            if (o.owner.empty() and o.same_as_uid != 0 and o.same_as_prob > 0.5f) o.owner = owner_words(o.same_as_uid, h);
+    }
 }
 
 /// The human node on ltom's memory graph (human_1) is the person at the chat, never a perceived object.

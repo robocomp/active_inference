@@ -157,6 +157,9 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
             "approach_object: free space kept between the body and the object (room to turn)");
     c.objects_nearest = r.i("Chat.objects_nearest", 6, "OBJECTS section of the STATE: how many nearest objects are listed");
     c.look_wait_s = r.d("LTOM.look_wait_s", 2.0, "going to a remembered object in this room: wait after turning to it before the approach (s)");
+    c.question_cost_ask = static_cast<float>(r.d("Questions.CostAsk", 0.4,
+            "moved object: the cost of asking the person; with CostWrong 1 one 'yes' tips it to reporting (P 2/3 -> 0.33 < 0.4; none -> 0.5 > 0.4)"));
+    c.question_cost_wrong = static_cast<float>(r.d("Questions.CostWrong", 1.0, "moved object: the cost of a wrong 'I assume you moved it'"));
     c.object_change_period_ms = r.i("Chat.object_change_period_ms", 2000,
             "object births/removals are shown in the window at most this often (flaps inside the window cancel)");
     c.look_max_side = r.i("Chat.look_max_side", 1280,

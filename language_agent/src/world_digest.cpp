@@ -240,6 +240,8 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
                 o.color_prob = G.get_attrib_by_name<color_prob_att>(n).value_or(0.f);
             }
             o.uid = G.get_attrib_by_name<object_uid_att>(n).value_or(0);   // LTOM's stable id: what a person can own
+            o.same_as_uid = G.get_attrib_by_name<same_as_uid_att>(n).value_or(0);    // changed object: believed to be, moved
+            o.same_as_prob = G.get_attrib_by_name<same_as_prob_att>(n).value_or(0.f);
             // Its approach affordance's sides (approach.h), labelled as seen from the robot now — in the robot's frame,
             // where the robot is the origin: the room-frame standpoints are brought into it.
             if (o.in_current_room)

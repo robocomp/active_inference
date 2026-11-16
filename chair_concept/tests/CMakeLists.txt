@@ -72,3 +72,10 @@ target_compile_definitions(planner_ab_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LI
 target_compile_options(planner_ab_test PRIVATE -O2)
 target_link_libraries(planner_ab_test PRIVATE Eigen3::Eigen)
 add_test(NAME planner_ab_test COMMAND planner_ab_test)
+
+# The ghost at a remembered chair's old spot is a prior-sized chair (changed-object). Run: ./chair_ghost_test
+add_executable(chair_ghost_test chair_ghost_test.cpp ../src/chair_model.cpp)
+target_include_directories(chair_ghost_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(chair_ghost_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
+target_link_libraries(chair_ghost_test PRIVATE Eigen3::Eigen)
+add_test(NAME chair_ghost_test COMMAND chair_ghost_test)

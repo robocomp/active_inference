@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -60,6 +61,12 @@ struct RecallCand
 {
     recall::Candidate cand;   // uid, room-frame mu, diagonal cov from the recall edge's x/y variances
     int n = 0;                // the <class>_<N> number carried by the uid (low 40 bits)
+    // Changed object (2026-11-15): the remembered colour (identity_link.h weighs it), and the live uid this memory
+    // already continues as (ltom's link; 0 = none). A linked candidate is never resurrected at a birth.
+    std::string colour_name;
+    float colour_prob = 0.f;
+    std::uint64_t same_as_uid = 0;
+    float same_as_prob = 0.f;
 };
 
 inline constexpr std::uint64_t kUidNumberMask = (std::uint64_t{1} << 40) - 1;

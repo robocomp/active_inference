@@ -192,6 +192,11 @@ struct ChairConfig
     float tracker_gate_fallback_m  = 0.40f;   // metric XY gate (m) before an instance has a usable covariance
     float recall_pi_move = 0.5f;              // Tracker.RecallPiMove — class prior that a remembered chair was MOVED (guess; learned in step 4)
     float recall_log_prior_new = 0.0f;        // Tracker.RecallLogPriorNew — log prior of "new chair" vs one recalled candidate
+    // Changed object (2026-11-15, common/recall_match/identity_link.h): per-visit rates of the identity link of a
+    // live chair to an untaken recall. GUESSES until the learned "gets moved" belief replaces LinkPiMove.
+    float link_pi_move = 0.10f;               // Tracker.LinkPiMove — a remembered chair was moved
+    float link_pi_gone = 0.10f;               // Tracker.LinkPiGone — a remembered chair left the room
+    float link_lambda_new = 0.10f;            // Tracker.LinkLambdaNew — a new chair arrived
     float tracker_detection_noise_m = 0.20f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
     int   tracker_birth_frames     = 8;       // frames a mask must stay unexplained before spawning a chair
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing chair (anti-dup)

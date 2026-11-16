@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <ranges>
 
 namespace ltom
 {
@@ -79,6 +80,8 @@ Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::
         const bool owner_absent = not owners_present.contains(owner_of(uid));
         const auto [pit, first_miss] = pending_.try_emplace(uid, Pending{now_ms});
         const std::int64_t vanish = pit->second.vanish_ms;
+        if (owner_absent) close_questions_of_live(uid, false);
+        else if (not first_miss and now_ms - vanish >= grace_ms_) close_questions_of_live(uid, true);
         if (owner_absent)
         {
             l.end = End::owner_exit; l.end_ms = vanish; ch.owner_exited.push_back(uid);
@@ -90,7 +93,144 @@ Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::
             pending_.erase(uid); dirty_ = true;
         }
     }
+    tend_links(alive, now_ms);
     return ch;
+}
+
+// A link is held while its owner publishes it as the MAP (same_prob > 1/2: the binary {same, not}). An unconfirmed
+// link whose sighting no longer says so is undone silently: nobody said "no", the evidence simply changed its mind.
+// A confirmed link is the owner's word and evidence does not undo it.
+void Repertory::tend_links(std::span<const Sighting> alive, std::int64_t now_ms)
+{
+    for (const Sighting& s : alive)
+    {
+        const bool says_same = s.link.has_value() and s.link->same_prob > 0.5f and s.link->memory_uid != s.uid;
+        if (says_same)
+        {
+            // The owner said this live object was not moved here: it is new, whichever memory the MAP names now.
+            if (const auto me = entries_.find(s.uid); me != entries_.end() and me->second.said_new) continue;
+            const auto m = entries_.find(s.link->memory_uid);
+            if (m == entries_.end()) continue;
+            // The owner said no for that room: a stale link still on the node (one cycle) must not re-link it.
+            if (gone_from(m->second, s.room_key)) continue;
+            // The live object's MAP moved to another memory: the previous, unconfirmed link is undone first. A
+            // confirmed one is the owner's word and stands.
+            if (const auto me = entries_.find(s.uid); me != entries_.end() and me->second.continues.has_value() and
+                                                      *me->second.continues != m->first)
+            {
+                const auto old = entries_.find(*me->second.continues);
+                if (old != entries_.end() and not old->second.moves.empty() and old->second.moves.back().confirmed) continue;
+                if (old != entries_.end()) cut_link(old->first, now_ms, "");
+            }
+            if (not m->second.continued_by.has_value()) record_link(m->first, s.uid, now_ms, s.link->same_prob);
+            else if (*m->second.continued_by == s.uid and not m->second.moves.empty() and not m->second.moves.back().confirmed)
+            {
+                m->second.moves.back().prob = s.link->same_prob;
+                dirty_ = true;
+            }
+            if (m->second.continued_by != s.uid or m->second.moves.empty()) continue;
+            Move& mv = m->second.moves.back();
+            if (not mv.confirmed and not mv.asked and mv.question_stamp == 0 and s.link->left_spot_prob > 0.5f)
+            {
+                auto stamp = static_cast<std::uint64_t>(now_ms);
+                const auto open = questions();
+                while (open.contains(stamp)) ++stamp;   // two questions in one cycle keep distinct stamps
+                mv.question_stamp = stamp;
+                dirty_ = true;
+            }
+            continue;
+        }
+        const auto me = entries_.find(s.uid);
+        if (me == entries_.end() or not me->second.continues.has_value()) continue;
+        const auto m = entries_.find(*me->second.continues);
+        if (m == entries_.end() or m->second.moves.empty() or m->second.moves.back().confirmed) continue;
+        cut_link(m->first, now_ms, "");
+    }
+}
+
+void Repertory::close_questions_of_live(std::uint64_t live_uid, bool asked)
+{
+    const auto l = entries_.find(live_uid);
+    if (l == entries_.end() or not l->second.continues.has_value()) return;
+    const auto m = entries_.find(*l->second.continues);
+    if (m == entries_.end() or m->second.moves.empty()) return;
+    Move& mv = m->second.moves.back();
+    if (mv.question_stamp != 0) { mv.question_stamp = 0; mv.asked = asked; dirty_ = true; }
+}
+
+std::map<std::uint64_t, Question> Repertory::questions() const
+{
+    std::map<std::uint64_t, Question> out;
+    const auto has_confirmed = [](const Entry& e, std::size_t upto)
+    { return std::ranges::any_of(e.moves | std::views::take(upto), &Move::confirmed); };
+    for (const auto& [uid, e] : entries_)
+    {
+        if (not e.continued_by.has_value() or e.moves.empty() or e.moves.back().question_stamp == 0) continue;
+        const Move& mv = e.moves.back();
+        Question q{mv.question_stamp, uid, mv.live_uid, mv.from.room_key, mv.from, mv.to, has_confirmed(e, e.moves.size() - 1)};
+        if (const auto l = entries_.find(mv.live_uid); l != entries_.end() and not l->second.keyframes.empty())
+            q.new_kf = *std::ranges::max_element(l->second.keyframes, {}, &Keyframe::t_ms);
+        if (not q.again and e.continues.has_value())
+            if (const auto prev = entries_.find(*e.continues); prev != entries_.end())
+                q.again = has_confirmed(prev->second, prev->second.moves.size());
+        out.emplace(q.stamp, q);
+    }
+    return out;
+}
+
+bool Repertory::close_question(std::uint64_t memory_uid, std::uint64_t stamp)
+{
+    const auto m = entries_.find(memory_uid);
+    if (m == entries_.end() or not m->second.continued_by.has_value() or m->second.moves.empty()) return false;
+    Move& mv = m->second.moves.back();
+    if (stamp == 0 or mv.question_stamp != stamp) return false;
+    mv.question_stamp = 0;
+    mv.asked = true;
+    dirty_ = true;
+    return true;
+}
+
+void Repertory::record_link(std::uint64_t memory_uid, std::uint64_t live_uid, std::int64_t now_ms, float prob)
+{
+    const auto m = entries_.find(memory_uid);
+    const auto l = entries_.find(live_uid);
+    if (m == entries_.end() or l == entries_.end() or m->second.keyframes.empty()) return;
+    Move mv;
+    mv.t_ms = now_ms;
+    mv.live_uid = live_uid;
+    mv.from = *std::ranges::max_element(m->second.keyframes, {}, &Keyframe::t_ms);
+    if (not l->second.keyframes.empty()) mv.to = *std::ranges::max_element(l->second.keyframes, {}, &Keyframe::t_ms);
+    mv.prob = prob;
+    m->second.moves.push_back(mv);
+    m->second.continued_by = live_uid;
+    l->second.continues = memory_uid;
+    dirty_ = true;
+}
+
+void Repertory::confirm_link(std::uint64_t memory_uid)
+{
+    const auto m = entries_.find(memory_uid);
+    if (m == entries_.end() or not m->second.continued_by.has_value() or m->second.moves.empty()) return;
+    m->second.moves.back().confirmed = true;
+    m->second.moves.back().prob = 1.f;
+    dirty_ = true;
+}
+
+void Repertory::cut_link(std::uint64_t memory_uid, std::int64_t now_ms, std::string words)
+{
+    const auto m = entries_.find(memory_uid);
+    if (m == entries_.end() or not m->second.continued_by.has_value()) return;
+    Entry& mem = m->second;
+    if (const auto l = entries_.find(*mem.continued_by); l != entries_.end())
+    {
+        l->second.continues.reset();
+        if (not words.empty()) l->second.said_new = true;   // the owner's "no": the live object is new
+    }
+    mem.continued_by.reset();
+    if (not mem.moves.empty() and not mem.moves.back().confirmed) mem.moves.pop_back();   // it never happened
+    if (not words.empty() and not mem.keyframes.empty())
+        mem.gone.push_back(GoneFromRoom{now_ms, std::ranges::max_element(mem.keyframes, {}, &Keyframe::t_ms)->room_key, std::move(words)});
+    dirty_ = true;
 }
 
 void Repertory::close_open_lives_as_gap()

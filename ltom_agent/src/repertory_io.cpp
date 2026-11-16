@@ -30,6 +30,26 @@ bool end_from(const QString& s, End& out)
     return false;
 }
 
+QJsonObject kf_json(const Keyframe& k)
+{
+    QJsonObject j;
+    j["t_ms"] = static_cast<double>(k.t_ms);
+    j["room_key"] = static_cast<double>(k.room_key);
+    j["x"] = k.pose.x; j["y"] = k.pose.y; j["yaw"] = k.pose.yaw;
+    j["vx"] = k.pose.vx; j["vy"] = k.pose.vy; j["vyaw"] = k.pose.vyaw;
+    return j;
+}
+Keyframe kf_from(const QJsonObject& j)
+{
+    Keyframe k;
+    k.t_ms = static_cast<std::int64_t>(j["t_ms"].toDouble());
+    k.room_key = static_cast<std::int64_t>(j["room_key"].toDouble(-1));
+    k.pose = Pose2{j["x"].toDouble(), j["y"].toDouble(), j["yaw"].toDouble(),
+                   j["vx"].toDouble(), j["vy"].toDouble(), j["vyaw"].toDouble()};
+    return k;
+}
+bool parse_uid(const QString& s, std::uint64_t& out);
+
 QJsonObject to_json(const Entry& e)
 {
     QJsonObject o;
@@ -59,16 +79,43 @@ QJsonObject to_json(const Entry& e)
     }
     o["lives"] = lives;
     QJsonArray kfs;
-    for (const Keyframe& k : e.keyframes)
-    {
-        QJsonObject j;
-        j["t_ms"] = static_cast<double>(k.t_ms);
-        j["room_key"] = static_cast<double>(k.room_key);
-        j["x"] = k.pose.x; j["y"] = k.pose.y; j["yaw"] = k.pose.yaw;
-        j["vx"] = k.pose.vx; j["vy"] = k.pose.vy; j["vyaw"] = k.pose.vyaw;
-        kfs.append(j);
-    }
+    for (const Keyframe& k : e.keyframes) kfs.append(kf_json(k));
     o["keyframes"] = kfs;
+    // The identity link (2026-11-15): absent fields = none, so an older file loads unchanged.
+    if (e.continued_by.has_value()) o["continued_by"] = QString::number(*e.continued_by);
+    if (e.continues.has_value()) o["continues"] = QString::number(*e.continues);
+    if (not e.moves.empty())
+    {
+        QJsonArray mv;
+        for (const Move& m : e.moves)
+        {
+            QJsonObject j;
+            j["t_ms"] = static_cast<double>(m.t_ms);
+            j["live_uid"] = QString::number(m.live_uid);
+            j["from"] = kf_json(m.from);
+            j["to"] = kf_json(m.to);
+            j["confirmed"] = m.confirmed;
+            j["prob"] = static_cast<double>(m.prob);
+            if (m.question_stamp != 0) j["question_stamp"] = QString::number(m.question_stamp);
+            if (m.asked) j["asked"] = true;
+            mv.append(j);
+        }
+        o["moves"] = mv;
+    }
+    if (not e.gone.empty())
+    {
+        QJsonArray gn;
+        for (const GoneFromRoom& g : e.gone)
+        {
+            QJsonObject j;
+            j["t_ms"] = static_cast<double>(g.t_ms);
+            j["room_key"] = static_cast<double>(g.room_key);
+            j["words"] = QString::fromStdString(g.words);
+            gn.append(j);
+        }
+        o["gone"] = gn;
+    }
+    if (e.said_new) o["said_new"] = true;
     QJsonArray thumbs;
     for (const auto& [bin, t] : e.thumbs)
     {
@@ -127,6 +174,26 @@ QJsonObject to_json(const Human& h)
         things.append(j);
     }
     o["things"] = things;
+    QJsonArray beliefs;
+    for (const Belief& b : h.beliefs)
+    {
+        QJsonObject j;
+        j["key"] = QString::fromStdString(b.key);
+        QJsonArray recs;
+        for (const BeliefRecord& r : b.records)
+        {
+            QJsonObject x = said_json(r.said);
+            x["yes"] = r.yes;
+            x["object_uid"] = QString::number(r.object_uid);
+            recs.append(x);
+        }
+        j["records"] = recs;
+        QJsonArray fg;
+        for (const Said& f : b.forgotten) fg.append(said_json(f));
+        j["forgotten"] = fg;
+        beliefs.append(j);
+    }
+    if (not h.beliefs.empty()) o["beliefs"] = beliefs;
     return o;
 }
 
@@ -149,6 +216,23 @@ bool from_json(const QJsonObject& o, Human& h)
         t.said = said_from(j);
         if (j.contains("retracted")) t.retracted = said_from(j["retracted"].toObject());
         h.things.push_back(std::move(t));
+    }
+    for (const QJsonValue& v : o["beliefs"].toArray())   // absent (older file) = nothing learned yet
+    {
+        const QJsonObject j = v.toObject();
+        Belief b;
+        b.key = j["key"].toString().toStdString();
+        for (const QJsonValue& rv : j["records"].toArray())
+        {
+            const QJsonObject x = rv.toObject();
+            BeliefRecord r;
+            r.said = said_from(x);
+            r.yes = x["yes"].toBool();
+            if (not parse_uid(x["object_uid"].toString(), r.object_uid)) return false;
+            b.records.push_back(std::move(r));
+        }
+        for (const QJsonValue& fv : j["forgotten"].toArray()) b.forgotten.push_back(said_from(fv.toObject()));
+        h.beliefs.push_back(std::move(b));
     }
     return true;
 }
@@ -176,16 +260,40 @@ bool from_json(const QJsonObject& o, Entry& e)
         if (not end_from(j["end"].toString(), l.end)) return false;
         e.lives.push_back(l);
     }
-    for (const QJsonValue& v : o["keyframes"].toArray())
+    for (const QJsonValue& v : o["keyframes"].toArray()) e.keyframes.push_back(kf_from(v.toObject()));
+    if (o.contains("continued_by"))
+    {
+        std::uint64_t u = 0;
+        if (not parse_uid(o["continued_by"].toString(), u)) return false;
+        e.continued_by = u;
+    }
+    if (o.contains("continues"))
+    {
+        std::uint64_t u = 0;
+        if (not parse_uid(o["continues"].toString(), u)) return false;
+        e.continues = u;
+    }
+    for (const QJsonValue& v : o["moves"].toArray())
     {
         const QJsonObject j = v.toObject();
-        Keyframe k;
-        k.t_ms = static_cast<std::int64_t>(j["t_ms"].toDouble());
-        k.room_key = static_cast<std::int64_t>(j["room_key"].toDouble(-1));
-        k.pose = Pose2{j["x"].toDouble(), j["y"].toDouble(), j["yaw"].toDouble(),
-                       j["vx"].toDouble(), j["vy"].toDouble(), j["vyaw"].toDouble()};
-        e.keyframes.push_back(k);
+        Move m;
+        m.t_ms = static_cast<std::int64_t>(j["t_ms"].toDouble());
+        if (not parse_uid(j["live_uid"].toString(), m.live_uid)) return false;
+        m.from = kf_from(j["from"].toObject());
+        m.to = kf_from(j["to"].toObject());
+        m.confirmed = j["confirmed"].toBool();
+        m.prob = static_cast<float>(j["prob"].toDouble());
+        if (j.contains("question_stamp") and not parse_uid(j["question_stamp"].toString(), m.question_stamp)) return false;
+        m.asked = j["asked"].toBool();
+        e.moves.push_back(m);
     }
+    for (const QJsonValue& v : o["gone"].toArray())
+    {
+        const QJsonObject j = v.toObject();
+        e.gone.push_back(GoneFromRoom{static_cast<std::int64_t>(j["t_ms"].toDouble()),
+                                      static_cast<std::int64_t>(j["room_key"].toDouble(-1)), j["words"].toString().toStdString()});
+    }
+    e.said_new = o["said_new"].toBool();   // absent = false (files written before 2026-11-16)
     for (const QJsonValue& v : o["thumbs"].toArray())   // absent in files written before thumbnails existed
     {
         const QJsonObject j = v.toObject();

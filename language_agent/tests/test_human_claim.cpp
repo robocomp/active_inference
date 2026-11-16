@@ -63,6 +63,14 @@ int main()
     assert(second_claim_this_turn(std::optional<std::uint64_t>(4), 4)); ++checks;
     assert(not second_claim_this_turn(std::optional<std::uint64_t>(3), 4)); ++checks;
     assert(not second_claim_this_turn(std::nullopt, 4)); ++checks;
+    // Changed object (2026-11-15): the answer to a moved-object question, and "forget that".
+    assert(claim_recorded_words(HumanClaim{.kind = "moved", .value = "yes:7"}, "chair_50") == "Thank you. I will remember that you moved chair_50."); ++checks;
+    assert(claim_recorded_words(HumanClaim{.kind = "moved", .value = "no:7"}, "chair_50")
+           == "Then it is a different one, and chair_50 is gone from that room. I will remember that."); ++checks;
+    assert(claim_recorded_words(HumanClaim{.kind = "moved", .value = "unknown:7"}, "chair_50")
+           == "All right: I will keep my guess that it is chair_50, moved."); ++checks;
+    assert(claim_readback(HumanClaim{.kind = "forget", .value = "moves_things"}, "you move things") == "Forget that you move things?"); ++checks;
+    assert(claim_recorded_words(HumanClaim{.kind = "forget", .value = "moves_things"}, "you move things") == "I have forgotten that you move things."); ++checks;
     std::println("test_human_claim: {} checks passed", checks);
     return 0;
 }

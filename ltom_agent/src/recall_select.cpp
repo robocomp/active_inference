@@ -14,7 +14,15 @@ std::vector<Recall> select_recalls(const Repertory& r, std::int64_t room_key,
         if (std::ranges::find(classes, e.cls) == classes.end()) continue;
         const auto last = std::ranges::max_element(e.keyframes, {}, &Keyframe::t_ms);
         if (last->room_key != room_key) continue;
-        out.push_back(Recall{uid, e.cls, *last, e.exist_prob});
+        if (gone_from(e, room_key)) continue;
+        Recall rc{uid, e.cls, *last, e.exist_prob, e.color_name, e.color_prob};
+        if (e.continued_by.has_value())
+        {
+            if (not present.contains(*e.continued_by)) continue;
+            rc.same_as_uid = *e.continued_by;
+            rc.same_as_prob = e.moves.empty() ? 0.f : e.moves.back().prob;
+        }
+        out.push_back(std::move(rc));
     }
     return out;
 }

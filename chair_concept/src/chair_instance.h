@@ -128,6 +128,11 @@ struct ChairInstance
     // cycles that resolved nothing, which is what makes a frozen decision visible instead of silent.
     rc::exist::RemovalDebounce existence_debounce;
     float exist_logodds = std::numeric_limits<float>::quiet_NaN();
+    // Changed object (2026-11-15): the identity link to a remembered chair (common/recall_match/identity_link.h),
+    // published as same_as_uid / same_as_prob / left_spot_prob. link_uid 0 = none.
+    std::uint64_t link_uid = 0;
+    float link_prob = 0.f;
+    float link_left_spot_prob = 0.f;
     // Classifier-free contour channel (common/contour_edge), last scored frame. ★n == 0 means NOT
     // MEASURED, never refuted — conflating the two deleted a live door on 2026-09-09. bias is SIGNED:
     // a low depth verdict with a large bias is a FIT error (chair nearer/farther than believed), not absence.

@@ -1,4 +1,7 @@
 #include "human_graph.h"
+#include <algorithm>
+#include <format>
+#include <ctime>
 
 #include <print>
 #include <set>
@@ -32,7 +35,67 @@ std::optional<Claim> read_claim(DSR::DSRGraph& working)
 
 HumanGraph::HumanGraph(std::shared_ptr<DSR::DSRGraph> memory) : G_(std::move(memory)) {}
 
-void HumanGraph::sync(const HumanBook& book, const std::optional<Answer>& last)
+namespace
+{
+// "2026-11-15 10:02": local time, as the person reads it.
+std::string local_minute(std::int64_t t_ms)
+{
+    const std::time_t t = static_cast<std::time_t>(t_ms / 1000);
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm);
+    return buf;
+}
+std::string object_name(const Repertory* r, std::uint64_t uid)
+{
+    if (r != nullptr)
+        if (const auto e = r->entries().find(uid); e != r->entries().end() and not e->second.name.empty()) return e->second.name;
+    return std::to_string(uid);
+}
+constexpr const char* kBeliefPrefix = "ltom_belief_";
+constexpr const char* kQuestionPrefix = "ltom_question_";
+}
+
+std::string belief_evidence_text(const Belief& b, const Repertory* r)
+{
+    std::string out;
+    for (const BeliefRecord& x : b.records)
+        out += std::format("{} | {} | {} | {}\n", local_minute(x.said.t_ms), x.yes ? "yes" : "no", x.said.words, object_name(r, x.object_uid));
+    for (const Said& f : b.forgotten)
+        out += std::format("{} | forgotten | {} | -\n", local_minute(f.t_ms), f.words);
+    return out;
+}
+
+void HumanGraph::sync_questions(const std::map<std::uint64_t, Question>& open)
+{
+    const auto root = G_->get_node("root");
+    if (not root) return;
+    std::set<std::string> want;
+    for (const auto& [stamp, q] : open) want.insert(kQuestionPrefix + std::to_string(stamp));
+    for (const auto& n : G_->get_nodes_by_type("metaconcept"))
+        if (n.name().starts_with(kQuestionPrefix) and not want.contains(n.name())) G_->delete_node(n.id());
+    for (const auto& [stamp, q] : open)
+    {
+        const std::string name = kQuestionPrefix + std::to_string(stamp);
+        if (G_->get_node(name)) continue;   // a question never changes once open
+        auto n = DSR::Node::create<metaconcept_node_type>(name);
+        G_->add_or_modify_attrib_local<parent_att>(n, root->id());
+        G_->add_or_modify_attrib_local<level_att>(n, 1);
+        G_->add_or_modify_attrib_local<question_kind_att>(n, std::string("moved"));
+        G_->add_or_modify_attrib_local<question_live_uid_att>(n, q.live_uid);
+        G_->add_or_modify_attrib_local<question_memory_uid_att>(n, q.memory_uid);
+        G_->add_or_modify_attrib_local<question_old_xy_att>(n, std::vector<float>{static_cast<float>(q.old_kf.pose.x), static_cast<float>(q.old_kf.pose.y)});
+        G_->add_or_modify_attrib_local<question_new_xy_att>(n, std::vector<float>{static_cast<float>(q.new_kf.pose.x), static_cast<float>(q.new_kf.pose.y)});
+        G_->add_or_modify_attrib_local<question_room_att>(n, std::string("room_") + std::to_string(q.room_key));
+        G_->add_or_modify_attrib_local<question_again_att>(n, q.again);
+        G_->add_or_modify_attrib_local<question_stamp_att>(n, q.stamp);
+        if (G_->insert_node(n)) std::println("[ltom] question opened {} (memory {} as live {})", name, q.memory_uid, q.live_uid);
+        else std::println(stderr, "⚠ ltom: cannot insert {}", name);
+    }
+}
+
+void HumanGraph::sync(const HumanBook& book, const std::optional<Answer>& last, const Repertory* r)
 {
     auto node = G_->get_node(kHumanNode);
     if (not node)
@@ -93,5 +156,39 @@ void HumanGraph::sync(const HumanBook& book, const std::optional<Answer>& last)
     for (const auto to : want)
         if (not have.contains(to))
             G_->insert_or_assign_edge(DSR::Edge::create<owns_edge_type>(human_id, to));
+
+    // Beliefs learned from the person's answers: one `ltom_belief_<key>` metaconcept each, hanging from human_1 by
+    // a `has` edge, with the counts and the dated evidence lines (never a bare number).
+    for (const Belief& b : book.human().beliefs)
+    {
+        const std::string name = kBeliefPrefix + b.key;
+        const int yes = static_cast<int>(std::ranges::count_if(b.records, &BeliefRecord::yes));
+        const int no = static_cast<int>(b.records.size()) - yes;
+        const std::string ev = belief_evidence_text(b, r);
+        auto bn = G_->get_node(name);
+        if (not bn)
+        {
+            auto n = DSR::Node::create<metaconcept_node_type>(name);
+            G_->add_or_modify_attrib_local<parent_att>(n, human_id);
+            G_->add_or_modify_attrib_local<level_att>(n, 2);
+            G_->add_or_modify_attrib_local<belief_yes_att>(n, yes);
+            G_->add_or_modify_attrib_local<belief_no_att>(n, no);
+            G_->add_or_modify_attrib_local<belief_evidence_att>(n, ev);
+            if (not G_->insert_node(n)) { std::println(stderr, "⚠ ltom: cannot insert {}", name); continue; }
+            bn = G_->get_node(name);
+            if (not bn) continue;
+        }
+        else if (G_->get_attrib_by_name<belief_yes_att>(*bn) != std::optional<int>(yes) or
+                 G_->get_attrib_by_name<belief_no_att>(*bn) != std::optional<int>(no) or
+                 G_->get_attrib_by_name<belief_evidence_att>(*bn).value_or("") != ev)
+        {
+            G_->add_or_modify_attrib_local<belief_yes_att>(*bn, yes);
+            G_->add_or_modify_attrib_local<belief_no_att>(*bn, no);
+            G_->add_or_modify_attrib_local<belief_evidence_att>(*bn, ev);
+            G_->update_node(*bn);
+        }
+        if (not G_->get_edge(human_id, bn->id(), "has"))
+            G_->insert_or_assign_edge(DSR::Edge::create<has_edge_type>(human_id, bn->id()));
+    }
 }
 }

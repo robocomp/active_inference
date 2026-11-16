@@ -3,6 +3,7 @@
  */
 
 #include "chair_fitter.h"
+#include "chair_ghost.h"
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 
@@ -781,6 +782,18 @@ float ChairFitter::zed_detectability(const ChairInstance& inst) const
     in.chair_xy = Eigen::Vector2f(s.cx, s.cy);
     return chair_p_detect(in, rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft},
                           room_polygon_);
+}
+
+float ChairFitter::ghost_p_vis(const Eigen::Vector2f& xy, Eigen::Vector2f* cam_xy)
+{
+    ChairInstance g;
+    g.model = ghost_model(xy.x(), xy.y(), make_model_params());
+    compute_projected_roi(g);
+    if (not g.roi_valid) return 0.0f;
+    if (cam_xy != nullptr) *cam_xy = g.roi_cam_xy;
+    const float pd = zed_detectability(g);
+    const float occ = cfg_.exist_occlusion_check ? los_occlusion(g) : 0.0f;
+    return std::clamp(pd * std::clamp(1.0f - occ, 0.0f, 1.0f), 0.0f, 1.0f);
 }
 
 // FIXATION (attention): true only when this view may touch the chair's POSE — RESOLVABLE, CENTRED and STILL.

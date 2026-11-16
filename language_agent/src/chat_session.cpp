@@ -322,6 +322,7 @@ void ChatSession::tick_digest()
     }
     track_object_changes();
     check_claim_answer();
+    track_questions();
 }
 
 // Births/removals of the current room's objects. Two baselines: the window's (flushed at most every
@@ -514,6 +515,19 @@ void ChatSession::on_user_text(const QString& text)
         push_history({{"role", "assistant"}, {"content", reply}});
         return;
     }
+    // 2q. an answer to the moved-object question in the chat (changed object): posted for LTOM here, never by the
+    //     model — the question itself was the read-back. Anything else goes on as usual, and the question is raised
+    //     once more after the reply (then the robot stays silent about it).
+    if (raised_.has_value())
+    {
+        if (const auto r = rc::chat::classify_reply(text.toStdString()); r != rc::chat::Reply::other)
+        {
+            answer_question(r, text);
+            return;
+        }
+        if (raised_->raised == 1) reraise_due_ = true;
+        else raised_.reset();
+    }
     // 3. the model.
     // ★ Busy (the person's previous message, or a robot event's turn): HOLD it, never drop it. drain_wakes answers
     //   it as soon as the model is free, before any robot event.
@@ -699,9 +713,11 @@ QJsonArray ChatSession::tools_json() const
         "\"chair_1 is mine\", \"that is not my chair\"). It stores nothing itself: it shows them a question and keeps the "
         "fact only if they answer yes. NEVER for a request that USES what is theirs: \"go to my chair\" is approach_object "
         "with object \"my chair\", \"where is my chair?\" is where_is. Not for naming an object (\"call it the reading chair\").",
-        QJsonObject{{"kind", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"name", "owns", "disowns"}},
+        QJsonObject{{"kind", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"name", "owns", "disowns", "forget"}},
                                          {"description", "name: they tell their name; owns: an object is theirs; disowns: "
-                                                         "an object is not theirs"}}},
+                                                         "an object is not theirs; forget: they ask the robot to forget "
+                                                         "something it learned (give the belief key from what_i_learned in name: "
+                                                         "moves_things, or gets_moved:<uid>)"}}},
                     {"object", QJsonObject{{"type", "string"},
                                            {"description", "for owns/disowns: the object as they said it: a name from the "
                                                            "STATE (chair_1), \"that\" / \"this\" (what the camera shows), "
@@ -896,6 +912,12 @@ QJsonArray ChatSession::tools_json() const
         QJsonObject{{"kind", str("mission, or a step/claim kind such as cross, open, approach")},
                     {"target", str("optional: a door/room/object name, e.g. door_27; empty = all of that kind")}},
         QJsonArray{"kind"}));
+    tools.append(tool_def("what_i_learned",
+        "What the robot has learned about the person from their answers (for example that they move things), each "
+        "belief with its dated evidence: when they said it and their words. For \"what have you learned about me?\", "
+        "\"why did you think I moved the chair?\". Say the evidence, never a bare number. To drop a belief they ask to "
+        "forget, call human_claim with kind forget. Read-only.",
+        QJsonObject{}, QJsonArray{}));
     tools.append(tool_def("where_was",
         "Where the robot WAS at an earlier time today (since this chat started): its room and pose then, how long ago, "
         "and the way back to that room. Give ago_min (\"10 minutes ago\" = 10) or at (HH:MM). To go back there, call "
@@ -1276,6 +1298,7 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         out = it != skills_.end() ? q(it->body) : QStringLiteral("REJECTED: no skill '%1'").arg(q(want));
     }
     else if (name == "where_was") out = answer_where_was(args);
+    else if (name == "what_i_learned") out = answer_what_i_learned();
     else if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
     else if (name == "find_objects" or name == "where_is")
     {
@@ -1855,7 +1878,22 @@ QString ChatSession::do_human_claim(const QJsonObject& args)
         object_name = cands.front().name;
         described = cands.front().words;
     }
-    else return refuse("kind must be name, owns or disowns");
+    else if (kind == "forget")
+    {
+        if (std::ranges::find(beliefs_, name, &rc::chat::BeliefFacts::key) == beliefs_.end())
+            return refuse("I have not learned '" + name + "': call what_i_learned for the keys");
+        claim.value = name;
+        std::string obj;
+        if (name.starts_with("gets_moved:"))
+        {
+            std::uint64_t uid = 0;
+            std::from_chars(name.data() + 11, name.data() + name.size(), uid);
+            for (const auto& o : remembered_now().objects) if (o.uid == uid) obj = o.name;
+        }
+        described = rc::chat::belief_words(name, obj);
+        object_name = described;
+    }
+    else return refuse("kind must be name, owns, disowns or forget");
     const std::string readback = rc::chat::claim_readback(claim, described);
     pending_claim_ = ClaimCard{.claim = claim, .readback = readback, .object_name = object_name, .serial = ++card_serial_,
                                .turn = user_turn_};
@@ -1864,6 +1902,112 @@ QString ChatSession::do_human_claim(const QJsonObject& args)
     window_->append_card(last_user_text_, q(readback));
     return QStringLiteral("SHOWN to the person as a question: \"%1\" Nothing is stored unless they answer yes. Ask them "
                           "to answer yes or no; do NOT say it is stored or remembered.").arg(q(readback));
+}
+
+void ChatSession::say_now(const std::string& text)
+{
+    window_->begin_assistant();
+    window_->append_token(q(text));
+    window_->end_assistant();
+    push_history({{"role", "assistant"}, {"content", q(text)}});
+}
+
+std::string ChatSession::place_of(const rc::chat::OpenQuestion& qn, rc::chat::P2 xy) const
+{
+    std::int64_t key = -1;
+    if (qn.room.starts_with("room_"))
+        std::from_chars(qn.room.data() + 5, qn.room.data() + qn.room.size(), key);
+    std::vector<rc::chat::P2> poly;
+    std::vector<std::pair<std::string, rc::chat::P2>> doors;
+    const auto rt = G_->get_rt_api();
+    for (const auto& rn : G_->get_nodes_by_type("room"))
+    {
+        if (G_->get_attrib_by_name<room_id_att>(rn) != std::optional<std::uint64_t>(static_cast<std::uint64_t>(key))) continue;
+        const auto px = G_->get_attrib_by_name<delimiting_polygon_x_att>(rn);
+        const auto py = G_->get_attrib_by_name<delimiting_polygon_y_att>(rn);
+        if (px.has_value() and py.has_value())
+            for (std::size_t i = 0; i < std::min(px.value().get().size(), py.value().get().size()); ++i)
+                poly.push_back({px.value().get()[i], py.value().get()[i]});
+        for (const auto& d : G_->get_nodes_by_type("door"))
+            if (const auto t = rt->get_translation(rn, d.id()); t.has_value())
+                doors.emplace_back(d.name(), rc::chat::P2{static_cast<float>(t->x()), static_cast<float>(t->y())});
+        break;
+    }
+    return rc::chat::place_words(xy, poly, doors);
+}
+
+// LTOM opens a question when a live object is linked to a remembered one whose old spot was seen empty. The chat says
+// it as soon as nothing else is waiting (a reply, a planner, a card, a posted claim), in the ask or the report form;
+// after the person's next message that is not an answer it says it once more (the away form), then stays silent.
+void ChatSession::track_questions()
+{
+    if (not ltom_G_) return;
+    questions_ = rc::chat::load_questions(*ltom_G_);
+    beliefs_ = rc::chat::load_beliefs(*ltom_G_);
+    if (raised_.has_value() and std::ranges::none_of(questions_, [&](const auto& x) { return x.stamp == raised_->stamp; }))
+    {
+        raised_.reset();   // LTOM closed it (answered, the link cut, or the object gone)
+        reraise_due_ = false;
+    }
+    const bool quiet = not llm_.busy() and not planner_.has_value() and not pending_mission_.has_value() and
+                       not pending_claim_.has_value() and not posted_claim_.has_value();
+    if (not quiet) return;
+    const auto find_q = [&](std::uint64_t stamp) { return std::ranges::find(questions_, stamp, &rc::chat::OpenQuestion::stamp); };
+    if (raised_.has_value())
+    {
+        if (not reraise_due_) return;
+        reraise_due_ = false;
+        if (const auto it = find_q(raised_->stamp); it != questions_.end() and raised_->raised == 1)
+        {
+            const std::string text = rc::chat::question_text(*it, rc::chat::QMode::ask, true, place_of(*it, it->old_xy), place_of(*it, it->new_xy));
+            log_.write("question_raised", QJsonObject{{"stamp", QString::number(it->stamp)}, {"times", 2}, {"text", q(text)}});
+            say_now(text);
+            raised_->raised = 2;
+        }
+        return;
+    }
+    const auto open = std::ranges::find_if(questions_, [&](const auto& x) { return not done_questions_.contains(x.stamp); });
+    if (open == questions_.end()) return;
+    const auto mt = std::ranges::find(beliefs_, std::string("moves_things"), &rc::chat::BeliefFacts::key);
+    const auto mode = rc::chat::choose_mode(mt == beliefs_.end() ? 0 : mt->yes, mt == beliefs_.end() ? 0 : mt->no,
+                                            cfg_.question_cost_ask, cfg_.question_cost_wrong);
+    const std::string text = rc::chat::question_text(*open, mode, false, place_of(*open, open->old_xy), place_of(*open, open->new_xy));
+    log_.write("question_raised", QJsonObject{{"stamp", QString::number(open->stamp)}, {"times", 1},
+                                              {"mode", mode == rc::chat::QMode::ask ? "ask" : "report"}, {"text", q(text)}});
+    say_now(text);
+    done_questions_.insert(open->stamp);
+    raised_ = rc::chat::RaiseState{open->stamp, mode == rc::chat::QMode::report ? 2 : 1, mode};
+}
+
+void ChatSession::answer_question(rc::chat::Reply r, const QString& text)
+{
+    const auto it = std::ranges::find(questions_, raised_->stamp, &rc::chat::OpenQuestion::stamp);
+    push_history({{"role", "user"}, {"content", text}});
+    if (it == questions_.end()) { raised_.reset(); say_now("That question is closed now; nothing was stored."); return; }
+    HumanClaim c{.kind = "moved", .value = rc::chat::moved_claim_value(r, it->stamp), .uid = it->memory_uid, .words = text.toStdString()};
+    if (posted_claim_.has_value()) intention_.clear_claim();
+    posted_claim_.reset();
+    const auto stamp = intention_.post_claim(c);
+    log_.write("question_answer", QJsonObject{{"stamp", QString::number(it->stamp)}, {"value", q(c.value)}, {"posted", stamp.has_value()}});
+    if (stamp.has_value())
+        posted_claim_ = PostedClaim{.claim = c, .readback = "", .object_name = it->memory_name, .stamp = *stamp,
+                                    .posted_ms = static_cast<std::int64_t>(rc::provenance::now_ms())};
+    raised_.reset();
+    reraise_due_ = false;
+    say_now(stamp.has_value() ? "Keeping it in my long-term memory…" : "I could not write it to the graph; nothing was stored.");
+}
+
+QString ChatSession::answer_what_i_learned() const
+{
+    const auto name_of = [this](std::uint64_t uid) -> std::string
+    {
+        if (not ltom_G_) return {};
+        for (const auto& n : ltom_G_->get_nodes_by_type("object"))
+            if (ltom_G_->get_attrib_by_name<object_uid_att>(n) == std::optional<std::uint64_t>(uid)) return n.name();
+        return {};
+    };
+    if (not ltom_G_) return QStringLiteral("My long-term memory (ltom_agent) is not joined, so I cannot tell what I learned.");
+    return q(rc::chat::learned_text(beliefs_, name_of));
 }
 
 void ChatSession::check_claim_answer()

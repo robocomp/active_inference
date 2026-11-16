@@ -23,7 +23,7 @@ constexpr std::int64_t kClaimAnswerWaitMs = 5000;
 
 struct HumanClaim
 {
-    std::string kind;            ///< "name" | "owns" | "disowns"
+    std::string kind;            ///< "name" | "owns" | "disowns" | "moved" (answer to a moved-object question) | "forget"
     std::string value{};         ///< the name, for kind name
     std::uint64_t uid = 0;       ///< object_uid, for owns / disowns
     std::string words{};         ///< the person's own words
@@ -50,6 +50,7 @@ inline std::string remembered_words(const RememberedObject& o)
 inline std::string claim_readback(const HumanClaim& c, const std::string& what)
 {
     if (c.kind == "name") return std::format("Your name is {}?", c.value);
+    if (c.kind == "forget") return std::format("Forget that {}?", what);
     if (c.kind == "disowns") return std::format("{}, is NOT yours?", what);
     return std::format("{}, is yours?", what);
 }
@@ -58,6 +59,14 @@ inline std::string claim_readback(const HumanClaim& c, const std::string& what)
 inline std::string claim_recorded_words(const HumanClaim& c, const std::string& object_name)
 {
     if (c.kind == "name") return std::format("I will remember that your name is {}.", c.value);
+    if (c.kind == "forget") return std::format("I have forgotten that {}.", object_name);
+    if (c.kind == "moved")   // changed object: object_name = the remembered object asked about
+    {
+        if (c.value.starts_with("yes:")) return std::format("Thank you. I will remember that you moved {}.", object_name);
+        if (c.value.starts_with("no:"))
+            return std::format("Then it is a different one, and {} is gone from that room. I will remember that.", object_name);
+        return std::format("All right: I will keep my guess that it is {}, moved.", object_name);
+    }
     return std::format("I will remember that {} is {}yours.", object_name, c.kind == "disowns" ? "not " : "");
 }
 
