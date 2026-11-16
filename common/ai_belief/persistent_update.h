@@ -6,8 +6,12 @@
  * surface through the same localisation, deprojection and mask bias frame after frame. Here the shared errors are
  * LATENTS b ∈ ℝᴷ carried beside the object state θ ∈ ℝᴺ, state x = (θ, b), covariance P ((N+K)×(N+K), double).
  *
- *   Dynamics, per latent DOF j:  b_t = ρ_j D_j b_{t−1} + w_t,  D_j = σ_now/σ_prev (1 when σ_prev = 0),
+ *   Dynamics, per latent DOF j:  b_t = ρ_j D_j b_{t−1} + w_t,  D_j = σ_now/σ_prev,
  *                                w_t ~ N(0, (1 − ρ_j²) σ_now²)        ⇒ marginal exactly σ_now², lag-1 corr. ρ_j.
+ *   σ_prev = 0 means there was no error source before this step (a zero-variance latent: chain cov disabled, a channel
+ *   never measured, a fresh birth). The source is then NEW, uncorrelated with the (non-existent) old one: ρ = 0 for that
+ *   transition, so the latent is drawn afresh with variance σ_now² — not (1 − ρ²)σ_now², which at ρ = 1 would leave a new
+ *   error source at variance 0 for ever (ruling T4-1c).
  *   Channel c measures θ + B_c b; its linearised data enters as information (I_c, g_c) on that quantity, with
  *   g_c the log-likelihood gradient at the linearisation point (the engine's bd = −Σ w J d). H_c = [𝟙 B_c].
  *   A θ-only channel (I_θ, g_θ), H_θ = [𝟙 0], carries what the biases must not absorb (one-sided constraints, anchors).
@@ -18,8 +22,8 @@
  *   the last iterate keeps the whole x_{k+1} (its b is the posterior b). At ρ = 0, eliminating b reproduces today's
  *   saturated step at every iterate; carrying the iterate's b belief instead re-counts the frame on b.
  *
- * All solves in double; fixed-size Eigen throughout (N, K known at compile time). No thresholds: the only guard is
- * D = 1 when σ_prev = 0 (a zero-variance latent), as specified.
+ * All solves in double; fixed-size Eigen throughout (N, K known at compile time). No thresholds: the only case split is
+ * σ_prev = 0 (a new error source: ρ = 0 for that transition, no 0/0).
  */
 #pragma once
 
@@ -66,6 +70,7 @@ struct Channel
 
 // Predict the latents: F = blockdiag(𝟙_N, diag(ρ_j D_j)) applied to x and as F P Fᵀ (θ–b and b–b cross blocks included),
 // then P_bb += diag((1 − ρ²) σ_now²). θ's own prediction (and its clamp) is the caller's, on the θθ block.
+// σ_prev = 0 ⇒ a NEW error source: ρ = 0 for this transition (mean and cross terms dropped, variance σ_now²).
 template <int N, int K>
 void predict_latents(Eigen::Matrix<double, N + K, N + K>& P,
                      Eigen::Matrix<double, N + K, 1>& x,
@@ -75,13 +80,15 @@ void predict_latents(Eigen::Matrix<double, N + K, N + K>& P,
 {
     for (int j = 0; j < K; ++j)
     {
-        const double D = (sigma_prev(j) == 0.0) ? 1.0 : sigma_now(j) / sigma_prev(j);   // the specified guard
-        const double f = rho(j) * D;
-        const int    r = N + j;
+        const bool   new_source = (sigma_prev(j) == 0.0);                 // nothing to correlate with: ρ = 0
+        const double rj = new_source ? 0.0 : rho(j);
+        const double D  = new_source ? 1.0 : sigma_now(j) / sigma_prev(j);
+        const double f  = rj * D;
+        const int    r  = N + j;
         x(r) *= f;
         P.row(r) *= f;
         P.col(r) *= f;
-        P(r, r) += (1.0 - rho(j) * rho(j)) * sigma_now(j) * sigma_now(j);
+        P(r, r) += (1.0 - rj * rj) * sigma_now(j) * sigma_now(j);
     }
 }
 

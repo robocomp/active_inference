@@ -1,6 +1,7 @@
 // persistent_update_test — the persistent shared-error latents (spec 2026-11-15 lidar-measures §7c.2): fresh-covariance
 // marginalisation, latent dynamics, the inverse-free joint step with the bias restart, and the joint covariance.
 // Header-only under test (common/ai_belief/persistent_update.h); nothing in the agents uses it yet. Run: ./persistent_update_test
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -184,11 +185,48 @@ static void zero_variance_latent_runs()
     CHECK(xn.allFinite() and Pn.allFinite());
     CHECK(xn(2) == 0.0 and Pn(2, 2) == 0.0);
 
-    // D = 1 when σ_prev = 0: with ρ = 1 a carried latent mean is untouched (no 0/0).
+    // σ_prev = 0 ⇒ a new source (ruling T4-1c): ρ = 0 for the transition, so even at ρ = 1 a (meaningless) carried mean on
+    // the zero-variance latent is dropped, with no 0/0.
     V4 x2 = V4::Zero(); x2(2) = 0.3;
     M4 P2 = P;
     pu::predict_latents<2, 2>(P2, x2, V2(1.0, 1.0), s_prev, s_now);
-    CHECK(x2(2) == 0.3 and x2.allFinite() and P2.allFinite());
+    CHECK(x2(2) == 0.0 and x2.allFinite() and P2.allFinite());
+}
+
+// ─── dynamics with D ≠ 1 (ruling T4-1b): σ 0.02 → 0.03 at ρ = 0.6 ⇒ marginal σ_now², cross entries f·old ──────────────
+static void dynamics_rescale()
+{
+    using V3 = Eigen::Vector3d;
+    using M3 = Eigen::Matrix3d;
+    using V1 = Eigen::Matrix<double, 1, 1>;
+    M3 P; P << 1e-3, 2e-4, -3e-4,
+               2e-4, 5e-4,  1e-4,
+              -3e-4, 1e-4,  4e-4;                  // latent (row 2) at σ_prev² = 0.02², correlated with θ (rows 0, 1)
+    const M3 old = P;
+    V3 x(0.1, -0.2, 0.015);
+    const double rho = 0.6, sp = 0.02, sn = 0.03, f = rho * sn / sp;   // f = 0.9
+    pu::predict_latents<2, 1>(P, x, V1(rho), V1(sp), V1(sn));
+    std::printf("dynamics_rescale  P(2,2) %.6e (sigma_now^2 %.6e)  P(0,2) %.6e (f*old %.6e)  P(1,2) %.6e (f*old %.6e)  x(2) %.6e\n",
+                P(2, 2), sn * sn, P(0, 2), f * old(0, 2), P(1, 2), f * old(1, 2), x(2));
+    CHECK(std::abs(P(2, 2) - sn * sn) < 1e-15);
+    CHECK(std::abs(P(0, 2) - f * old(0, 2)) < 1e-15 and std::abs(P(2, 0) - f * old(2, 0)) < 1e-15);
+    CHECK(std::abs(P(1, 2) - f * old(1, 2)) < 1e-15 and std::abs(P(2, 1) - f * old(2, 1)) < 1e-15);
+    CHECK((P.topLeftCorner<2, 2>() == old.topLeftCorner<2, 2>()));
+    CHECK(std::abs(x(2) - f * 0.015) < 1e-15 and x(0) == 0.1 and x(1) == -0.2);
+}
+
+// ─── a new error source (ruling T4-1c): σ_prev = 0 → σ_now = 0.03 at ρ = 1 ⇒ variance 0.03², not 0 ─────────────────
+static void new_source_gets_full_variance()
+{
+    using V1 = Eigen::Matrix<double, 1, 1>;
+    using M2 = Eigen::Matrix2d;
+    using V2 = Eigen::Vector2d;
+    M2 P = M2::Zero(); P(0, 0) = 1e-3;
+    V2 x(0.1, 0.0);
+    pu::predict_latents<1, 1>(P, x, V1(1.0), V1(0.0), V1(0.03));
+    std::printf("new_source_gets_full_variance  P(1,1) %.6e (0.03^2 = %.6e)\n", P(1, 1), 0.03 * 0.03);
+    CHECK(std::abs(P(1, 1) - 0.03 * 0.03) < 1e-15);
+    CHECK(P(0, 1) == 0.0 and P(1, 0) == 0.0 and x(1) == 0.0 and x(0) == 0.1);
 }
 
 // ─── ρ = 1, D = 1: n identical updates of one look = one update with n·Id ─────────────────────────
@@ -275,6 +313,8 @@ int main()
     rho0_equals_saturate();
     fresh_zero_is_identity();
     zero_variance_latent_runs();
+    dynamics_rescale();
+    new_source_gets_full_variance();
     rho1_n_sweeps_equal_one_with_n_id();
     shared_latent_position_information();
     cov_symmetric_psd();
