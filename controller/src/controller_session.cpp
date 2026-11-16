@@ -4023,15 +4023,25 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             else
                 current_plan_ = ControllerPathPlan{.room_path = {step.robot_pose.pos, step.target.room_pos}};   // display stub
             plan_spline_valid_ = false;
+            plan_is_policy_stub_ = true;
         }
         return true;
     }
+    // ★ 2026-11-16: a plan left by the branch above (the policy's unsmoothed display route, e.g. the first cycle of a target
+    //   after a door cross or a lock-on, when chain_hybrid_place_ was still false) is NOT the chain's: it has no fitted spline,
+    //   so drive_with_policy never handed the cycle to the tracker and the policy drove the whole target. Planned again, once.
+    const bool replace_stub = plan_is_policy_stub_;
+    plan_is_policy_stub_ = false;
     // ── PORT STEP 4 — WAIT. The way is blocked by what the map does not have (no route on map + marks, one on the map alone):
     //    stopped and watching, never "unreachable" — a mark that clears (chain_observe) ends the wait and the planner tries the
     //    marks again. ★FLAGGED: no give-up time here; how long a mission waits is the caller's (its contract's timeout).
     if (chain_wait_)
     {
-        if (step.target_changed) chain_wait_ = false;
+        // ★ 2026-11-16: the marks are WATCHED HERE. A WAIT returns false below, and compute() does not call execute_plan after
+        //   a refused plan — so neither drive_with_policy's nor execute_plan's chain_observe ran while waiting, no mark was ever
+        //   seen cleared, and a WAIT could end only by a new target. chain_observe clears chain_wait_ when a mark is seen gone.
+        if (not step.target_changed) chain_observe(rc::policy::to_policy_pose(step.robot_pose), obstacle_tracker);
+        if (step.target_changed or not chain_wait_) chain_wait_ = false;
         else
         {
             current_plan_.reset();
@@ -4058,7 +4068,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
                 plan_spline_valid_ = false;
             }
     }
-    if (step.target_changed || !current_plan_.has_value())
+    if (step.target_changed or not current_plan_.has_value() or replace_stub)
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.

@@ -869,6 +869,7 @@ private:
     [[nodiscard]] bool chain_hybrid_on() const
     { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled and policy_enabled(); }
     bool chain_hybrid_place_ = false;          ///< drive_with_policy reached its PLACE branch last cycle (the chain plans for it)
+    bool plan_is_policy_stub_ = false;         ///< current_plan_ is the policy branch's unsmoothed display route, not the chain's
     struct ChainEpisode
     {
         bool active = false, final = false;    ///< final: the episode's goal is the target itself (its Arrived completes it)
