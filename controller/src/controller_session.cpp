@@ -8,11 +8,9 @@
 #include "residual_risk.h"
 #include "standpoint_fit.h"      // Task 3c: does an affordance standpoint serve, or is it handed back
 #include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
-#include "near_field_clearance.h"        // Task 6: [Route] NearFieldClearance — the band's structured near field
 #include "door_leaf_geometry.h"      // the canvas draws every door as aperture + believed leaf
 #include "controller_approach_view.h"   // the canvas draws an object-approach's options (one arrow per side)
 #include "door_route.h"                 // the door route's waypoints (controller_door_passage.h ROUTE MODE)
-#include "band_cross.h"                 // Task 6 fix round 1: [Route] BandDrivesCross's route through the opening
 #include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
 
 #include "controller_stage_timer.h"
@@ -176,6 +174,24 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         return false;
     }
     room_wait_logged_ = false;
+    // ★ THE MARKS BELONG TO ONE VISIT OF ONE ROOM (owner 2026-11-16). They record transient obstacles the map does not have,
+    //   in that room's frame; on the room switch they are forgotten, so a re-entry starts with none. Done HERE, where the room
+    //   name changes — step_chain_monitor's own check runs only while the chain's tracker drives, so a room crossed and left
+    //   under the policy never dropped them, and coming back to a room of the same name found the old visit's marks still
+    //   "in its frame" (hy2_explore2: room_1 -> room_2 -> room_1, a WAIT on 60 marks of the first visit).
+    if (const std::string &room_now = world_model.graph_state().room_name; room_now != current_room_name_)
+    {
+        if (not chain_marks_.empty() or chain_wait_)
+            std::println("[chain] room switch '{}' -> '{}': {} marks and {} failure marks forgotten{}", current_room_name_, room_now,
+                         chain_marks_.marks.size(), chain_marks_.fail.size(), chain_wait_ ? " — the WAIT on them ends" : "");
+        chain_marks_ = {};
+        chain_ep_marks_.clear();
+        chain_marks_room_ = room_now;
+        chain_marks_off_ = false;
+        chain_clear_check_ = false;
+        chain_have_prev_ = false;
+        chain_wait_ = false;
+    }
     current_room_name_ = world_model.graph_state().room_name;   // Task 18: the frame the gap line is carried in
 
     const auto room_polygon = world_model.read_room_polygon();
@@ -295,7 +311,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             door_passage_.note_robot(rp.has_value() ? std::optional<Eigen::Vector2f>(rp->pos) : std::nullopt,
                                      path_controller.goal_threshold());
         }
-        door_passage_.set_look_enabled(policy_enabled());   // Task E: the look-vs-step choice belongs to the [Policy] chain
+        door_passage_.set_look_enabled(true);   // Task E: the look-vs-step choice belongs to the [Policy] chain
         door_passage_.note_room_id(world_model.graph_state().room_id);
         door_passage_.note_archived_room_id(world_model.graph_state().archived_room_id);
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
@@ -563,7 +579,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     //   cells (a live return in the body band this cycle, or no belief) are occupied whatever caused them and stay hard
     //   (fix round 1, I-1). Only in the room frame the leaf was taken in (a room switch drops it: policy_reset). The radius
     //   is the BARE body's inscribed radius — the one the field's free test uses (M-4).
-    const bool leaf_explains = policy_enabled() and not policy_leaf_.empty() and policy_leaf_room_ == current_room_name_;
+    const bool leaf_explains = not policy_leaf_.empty() and policy_leaf_room_ == current_room_name_;
     policy_leaf_evidence_.reset();
     if (leaf_explains)
     {
@@ -584,7 +600,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     else policy_leaf_mass_logged_ = -1.f;
     // clean18: the door the robot has just come through is a known obstacle for the planner, in the room frame it was taken in.
     // Not during a cross: there the opening is the goal, and the leaf's hypotheses are priced by its own model above.
-    const bool passed_leaf_known = policy_enabled() and not anchor_cross_.has_value() and not policy_passed_leaf_.empty()
+    const bool passed_leaf_known = not anchor_cross_.has_value() and not policy_passed_leaf_.empty()
                                    and policy_passed_leaf_room_ == current_room_name_;
     ControllerPolygons polygons_with_leaf;
     if (passed_leaf_known)
@@ -1180,33 +1196,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // ★ Task 3e (3): a flagged hand-back is reported on the node it names BEFORE the selection can move the claim on.
     report_flagged_unreachable(affordance_manager);
 
-    // ── ACT ON A PENDING REJECTION, BEFORE THE NEXT SELECTION ────────────────────────────────────
-    // Set by begin_escape after kMaxEscapesPerAffordance wedges against one standpoint. Done here
-    // because this is where the manager is reachable, and it must land BEFORE read_target_in_room or
-    // the very next selection hands the same unreachable affordance straight back.
-    if (reject_affordance_id_ != 0)
-    {
-        std::println("[controller] ABANDONING '{}' after {} escapes without reaching it — releasing the "
-                     "claim so another affordance can win. An affordance the body cannot reach advertises "
-                     "gain it cannot deliver; grinding at it serves nothing.",
-                     reject_affordance_name_, escapes_on_target_);
-        affordance_manager.suppress_target(graph_, reject_affordance_id_, kUnreachableRounds);
-        affordance_manager.release_execution_claim(graph_);
-        // Remember the spot as PUBLISHED, so the same proposal is recognised next time it arrives.
-        if (last_raw_target_pos_.has_value())
-            remember_useless_spot(*last_raw_target_pos_, reject_affordance_name_, timestamp_ms);
-        reject_affordance_id_ = 0;
-        reject_affordance_name_.clear();
-        escapes_on_target_ = 0;
-        escapes_target_id_ = 0;
-        // Drop every trace of the abandoned goal so the next selection starts clean rather than
-        // re-planning to the pose we just gave up on.
-        last_target_info_.reset();
-        current_target_room_.reset();
-        active_target_id_ = 0;
-        current_plan_.reset();
-        plan_spline_valid_ = false;
-    }
 
     // Door passage: the selector may take only the step's affordance. On its start the claim on whatever was being
     // executed (the explorer's afford_room, typically) is released, exactly as an abandoned goal is above.
@@ -1856,7 +1845,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // Here — every cycle, at any range — only causes that do not come and go hand back; a cell hard only from a live
         // return this cycle is left to the windowed recheck, where the LiDAR measures the spot.
         const auto standpoint_decision = rc::standpoint::decide_standpoint(
-            grid_planner_, step.target.room_pos, will_rotate_here, policy_enabled(), target_contract_known_,
+            grid_planner_, step.target.room_pos, will_rotate_here, /*policy_on=*/true, target_contract_known_,
             target_contract_.policy == rc::affordance::Policy::Reach, rc::standpoint::Stage::Planning);
         const bool object_standpoint_under_policy = standpoint_decision.action != rc::standpoint::Action::LegacyRepair;
         if (object_standpoint_under_policy)
@@ -2710,63 +2699,6 @@ void ControllerSession::log_residual_world(std::uint64_t t_ms,
     residual_world_csv_.flush();
 }
 
-void ControllerSession::log_route_geometry()
-{
-    if (!route_geom_csv_open_)
-    {
-        route_geom_csv_.open("route_geometry.csv", std::ios::out | std::ios::trunc);
-        route_geom_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
-        if (route_geom_csv_.is_open()) route_geom_csv_ << "event_id,kind,i,x,y\n";
-        route_geom_csv_open_ = true;
-    }
-    if (!route_geom_csv_.is_open()) return;
-    const auto &poly = route_.polyline();
-    for (std::size_t i = 0; i < poly.size(); ++i)
-        route_geom_csv_ << route_event_id_ << ",astar," << i << ',' << poly[i].x() << ',' << poly[i].y() << '\n';
-    const auto &curve = route_.path();
-    for (std::size_t i = 0; i < curve.size(); ++i)
-        route_geom_csv_ << route_event_id_ << ",smoothed," << i << ',' << curve[i].x() << ',' << curve[i].y() << '\n';
-    route_geom_csv_.flush();
-}
-
-void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
-                                         const std::vector<Eigen::Vector2f> &raw,
-                                         const std::vector<Eigen::Vector2f> &repaired,
-                                         int laps,
-                                         const rc::RouteOptimizerConfig &opt) const
-{
-    std::ofstream f("route_world.txt", std::ios::out | std::ios::trunc);
-    if (not f.is_open()) return;
-    // Locale-proof the writer (CLAUDE.md): these machines run es_ES, where the decimal separator is a
-    // COMMA. std::ofstream formats through the C++ global locale, which stays "C" unless someone calls
-    // std::locale::global — but this file is parsed back by tools that read with the C library, and a
-    // comma here would silently truncate every coordinate to its integer part. Cheap insurance.
-    f.imbue(std::locale::classic());
-    f << std::setprecision(9);
-    f << "# route world snapshot — ControllerSession::build_route. Replay with tools/route_bench.\n";
-    f << "version 1\n";
-    f << "mission " << mission_.selected_name() << '\n';
-    f << "laps " << laps << '\n';
-    f << "start " << start.x() << ' ' << start.y() << '\n';
-    // Both waypoint sets: the tour as RECORDED and as REPAIRED to feasible poses. The bench must drive
-    // the repaired ones (they are what was planned through) but anchor-fidelity is only meaningful
-    // against what was actually asked for, and the two differ by however much the world moved.
-    for (const auto &p : raw)      f << "wp_raw "  << p.x() << ' ' << p.y() << '\n';
-    for (const auto &p : repaired) f << "wp_safe " << p.x() << ' ' << p.y() << '\n';
-    if (params_ != nullptr)
-        f << "fit " << params_->route_spacing_m << ' ' << params_->route_smoothing_m << ' '
-          << params_->max_adv_speed_mps << ' ' << params_->max_lateral_accel_mps2 << ' '
-          << params_->comfort_standoff_m << '\n';
-    // EVERY field the solve consumed, so the bench replays rather than infers. New fields go on the END:
-    // the reader takes them in order and leaves anything missing at its default, so an older snapshot
-    // stays readable instead of becoming a file that parses into a subtly different optimiser.
-    f << "opt " << opt.d_target << ' ' << opt.rho << ' ' << opt.sigma_a << ' ' << opt.clearance_floor << ' '
-      << opt.w_kappa << ' ' << opt.w_clear << ' ' << opt.w_gauge << ' ' << opt.clear_peak << ' '
-      << opt.anchor_huber << ' ' << opt.iterations << ' ' << opt.kappa_peak << ' '
-      << opt.safety_bias << ' ' << opt.w_jerk << '\n';
-    grid_planner_.write_grid(f);
-}
-
 void ControllerSession::log_tracker_diagnostics(std::uint64_t t_ms,
                                              const rc::TrajectoryController::ControlOutput &o,
                                              float commanded_adv, float measured_speed,
@@ -2877,194 +2809,6 @@ void ControllerSession::log_tracker_diagnostics(std::uint64_t t_ms,
               << pose_stamp_age << ',' << path_generation_ << '\n';
 }
 
-void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
-                                        const rc::TrajectoryController &path_controller,
-                                        float window_m)
-{
-    if (!route_events_csv_open_)
-    {
-        route_events_csv_.open("route_events.csv", std::ios::out | std::ios::trunc);
-        route_events_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
-        if (route_events_csv_.is_open())
-            route_events_csv_ << "t_ms,event,ok,mission,route_len_m,samples,corrections,window_m,"
-                                 "opt_ran,opt_rejected,opt_iters,cost_before,cost_after,"
-                                 "e_kappa,e_clear,e_anchor,e_gauge,clear_before_m,clear_after_m,max_move_m,"
-                                 "esdf_boundary_cells,esdf_boundary_rejected,"
-                                 "max_dev_m,mean_dev_m,detail\n";
-        route_events_csv_open_ = true;
-    }
-    if (!route_events_csv_.is_open()) return;
-
-    const auto &o = route_.spline().last_optimizer_report();
-    route_events_csv_ << t_ms << ',' << event << ',' << (ok ? 1 : 0) << ','
-                      << mission_.selected_name() << ','
-                      << route_.length() << ',' << route_.path().size() << ',' << route_.corrections() << ','
-                      << window_m << ','
-                      << (o.ran ? 1 : 0) << ',' << (o.rejected ? 1 : 0) << ',' << o.iterations << ','
-                      << o.cost_before << ',' << o.cost_after << ','
-                      << o.e_kappa << ',' << o.e_clear << ',' << o.e_anchor << ',' << o.e_gauge << ','
-                      << o.min_clearance_before << ',' << o.min_clearance_after << ',' << o.max_move_m << ','
-                      << path_controller.esdf_boundary_cells() << ','
-                      << (path_controller.esdf_boundary_rejected() ? 1 : 0) << ','
-                      << route_.spline().max_deviation_m() << ',' << route_.spline().mean_deviation_m() << ','
-                      // The planner's reason contains commas AND is only meaningful for the event that
-                      // produced it. Sanitised so a naive splitter cannot be shifted a column, and
-                      // consumed so it cannot go stale on the next row.
-                      << [this]
-                         {
-                             std::string d = last_plan_failure_;
-                             std::replace(d.begin(), d.end(), ',', ';');
-                             last_plan_failure_.clear();
-                             return d;
-                         }() << '\n';
-    route_events_csv_.flush();
-    ++route_event_id_;
-    log_route_geometry();
-}
-
-bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
-{
-    // The RUNNING copy: moved into the current room frame at start() (mission_frame.h).
-    const auto *m = mission_.running_mission() ? mission_.running_mission() : mission_.selected_mission();
-    if (m == nullptr or m->waypoints.size() < 2) return false;
-
-    // REPAIR EVERY WAYPOINT FIRST. A recorded waypoint is a DESIRE; what can actually be driven is the
-    // nearest footprint-feasible pose to it. The world moves between recording and running — an obstacle
-    // appears, a wall is re-estimated — so a raw waypoint is not guaranteed drivable, and planning
-    // straight to it fails outright.
-    // This is not a workaround: the per-waypoint mode did exactly this (nearest_free, below) on every
-    // target, which is why it drove this same tour for five clean laps while the route builder could not
-    // plan past waypoint 6. Moving the planning into the route builder dropped the repair with it.
-    // Yaw is the direction of travel toward the NEXT waypoint — the pose the robot will actually present
-    // there, and the one the planner searches under.
-    std::vector<Eigen::Vector2f> wps, raw_wps;
-    wps.reserve(m->waypoints.size());
-    raw_wps.reserve(m->waypoints.size());
-    int repaired = 0, skipped = 0;
-    const int n = static_cast<int>(m->waypoints.size());
-    // ── THE AUTHORED ORDER, POSSIBLY BACKWARDS ───────────────────────────────────────────────────
-    // A LOCAL copy, reversed here and nowhere else: the recorded mission must not change because a run
-    // was driven the other way round, or the reversal would be written back to missions.toml the next
-    // time the library is saved. Reversing the list rather than indexing backwards also means the yaw
-    // below — "face the NEXT waypoint" — keeps working with no second spelling: in a reversed tour the
-    // next waypoint IS the previous one, and that is what the robot will actually be driving toward.
-    std::vector<Eigen::Vector2f> authored;
-    authored.reserve(m->waypoints.size());
-    for (const auto &w : m->waypoints) authored.push_back(w.pos);
-    if (route_reverse_)
-    {
-        std::ranges::reverse(authored);
-        std::println("[route] REVERSED: driving '{}' in reverse waypoint order. This is a DIFFERENT "
-                     "stimulus from the forward tour — recorded as params.reversed in the run JSON so "
-                     "the two cannot be compared by accident.", mission_.selected_name());
-    }
-    for (int i = 0; i < n; ++i)
-    {
-        const Eigen::Vector2f raw = authored[i];
-        const Eigen::Vector2f next = authored[(i + 1) % n];
-        const Eigen::Vector2f dir = next - raw;
-        const float yaw = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
-        const auto safe = grid_planner_.nearest_free(raw, yaw);
-        if (not safe.has_value())
-        {
-            // Boxed in beyond the repair radius. It CHANGES THE ROUTE, so it is said out loud rather
-            // than swallowed: a benchmark whose stimulus quietly differs is worse than no run.
-            // ★HANDED ON RAW RATHER THAN DROPPED HERE (2026-08-17). There used to be two independent,
-            // permanent drop sites — this one and RouteFollower's — and neither remembered anything.
-            // Passing the unrepaired waypoint through means its hop simply fails in the builder, which
-            // DEFERS it, so both cases funnel into the one mechanism that can give it back. The
-            // immediate behaviour is unchanged (an infeasible pose cannot be planned to either way);
-            // what changes is that the tour can recover it when the robot gets there.
-            std::println("[route] waypoint {} at ({:.2f},{:.2f}) is BOXED IN — deferring it. The driven "
-                         "route does not match the recorded one until it comes back.", i + 1, raw.x(), raw.y());
-            ++skipped;
-            wps.push_back(raw);
-            raw_wps.push_back(raw);
-            continue;
-        }
-        if ((*safe - raw).squaredNorm() > 1e-6f) ++repaired;
-        wps.push_back(*safe);
-        raw_wps.push_back(raw);
-    }
-    if (wps.size() < 2)
-    {
-        std::println("[route] fewer than 2 drivable waypoints remain — cannot build a route.");
-        return false;
-    }
-    if (repaired > 0 or skipped > 0)
-        std::println("[route] {} waypoint(s) moved to the nearest feasible pose, {} deferred.",
-                     repaired, skipped);
-
-    // ── VARIATIONAL ROUTE OPTIMISATION ──
-    // Every constant here is read off a measured physical quantity of THIS robot, not tuned:
-    //   d_target = what the body actually occupies (worst-case reach, since the field carries no bearing)
-    //              plus the same comfort standoff the MPPI prefers,
-    //   rho      = v_max^2 / a_lat_max, the radius below which a turn stops being drivable at speed,
-    //   sigma_a  = a stated fidelity allowance — how far the route may drift from what was clicked —
-    //              in the same sense as carrot_max_route_cut_m, not a safety number.
-    // The distance field is EXACT (GridPlanner's EDT): an optimiser follows the gradient of whatever it
-    // is handed, so a chamfer's direction-dependent error would be baked into the route's shape.
-    {
-        const rc::RouteOptimizerConfig opt = make_route_optimizer_config();
-        route_.set_optimizer(opt);
-        dump_route_world(robot_pose.pos, raw_wps, wps, mission_.laps_remaining(), opt);
-    }
-
-    last_plan_failure_.clear();
-    const bool built = route_.build(
-        robot_pose.pos, wps, mission_.laps_remaining(),
-        [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
-        {
-            auto r = grid_planner_.plan(a, b);
-            if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
-            return r;
-        },
-        [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
-        params_ ? params_->route_spacing_m : 0.05f,
-        params_ ? params_->route_smoothing_m : 0.40f);
-    route_active_ = built;
-    if (not built and not last_plan_failure_.empty())
-        std::println("[route] the planner refused that hop: {}", last_plan_failure_);
-
-    // ── HOW WELL THE ROUTE ACTUALLY VISITS THE WAYPOINTS IT WAS BUILT FROM ───────────────────────
-    // ★A RECORDED WAYPOINT IS A REQUEST, AND UNTIL NOW NOTHING SAID WHETHER IT WAS HONOURED. The
-    // optimiser trades fidelity to the authored points against curvature and clearance — that is its
-    // job — but the aggregate it reports (dev max / dev mean) cannot say WHICH point was given up, and
-    // "the robot passed far from one of them" is a per-waypoint question. So this prints the miss at
-    // every waypoint, once per build.
-    //
-    // ★MEASURED AT THE WAYPOINT'S OWN ARC LENGTH, not at the nearest point of the curve. wp_s_ is where
-    // the route claims to be visiting waypoint i; the nearest-point distance would quietly answer a
-    // different question — "does the curve pass near here at any time" — which on a tour that crosses
-    // itself or repeats laps can be satisfied by a completely different part of the route.
-    // ★FIRST LAP ONLY: later laps are the same waypoints again, and the arc lengths repeat.
-    if (built)
-    {
-        const auto &wp_s = route_.waypoint_arclengths();
-        const auto &sp = route_.spline();
-        const std::size_t n = std::min(wps.size(), wp_s.size());
-        float worst = 0.f, sum = 0.f;
-        std::size_t worst_i = 0;
-        std::string detail;
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            const float d = (sp.position_at(wp_s[i]) - wps[i]).norm();
-            sum += d;
-            if (d > worst) { worst = d; worst_i = i; }
-            detail += std::format("{}{}:{:.2f}", i ? " " : "", i, d);
-        }
-        if (n > 0)
-            std::println("[route] waypoint fit (m, at each waypoint's OWN arc length): {}\n"
-                         "[route]   worst wp{} misses by {:.3f} m at ({:+.2f},{:+.2f}); mean {:.3f} m "
-                         "over {} waypoints",
-                         detail, worst_i, worst, wps[worst_i].x(), wps[worst_i].y(), sum / n, n);
-    }
-    // A WHOLE new curve, including the route optimiser's pass over it. Only on success: a refused
-    // build leaves the robot on the curve it already had, so its trace is still the right picture.
-    if (built) note_route_changed();
-    return built;
-}
-
 std::optional<float> ControllerSession::clearance_speed_limit(const DrivenCurve &curve,
                                                               const ControllerRobotPose &robot_pose,
                                                               const rc::TrajectoryController &path_controller) const
@@ -3103,131 +2847,6 @@ std::optional<float> ControllerSession::clearance_speed_limit(const DrivenCurve 
         if (s >= sp.length()) break;
     }
     return v;
-}
-
-float ControllerSession::raw_return_clearance(const Eigen::Vector2f &probe_room, const ControllerRobotPose &pose,
-                                              ControllerObstacleTracker &tracker) const
-{
-    constexpr float kFar = 100.f;
-    auto *lidar = tracker.lidar_buffer();
-    if (lidar == nullptr) return kFar;
-    const auto [cloud_opt] = lidar->read_last();
-    if (not cloud_opt.has_value()) return kFar;
-    const auto &[xs, ys, zs] = cloud_opt.value();
-    const std::size_t n = std::min({xs.size(), ys.size(), zs.size()});
-    // The same body band and the same hull self-filter recheck_standpoint_on_approach uses.
-    constexpr float kBodyZLo = 0.05f, kBodyZHi = 1.45f;
-    const float yaw = pose.theta + static_cast<float>(M_PI_2);
-    float best = kFar;
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        if (zs[i] < kBodyZLo or zs[i] > kBodyZHi) continue;
-        const Eigen::Vector2f p{xs[i], ys[i]};
-        if (approach_body_.contains_yaw(p, pose.pos, yaw)) continue;   // the robot seeing itself
-        best = std::min(best, (p - probe_room).norm());
-    }
-    return best;
-}
-
-float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
-{
-    if (not route_active_ or not route_.valid() or params_ == nullptr) return v_cap;
-
-    const float a_lat = std::max(0.05f, params_->max_lateral_accel_mps2);
-    const float a_dec = std::max(0.05f, a_decel);
-    const float s_now = route_.progress();
-    // Look ahead by the distance needed to stop from the cap, plus a little: anything closer than that
-    // is something we must ALREADY be slowing for. Beyond it, no amount of braking is required yet.
-    const float horizon = v_cap * v_cap / (2.f * a_dec) + 1.0f;
-
-    // ── The curvature the ROTATION limit must use is not the one the lateral limit uses ──
-    // omega = v*kappa <= max_rot gives v <= max_rot/kappa, which is 1/kappa — it AMPLIFIES an
-    // overestimate of curvature, where the lateral limit's sqrt(a_lat/kappa) damps it. Fed the point
-    // value of curvature_at (a second difference, and the comment below says why that is noisy at this
-    // spacing) it throttled 15% of a lap below 0.40 m/s and cost 22% of the lap time, for curvature
-    // structure finer than the 0.40 m scale the route was actually fitted at — i.e. mostly fitting noise.
-    //
-    // What a differential drive must physically deliver is the NET HEADING CHANGE over the stretch it is
-    // about to drive, so the right quantity is the AVERAGE curvature over that stretch:
-    //     kappa_avg = |psi(s+W) - psi(s)| / W      (the mean value theorem, applied honestly)
-    // Two things make this the better estimator, not merely a smoother one:
-    //   • heading_at is a FIRST difference of positions; curvature_at is a SECOND difference. One order
-    //     less differentiation is one order less noise amplification.
-    //   • a lone 5 cm curvature spike contributes almost nothing to the net heading change, so it stops
-    //     mattering by construction rather than by being filtered out — while a sustained tight curve
-    //     accumulates its full turn and still binds.
-    // W is the route's own smoothing scale: the curve was fitted with control points that far apart, so
-    // curvature structure finer than W is a property of the fit, not of the route.
-    const float w_kappa = std::max(0.10f, params_->route_smoothing_m);
-    // ONE estimator, shared with the tracker: RouteSpline::kappa_avg is CENTRED, so the forward window
-    // [s, s+W] this limit wants is the centred window at s + W/2. Expressing it that way keeps a single
-    // implementation instead of two that can drift apart, and is exactly the previous arithmetic.
-    const auto kappa_avg_at = [this, w_kappa](float s)
-    { return std::abs(route_.spline().kappa_avg(s + 0.5f * w_kappa, w_kappa)); };
-
-    float v = v_cap;
-    // The tightest rotation-limited speed the scan finds. The floor at the bottom may not exceed it —
-    // see the note there; it is what makes a cusp followable at all.
-    float v_rot_min = v_cap;
-    // Sampled at 10 cm against a 5 cm curve — deliberately coarser than the curve's own spacing, because
-    // curvature_at is a second difference of the samples and is therefore noisiest at that scale.
-    for (float ds = 0.f; ds <= horizon; ds += 0.10f)
-    {
-        const float k = std::abs(route_.spline().curvature_at(s_now + ds));
-        if (k < 1e-3f) continue;                       // straight: no constraint from here
-        // TWO limits, and only one of them was here. v^2·kappa = a_lat is the COMFORT limit — how much
-        // lateral acceleration the payload will accept, on the POINT curvature as before. omega = v·kappa
-        // <= max_rot is the KINEMATIC one: a differential drive physically cannot hold curvature kappa
-        // faster than max_rot/kappa, whatever the lateral budget says — and it takes the AVERAGED
-        // curvature, for the reasons given above the loop.
-        // ★Measured at the authored wp21/wp22 hairpin (0.35 m across a 104 deg turn): sqrt(a_lat/kappa)
-        // permits 0.41 m/s, which demands omega = 2.4 rad/s against a max_rot of 0.8. The robot was being
-        // allowed a speed it could not turn at, so it left the route — reported as "cuts quite a bit on
-        // the hairpin". The MPPI never showed this because its rollouts integrate the real kinematics
-        // with rot clamped, so a too-fast rollout visibly fails to track and is scored down; a geometric
-        // tracker has no such foresight and simply cannot comply.
-        const float v_lat = std::sqrt(a_lat / k);      // v^2·kappa = a_lat — comfort, POINT curvature
-        const float k_avg = kappa_avg_at(s_now + ds);  // net heading change / arc length — see above
-        // ★HEADROOM. omega_max/kappa hands the FEEDFORWARD the entire rotation budget, so on a curve
-        // the command saturates and the feedback loop is effectively open — measured in tracker_sim as
-        // a systematic UNDER-turn (the robot rides outside the curve, corr(e,kappa) -0.160). Reserving
-        // a fraction for feedback moved rms 154 -> 94 mm at 0.70 and corr to ~0. Inert for the PD
-        // tracker, which has no feedforward to saturate, so it is applied in ROUTE mode only.
-        // ★SHARPNESS. The budget above is a CONSTANT, so v_rot = h*w_max/kappa scales a hairpin the
-        // robot can barely fit through exactly as it scales a gentle bend. That is the whole speed law
-        // in every turn — measured, the comfort limit stops binding above kappa = 0.3 1/m and the
-        // rotational-acceleration limit never binds at all — so if the robot is to take a REALLY sharp
-        // turn more carefully than a wide one, the budget itself has to know how sharp the turn is.
-        // See ControllerRuntimeParams::sharp_turn_slowdown for the measured sweep; q = 0 is the old law.
-        const float kr = k_avg * approach_body_.circumscribed_radius();
-        const float sharp = 1.f + std::max(0.f, params_->sharp_turn_slowdown) * kr * kr;
-        const float rot_budget = std::max(0.05f, params_->max_rot_speed_rps)
-                               * (route_tracker_active_ ? rot_headroom_ : 1.0f) / sharp;
-        const float v_rot = k_avg > 1e-3f ? rot_budget / k_avg : v_cap;
-        v_rot_min = std::min(v_rot_min, v_rot);
-        const float v_here = std::min(v_lat, v_rot);
-        // The bound is on the speed we may hold NOW: we must be able to shed the difference over ds.
-        const float v_allowed = std::sqrt(v_here * v_here + 2.f * a_dec * ds);
-        v = std::min(v, v_allowed);
-    }
-    // A floor purely against numerical noise in the curvature estimate: a spurious kappa spike must not
-    // be able to command a standstill.
-    // ★2026-08-05 — IT MUST NEVER OVERRULE THE ROTATION BUDGET, and until now it did. The old form was a
-    // flat clamp to 0.15 m/s, justified by "a differential drive has no minimum turn radius — it can
-    // rotate in place — so a sharp corner is handled by the rotation". That is true of the ROBOT and
-    // FALSE of the TRACKER: the plain tracker's omega = g_dc*v*kappa is PROPORTIONAL to v, so it cannot
-    // rotate in place, and flooring v is therefore the same as demanding a turn rate.
-    // Measured on this tour (tools/tracker_sim): the route reaches |kappa_avg| = 7.79 1/m — radius
-    // 0.13 m, against a 0.325 m circumscribed body — at s=23.9, with a 52.5 degree heading step between
-    // adjacent 5 cm samples, i.e. a cusp. At the 0.15 floor that demands omega = 1.17 rad/s against a
-    // 0.8 limit, so the command saturates, the robot under-turns, leaves the route and the Frenet
-    // feedback diverges: 4675 mm rms on the two-lap tour against 157 mm on one lap, with a PERFECT pose
-    // and no obstacles. The robot's lap 5 carried the same signature — 1.03 m rms, 4.32 m max, and 31%
-    // extra distance driven.
-    // Flooring at min(0.15, v_rot_min) keeps the noise protection everywhere it was doing a job — on a
-    // straight v_rot is metres per second, so the floor is unchanged at 0.15 — while letting a genuine
-    // corner slow to the speed the robot can actually turn through it (about 0.07 m/s at that cusp).
-    return std::clamp(v, std::min(0.15f, v_rot_min), v_cap);
 }
 
 // ── DRIVE-MODE SEPARATION ────────────────────────────────────────────────────────────────────────
@@ -3269,27 +2888,10 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         }
     }
 
-    // Task 8: with the local policy driving, the escape and the returns' backoff are OFF (the policy's Release is the only
-    // recovery) — neither may own the base.
-    if (escape_active_ and not policy_enabled())
-    {
-        display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
-        step_escape(step.robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
-        note_hold("escape manoeuvre owns the base");   // step_escape notes the why
-        return false;
-    }
-    // Task 14 fix round 4: the returns' backoff owns the base the same way, until clearance is open; then the planner.
-    if (returns_backoff_active_ and not policy_enabled()
-        and step_returns_backoff(step.robot_pose, path_controller, obstacle_tracker, motion_commander, "returns' backoff"))
-    {
-        note_hold("returns' backoff owns the base");
-        return false;
-    }
 
     if (step.target_changed)
     {
         reset_stuck_state();   // a fresh target = fresh navigation; don't inherit a stale stuck clock
-        returns_backoff_failed_ = false;
         chain_marks_off_ = false;   // a new target is planned with the marks again (port step 3)
         chain_wait_ = false;        // ...and neither a WAIT nor an episode carries over to it (steps 4, 5)
         chain_ep_ = {};
@@ -3304,8 +2906,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     {
         // Task 8 ruling 1: with the local policy driving, the tour's waypoints are its successive place goals
         // (drive_with_policy) — no arc-length curve is built or followed.
-        if (policy_enabled()) return true;
-        return drive_mission_route(step, path_controller, motion_commander, time_source);
+        return true;
     }
     if (door_route_leg_.has_value())
         return drive_door_route(step, path_controller, motion_commander, time_source);
@@ -3313,209 +2914,9 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
                              display, time_source);
 }
 
-// ── MISSION ROUTE ────────────────────────────────────────────────────────────────────────────────
-// Built once and driven in ARC-LENGTH coordinates. There is no target to replan to here, and
-// re-issuing a path is exactly what destroys the follower's continuity — so this regime repairs
-// its curve in place and never re-plans. Nothing in drive_point_target runs in this mode.
-rc::RouteFollower::PlanFn ControllerSession::route_plan_fn()
-{
-    return [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
-    {
-        auto r = grid_planner_.plan(a, b);
-        if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
-        return r;
-    };
-}
-
 rc::RouteFollower::FreeFn ControllerSession::route_free_fn()
 {
     return [this](const Eigen::Vector2f &p, float hdg) { return grid_planner_.pose_free(p, hdg); };
-}
-
-// ── THE LAP BEING DRIVEN, NOT EVERY LAP AT ONCE ──────────────────────────────────────────────────
-// ★★★WHY THE CANVAS SHOWED TWO PATHS. RouteFollower::build lays the tour down ONCE PER LAP
-// (route_follower.cpp:44, `for lap … for waypoint …`) and fits ONE spline through the whole
-// concatenation, so path() is the tour repeated N times: measured on the real tour, 39.88 m / 800
-// samples at 1 lap against 230.17 m / 4608 at 6. Drawing that draws six near-copies of the same
-// journey on top of each other. They are NOT identical — the spline is continuous across the seams and
-// the optimiser moves each lap's control points differently — so they separate into visibly distinct
-// curves, which reads exactly as "the original path with the optimised one drawn over it".
-//
-// So the display gets the lap the robot is ON. Lap boundaries are already known: wp_s_ holds every
-// waypoint's arc length and wp_per_lap_ how many belong to a lap, so the k-th lap spans
-// [wp_s[k*per_lap], wp_s[(k+1)*per_lap]).
-//
-// ★DISPLAY ONLY. The follower keeps the whole concatenated curve — progress(), finished(), the
-// waypoint arc lengths and the band's frozen prefix are all defined on it, and slicing what the
-// CONTROLLER drives is a different and much larger change (it is the same change as building one lap
-// at a time, which would also fix the build cost). This slices the mirror, not the thing.
-void ControllerSession::on_route_reauthored(const char *event, float window_m,
-                                           rc::TrajectoryController &path_controller,
-                                           std::uint64_t now_ms)
-{
-    ++route_repair_count_;
-    mission_.note_replan();   // count what HAPPENED, not the reflex that asked for it
-    // The curve the trace belongs to has just been replaced — see RouteChangedCallback.
-    note_route_changed();
-    // Force the new curve to be installed: the follower is still holding the old one.
-    path_controller.stop();
-    current_plan_.reset();
-    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
-    log_route_event(event, true, now_ms, path_controller, window_m);
-}
-
-bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
-                                           rc::TrajectoryController &path_controller,
-                                           ControllerMotionCommander &motion_commander,
-                                           const TimeSource &time_source)
-{
-    // A failed build must not be retried every cycle: that is ~30 A* calls and a screenful of log
-    // at 10 Hz, which buries the one line that says why. Try, then wait before trying again.
-    if (not route_active_ and time_source() - last_route_build_ms_ >= 2000)
-    {
-        last_route_build_ms_ = time_source();
-        const bool ok = build_route(step.robot_pose);
-        log_route_event("build", ok, time_source(), path_controller, 0.f);
-    }
-    if (not route_active_)
-    {
-        path_controller.stop();
-        motion_commander.stop_robot();
-        if (time_source() - last_no_route_log_ms_ >= 3000)
-        {
-            last_no_route_log_ms_ = time_source();
-            std::println("[controller] HOLDING — the mission route could not be built.");
-        }
-        note_hold(std::format("route not built ({})",
-                              last_plan_failure_.empty() ? "no reason recorded" : last_plan_failure_));
-        note_why(rc::why::Cause::NoRoute, std::format("mission '{}': the route could not be built ({})", mission_.selected_name(),
-                                                      last_plan_failure_.empty() ? "no reason recorded" : last_plan_failure_));
-        return false;
-    }
-    // ── SECOND CHANCE FOR THE WAYPOINTS THE BUILD COULD NOT REACH ────────────────────────────────
-    // A waypoint blocked when the route was built used to be gone for the whole mission, and that drop
-    // was SELF-FULFILLING: out of the route means the robot never drives toward it, so the close-range
-    // evidence that would free it is never gathered. Now it is deferred and re-offered here.
-    // Rate-limited to ~1 Hz because a successful recovery re-authors a window; the test itself is nearly
-    // free, since reinstate_deferred only plans for a waypoint the robot is near, still short of, AND
-    // materially closer to than at its last try. Costs exactly nothing on the overwhelmingly common
-    // route with nothing deferred.
-    // ★THIS TIMER DOES NOT SPEND THE RETRY BUDGET — the approach does. It used to: four tries at 1 Hz
-    // were gone within four seconds of entering the 4 m radius, i.e. across 4.0 -> 2.0 m, and the
-    // waypoint was retired for the run before the robot was ever close enough for the map about it to
-    // have changed. reinstate_deferred now charges an attempt only on a step of approach, so the four
-    // tries span 4.0 -> 1.0 m and the last one is made where the evidence actually is.
-    if (route_active_ and route_.deferred_count() > 0
-        and time_source() - last_reinstate_ms_ >= 1000)
-    {
-        last_reinstate_ms_ = time_source();
-        // The same window a repair re-authors: it is how far ahead the route may be re-planned, so it is
-        // also how far ahead a waypoint can be put back into one. No second allowance to keep in step.
-        constexpr float kReinstateAheadM = 4.0f;
-        const auto rr = route_.reinstate_deferred(step.robot_pose.pos, kReinstateAheadM,
-                                                  route_plan_fn(), route_free_fn());
-        // The curve changed under the follower — same obligation as a repair, same one place.
-        if (rr.recovered > 0)
-            on_route_reauthored("reinstate", kReinstateAheadM, path_controller, time_source());
-    }
-
-    // ── LOCAL REPAIR ──
-    // A recovery reflex fired and put a new obstacle in the planner's world. In leg mode the next
-    // cycle simply replanned to the current target; here there is no target to replan to, so the
-    // route itself has to be re-authored around the blocker or nothing changes at all. Rate-limited
-    // for the same reason the build is: a repair is ~one A* call plus a refit, and retrying it every
-    // cycle would bury the one line that says whether it worked.
-    if (route_repair_pending_ and route_active_
-        and time_source() - last_route_repair_ms_ >= 1500)
-    {
-        last_route_repair_ms_ = time_source();
-        // How much route may be re-authored. Behind: the robot has just reversed out, so the detour
-        // must start somewhere it can still reach. Ahead: far enough to clear the blocker and rejoin.
-        constexpr float kRepairBackM = 1.0f;
-        constexpr float kRepairAheadM = 4.0f;
-        const auto result = route_.repair(step.robot_pose.pos, kRepairBackM, kRepairAheadM,
-                                          route_plan_fn(), route_free_fn());
-
-        using RR = rc::RouteFollower::RepairResult;
-        if (result == RR::NotNeeded)
-        {
-            // The reflex fired but the route across the window is still footprint-feasible: whatever
-            // was seen is not on our path. Clear the request and KEEP DRIVING — the expensive mistake
-            // here is not a missed repair, it is re-authoring a good route and stopping to do it.
-            route_repair_pending_ = false;
-            log_route_event("repair_skipped", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
-        }
-        else if (result == RR::Repaired)
-        {
-            route_repair_pending_ = false;
-            on_route_reauthored("repair", kRepairBackM + kRepairAheadM, path_controller, time_source());
-        }
-        else
-        {
-            // HOLD, and stay pending. The obstacle carries a TTL, so the retry after the cooldown
-            // either finds a detour or finds the blocker gone. Rebuilding the whole route would get
-            // the robot moving again, but it resets progress_ — laps and finished() would believe the
-            // robot was back at the start, and the run's metrics would silently stop meaning anything.
-            mission_.note_replan();
-            path_controller.stop();
-            motion_commander.stop_robot();
-            log_route_event("repair_failed", false, time_source(), path_controller, kRepairBackM + kRepairAheadM);
-            note_hold(std::format("repair FAILED at s={:.2f} m — the route under the robot is not "
-                                  "footprint-feasible and could not be re-authored around it",
-                                  route_.progress()));
-            note_why(rc::why::Cause::NoRoute, hold_reason_);
-            return false;
-        }
-    }
-    if (not path_controller.is_active())
-    {
-        // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
-        // elastic band and the C1 spline inside set_path would only undo both.
-        ++path_generation_;      // route re-authored — same reasoning as above
-        path_controller.set_path_presmoothed(route_.path());
-    // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
-    // deforms this same spline in place just before compute, so the tracker sees the deformed curve
-    // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
-    path_controller.set_route(&route_.spline());
-    // ── WHAT THIS ROUTE MAKES UNAVOIDABLE ───────────────────────────────────────────────────────
-    // Computed ONCE per route, from the spline and the identified plant. It is what makes J_route
-    // route-independent: the run's totals are divided by these, so each term reads ">= 1, where 1 is as
-    // well as the plant permits HERE" instead of being dominated by how much this particular tour turns.
-    // Same inputs route_speed_limit uses, so v* is the profile the robot will actually be held to.
-    {
-    const float v_cap = params_ ? params_->max_adv_speed_mps : 0.7f;
-    const float a_lat = params_ ? params_->max_lateral_accel_mps2 : 1.0f;
-    const float w_max = params_ ? params_->max_rot_speed_rps : 0.8f;
-    const auto &tp = path_controller.params;
-    const rc::RouteIdeal ideal = rc::route_ideal(route_.spline(), v_cap, a_lat, tp.cbf_max_decel,
-                                                 w_max, tp.plain_W, tp.plain_T_lag,
-                                                 route_tracker_active_ ? rot_headroom_ : 1.0f,
-                                                 params_ ? params_->sharp_turn_slowdown : 0.f,
-                                                 approach_body_.circumscribed_radius());
-    mission_.set_route_ideal(ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.valid);
-    std::println("[route] ideal floor: TV(v*)={:.2f} m/s  TV(w*)={:.2f} rad/s  rms(e*)={:.4f} m "
-                 "over {:.1f} m ({:.0f}% of the route contributes to TV(w*)){}",
-                 ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.length_m,
-                 ideal.length_m > 0.f ? 100.f * ideal.w_span / ideal.length_m : 0.f,
-                 ideal.valid ? "" : "   ⚠INVALID — J_route will be NaN");
-    }
-        // Seed the carrot's forward-only anchor at the robot's own arc length. After a repair the
-        // route is re-installed mid-drive, and a hint of 0 would aim the carrot at the route's start.
-        path_controller.set_carrot_hint(
-            static_cast<int>(route_.progress() / std::max(0.01f, route_.spline().spacing())));
-        path_controller.set_goal_facing_yaw(std::nullopt);
-        path_controller.set_arrival_point(std::nullopt);
-        // A TOUR ENDS WHERE IT BEGAN, so the follower's euclidean "am I near the last point?" test is
-        // true before the robot has moved: the route is installed, arrival fires on cycle 1, the
-        // session consumes it as an affordance arrival ("reached -> REACH") and stops. Measured:
-        // 09:34 completed the tour (progress 35.15/35.33 m); the next two runs recorded progress
-        // 0.00 m and 0.10 m of motion, because the robot was now parked on the endpoint. The mission
-        // is ended by arc length below (route_.finished()), which knows the difference between not
-        // yet departed and returned — so that is the only arrival test left running here.
-        path_controller.set_endpoint_arrival(false);
-        current_plan_ = ControllerPathPlan{.room_path = route_.path()};
-    }
-    return true;
 }
 
 // ── DOOR ROUTE (controller_door_passage.h ROUTE MODE) ──────────────────────────────────────────────────────────────────
@@ -4066,51 +3467,16 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     // standpoint was 0.4–0.5 m wrong at the doorway and drove the robot into the wall. With an anchor there is no
     // route: execute_plan servoes on it (step_anchor_cross). Without one — not yet written, stale, or no width —
     // the existing room route below runs unchanged.
-    bool band_cross_install = false, band_cross_active = false;
     if (update_cross_anchor(step))
-    {
-        // ★ [Route] BandDrivesCross (Task 6 fix round 1): a cross with an anchor to drive on (fresh, or carried by its held
-        //   gap) gets a ROUTE through the opening (band_cross.h) for the follower + band; waiting for one stays the servo's.
-        const bool band_route = band_drives_cross() and anchor_cross_.has_value() and anchor_cross_->width_m > 0.f
-                                and (anchor_cross_->fresh or gap_carries_cross(step.target.node_name));
-        if (not band_route)
+    {   // an anchor to cross on: the cross is the policy's (drive_with_policy step 1) — no route is asked of the planner
+        if (current_plan_.has_value() or path_controller.is_active())
         {
-            if (current_plan_.has_value() or path_controller.is_active())
-            {
-                path_controller.stop();
-                current_plan_.reset();
-                plan_spline_valid_ = false;
-            }
-            no_route_since_ms_ = 0;          // not a planner failure: nothing was asked of the planner
-            short_path_since_ms_ = 0;        // nor a path ending short: there is no path
-            return true;
+            path_controller.stop();
+            current_plan_.reset();
+            plan_spline_valid_ = false;
         }
-        // The route is built on the ANCHOR's opening (the door — the goal line is the anchor's, as the policy rules) and
-        // rebuilt only when it no longer takes the body through the opening as now measured (band_cross_route_passes: a
-        // physical feasibility test on the measurement). The band deforms it every cycle against the near field.
-        band_cross_active = true;
-        const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
-        const auto g = rc::policy::gap_in_room(anchor_cross_->pose, anchor_cross_->width_m, cpose);
-        const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
-                                      approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
-        if (band_cross_route_for_ != anchor_latched_for_ or not current_plan_.has_value() or not path_controller.is_active()
-            or not rc::band_cross_route_passes(current_plan_->room_path, g, half_w))
-        {
-            const float front = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
-            const float standoff = cross_standoff_m();
-            // past the protocol's `through` (s >= standoff) by two goal tolerances, as the policy's doorway goal line is
-            const float past = standoff + 2.f * path_controller.goal_threshold();
-            const auto poly = rc::band_cross_polyline(cpose.pos, g, front + rc::kBandCrossWallHalfDepthM, past);
-            current_plan_ = ControllerPathPlan{.room_path = smooth_plan(poly, /*door_axis_anchors=*/false)};
-            if (band_cross_route_for_ != anchor_latched_for_) band_cross_logged_ = false;
-            band_cross_route_for_ = anchor_latched_for_;
-            band_cross_install = true;
-            std::println("[anchor] cross on {}: route THROUGH the opening for the spline ({} points, crossing at e {:+.3f} m of "
-                         "the anchor's {:.2f} m opening)", anchor_cross_->name, poly.size(),
-                         rc::band_cross_offset(current_plan_->room_path, g), anchor_cross_->width_m);
-        }
-        no_route_since_ms_ = 0;
-        short_path_since_ms_ = 0;
+        no_route_since_ms_ = 0;          // not a planner failure: nothing was asked of the planner
+        return true;
     }
     // ★ Task 8 ruling I4: with the local policy driving, DRIVING IS GATED ON THE FIELD, not on this A*. The A* still runs (the
     //   route on the canvas, the legacy consumers of current_plan_), but its failure neither holds the base nor starts the
@@ -4119,7 +3485,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     //   refuses (the bare hull near a wall, inside the margin) therefore still drives.
     // PORT STEP 5: in the HYBRID a plain Place (drive_with_policy's PLACE branch, last cycle) is planned the CHAIN's way below:
     // smoothed, fitted to plan_spline_, with the marks and the WAIT.
-    if (policy_enabled() and not (chain_hybrid_on() and chain_hybrid_place_))
+    if (not (chain_hybrid_on() and chain_hybrid_place_))
     {
         if (step.target_changed or not current_plan_.has_value())
         {
@@ -4128,16 +3494,29 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             else
                 current_plan_ = ControllerPathPlan{.room_path = {step.robot_pose.pos, step.target.room_pos}};   // display stub
             plan_spline_valid_ = false;
+            plan_is_policy_stub_ = true;
+            if (step.target_changed) plan_stub_replaced_for_ = 0;   // a new or changed target may be planned onto the chain, once
         }
-        short_path_since_ms_ = 0;
         return true;
     }
+    // ★ 2026-11-16: a plan left by the branch above (the policy's unsmoothed display route, e.g. the first cycle of a target
+    //   after a door cross or a lock-on, when chain_hybrid_place_ was still false) is NOT the chain's: it has no fitted spline,
+    //   so drive_with_policy never handed the cycle to the tracker and the policy drove the whole target. Planned again, once.
+    //   ONCE PER TARGET (plan_stub_replaced_for_): a target that goes back to the policy later — a hold at its standpoint,
+    //   a lock-on — and returns here is not planned onto the chain a second time by this rule.
+    const bool replace_stub = plan_is_policy_stub_ and plan_stub_replaced_for_ != active_target_id_;
+    if (replace_stub) plan_stub_replaced_for_ = active_target_id_;
+    plan_is_policy_stub_ = false;
     // ── PORT STEP 4 — WAIT. The way is blocked by what the map does not have (no route on map + marks, one on the map alone):
     //    stopped and watching, never "unreachable" — a mark that clears (chain_observe) ends the wait and the planner tries the
     //    marks again. ★FLAGGED: no give-up time here; how long a mission waits is the caller's (its contract's timeout).
     if (chain_wait_)
     {
-        if (step.target_changed) chain_wait_ = false;
+        // ★ 2026-11-16: the marks are WATCHED HERE. A WAIT returns false below, and compute() does not call execute_plan after
+        //   a refused plan — so neither drive_with_policy's nor execute_plan's chain_observe ran while waiting, no mark was ever
+        //   seen cleared, and a WAIT could end only by a new target. chain_observe clears chain_wait_ when a mark is seen gone.
+        if (not step.target_changed) chain_observe(rc::policy::to_policy_pose(step.robot_pose), obstacle_tracker);
+        if (step.target_changed or not chain_wait_) chain_wait_ = false;
         else
         {
             current_plan_.reset();
@@ -4153,7 +3532,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     if (chain_clear_check_)
     {
         chain_clear_check_ = false;
-        if (not band_cross_active and not step.target_changed and current_plan_.has_value() and plan_spline_valid_ and chain_have_s_
+        if (not step.target_changed and current_plan_.has_value() and plan_spline_valid_ and chain_have_s_
             and driven_curve().owner == DriveOwner::PointPlan)
             if (const auto cand = grid_planner_.plan(step.plan_origin, step.target.room_pos);
                 cand.has_value() and rc::chain::shorter_route(*cand, plan_spline_.length() - chain_s_prog_, grid_planner_.params.cell_size_m))
@@ -4164,7 +3543,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
                 plan_spline_valid_ = false;
             }
     }
-    if (not band_cross_active and (step.target_changed || !current_plan_.has_value()))
+    if (step.target_changed or not current_plan_.has_value() or replace_stub)
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
@@ -4176,6 +3555,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         {
             chain_wait_ = true;
             chain_marks_off_ = false;   // the marks are back in the world; a clear ends the wait (chain_observe)
+            note_mode("wait", [&]{ return std::format("no route on map + {} marks, one on the map alone", chain_marks_.marks.size()); });
             current_plan_.reset();
             plan_spline_valid_ = false;
             std::println("[chain] WAIT: no route to '{}' with {} marks, one on the map alone — stopped, watching the marks",
@@ -4241,20 +3621,6 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         // So: hold the base, and SAY SO. A stationary robot with a clear message is diagnosable; one thrashing
         // backwards looks like a perception or traction fault and hides the real cause. The stuck clock is
         // reset here so a genuine wedge later starts from a clean window rather than inheriting this one.
-        // ★ Task 14 fix round 4 (try79: "HOLDING — no route" for 300 s beside room_2's east wall): a planner that cannot
-        //   route from a pose hemmed in by REAL returns is not "a planner fault reversing cannot fix" — the start pose is
-        //   inside the band the body's own margin claims. Back off those returns first (step_returns_backoff), then re-plan.
-        if (not returns_backoff_failed_ and not policy_enabled())   // Task 8: no backoff while the policy drives
-        {
-            const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
-            if (hemmed_in_by_returns(live_returns(pose, obstacle_tracker, path_controller))
-                and step_returns_backoff(step.robot_pose, path_controller, obstacle_tracker, motion_commander,
-                                         "no route from a pose hemmed in by real returns"))
-            {
-                note_hold("returns' backoff owns the base (no route from a hemmed-in pose)");
-                return false;
-            }
-        }
         reset_stuck_state();
         path_controller.stop();
         motion_commander.stop_robot();
@@ -4263,9 +3629,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
                  std::format("no route to '{}' at ({:.2f},{:.2f}) for {:.1f} s: {}{}", step.target.node_name,
                              step.target.room_pos.x(), step.target.room_pos.y(),
                              double(time_source() - no_route_since_ms_) * 1e-3, grid_planner_.last_failure(),
-                             unroutable_fix_.has_value() ? " (a reachability fallback is held)"
-                                                         : returns_backoff_failed_ ? " (the returns' backoff found no way out)"
-                                                                                   : ""));
+                             unroutable_fix_.has_value() ? " (a reachability fallback is held)" : ""));
         if (time_source() - last_no_route_log_ms_ >= 3000)
         {
             last_no_route_log_ms_ = time_source();
@@ -4315,7 +3679,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     }
 
     no_route_since_ms_ = 0;   // a route exists this cycle
-    if (step.target_changed || !path_controller.is_active() || band_cross_install)
+    if (step.target_changed || !path_controller.is_active())
     {
         // Presmoothed: smooth_plan already fitted the C2 curve AND checked every sample against the
         // footprint, so set_path's elastic band and C1 spline would only undo both.
@@ -4480,7 +3844,6 @@ std::optional<ControllerRobotPose> ControllerSession::policy_pose_at(std::int64_
 
 void ControllerSession::note_anchor_block(const ControllerRobotPose &robot_pose)
 {
-    if (not policy_enabled()) return;
     const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());   // the clock door_concept stamps with
     // ★ Task 3f (d) (tour3A leg 1: "RE-INITIALISED (2.23 m, -13.0 deg) — P(anchor lost) 0.031 -> 1.000" at the room switch): the
     //   ring's poses and the last block are in the frame of the room they were recorded in; across a room switch they are
@@ -4724,66 +4087,6 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
     return lr;
 }
 
-rc::LidarCapResult ControllerSession::cap_by_returns(const LiveReturns &lr, float &adv, float &side, float &rot) const
-{
-    if (not lr.valid) return rc::LidarCapResult{.v_lim = lr.v_max, .w_lim = lr.w_max};
-    return rc::lidar_cap_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
-                                 adv, side, rot);
-}
-
-bool ControllerSession::hemmed_in_by_returns(const LiveReturns &lr) const
-{
-    return lr.valid and rc::lidar_band_penetration(lr.r.obstacles, returns_body(), lr.margin + lr.sigma,
-                                                   0.f, 0.f, 0.f) > 0.f;
-}
-
-bool ControllerSession::step_returns_backoff(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
-                                             ControllerObstacleTracker &obstacle_tracker,
-                                             ControllerMotionCommander &motion_commander, const char *why)
-{
-    const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    const auto lr = live_returns(pose, obstacle_tracker, path_controller);
-    const bool holonomic = base_capability_.holonomic.value_or(false);
-    const auto b = lr.valid ? rc::lidar_return_backoff(lr.r.obstacles, returns_body(), lr.margin, lr.sigma, lr.a_dec,
-                                                       lr.v_max, lr.w_max, holonomic)
-                            : std::nullopt;
-    if (not returns_backoff_active_)
-    {
-        if (not b.has_value())
-        {
-            returns_backoff_failed_ = true;
-            std::println("[controller] {} — HEMMED IN by real returns, and no motion opens clearance from them (turn, drive, "
-                         "turn-then-drive all touch or gain nothing): holding, said once", why);
-            return false;
-        }
-        returns_backoff_active_ = true;
-        std::println("[controller] {} — BACKING OFF the real returns (the motion that opens clearance from them): adv {:+.3f} "
-                     "rot {:+.3f}; the plan is dropped and re-planned once clearance is open", why, b->adv, b->rot);
-        current_plan_.reset();
-        path_controller.stop();
-    }
-    if (not b.has_value())
-    {
-        returns_backoff_active_ = false;
-        returns_held_since_ms_ = 0;
-        const bool open = not hemmed_in_by_returns(lr);
-        returns_backoff_failed_ = not open;
-        std::println("[controller] returns' backoff ends — {}: re-planning", open ? "clearance open beyond the margin"
-                                                                                  : "nothing opens it further");
-        note_why(rc::why::Cause::ReturnsBackoff, std::format("the returns' backoff ends ({}) — re-planning next cycle",
-                                                             open ? "clearance open" : "nothing opens it further"));
-        reset_stuck_state();
-        current_plan_.reset();
-        path_controller.stop();
-        note_no_command(); motion_commander.stop_robot();
-        return false;
-    }
-    note_why(rc::why::Cause::ReturnsBackoff,
-             std::format("{} — backing off the real returns: adv {:+.2f} rot {:+.2f} ({} returns around the body)", why,
-                         b->adv, b->rot, lr.r.obstacles.size()));
-    motion_commander.send_speed_command(b->adv, holonomic ? b->side : 0.f, b->rot);
-    return true;
-}
 
 void ControllerSession::log_returns_census(const char *when, const LiveReturns &lr) const
 {
@@ -5114,7 +4417,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
         // the hypotheses' P. (M-1) P(through) is kept every clearing cycle, near side seen or not: the passage asks it before
         // closing a door on a clearing that was given up. (M-8) σ_r = the pose σ latched at the switch.
         double p_through = -1.0;
-        if (policy_enabled() and door_passage_.clearing() and drive_pose.x.allFinite() and drive_pose.P.allFinite())
+        if (door_passage_.clearing() and drive_pose.x.allFinite() and drive_pose.P.allFinite())
         {
             const auto g = rc::anchor_cross_geometry(drive_pose);
             const float sigma_s = std::sqrt(std::max(0.f, g.n.dot(drive_pose.P.topLeftCorner<2, 2>() * g.n)));
@@ -5169,13 +4472,6 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
                                      drive_name, g.s, standoff));
                 path_controller.stop();
                 note_no_command(); motion_commander.stop_robot();
-                // [Route] BandDrivesCross: the route through the opening is spent — drop it, so a cycle whose target is
-                // unchanged cannot reinstall it (drive_point_target installs a plan it finds and a stopped follower)
-                if (band_drives_cross())
-                {
-                    current_plan_.reset();
-                    plan_spline_valid_ = false;
-                }
                 out.ended = true;
                 return out;
             }
@@ -5249,29 +4545,6 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
 // A STALE anchor (Task 9, fix A) is waited for: after a fresh one in this step the base stops; before, it turns in place
 // toward where the anchor was last published. The wait is bounded by the cross contract's timeout, then Unreachable.
 // The LiDAR-stall EMERGENCY hold sits above all of this in SpecificWorker (compute() is not called at all).
-// [Route] BandDrivesCross: the opening's jambs this cycle — F4's DoorwayRisk exactly as the policy's doorway drive builds it
-// (controller_policy_drive.cpp, jambs_of): the anchor's opening, and the measured gap weighted by its score; each with its
-// along-wall / along-normal sigmas from its own pose, the contact model's shared offset and the LiDAR range sigma per edge.
-rc::policy::DoorwayRisk ControllerSession::band_cross_doorway_risk(const CrossProtocol &cp, const ControllerRobotPose &cpose) const
-{
-    rc::RobotFootprint bare = approach_body_;
-    bare.set_safety_margin(0.f);
-    const float g_body = rc::policy::PolicyInput{}.body_geometry_sigma_m;
-    const float sigma_s = std::hypot(params_ != nullptr ? params_->policy_sigma_rel_xy_m : 0.f, g_body);
-    const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
-    const float standoff = cross_standoff_m();
-    auto jambs_of = [&](const rc::interaction::RelPose &rp, float width)
-    {
-        const auto geo = rc::anchor_cross_geometry(rp);
-        const float sigma_n = std::sqrt(std::max(0.f, geo.n.dot(rp.P.topLeftCorner<2, 2>() * geo.n)));
-        return rc::policy::doorway_jambs(rc::policy::gap_in_room(rp, width, cpose), geo.sigma_lat, sigma_n, sigma_s, sigma_r,
-                                         bare, 1.0f, standoff + 0.05f);
-    };
-    rc::policy::DoorwayRisk risk{jambs_of(cp.anchor_pose, cp.anchor_width), std::nullopt, 0.f};
-    if (cp.on_gap) { risk.gap = jambs_of(cp.drive_pose, cp.drive_width); risk.p_gap = cp.gap_score; }
-    return risk;
-}
-
 // ── FINAL-APPROACH BLACK BOX ─────────────────────────────────────────────────────────────────────
 // WHY THIS EXISTS. An affordance standpoint is verified footprint-feasible at exactly ONE heading —
 // the facing yaw, by the repair — and the plan is verified at the TRAVEL heading. Neither verifies the
@@ -5439,7 +4712,7 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                                            : std::numeric_limits<float>::quiet_NaN()) << ','
                   << (last_raw_target_pos_ ? last_raw_target_pos_->y()
                                            : std::numeric_limits<float>::quiet_NaN()) << ','
-                  << (approach_fix_.has_value() ? 1 : 0) << ','
+                  << 0 << ','
                   << (path_controller.endpoint_arrival() ? 1 : 0) << ','
                   << path_controller.goal_threshold() << ','
                   << (o.arrival_test_ran ? 1 : 0) << ',' << (o.arrival_endpoint_on ? 1 : 0) << ','
@@ -5745,19 +5018,15 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                                                        std::uint64_t timestamp_ms)
 {
     const float window = params_ != nullptr ? params_->affordance_approach_recheck_m : 0.f;
-    if (window <= 0.f or not step.target.from_affordance) { approach_fix_.reset(); return; }
+    if (window <= 0.f or not step.target.from_affordance) return;
     // Keyed by NAME, like the reachability repair: the name is the identity that survives every repair
     // that moves the pose, and it needs no tolerance to compare.
-    if (approach_fix_.has_value() and approach_fix_->name != step.target.node_name)
-        approach_fix_.reset();
 
     // The anchor is the standpoint as the grid repair left it — that is the pose the robot is actually
     // driving to, and searching around anything else would be answering about a pose already rejected.
     const Eigen::Vector2f anchor = step.target.room_pos;
     // A held fix belongs to the pose it repaired. If that pose has moved further than the fix itself was
     // allowed to move, it is a different standpoint and the old correction is about a problem elsewhere.
-    if (approach_fix_.has_value() and (anchor - approach_fix_->anchor).squaredNorm() > window * window)
-        approach_fix_.reset();
 
     // ★★★ALREADY STANDING THERE ⇒ THERE IS NOTHING TO APPROACH, AND NOTHING TO REPAIR. Leave the target
     // exactly as the producer published it and let the ordinary arrival path have it.
@@ -5781,7 +5050,6 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     // there is nothing left to approach" are one question, so they must not be two numbers.
     if ((step.robot_pose.pos - anchor).norm() <= path_controller.params.goal_threshold)
     {
-        approach_fix_.reset();
         return;
     }
     // ── Task 3c ([Policy] Enabled): RE-ASKED CLOSE IN, BUT NEVER RE-SITED ─────────────────────────────────────────────
@@ -5793,10 +5061,7 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     // cycle — which is how the cloud reaches this test, and why it is re-asked close in, where the LiDAR sees the spot;
     // soft cells are priced, never a hand-back). Not ⇒ hand it back (Reach and object alike) so the producer re-solves
     // inside its own band. No fix is ever taken: the policy's contact model keeps the body off every live return on the way.
-    // The old chain ([Policy] Enabled = false) keeps the disc test and the repair below unchanged.
-    if (policy_enabled())
     {
-        approach_fix_.reset();
         if (window <= 0.f or (step.plan_origin - anchor).squaredNorm() > window * window) return;
         // fix round 1 (I-2): the same pure decision as build_planning_step, at the ApproachWindow stage (every hard cell
         // counts, live returns included — this is where the LiDAR measures the spot); Reach is judged here too.
@@ -5817,213 +5082,6 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                          step.target.node_name, (step.plan_origin - anchor).norm(), anchor.x(), anchor.y());
         return;
     }
-    // ★MEASURED TO WHAT WE ARE DRIVING TO, not to the anchor. Once a fix is taken the robot approaches
-    // the MOVED pose, so a window measured against the anchor walks out of range exactly because the fix
-    // worked — which would drop it and put the target straight back where the returns said it must not
-    // be, once per lap of that loop, forever.
-    // Measured to the pose actually being driven to, so a held fix does not walk itself out of the
-    // window and get dropped. ★The gate applies WHETHER OR NOT a fix is held: the earlier spelling
-    // (`not approach_fix_.has_value() and ...`) disabled it outright once a fix existed, so the full
-    // cloud read and scan below then ran every cycle for the rest of the target's life however far away
-    // the robot was. That is the opposite of what the comment above claims. Caught by review 2026-08-17.
-    const Eigen::Vector2f driving_to = approach_fix_.has_value() ? approach_fix_->pos : anchor;
-    if ((step.plan_origin - driving_to).squaredNorm() > window * window) return;
-
-    auto *lidar = obstacle_tracker.lidar_buffer();
-    if (lidar == nullptr) return;
-    const auto [cloud_opt] = lidar->read_last();
-    if (not cloud_opt.has_value()) return;
-    const auto &[xs, ys, zs] = cloud_opt.value();
-    const std::size_t n_pts = std::min({xs.size(), ys.size(), zs.size()});
-    if (n_pts == 0) return;
-
-    // The SAME standoff the planner obeys — footprint_safety_margin_m, the one number robot_footprint.h
-    // exists to keep from multiplying. Nothing here introduces a second one.
-    // ★HELD AS A MEMBER, not rebuilt per call: shadow() allocates an 18-vertex polygon, and this runs on
-    // the control thread. The margin is re-set only when the configured one moves.
-    const float margin = params_ != nullptr ? params_->footprint_safety_margin_m : 0.f;
-    if (std::abs(approach_body_.safety_margin() - margin) > 1e-6f)
-        approach_body_.set_safety_margin(margin);
-    const auto &body = approach_body_;
-    // ★NOT `+ safety_margin()`. circumscribed_radius() ALREADY adds the margin (robot_footprint.cpp:48),
-    // so adding it again stacked a second 0.05 m — 0.375 m where the body reaches 0.325 — which is the
-    // exact multiplying-margin failure robot_footprint.h was written to abolish, reintroduced inside the
-    // file that quotes it. Caught by review 2026-08-17.
-    const float reach = body.circumscribed_radius();
-    const float reach2 = reach * reach;
-
-    // ── THE STANDPOINT MUST BE CLEAR WITH THE ROOM THE ARRIVAL ITSELF NEEDS ──────────────────────
-    // ★★★A POSE VALIDATED AS CLEAR IS NOT WHERE THE ROBOT STOPS. Arrival completes anywhere within
-    // goal_threshold of the standpoint, in any direction, so a body that merely FITS at the validated
-    // pose can be a quarter of a metre deeper into the furniture when the robot actually halts — which
-    // is the reported behaviour: targets that drive the robot into contact with the table.
-    // ★THE MARGIN IS THE ARRIVAL BAND, not a comfort preference. ComfortStandoff (0.6 m) is the wrong
-    // instrument: a standpoint exists to SEE something, and holding it two thirds of a metre off every
-    // return would refuse most of the cells worth standing in. goal_threshold is the honest number
-    // because it is exactly how far the arrival test permits the robot to be from the pose we checked.
-    // Nothing new is introduced — the same quantity the arrival gate already compares.
-    rc::RobotFootprint standoff_body = approach_body_;
-    standoff_body.set_safety_margin(margin + path_controller.params.goal_threshold);
-    const float standoff_reach2 = standoff_body.circumscribed_radius() * standoff_body.circumscribed_radius();
-
-    // Returns that could touch ANY candidate the search may return, with the robot's own body removed.
-    // Self-returns must go first: the wheels sit at 0.25 m and the robot is by definition standing next
-    // to the standpoint by the time this runs, so leaving them in would condemn every standpoint the
-    // moment the robot got close enough to check it.
-    constexpr float kBodyZLo = 0.05f;   // above this is the body, below it is the floor beneath us
-    constexpr float kBodyZHi = 1.45f;   // the mesh tops out at 1.42 m
-    const float robot_yaw = step.robot_pose.theta + static_cast<float>(M_PI_2);
-    std::vector<Eigen::Vector2f> returns;
-    returns.reserve(256);                    // typical near-anchor count; avoids ~10 reallocations
-    for (std::size_t i = 0; i < n_pts; ++i)
-    {
-        if (zs[i] < kBodyZLo or zs[i] > kBodyZHi) continue;
-        const Eigen::Vector2f p{xs[i], ys[i]};
-        if ((p - anchor).squaredNorm() > (window + reach) * (window + reach)) continue;
-        if (body.contains_yaw(p, step.robot_pose.pos, robot_yaw)) continue;   // the robot seeing itself
-        returns.push_back(p);
-    }
-    if (returns.empty()) return;   // no evidence is not the same as clear, and it licenses nothing
-
-    // WHICH HEADINGS THE BODY WILL ACTUALLY HOLD THERE decides the shape of the test, because a rigid
-    // footprint is not rotation-invariant and assuming a disc is what the footprint planner exists to
-    // stop doing. A target that ends in a terminal rotation sweeps every heading, so it must clear the
-    // circumscribed disc; one that does not is tested at the two headings it really occupies — the
-    // arrival heading (it drives in along the bearing from wherever it is) and the commanded facing.
-    const bool rotates = wants_final_facing(step.target);
-    // ★THE ARRIVAL HEADING IS AN ARGUMENT NOW, NOT A RE-DERIVATION. Deriving it inside from
-    // `centre - plan_origin` made the admissibility of a FIXED pose a function of where the robot
-    // currently stands, which is what produced the fleeing standpoint (see ApproachFix::arrival_yaw).
-    // Choosing a NEW fix still asks the question from where the robot is — that is the heading it will
-    // really arrive on — but RE-TESTING a held one must ask it at the heading the fix was chosen for.
-    const auto arrival_yaw_from = [&](const Eigen::Vector2f &centre)
-    {
-        const Eigen::Vector2f approach_dir = centre - step.plan_origin;
-        return approach_dir.squaredNorm() > 1e-8f
-             ? std::atan2(approach_dir.y(), approach_dir.x())
-             : step.target.yaw_rad;
-    };
-    const auto clear_of_returns_at = [&](const Eigen::Vector2f &centre, const float arrival_yaw)
-    {
-        // ★★★ THE PATCH UNDER THE ROBOT IS A BLIND SPOT, NOT FREE SPACE. The self-return filter above
-        // deletes every point inside the robot's own body — it must, or the wheels at 0.25 m would
-        // condemn every standpoint the moment the robot got close enough to test it. But that leaves a
-        // body-shaped hole GUARANTEED to hold no returns whatever is really there, and
-        // nearest_free_where, searching outward from an anchor the object itself occupies, lands on it
-        // almost every time. Live 2026-08-19, robot at (-0.81,-2.26):
-        //     [approach] (-1.00,-2.38) is OCCUPIED ... Standpoint moved to (-0.81,-2.26)
-        //     [affordance] REFUSED: already at this standpoint on the first cycle
-        // — the standpoint relocated onto the robot ITSELF, was instantly refused as already-reached,
-        // and the pair looped there indefinitely.
-        // ★This file already states the rule, about an empty cloud: "no evidence is not the same as
-        // clear, and it licenses nothing". Same rule, applied to the hole we punch in the cloud
-        // ourselves. A viewpoint the robot already occupies also yields exactly the image it already
-        // has, so there is nothing to be gained by moving there even if it IS free.
-        // ★★NOT AN ARRIVAL TEST, and that is the whole point. This rejects a candidate RELOCATION and
-        // never a completion, so it cannot turn a legitimate arrival into a refusal — which is what
-        // forced the revert of 31faa35 (af7ba55). A normal approach relocates nothing and never
-        // reaches this line.
-        if (body.contains_yaw(centre, step.robot_pose.pos, robot_yaw)) return false;
-        for (const auto &p : returns)
-        {
-            // ★JUDGED WITH THE ARRIVAL BAND ADDED, so the pose stays clear wherever inside that band
-            // the robot actually stops. The self-return filter above still uses the TRUE body: growing
-            // it there would delete returns from the very furniture this is meant to keep away from.
-            if ((p - centre).squaredNorm() > standoff_reach2) continue;   // out of reach at any heading
-            if (rotates) return false;                                   // ...and it turns through all
-            if (standoff_body.contains_yaw(p, centre, arrival_yaw)) return false;
-            if (standoff_body.contains_yaw(p, centre, step.target.yaw_rad)) return false;
-        }
-        return true;
-    };
-    // The predicate nearest_free_where takes: a CANDIDATE is judged at the heading the robot would
-    // really arrive on, which is the honest question when choosing where to go.
-    const auto clear_of_returns = [&](const Eigen::Vector2f &centre)
-    { return clear_of_returns_at(centre, arrival_yaw_from(centre)); };
-
-    const auto aim_at_object = [&]()
-    {
-        // The producer's yaw faced the object from the viewpoint it published; the standpoint has moved.
-        if (step.target.parent_node_id == 0) return;
-        if (const auto obj = world_model.read_node_room_xy(step.target.parent_node_id, timestamp_ms);
-            obj.has_value())
-            step.target.yaw_rad = std::atan2(obj->y() - step.target.room_pos.y(),
-                                             obj->x() - step.target.room_pos.x());
-    };
-
-    // ★A FIX, ONCE TAKEN, IS STATIC FOR THE LIFE OF THE TARGET. Validated ONCE against the live LiDAR
-    // at the moment it is chosen (that is what `clear_of_returns` below does), and then held — no
-    // re-test, no re-solve.
-    // ★★WHY THE RE-TEST IS GONE (user, watching a live run, 2026-08-19: "you are moving the target
-    // before the robot can reach it" / "just leave it static in a place that the local lidar validates
-    // as reachable"). This block used to re-ask, every cycle, whether the held standpoint was still
-    // clear, and re-solve when the answer came back no. Freezing the arrival heading removed the
-    // systematic FLEE (measured: 77% of moves in the robot's own travel direction, down to 57% with
-    // 50% being no correlation at all) but not the MOTION: 197 target moves over 5 cm in one 120 s
-    // run, p50 0.30 m. A standpoint that is re-decided is not a standpoint.
-    // ★The re-test could never be a stable question, because its evidence is not stable. The LiDAR
-    // returns it judges against are re-gathered every cycle from a moving robot, at a viewpoint that
-    // is by construction getting CLOSER to the standpoint — so occlusion, incidence and density at
-    // that patch of floor all change under it, and a boundary case flickers. Holding a flickering
-    // predicate's FIRST answer is not worse than holding its latest one; it is merely honest about
-    // which answer it is holding.
-    // ★What replaces it is not nothing. If the held standpoint really is unstandable, the robot fails
-    // to arrive, the wedge or Spinning verdict fires, and after kMaxEscapesPerAffordance the affordance
-    // is given up and the claim released (begin_escape). That path reports the failure to the producer
-    // instead of silently re-siting its viewpoint — which is what room_concept asked for on 2026-08-19
-    // ("refuse, never move": a relocated-then-completed standpoint makes the producer record an
-    // observation that never happened, corrupting its exploration drive).
-    // The lifecycle guards above still drop the fix when it stops belonging to this target: a changed
-    // node name (:1751) and a producer that republishes its viewpoint elsewhere (:1759).
-    if (approach_fix_.has_value())
-    {
-        step.target.room_pos = approach_fix_->pos;
-        // ★THE FROZEN FACING, not a fresh aim. See ApproachFix::object_yaw: re-aiming every cycle at a
-        // live object estimate is a second moving target wearing the first one's clothes.
-        step.target.yaw_rad  = approach_fix_->object_yaw;
-        return;
-    }
-
-    // One search, both questions: the grid (which knows about walls, and about obstacles no longer in
-    // view) AND the cloud (which knows about what is there now). nearest_free_where returns the anchor
-    // itself when the anchor already satisfies both, so this both tests and repairs in one call.
-    const auto fix = grid_planner_.nearest_free_where(anchor, step.target.yaw_rad, clear_of_returns, window);
-    if (not fix.has_value())
-    {
-        // Nowhere within the window is clear under both. Say so and leave the target alone: inventing a
-        // standpoint outside the window would service the affordance from somewhere it cannot see its
-        // object, and driving on silently is what this whole function exists to stop.
-        if (timestamp_ms - approach_blocked_log_ms_ >= 3000)
-        {
-            approach_blocked_log_ms_ = timestamp_ms;
-            std::println("[approach] ⚠ '{}' at ({:.2f},{:.2f}) is occupied by {} live LiDAR return(s) the "
-                         "planner grid no longer carries, and NOTHING within {:.2f} m is clear under both. "
-                         "Holding the target as published — it will drive into that.",
-                         step.target.node_name, anchor.x(), anchor.y(), returns.size(), window);
-        }
-        return;
-    }
-    if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
-    // ── A REACH STANDPOINT THE LIVE LiDAR SAYS IS OCCUPIED: HAND IT BACK (2026-10-09) ───────────────────────────
-    // For an exploration standpoint the exact spot does not matter, and nudging it a few cm drove the robot into
-    // the furniture that occupied it (live: moved 5 cm, then WEDGE, then 3 blind escapes into a wall). The
-    // producer owns the choice: report Unreachable and it offers another. Object approaches keep the repair.
-    if (flag_reach_unreachable(std::format("live LiDAR: standpoint ({:.2f},{:.2f}) occupied", anchor.x(), anchor.y())))
-        return;
-
-
-    step.target.room_pos = *fix;      // aim_at_object reads room_pos, so the move lands first
-    aim_at_object();                  // ONE aim, at the moment of the repair, and it is kept
-    approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor,
-                               .arrival_yaw = arrival_yaw_from(*fix),
-                               .object_yaw = step.target.yaw_rad};
-    std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
-                 "something the grid has forgotten (residual decays; returns do not). Standpoint moved to "
-                 "({:.2f},{:.2f}), {:.2f} m away.",
-                 step.target.node_name, (step.plan_origin - anchor).norm(),
-                 anchor.x(), anchor.y(), fix->x(), fix->y(), (*fix - anchor).norm());
-    // (room_pos and yaw_rad were both set above, before the fix was recorded, so that the frozen
-    // object_yaw is exactly the heading this run of the function chose — not one re-derived later.)
 }
 
 bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) const
@@ -6543,9 +5601,6 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                    max_lidar_draw_points,
                    lidar_correction);
 
-    // Light the toolbar stuck indicator while an escape maneuver owns the base (robot is
-    // reversing/turning out of a wedge). Pushed every cycle; the widget dedups same-state calls.
-    display.set_stuck_active(escape_active_);
 }
 
 ControllerSession::DrivenCurve ControllerSession::driven_curve() const
@@ -6676,91 +5731,7 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
         const Eigen::Vector2f r = Rt * (p - t);
         return R * path_controller.clearance_gradient_at(r.x(), r.y());
     };
-    // ── [Route] NearFieldClearance (Task 6, 2026-10-21, user: the B arm) ─────────────────────────────────────────────
-    // ★ WHY: in a narrow passage the raw ESDF gives the near part of the spline no traction — in a 0.90 m doorway the margin
-    //   is 1-3 cm a side, the size of the return noise, and the min-distance gradient flips between the jambs. Near the robot
-    //   the field becomes the EXPECTED clearance to the local policy's FITTED surfaces (the same denoise_returns model its
-    //   contact probability uses — one obstacle model, no second fit), joined to this ESDF by a weight from the model
-    //   (near_field_clearance.h). The optimiser is unchanged; it is handed a better field. Off: nothing here runs.
-    // The near model's coverage R = the body's circumscribed radius + the route look-ahead the band deforms (to the end of
-    // its window, lead + span control points at h); sigma_far = the ESDF's cell.
-    // ★ Fix round 1 (review I-2): the near model sees the SAME obstacle set as the ESDF it replaces near the robot —
-    //   · the LiDAR returns of the ESDF's own buffer (lidar_buffer: the legacy 0.20 m height band, Controller
-    //     TemporaryObstacleMinHeight — NOT the policy's contact band at Lidar.ContactMinHeightM 0.074 m: a return between the
-    //     two would sit in the near model and not in the far one, and the join would disagree about whether it exists). The
-    //     body itself is filtered by its hull (returns_body / self_body_), where the ESDF drops a 0.405 m disc: the near model
-    //     keeps the real returns that disc deleted — stated, the one deliberate difference;
-    //   · the room outline minus the passage being crossed and the furniture polygons — the model build_esdf injects — as
-    //     segments sampled exactly as it samples them, each sample deferring (as there) to a LiDAR return within
-    //     Controller.ModelMergeRadius (Chebyshev, the ESDF's cell-square neighbourhood), position sigma = the relative pose
-    //     sigma (Policy.SigmaRelXY) with the samples' cell quantisation (res / sqrt 12);
-    //   · and, while the band DRIVES a cross ([Route] BandDrivesCross), the opening's jambs (F4's DoorwayRisk, built from the
-    //     cross protocol's anchor and measured gap this cycle) with the wall's half-depth (band_cross.h).
     const auto band_t0 = std::chrono::steady_clock::now();
-    band_near_elements_ = 0;
-    if (params_->route_near_field_clearance and obstacle_tracker != nullptr)
-    {
-        const float R_near = approach_body_.circumscribed_radius() + static_cast<float>(freeze_after - i_robot) * h;
-        const float reach = R_near + rc::policy::kDenoiseRadiusM;
-        std::vector<rc::policy::Return> returns;
-        std::vector<Eigen::Vector2f> lidar_room;
-        if (auto *buf = obstacle_tracker->lidar_buffer(); buf != nullptr)
-            if (const auto pts = rc::lidar_robot_points_from_buffer(*buf, pose, returns_body(), self_body_); pts.has_value())
-                for (const auto &q_robot : *pts)
-                {
-                    const Eigen::Vector2f q = pose * q_robot;
-                    if (not q.allFinite() or (q - robot_pose.pos).squaredNorm() > reach * reach) continue;
-                    returns.push_back({.p = q, .sigma = params_->lidar_range_sigma_m, .p_exist = 1.f});
-                    lidar_room.push_back(q);
-                }
-        auto nf = std::make_shared<rc::NearFieldClearance>(robot_pose.pos, R_near, path_controller.params.grid_resolution,
-                                                           distance, gradient);
-        nf->set_surfaces(rc::policy::denoise_returns(returns));
-        // the ESDF's injected model (deferring to the LiDAR as build_esdf does)
-        const float merge = std::max(1e-3f, path_controller.params.model_merge_radius_m);
-        std::unordered_multimap<std::int64_t, Eigen::Vector2f> lidar_hash;   // cells of side `merge`
-        const auto cell_key = [merge](float x, float y, int dx = 0, int dy = 0)
-        {
-            const auto ix = static_cast<std::int64_t>(std::floor(x / merge)) + dx, iy = static_cast<std::int64_t>(std::floor(y / merge)) + dy;
-            return (ix << 32) ^ (iy & 0xffffffff);
-        };
-        for (const auto &r : lidar_room) lidar_hash.emplace(cell_key(r.x(), r.y()), r);
-        const auto lidar_near = [&](const Eigen::Vector2f &q)
-        {
-            for (int dx = -1; dx <= 1; ++dx)
-                for (int dy = -1; dy <= 1; ++dy)
-                {
-                    const auto [lo, hi] = lidar_hash.equal_range(cell_key(q.x(), q.y(), dx, dy));
-                    for (auto it = lo; it != hi; ++it)
-                        if (std::abs(it->second.x() - q.x()) <= merge and std::abs(it->second.y() - q.y()) <= merge) return true;
-                }
-            return false;
-        };
-        // outside the coverage disc a sample is not part of the near model at all (cut first: the test below is per sample)
-        const auto in_reach = [&](const Eigen::Vector2f &q) { return (q - robot_pose.pos).squaredNorm() <= reach * reach; };
-        const auto in_passage = [this](const Eigen::Vector2f &q)
-        {
-            return std::ranges::any_of(door_passages_, [&](const auto &pass)
-                                       { return pass.size() >= 3 and rc::corner_visibility::point_in_polygon(q, pass); });
-        };
-        const double sigma_model = std::hypot(double(params_->policy_sigma_rel_xy_m),
-                                              double(path_controller.params.grid_resolution) / std::sqrt(12.0));
-        const float spacing = 0.05f;   // TrajectoryController::set_room_boundary / set_static_obstacles' default sampling
-        std::vector<rc::NearFieldElement> model;
-        if (room_polygon_.size() >= 3)
-            for (const auto &e : rc::NearFieldClearance::polygon_elements(room_polygon_, sigma_model, spacing,
-                     [&](const Eigen::Vector2f &q) { return in_reach(q) and not in_passage(q) and not lidar_near(q); }))
-                model.push_back(e);
-        for (const auto &obs : obstacle_tracker->obstacle_polygons())
-            if (obs.size() >= 2)
-                for (const auto &e : rc::NearFieldClearance::polygon_elements(obs, sigma_model, spacing,
-                         [&](const Eigen::Vector2f &q) { return in_reach(q) and not lidar_near(q); }))
-                    model.push_back(e);
-        nf->set_model(model);
-        band_near_elements_ = static_cast<int>(nf->surface_count() + nf->model_count());
-        distance = [nf](const Eigen::Vector2f &p) { return nf->distance(p); };
-        gradient = [nf](const Eigen::Vector2f &p) { return nf->gradient(p); };
-    }
 
     rc::RouteOptimizerReport rep;
     if (on_mission)
@@ -6870,7 +5841,7 @@ void ControllerSession::log_band_diagnostics(std::uint64_t t_ms, const rc::Route
               << rep.max_move_m << ',' << rep.cost_before << ',' << rep.cost_after << ','
               << rep.min_clearance_before << ',' << rep.min_clearance_after << ','
               << rep.e_kappa << ',' << rep.e_clear << ',' << rep.e_anchor << ',' << rep.e_gauge << ','
-              << band_solve_ms_ << ',' << band_near_elements_ << '\n';
+              << band_solve_ms_ << "," << 0 << '\n';
 }
 
 // ★ Task 3e (3) — A HAND-BACK COMPLETES THE NODE IT NAMES (rtD1h leg 5). The verdict is flagged in one cycle and reported in
@@ -6900,11 +5871,9 @@ void ControllerSession::report_flagged_unreachable(rc::AffordanceManager &afford
     if (not named_is_current) return;   // the claim being driven now is another one: its route and state are its own
     route_dropped_ = true;
     approach_commit_.reset();
-    approach_fix_.reset();
     reset_anchor_cross_state();      // the claim is over: its re-offer starts a fresh one (fix round 1)
     contract_for_node_id_ = 0;       // ...and is resolved again even if the producer keeps the same epoch
     no_route_since_ms_ = 0;
-    short_path_since_ms_ = 0;
 }
 
 void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &affordance_manager,
@@ -6961,8 +5930,7 @@ bool ControllerSession::consume_goal_reached(bool goal_reached, const Controller
                                              rc::TrajectoryController &path_controller,
                                              ControllerObstacleTracker &obstacle_tracker,
                                              ControllerMotionCommander &motion_commander, ControllerDisplay &display,
-                                             rc::AffordanceManager &affordance_manager, const TimeSource &time_source,
-                                             bool drive_base)
+                                             rc::AffordanceManager &affordance_manager, const TimeSource &time_source)
 {
     // ★★★A "REACHED" WITH NO PATH IS NOT AN ARRIVAL. compute()'s FIRST line returns
     //     if (!active_ || path_room_.empty()) { active_ = false; out.goal_reached = true; return out; }
@@ -7055,7 +6023,7 @@ bool ControllerSession::consume_goal_reached(bool goal_reached, const Controller
             lockon_.begin(time_source(), active_contract_.scalar_target,
                           active_contract_.stable_n, active_contract_.timeout_ms);
             path_controller.stop();
-            if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source, drive_base))
+            if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source))
                 finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
             return true;
@@ -7273,48 +6241,28 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                    robot_pose.theta, orient_overlay_visible_);
     };
 
-    // ── Task 8: THE LOCAL POLICY DRIVES ([Policy] Enabled). Dispatched BEFORE every branch below — the escape, the
-    //    returns' backoff, the anchor servo, lock-on and orient motion, the band, the clearance ceiling, the tracker's
-    //    command path and its caps, the uncertainty limiter — none of which runs, so none can write the base. The
-    //    protocol halves they carried (arrival, the cross's completion, the lock-on / orient predicates) are shared.
-    if (policy_enabled())   // C1: the policy drives the WHOLE door passage too (approach, hold at the vantage, cross)
+    // ── THE LOCAL POLICY IS ASKED FIRST, every cycle. It owns the cycle (returns false) for a cross, a door route, a lock-on,
+    //    an orient, a mission tour, an episode and a WAIT; for a HYBRID plain PLACE with a fitted route it returns true and
+    //    the spline chain's tracker path below runs (band, clearance ceiling, tracker, live-returns net, stall judge).
     {
         // PORT STEP 5: the HYBRID's chain drives a plain Place — drive_with_policy says so and the tracker path below runs
         const bool chain_drives = drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
                                                     affordance_manager, time_source);
         if (not chain_drives)
         {
+            if (chain_wait_)
+                note_mode("wait", [&]{ return std::format("no route on map + {} marks, one on the map alone", chain_marks_.marks.size()); });
+            else if (chain_ep_.active)
+                note_mode("policy", [&]{ return std::format("episode: {}", chain_ep_.why); });
+            else if (drive_mode_ != "recover" or current_plan_.has_value())   // a re-plan in progress stays "recover" until a plan exists
+                note_mode("policy", [&]{ return chain_hybrid_on() and chain_hybrid_place_ ? std::string("no fitted chain route for this goal yet")
+                                                                                         : std::string("this goal is the policy's (cross / door route / lock-on / orient / tour)"); });
             refresh_view_only();
             return;
         }
+        note_mode("spline", [&]{ return std::format("a fitted route of {:.2f} m, the chain's window passes", plan_spline_.length()); });
     }
 
-    // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
-    // out — bypass the planner/follower entirely, just like the lock-on micro-search below.
-    // It survives the current_plan_ reset done in begin_escape(), so it's gated FIRST.
-    if (escape_active_)
-    {
-        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
-        refresh_view_only();
-        return;
-    }
-    if (returns_backoff_active_
-        and step_returns_backoff(robot_pose, path_controller, obstacle_tracker, motion_commander, "returns' backoff"))
-    {
-        refresh_view_only();
-        return;
-    }
-
-    // The door cross on its interaction anchor is the LOCAL POLICY's (drive_with_policy step 1). Without [Policy] Enabled there is
-    // no driver for it: the base holds (the old anchor servo and its guard chain are gone).
-    if (anchor_cross_.has_value())
-    {
-        anchor_cross_.reset();
-        note_why(rc::why::Cause::NoRoute, "a door cross needs [Policy] Enabled — the anchor servo is gone");
-        note_no_command(); motion_commander.stop_robot();
-        refresh_view_only();
-        return;
-    }
 
     if (!current_plan_.has_value())
     {
@@ -7326,63 +6274,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         note_no_command(); motion_commander.stop_robot();
         refresh_view_only();
         return;
-    }
-
-    // A lock-on micro-search in progress owns the base until it locks or gives up — bypass the path
-    // follower so it isn't disturbed by goal_reached re-evaluation while we quasi-statically servo.
-    if (lockon_.active())
-    {
-        note_why(rc::why::Cause::LockOn, std::format("lock-on micro-search on '{}'", why_target_name()));
-        if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source))
-            finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                             robot_pose.pos, time_source());
-        refresh_view_only();
-        return;
-    }
-
-    // Orient affordance (Policy::Orient): rotate IN PLACE toward the target bearing — no navigation. Owns
-    // the base like the lock-on above; only for a from-affordance target whose contract is Orient (a
-    // bearing-only hypothesis, Part D). Read the contract each cycle so it activates as soon as selected.
-    if (params_ && params_->lockon_enabled && graph_ && last_target_info_.has_value()
-        && last_target_info_->from_affordance && active_target_id_ != 0)
-    {
-        if (const auto aff = graph_->get_node(active_target_id_); aff.has_value())
-        {
-            std::string parent_type;
-            if (last_target_info_->parent_node_id != 0)
-                if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
-                    parent_type = parent_contract_key(pn.value());
-            const auto contract = rc::affordance::read_contract(aff.value(), parent_type);
-            // ★ A REACH THAT WAITS (2026-11-01, warm15: every `close` behind ended Timeout at arrival — the claim and its completion
-            //   in ONE cycle, so door_concept never saw the claim and never sent the request). A Reach whose goal is the WORLD's
-            //   to bring about (`close`: the provider swings the leaf) keeps its claim at the standpoint and waits here, as an
-            //   Orient does, until the goal holds or the contract's timeout — armed at arrival (reach_wait_target_).
-            const bool reach_waits = reach_wait_target_ != 0 and reach_wait_target_ == active_target_id_;
-            if (contract.policy == rc::affordance::Policy::Orient or reach_waits)
-            {
-                // ★ KNOWN DEFECT (Task O, left as is — the old chain stays unchanged by standing order): this branch completes an orient on
-                //   step_orient's own predicate at wherever the repair left the robot, not on the affordance's precondition probability, and
-                //   its standpoint is the REPAIRED point. The [Policy] chain (controller_policy_drive.cpp) does both properly.
-                active_contract_  = contract;
-                feedback_node_id_ = contract.feedback_node_id != 0 ? contract.feedback_node_id
-                                                                   : last_target_info_->parent_node_id;
-                path_controller.stop();
-                // BEFORE the step, so the view describes the state being acted on — the same ordering
-                // the full cycle uses — and the final cycle of a turn is shown as a turn rather than
-                // as the idle that finalize_reached leaves behind.
-                refresh_view_only();
-                note_why(rc::why::Cause::Orienting, std::format("orient '{}': turning in place toward its bearing",
-                                                                last_target_info_->node_name));
-                if (step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
-                                last_target_info_->yaw_rad))
-                {
-                    reach_wait_target_ = 0;
-                    finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                             robot_pose.pos, time_source());
-                }
-                return;
-            }
-        }
     }
 
     // The MPPI gets the room's TRUE boundary. It used to get a copy shrunk inward by clearance_m (0.5 m),
@@ -7430,12 +6321,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // Reach standpoint is handed back.
     std::optional<float> v_limit = clearance_speed_limit(driven_curve(), robot_pose,
                                                          path_controller);
-    if (route_active_ and mission_.running())
-    {
-        const float v_route = route_speed_limit(params_ ? params_->max_adv_speed_mps : 0.7f,
-                                                path_controller.params.cbf_max_decel);
-        v_limit = v_limit.has_value() ? std::min(*v_limit, v_route) : v_route;
-    }
     path_controller.set_speed_limit(v_limit);
 
     // ── PER-CYCLE PLAN/TRACK RECORD (plan_track.csv, 2026-10-09) ─────────────────────────────────────────────
@@ -7508,6 +6393,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         plan_spline_valid_ = false;
         route_repair_pending_ = true;
         std::println("[chain] re-plan on map + {} marks (plan-first)", chain_marks_.marks.size());
+        note_mode("recover", [&]{ return std::format("plan-first: the window ahead fails on unmapped returns, re-plan on map + {} marks", chain_marks_.marks.size()); });
     }
     else if (act == ChainAction::Episode)
     {
@@ -7612,22 +6498,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             prev_cmd_rot_sign_ = rot_sign;
     }
 
-    if (door_route_active_ and door_route_installed_ and door_route_leg_.has_value())
-    {
-        door_route_.advance(robot_pose.pos);
-        if (door_route_.finished(robot_pose.pos))
-        {
-            std::println("[door-route] {}: the route's end reached ({:.2f} of {:.2f} m)", door_route_leg_->door, door_route_.progress(),
-                         door_route_.length());
-            door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
-            door_route_active_ = false;
-            door_route_installed_ = false;
-            path_controller.stop();
-            current_plan_.reset();
-            note_no_command(); motion_commander.stop_robot();
-            return;
-        }
-    }
     if (route_active_ and mission_.running())
     {
         // Progress is a scalar that only increases. Legs are read OFF it rather than driven by it.
@@ -7941,7 +6811,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                // The escape fires when this crosses the threshold — the last row before the
                                // "[recovery] STUCK -> escape" line is the smoking gun (cmd_* ~0, this ~confirm_ms).
                                << (stall_judge_.since_ms() != 0 ? t_ms - stall_judge_.since_ms() : 0) << ','
-                               << (escape_active_ ? 1 : 0) << ',' << od.n_temp << ',' << od.n_virtual << ','
+                               << 0 << ',' << od.n_temp << ',' << od.n_virtual << ','
                                << od.near_temp_m << ',' << od.near_virtual_m << ','
                                << od.near_temp_log_odds << ',' << od.near_temp_missed << ','
                                << od.near_temp_age_ms << ','
@@ -7962,86 +6832,24 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         }
     }
 
-    if (control_output.path_blocked and chain_hybrid_on())
+    if (control_output.path_blocked)
     {   // the chain's own confirmed blockage = "the chain cannot drive this stretch": the policy judges it on the LiDAR
         chain_ep_request_ = "blocked"; chain_ep_first_bad_ = 0;
         note_no_command(); motion_commander.stop_robot();
         refresh_view_only();
         return;
     }
-    if (control_output.path_blocked)
-    {
-        clear_tracking_state();
-        if (!params_ || params_->obstacle_creation_enabled)
-            obstacle_tracker.create_temporary_lidar_obstacle(time_source(),
-                                                             robot_pose,
-                                                             control_output.blockage_center_room,
-                                                             control_output.blockage_radius,
-                                                             path_controller);
-        current_plan_.reset();
-        plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
-        // In leg mode resetting the plan WAS the replan trigger. A continuous route has no target to
-        // replan to, so the request has to be explicit or the route branch just re-installs the same
-        // curve and the robot drives at the blocker again.
-        route_repair_pending_ = true;
-        path_controller.stop();
-        note_why(rc::why::Cause::Blockage,
-                 std::format("the path to '{}' is blocked at ({:.2f},{:.2f}), r {:.2f} m — plan dropped, re-routing",
-                             why_target_name(), control_output.blockage_center_room.x(),
-                             control_output.blockage_center_room.y(), control_output.blockage_radius));
-        note_no_command(); motion_commander.stop_robot();
-        return;
-    }
 
     if (consume_goal_reached(control_output.goal_reached, robot_pose, path_controller, obstacle_tracker, motion_commander,
-                             display, affordance_manager, time_source, /*drive_base=*/true))
+                             display, affordance_manager, time_source))
         return;
-    const float d_here =
-        last_target_info_.has_value()
-            ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
-            : std::numeric_limits<float>::infinity();
-
-    if (not path_controller.is_active() and chain_hybrid_on())
+    if (not path_controller.is_active())
     {   // PORT STEP 5: the tracker stopped short of the standpoint — the policy finishes the approach (the target itself)
         chain_ep_request_ = "finish"; chain_ep_first_bad_ = 0;
         note_no_command(); motion_commander.stop_robot();
         refresh_view_only();
         return;
     }
-    if (!path_controller.is_active())
-    {
-        // ── THE PATH ENDED SHORT OF THE STANDPOINT (2026-10-09) ─────────────────────────────────────────────
-        // The follower reports goal_reached when its PATH is done; arrival_is_real refused it (live: 0.77 m from
-        // the standpoint, 1714 such "arrivals" in 90 s) and this branch then stopped the robot for ever — no
-        // replan, no verdict to the producer. Drop the plan so the next cycle replans; if the path keeps ending
-        // short for 5 s (the same liveness constant as no-route), report Unreachable so the producer moves on.
-        if (last_target_info_.has_value() and last_target_info_->from_affordance)
-        {
-            current_plan_.reset();
-            plan_spline_valid_ = false;
-            if (short_path_since_ms_ == 0) short_path_since_ms_ = time_source();
-            else if (time_source() - short_path_since_ms_ > 5000)
-            {
-                std::println("[controller] path keeps ending {:.2f} m short of '{}' for {:.1f} s — reporting "
-                             "Unreachable to the producer", d_here, last_target_info_->node_name,
-                             (time_source() - short_path_since_ms_) / 1000.0);
-                std::fflush(stdout);
-                affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
-                approach_commit_.reset();
-                short_path_since_ms_ = 0;
-                route_dropped_ = true;
-            }
-        }
-        clear_tracking_state();
-        note_why(rc::why::Cause::PathShort,
-                 std::format("the path ended {:.2f} m short of '{}'{}", d_here, why_target_name(),
-                             short_path_since_ms_ != 0
-                                 ? std::format(" for {:.1f} s (Unreachable after 5 s)", (time_source() - short_path_since_ms_) * 1e-3)
-                                 : std::string{}));
-        note_no_command(); motion_commander.stop_robot();
-        return;
-    }
-    short_path_since_ms_ = 0;   // following a path
 
     // ── THE CARROT GUARD WAS REMOVED, AND WHY IT SHOULD NOT COME BACK AS A GATE ──────────────────
     // The observation behind it is real: clip_carrot_to_reachable can pull the carrot onto the robot,
@@ -8107,7 +6915,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         if (returns_hold)
             returns_cap_text = std::format("v <= {:.3f} m/s{}, |w| <= {:.3f} rad/s{}", cap.v_lim, cap.bound_lin ? " (binding)" : "",
                                            cap.w_lim, cap.bound_rot ? " (binding)" : "");
-        if (not returns_hold) returns_backoff_failed_ = false;   // a command the net lets through: a later hold may back off
         if (returns_hold != anchor_returns_binding_logged_)
         {
             anchor_returns_binding_logged_ = returns_hold;
@@ -8118,10 +6925,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 std::println("[controller] the live returns no longer bind the tracker's command");
         }
     }
-    // ★ Task 14 fix round 4 (try79: 213 "LIVE RETURN caps the tracker's command" lines, the base motionless 300 s). When the
-    //   net holds the tracker's WHOLE command (nothing left to send) the judge opens no window — a robot commanded nothing
-    //   predicts nothing, by design — so the hold was silent for ever. Held for one judge window (stuck_confirm_ms, the
-    //   judge's own length), or a window the judge called BLOCKED BY A REAL RETURN: the returns' backoff takes the base.
+    // When the net holds the tracker's WHOLE command (nothing left to send) the judge opens no window — a robot commanded
+    // nothing predicts nothing, by design — so the hold was silent for ever (try79: the base motionless 300 s). Held for one
+    // judge window (stuck_confirm_ms, the judge's own length), or a window the judge called BLOCKED BY A REAL RETURN: the
+    // stretch is the POLICY's (owner 2026-11-16: the returns' back-off manoeuvre is gone; a held tracker hands off, as a
+    // wedge and a spin do).
     {
         const bool held_now = returns_hold and adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f;
         const std::uint64_t now = time_source();
@@ -8129,17 +6937,16 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         else if (returns_held_since_ms_ == 0) returns_held_since_ms_ = now;
         const float window_ms = params_ != nullptr ? params_->stuck_confirm_ms : 1500.f;
         const bool held_window = held_now and double(now - returns_held_since_ms_) >= double(window_ms);
-        if ((held_window or returns_block_pending_) and not returns_backoff_failed_)
+        if (held_window or returns_block_pending_)
         {
             returns_block_pending_ = false;
             if (held_window)
                 std::println("[controller] BLOCKED BY A REAL RETURN — the live-returns net has held the tracker's whole command "
                              "for {:.1f} s", (now - returns_held_since_ms_) * 1e-3);
-            if (step_returns_backoff(robot_pose, path_controller, obstacle_tracker, motion_commander,
-                                     "the tracker is held by real returns"))
-                return;
+            returns_held_since_ms_ = 0;
+            chain_ep_request_ = "backoff"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot();
+            return;
         }
-        returns_block_pending_ = false;
     }
     // Publish what the limiter did into the actuation stream. It sits between the MPPI's command and the
     // wheels, and until now a lap could show a 17% gap between the two with no way to say whether this
@@ -8191,9 +6998,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                          /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
         {
             // PORT STEP 5: in the hybrid a spin that nets nothing is the policy's stretch, not the escape reflex's
-            if (chain_hybrid_on()) { chain_ep_request_ = "spin"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
-            begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-            step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
+            chain_ep_request_ = "spin"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot();
             return;
         }
         if (adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f and returns_hold)
@@ -8227,9 +7032,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                      /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
     {
         // PORT STEP 5: in the hybrid a wedge is the policy's stretch (its Release), not the escape reflex's
-        if (chain_hybrid_on()) { chain_ep_request_ = "wedge"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
-        begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
+        chain_ep_request_ = "wedge"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot();
         return;
     }
 
@@ -8702,41 +7505,14 @@ bool ControllerSession::robot_still() const
     return rc::affordance::stillness_ok(base_speed_lin_, base_speed_ang_, active_contract_);
 }
 
-void ControllerSession::send_through_returns(const ControllerRobotPose &robot_pose,
-                                             const rc::TrajectoryController &path_controller,
-                                             ControllerObstacleTracker &obstacle_tracker,
-                                             ControllerMotionCommander &motion_commander,
-                                             float adv, float side, float rot, const char *who)
-{
-    const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv, side, rot);
-    if (adv == 0.f and side == 0.f and rot == 0.f)
-    {
-        note_why(rc::why::Cause::ReturnsHold, std::format("{}: a live return holds the whole command — v <= {:.3f} m/s{}, "
-                                                          "|w| <= {:.3f} rad/s{}", who, cap.v_lim,
-                                                          cap.bound_lin ? " (binding)" : "", cap.w_lim,
-                                                          cap.bound_rot ? " (binding)" : ""));
-        note_no_command(); motion_commander.stop_robot();
-        return;
-    }
-    motion_commander.send_speed_command(adv, side, rot);
-}
-
 bool ControllerSession::step_lockon(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                                     ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                                    const TimeSource &time_source, bool drive_base)
+                                    const TimeSource &time_source)
 {
     const auto reading = read_servo_reading(feedback_node_id_);
     const bool met = goal_met(feedback_node_id_);
     const auto cmd = lockon_.update(reading, met, time_source(), masks_frame_seq());
-    // Quasi-static: drive the (tiny, capped) nudge only during STEP; hold still while SETTLING/done.
-    // Task 8: with the policy driving (drive_base false) the nudge is NOT sent — the policy holds the heading goal.
-    if (not drive_base) {}
-    else if (lockon_.active() && (cmd.adv != 0.0f || cmd.side != 0.0f || cmd.rot != 0.0f))
-        send_through_returns(robot_pose, path_controller, obstacle_tracker, motion_commander, cmd.adv, cmd.side, cmd.rot,
-                             "lock-on");
-    else
-        motion_commander.stop_robot();
+    (void)cmd;   // the policy holds the heading goal (drive_with_policy step 2); the lock-on's own nudge is never sent
     if (lockon_.done())
     {
         last_look_succeeded_ = lockon_.locked();
@@ -8770,7 +7546,7 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
                                     const rc::TrajectoryController &path_controller,
                                     ControllerObstacleTracker &obstacle_tracker,
                                     ControllerMotionCommander &motion_commander,
-                                    const TimeSource &time_source, float target_yaw, bool drive_base)
+                                    const TimeSource &time_source, float target_yaw)
 {
     // ★ Task 8 ruling 2 — ONE YAW CONVENTION: the contract's target yaw is the FORWARD heading (goal_adapter.h
     //   facing_yaw_to_theta cites the writers); everything below compares it with the controller's body angle theta, so it
@@ -8819,30 +7595,7 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
         return true;
     }
 
-    // Rotate the base toward the target bearing (capped). Once nearly aligned, HOLD STILL so the look is
-    // motion-free (the Orient contract's .still asks for a quiet capture) and wait for the detection.
-    const float k = params_ ? params_->lockon_k_yaw : 0.8f;
-    // ★THE PRODUCER MAY DECLARE THE RATE, because it knows what the manoeuvre is FOR and we do not.
-    // Our own lockon_max_yaw_rps was tuned for the LockOn micro-search, where creeping protects the
-    // masks being collected; a calibration pivot observes nothing while it turns, so the same cap is
-    // pure cost there. Both manoeuvres used to share this constant, and the pivot's producer -- with
-    // no way to say otherwise -- priced a 50 s detour that actually took 7 minutes.
-    // ★THE CEILING IS THE BASE'S LIMIT, NOT THE SERVO'S TUNING -- and that distinction is the actual
-    // bug. lockon_max_yaw_rps is a CHOICE (creep so the masks stay sharp); max_rot_speed_rps is what
-    // the machine can safely do. Clamping a producer's request to the servo tuning would keep every
-    // manoeuvre at 0.06 and change nothing; clamping it to nothing at all would let a contract
-    // command a base past its limits. So: the producer names a rate, we clamp it to the HARDWARE
-    // ceiling, and our servo tuning applies only when no rate was asked for.
-    const float servo_cap = params_ ? params_->lockon_max_yaw_rps : 0.12f;
-    const float base_cap  = params_ ? params_->max_rot_speed_rps  : 0.8f;
-    const float asked     = active_contract_.max_yaw_rate;
-    const float cap       = (asked > 0.f) ? std::min(asked, base_cap) : servo_cap;
-    float rot = std::clamp(k * yaw_err, -cap, cap);
-    if (aligned)
-        rot = 0.0f;
-    if (not drive_base) return false;   // Task 8: the policy drives the turn (a Heading goal); this is the protocol only
-    if (rot != 0.0f) send_through_returns(robot_pose, path_controller, obstacle_tracker, motion_commander, 0.f, 0.f, rot, "orient");
-    else             motion_commander.stop_robot();
+    // The turn itself is the policy's (a Heading goal, drive_with_policy step 3); this is the protocol only.
     return false;
 }
 
@@ -8986,7 +7739,6 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     current_target_room_.reset();
     // The final-approach correction belongs to the standpoint just retired. Re-selecting the same
     // affordance later must re-measure, not inherit an answer taken against a scan that is now old.
-    approach_fix_.reset();
     end_manual_target(outcome_override == rc::affordance::Outcome::Abandoned ? ManualTargetEnd::Cleared
                                                                              : ManualTargetEnd::Reached);
     manual_target_room_.reset();
@@ -9158,7 +7910,6 @@ void ControllerSession::clear_manual_target(rc::AffordanceManager &affordance_ma
 void ControllerSession::reset_stuck_state()
 {
     reset_stuck_window();   // the anchor and the commanded-travel accumulator go with the clock
-    escape_active_ = false;
     returns_held_since_ms_ = 0;   // Task 14 fix round 4: a held window starts again with the stuck clock
 }
 
@@ -9315,222 +8066,6 @@ void ControllerSession::reset_stuck_window()
     // Task 11 fix 3: the verdict belongs to the window it closed. Kept past a reset, a verdict from before (a wait cycle
     // that was not judged, an escape, a new target) was read as this window's by the anchor spin bound.
     last_judged_verdict_ = rc::StallVerdict::None;
-}
-
-void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
-                                     ControllerObstacleTracker &obstacle_tracker,
-                                     rc::TrajectoryController &path_controller,
-                                     std::uint64_t now_ms)
-{
-    // Choose the turn direction toward whichever side has more ESDF clearance.
-    //
-    // ⚠ TWO DIFFERENT ROBOT FRAMES ARE IN PLAY HERE — they are NOT the same one.
-    //   • The COMMAND frame (OmniRobot / send_speed_command): adv = forward, side = +y left.
-    //   • The ESDF frame that clearance_at(rx, ry) queries: +Y IS FORWARD, +X IS RIGHT.
-    //     That is the frame TrajectoryController integrates its rollouts in
-    //     (trajectory_controller.cpp: `x += adv*sin(theta)`, `y += adv*cos(theta)`, with the
-    //     explicit comment "Differential-drive kinematics (Y+ = forward, X+ = right)").
-    // So a SIDE probe varies rx, and a FRONT/REAR probe varies ry. This block previously
-    // probed (0, +probe)/(0, −probe) and called them left/right — they were front and rear,
-    // which meant the turn direction was picked by comparing FRONT clearance against REAR,
-    // and since a wedge means something is in front, the sign came out the same nearly every
-    // time. Do not "simplify" these back to the y axis.
-    const float probe = params_ ? params_->escape_side_probe_m : 0.5f;
-    // ★READ THE RAW RETURNS AS WELL. The ESDF these probes query has had every return inside 0.405 m of
-    // the centre deleted (its disc self-filter), so a chair leg touching the flank — the thing that
-    // wedged us — is not in it, and the probe reads the distance to whatever survived further out.
-    // Live 19:06: "clearance L 0.15 R 0.17" from a field blind to the contact itself, then the escape
-    // reversed and turned into the tighter side. The raw cloud with the HULL as self-filter sees it.
-    const Eigen::Affine2f T = robot_pose.as_transform();       // robot (x right, y forward) -> room
-    const float cl = std::min(path_controller.clearance_at(-probe, 0.f),   // left clearance  (−x = left)
-                              raw_return_clearance(T * Eigen::Vector2f(-probe, 0.f), robot_pose, obstacle_tracker));
-    const float cr = std::min(path_controller.clearance_at(+probe, 0.f),   // right clearance (+x = right)
-                              raw_return_clearance(T * Eigen::Vector2f(+probe, 0.f), robot_pose, obstacle_tracker));
-    const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
-    escape_rear_raw_m_ = raw_return_clearance(T * Eigen::Vector2f(0.f, -rear_probe), robot_pose, obstacle_tracker);
-    // ★ ESCALATION (user 2026-10-31: "progressively more energetic, more movement backwards and rotations in both
-    //   directions; eventually it has to give up and publish that it is stuck"). One EPISODE = the escapes while the robot
-    //   has not left a body radius of where it first wedged; each one backs further and turns harder, the first toward
-    //   the clearer side, then alternating, and from the second on turning both ways within the escape.
-    {
-        const float r_episode = path_controller.footprint().circumscribed_radius();
-        if (escape_level_ > 0 and (robot_pose.pos - escape_episode_origin_).norm() > r_episode)
-        {
-            escape_level_ = 0;          // it got out last time: a new episode
-            stuck_given_up_ = false;
-        }
-        if (escape_level_ == 0) escape_episode_origin_ = robot_pose.pos;
-        ++escape_level_;
-    }
-    if (door_passage_.active() and door_passage_.view().step == rc::DoorPassage::Step::Cross)
-        cross_status_ += std::format(" | STUCK: escape {} of {}", escape_level_, kMaxEscapeLevels);
-    if (escape_level_ > kMaxEscapeLevels)
-    {
-        stuck_given_up_ = true;
-        escape_active_ = false;
-        clear_tracking_state();
-        current_plan_.reset();
-        plan_spline_valid_ = false;
-        path_controller.stop();
-        const std::string why = std::format("{} escalating escapes within {:.2f} m of where it wedged", kMaxEscapeLevels,
-                                            path_controller.footprint().circumscribed_radius());
-        door_passage_.fail_stuck(why);
-        if (last_target_info_.has_value() and last_target_info_->from_affordance and active_target_id_ != 0)
-        {
-            reject_affordance_id_ = active_target_id_;
-            reject_affordance_name_ = last_target_info_->node_name;
-        }
-        note_why(rc::why::Cause::Escape, std::format("STUCK — gave up: {}", why));
-        std::println("[recovery] STUCK — gave up after {}; the task fails 'stuck'", why);
-        return;
-    }
-    if (escape_level_ == 1)
-    {
-        if (std::abs(cl - cr) > 0.05f)
-            escape_turn_sign_ = (cl > cr) ? +1.f : -1.f;
-        else
-            escape_turn_sign_ = (escape_count_ % 2 == 0) ? +1.f : -1.f;
-    }
-    else
-        escape_turn_sign_ = -escape_turn_sign_;   // the other way from the last attempt
-    escape_phase2_ = false;
-
-    // Mark the stuck spot just ahead of the robot so the replanner routes around whatever we
-    // wedged on. We drop a LOCAL-ONLY VIRTUAL obstacle (not the LiDAR-observed temp obstacle):
-    // the whole point of a stuck event is that the blocker is invisible to the pipeline — the
-    // LiDAR path would find no points and create nothing, so the planner would just reproduce the
-    // same blocked route. The virtual disc is geometric, always succeeds, is visible to the
-    // planner/MPPI, and is NOT uploaded to DSR. It ages out on its TTL so a since-moved obstacle
-    // is forgotten; if we re-wedge, another one is dropped.
-    const float vrad        = params_ ? params_->stuck_virtual_obstacle_radius_m  : 0.30f;
-    const float fwd_off_cfg = params_ ? params_->stuck_virtual_obstacle_forward_m : 0.40f;
-    // Worst-case body extent: the disc is dropped ahead of the robot before it turns, so it must clear the
-    // body at any heading. Asked of the footprint, not of a config knob that also meant three other things.
-    const float body_radius = path_controller.footprint().circumscribed_radius();
-    // Push the disc far enough ahead that its NEAR edge clears the robot footprint. Otherwise the marker
-    // overlaps the body (default 0.40 ahead − 0.30 radius = 0.10 m from centre, well inside clearance),
-    // the planner/MPPI reads the robot as "already colliding" with its own marker, no rollout escapes,
-    // and we re-stick on ourselves. Near edge = fwd_off − vrad ≥ body_radius (+ a small margin).
-    const float fwd_off = std::max(fwd_off_cfg, body_radius + vrad + 0.05f);
-    const Eigen::Vector2f fwd(std::cos(robot_pose.theta), std::sin(robot_pose.theta));
-    const Eigen::Vector2f stuck_center = robot_pose.pos + fwd_off * fwd;
-    // Gated with the rest of controller-side obstacle creation. This disc was the one source NOT covered by
-    // obstacle_creation_enabled, and it is the one that litters the map: every wedge drops a fresh 0.30 m disc
-    // ~0.85 m ahead, and the robot has been wedging constantly (the no-route branch counts as a wedge, so an
-    // unreachable target alone produces a disc every few seconds along the whole approach). The escape
-    // maneuver itself — reverse and turn out — is a genuinely useful reflex and still runs; only the map
-    // pollution is removed. Re-enable with Controller.ObstacleCreationEnabled once residual_concept is trusted
-    // as the sole obstacle source.
-    if (!params_ || params_->obstacle_creation_enabled)
-        obstacle_tracker.add_virtual_obstacle(now_ms, stuck_center, vrad);
-    // An escape is an exceptional state transition, so it gets one line — but only the facts that identify
-    // the episode. The geometry dump that used to live here existed to prove the disc was not trapping the
-    // robot on itself; that is now guaranteed by construction (fwd_off clears the footprint above).
-    std::println("[controller] ESCAPE #{} (level {}/{} of this episode) — wedged, reversing and turning {}{}. Side clearance "
-                 "L={:.2f} R={:.2f} m.", escape_count_ + 1, escape_level_, kMaxEscapeLevels, escape_turn_sign_ > 0 ? "left" : "right",
-                 escape_level_ >= 2 ? " then back the other way" : "", cl, cr);
-
-    mission_.note_escape();
-    escape_active_   = true;
-    escape_start_ms_ = now_ms;
-    escape_start_pos_ = robot_pose.pos;
-    ++escape_count_;
-    reset_stuck_window();
-
-    // ── CHARGE THIS ESCAPE TO THE AFFORDANCE IT HAPPENED UNDER ───────────────────────────────────
-    // An escape is a reflex, not a plan: it reverses out and lets the planner try again. That is right
-    // ONCE. Repeated against the same standpoint it becomes a livelock — wedge, escape, retry, wedge —
-    // and the robot spends minutes achieving a few centimetres while other affordances go unserved.
-    // After kMaxEscapesPerAffordance the honest conclusion is that this approach is not available to
-    // this body right now, so give the affordance up and let the selector choose another.
-    if (last_target_info_.has_value() and last_target_info_->from_affordance and active_target_id_ != 0)
-    {
-        constexpr int kMaxEscapesPerAffordance = 3;
-        if (active_target_id_ != escapes_target_id_)
-        {
-            escapes_target_id_ = active_target_id_;
-            escapes_on_target_ = 0;
-        }
-        if (++escapes_on_target_ >= kMaxEscapesPerAffordance)
-        {
-            reject_affordance_id_ = active_target_id_;
-            reject_affordance_name_ = last_target_info_->node_name;
-        }
-    }
-
-    clear_tracking_state();
-    current_plan_.reset();
-    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
-    // Same reason as the visible-blockage path: the virtual disc just dropped ahead of the robot is only
-    // useful if something re-plans against it, and in continuous-route mode nothing does unless asked.
-    route_repair_pending_ = true;
-    path_controller.stop();
-
-    qInfo() << "[recovery] STUCK -> escape | reverse + turn"
-            << (escape_turn_sign_ > 0 ? "LEFT" : "RIGHT")
-            << "| clearance L" << cl << "R" << cr << "| attempt" << escape_count_;
-}
-
-void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
-                                    rc::TrajectoryController &path_controller,
-                                    ControllerObstacleTracker &obstacle_tracker,
-                                    ControllerMotionCommander &motion_commander,
-                                    std::uint64_t now_ms)
-{
-    const float backed = (robot_pose.pos - escape_start_pos_).norm();
-    note_why(rc::why::Cause::Escape,
-             std::format("wedged: reverse + turn {} out of it, {:.2f} m backed so far (escape {} on this target)",
-                         escape_turn_sign_ > 0.f ? "LEFT" : "RIGHT", backed, escapes_on_target_));
-    // escalation: level k backs k times as far, for k times as long, faster and turning harder (to the base's limits)
-    const float k = static_cast<float>(std::max(1, escape_level_));
-    const float max_ms = k * (params_ ? params_->escape_max_ms : 1500.f);
-    const float max_dist = k * (params_ ? params_->escape_distance_m : 0.30f);
-    if (escape_level_ >= 2 and not escape_phase2_ and (backed > 0.5f * max_dist or now_ms - escape_start_ms_ > 0.5f * max_ms))
-    {
-        escape_phase2_ = true;
-        escape_turn_sign_ = -escape_turn_sign_;   // both directions: the second half turns back the other way
-    }
-    // ★ BACK INTO FREE SPACE, NOT A FIXED DISTANCE (user 2026-10-31: "it has to move back further into free space to have
-    //   a chance to replan"; pingpong17 leg 2: ended 0.135 m back, still at 0.00 m side clearance). The escape ends once
-    //   the body is at least its level's distance back AND free to turn in place — no live return within its
-    //   circumscribed radius (the hull self-filtered) — so any heading is open to the replan. The time is only a cap
-    //   (twice the level's), for a body that cannot get free (the next wedge escalates, the 5th gives up).
-    const float free_turn = raw_return_clearance(robot_pose.pos, robot_pose, obstacle_tracker);
-    const bool free_now = free_turn > path_controller.footprint().circumscribed_radius();
-    if (now_ms - escape_start_ms_ > static_cast<std::uint64_t>(2.f * max_ms) or (backed > max_dist and free_now))
-    {
-        escape_active_ = false;
-        motion_commander.stop_robot();   // plan already reset in begin_escape → next cycle replans
-        qInfo() << "[recovery] escape done | backed" << backed << "m | nearest return" << free_turn << "m"
-                << (free_now ? "(free to turn)" : "(NOT free: time cap)");
-        return;
-    }
-
-    // Rear-clearance guard: don't reverse into a wall. If the space behind is tight, escape
-    // by rotating in place only (adv = 0).
-    //
-    // ⚠ clearance_at() is in the ESDF/rollout frame: +Y FORWARD, +X RIGHT (see begin_escape
-    // above for why this is not the OmniRobot command frame). REAR is therefore −y, not −x.
-    // This read used to be clearance_at(−rear_probe, 0) — that is the LEFT side, so the guard
-    // was gating "may I reverse?" on whether the robot's LEFT was clear, and would happily
-    // reverse into a wall behind it any time the left flank was open.
-    const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
-    const float rear_min   = params_ ? params_->escape_rear_min_m   : 0.30f;
-    // The raw-return reading taken at escape start (see begin_escape) ANDed with the live field: the
-    // field is blind inside its 0.405 m self-filter disc, which is where a wedged body's contacts are.
-    const float rear = std::min(path_controller.clearance_at(0.f, -rear_probe), escape_rear_raw_m_);
-    const float v_lim = params_ ? params_->max_adv_speed_mps : 0.35f, w_lim = params_ ? params_->max_rot_speed_rps : 1.0f;
-    const float adv = (rear < rear_min) ? 0.f : -std::min(v_lim, k * (params_ ? params_->escape_adv_speed_mps : 0.15f));
-    float rot = escape_turn_sign_ * std::min(w_lim, k * (params_ ? params_->escape_rot_speed_rps : 0.35f));
-    // ★ Task 14 fix round 1, item 2 (a): the escape's reverse-and-turn goes through the SAME live-returns net as every
-    //   other command — it may not back a corner into a real return or turn one into a jamb it is beside.
-    float adv_c = adv, side_c = 0.f;
-    const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv_c, side_c, rot);
-    if (cap.bound_lin or cap.bound_rot)
-        std::println("[recovery] escape capped by the live returns: adv {:+.3f} -> {:+.3f}, rot -> {:+.3f}", adv, adv_c, rot);
-    if (adv_c == 0.f and rot == 0.f) { note_no_command(); motion_commander.stop_robot(); return; }
-    motion_commander.send_speed_command(adv_c, 0.f, rot);
 }
 
 void ControllerSession::stop(rc::TrajectoryController &path_controller,

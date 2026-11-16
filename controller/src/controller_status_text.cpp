@@ -42,6 +42,7 @@ std::string handoff_words(std::string_view why)
     if (why == "blocked") return "the tracker found the path blocked";
     if (why == "finish") return "the tracker stopped short of the goal";
     if (why == "wedge") return "the robot got wedged";
+    if (why == "backoff") return "obstacles too close held the tracker";
     if (why == "spin") return "the robot was spinning in place";
     if (why == "extend") return "the tight stretch goes on";
     return std::string(why);
@@ -155,17 +156,14 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
 
     // ── who drives
     section("WHO DRIVES");
-    const bool policy_driving = c.policy_enabled and (not c.hybrid_on or c.episode_active or not c.hybrid_place);
+    L.push_back(std::format("Mode: {}{}", c.mode, c.mode_why.empty() ? std::string{} : " — " + c.mode_why));
+    const bool policy_driving = not c.hybrid_on or c.episode_active or not c.hybrid_place;
     if (not in.mission.driving)
         L.push_back(std::format("Nobody: driving is {} (press Run or click a target).", in.mission.paused ? "PAUSED" : "off"));
     else if (not c.armed)
         L.emplace_back("Nobody: the base output is DISARMED; commands are not sent.");
     else if (c.relative_motion_active)
         L.push_back("A move/turn order" + (c.relative_motion_progress.empty() ? std::string(".") : ": " + c.relative_motion_progress));
-    else if (c.escape_active or in.stuck_active)
-        L.emplace_back("Escape manoeuvre: the robot got stuck and is backing out.");
-    else if (c.backoff_active)
-        L.emplace_back("Backing away from obstacles that hem the robot in.");
     else if (c.lockon_active)
         L.emplace_back("Lock-on: small corrective moves to line up with the target.");
     else if (c.chain_wait)
@@ -180,11 +178,8 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
     }
     else if (c.hybrid_on and c.hybrid_place)
         L.emplace_back("The spline chain (route → spline → tracker); the policy stands by.");
-    else if (c.policy_enabled)
-        L.emplace_back("The local policy.");
     else
-        L.push_back(std::string("The spline chain (route → spline → tracker)")
-                    + (c.marks_drive ? "; obstacles not on the map are marked for the planner." : "."));
+        L.emplace_back("The local policy.");
     if (not c.handoff_requested.empty() and not c.episode_active)
         L.push_back("Handing over to the policy next cycle: " + handoff_words(c.handoff_requested) + ".");
     if (not in.hold_reason.empty() and not c.chain_wait)

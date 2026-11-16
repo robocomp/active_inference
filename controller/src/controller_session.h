@@ -85,10 +85,6 @@ public:
                                                               ControllerDisplay &display);
 
     // Dispatcher: what both modes share, then hand off. Neither helper below serves the other's mode.
-    bool drive_mission_route(const ControllerPlanningStep &step,
-                             rc::TrajectoryController &path_controller,
-                             ControllerMotionCommander &motion_commander,
-                             const TimeSource &time_source);
     bool drive_point_target(const ControllerPlanningStep &step,
                             ControllerObstacleTracker &obstacle_tracker,
                             rc::TrajectoryController &path_controller,
@@ -138,8 +134,6 @@ public:
     };
     [[nodiscard]] LiveReturns live_returns(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
                                            const rc::TrajectoryController &path_controller) const;
-    // Cap a command (robot-frame convention: side = +x right, rot CCW positive) by the live returns, unfloored.
-    rc::LidarCapResult cap_by_returns(const LiveReturns &lr, float &adv, float &side, float &rot) const;
     // One census line (review item 4): what the net sees around the body right now.
     void log_returns_census(const char *when, const LiveReturns &lr) const;
     bool ensure_current_plan(const ControllerPlanningStep &step,
@@ -195,14 +189,9 @@ public:
               std::source_location loc = std::source_location::current());
 
     // ── Task 8: ONE LOCAL POLICY DRIVES EVERY MOTION (controller_policy_drive.cpp) ─────────────────────────────────────────
-    // [Policy] Enabled: execute_plan hands the cycle to drive_with_policy BEFORE the escape / backoff / anchor servo /
-    // lock-on / orient / band / tracker branches, which then do not run; ensure_current_plan skips escape and backoff. The
-    // old chain is switched OFF, not deleted. The protocol halves (arrival → finalize_reached, the cross's through /
-    // hand-back, the lock-on and orient completion predicates, Unreachable) are unchanged and shared.
-    [[nodiscard]] bool policy_enabled() const { return params_ != nullptr and params_->policy_enabled; }
-    // [Route] BandDrivesCross in force: the spline/band drives a door cross (needs NearFieldClearance; never with the policy)
-    [[nodiscard]] bool band_drives_cross() const
-    { return params_ != nullptr and params_->route_band_drives_cross and params_->route_near_field_clearance and not params_->policy_enabled; }
+    // execute_plan hands every cycle to drive_with_policy first. It returns true only for a HYBRID plain PLACE, where the
+    // spline chain's tracker path then runs; everything else (a cross, a door route, lock-on, orient, a mission tour, an
+    // episode) is the local policy's.
     // One policy tick toward `spec` (also the relative-motion path, SpecificWorker::step_relative_motion): builds the
     // input, keeps the Navigator's goal (set_goal only when the goal moved beyond its own tolerance), steps it, sends the
     // command, logs policy_decisions.csv and a [policy] line per mode change. `who` names the goal's owner in the logs.
@@ -317,13 +306,7 @@ private:
     // (LOCKED or GIVE_UP); drives the base directly via the motion commander.
     bool step_lockon(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                      ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                     const TimeSource &time_source, bool drive_base = true);   // Task 8: false = protocol only
-    // try104: the in-place turns and nudges that own the base (Orient, lock-on) go through the SAME live-returns net as
-    // the tracker, the escape and the anchor servo — they used to reach the base uncapped. Sends what the net allows,
-    // or stops when it holds the whole command.
-    void send_through_returns(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
-                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                              float adv, float side, float rot, const char *who);
+                     const TimeSource &time_source);   // protocol only: the policy drives the heading
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
     // Perception producer's monotonic frame counter (mask_frame_id), or -1. See the definition.
     [[nodiscard]] int masks_frame_seq() const;
@@ -334,7 +317,7 @@ private:
     // true once finished (LOOKED or GIVE_UP); drives the base rotation directly. Owns the base while active.
     bool step_orient(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                      ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                     const TimeSource &time_source, float target_yaw, bool drive_base = true);   // Task 8: false = protocol only
+                     const TimeSource &time_source, float target_yaw);   // protocol only: the policy drives the turn
     // What the 2D view draws for a running Orient: the bearing asked for, and whether to draw it at
     // all. Latched where the program is built (which is the only place that knows the policy) and
     // pushed to the display beside the rest of the overlay.
@@ -393,12 +376,11 @@ private:
                            ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     // The ARRIVAL protocol of a point target (servo → lock-on, already-there, approach-only retry, REACH), extracted from
     // execute_plan so the tracker and the policy consume an arrival through the same code. Returns true when the cycle is
-    // over (an arrival was consumed or a lock-on started). `drive_base` false: a lock-on started here does not move the
+    // over (an arrival was consumed or a lock-on started). A lock-on started here does not move the
     // base (the policy drives its heading).
     bool consume_goal_reached(bool goal_reached, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
                               ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                              ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source,
-                              bool drive_base);
+                              ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     // The cross's PROTOCOL half (step_anchor_cross's bookkeeping, shared with the policy): the measured gap, the near-side
     // gate, through / not-a-crossing / wait timeouts. `ended` = this cycle is over (finalized, handed back or stopped).
     struct CrossProtocol
@@ -514,26 +496,6 @@ private:
                       const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps, std::uint64_t now_ms,
                       bool spin_is_not_a_wedge = false, bool returns_hold = false);
     void reset_stuck_window();
-    // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
-    // the stuck spot, reset the plan, and record the start pose/time.
-    void begin_escape(const ControllerRobotPose &robot_pose,
-                      ControllerObstacleTracker &obstacle_tracker,
-                      rc::TrajectoryController &path_controller,
-                      std::uint64_t now_ms);
-    // Step the active escape (owns the base). Reverses with a slight turn (or rotates in
-    // place if the rear is blocked) until distance/time bound is met, then stops + clears.
-    // Task 14 fix round 4: one cycle of the returns' backoff on the tracker path. true = it commanded the base this cycle;
-    // false = clearance is open (or nothing opens it): the backoff ended, the plan was dropped so the planner re-plans.
-    bool step_returns_backoff(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
-                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                              const char *why);
-    // Are real returns inside the band the net acts on (the robot hemmed in)?
-    [[nodiscard]] bool hemmed_in_by_returns(const LiveReturns &lr) const;
-    void step_escape(const ControllerRobotPose &robot_pose,
-                     rc::TrajectoryController &path_controller,
-                     ControllerObstacleTracker &obstacle_tracker,
-                     ControllerMotionCommander &motion_commander,
-                     std::uint64_t now_ms);
     void reset_stuck_state();
 
     const ControllerParams *params_ = nullptr;
@@ -609,14 +571,9 @@ private:
     // ROUTE EVENTS. One row per route build / repair, appended immediately. These are RARE events whose
     // diagnostics used to exist only on stdout, where they scroll away and cannot be compared between
     // runs — a number you cannot read later is not a measurement.
-    std::ofstream route_events_csv_;
     // Both geometries, side by side: the A* polyline as planned and the smoothed curve as driven.
     // A deviation NUMBER says how far they differ; this says WHERE, which is the question when the
     // driven path visibly does not follow the planned one.
-    std::ofstream route_geom_csv_;
-    bool route_geom_csv_open_ = false;
-    int  route_event_id_ = 0;
-    void log_route_geometry();
     // ── WHAT THE PLANNER'S WORLD CONTAINS, OVER TIME ─────────────────────────────────────────────
     // With retina down, residual_concept's occupancy grid is the ONLY channel that can put a real
     // obstacle in front of A*, and nothing recorded whether it was doing so. See the definition.
@@ -642,27 +599,15 @@ private:
     // by tools/route_bench against exactly this world — the route optimiser has weights whose effect is
     // GEOMETRIC, and measuring a geometric effect by driving one lap per weight costs a run apiece
     // against a 14.5%-noise reversal count. Written on every build; one file, last build wins.
-    void dump_route_world(const Eigen::Vector2f &start,
-                          const std::vector<Eigen::Vector2f> &raw,
-                          const std::vector<Eigen::Vector2f> &repaired,
-                          int laps,
-                          const rc::RouteOptimizerConfig &opt) const;
-    bool route_events_csv_open_ = false;
     // Rate limit for the deferred-waypoint re-offer (see drive_mission_route). ~1 Hz: the test is cheap,
     // but a recovery re-authors a route window and that is not.
     std::uint64_t last_reinstate_ms_ = 0;
     // The planner callbacks the route path hands to RouteFollower. ONE spelling: they were written out
     // character-for-character at the repair site and again at the reinstate site.
-    rc::RouteFollower::PlanFn route_plan_fn();
     rc::RouteFollower::FreeFn route_free_fn();
     // THE INVARIANT after anything re-authors the curve under the follower: count it, tell the mission,
     // and make the follower re-install. It was five statements copied twice; a missed line means the
     // robot keeps driving the old curve, which is not a failure that announces itself.
-    void on_route_reauthored(const char *event, float window_m, rc::TrajectoryController &path_controller,
-                             std::uint64_t now_ms);
-    void log_route_event(const char *event, bool ok, std::uint64_t t_ms,
-                         const rc::TrajectoryController &path_controller,
-                         float window_m);
 
     // THE PER-CYCLE CONTROL RECORD (tracker_diag.csv). One row per control cycle: the command issued,
     // the clearance it was issued against, the tracker's own Frenet error and arc length, the safety
@@ -875,7 +820,6 @@ private:
     // stuck/escape reflex (reversing cannot fix a planner), so this line is the only signal that it happened.
     std::uint64_t last_no_route_log_ms_ = 0;
     std::uint64_t no_route_since_ms_    = 0;   ///< first cycle of the current no-route HOLD (0 = routing fine)
-    std::uint64_t short_path_since_ms_  = 0;   ///< first cycle the path ENDED short of an affordance standpoint
     std::string   reach_unreachable_why_;      ///< non-empty ⇒ report this Reach standpoint Unreachable next cycle
     /// ★ Task 3e (3): the affordance node the flagged verdict is ABOUT (id + name), captured when it is flagged — the report
     /// completes THAT node (AffordanceManager::complete_claim), never whatever the current claim has become by then.
@@ -898,10 +842,27 @@ private:
     int chain_last_verdict_ = -1; float chain_last_ahead_m_ = 0.f; bool chain_last_stall_ = false; std::uint64_t chain_last_monitor_ms_ = 0;
     // ── PORT STEP 4 — WAIT: no route on map + marks, one on the map alone -> stopped and watching until a mark clears
     bool chain_wait_ = false;
+    // ── THE MODE, and its switches (owner 2026-11-16: three modes, switched automatically, every switch logged once).
+    //    "spline"  = the chain's tracker drives a fitted route;  "policy" = the local policy drives (an episode the chain
+    //    handed it, or a goal that is the policy's: a cross, a door route, a lock-on, an orient, a tour, a target with no chain
+    //    route yet);  "recover" = the route failed and is being re-planned on map + marks;  "wait" = recover found no route
+    //    on map + marks but one on the map alone — stopped, watching the marks.  Set from the monitors' verdicts only.
+    //    note_mode costs one comparison per call; the reason is built, and the line printed, only on a change.
+    std::string drive_mode_ = "none";
+    std::string drive_mode_why_;
+    template <class WhyFn> void note_mode(std::string_view mode, WhyFn &&why)
+    {
+        if (drive_mode_ == mode) return;
+        drive_mode_why_ = why();
+        std::println("[mode] {} -> {} (why: {})", drive_mode_, mode, drive_mode_why_);
+        drive_mode_ = mode;
+    }
     // ── PORT STEP 5 — THE HYBRID (Policy.HybridChain; controller_chain_hybrid.cpp) ──
     [[nodiscard]] bool chain_hybrid_on() const
-    { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled and policy_enabled(); }
+    { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled; }
     bool chain_hybrid_place_ = false;          ///< drive_with_policy reached its PLACE branch last cycle (the chain plans for it)
+    bool plan_is_policy_stub_ = false;         ///< current_plan_ is the policy branch's unsmoothed display route, not the chain's
+    std::uint64_t plan_stub_replaced_for_ = 0; ///< the target whose stub was already re-planned onto the chain (once per target)
     struct ChainEpisode
     {
         bool active = false, final = false;    ///< final: the episode's goal is the target itself (its Arrived completes it)
@@ -923,9 +884,12 @@ private:
                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                              ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     void chain_episode_failed(const rc::policy::Pose2 &bel, const std::vector<rc::policy::Return> &cells, float s0, float s1, const char *why);
-    /// step 3 in force: the chain drives (policy off), the monitors are on and their marks are allowed to act
+    /// step 3 in force: the HYBRID's chain drives, the monitors are on and their marks are allowed to act — they enter the
+    /// planner's world, a plan-first re-plan follows a marked window, a cleared mark may shorten the route, and no route on
+    /// map + marks with one on the map alone is a WAIT. (Until 2026-11-16 this required the policy OFF — the gate of port
+    /// step 3, written before the hybrid existed — so in the live hybrid none of it ran, while the 2-D mock's hybrid had it.)
     [[nodiscard]] bool chain_marks_drive() const
-    { return params_ != nullptr and params_->chain_monitor_enabled and params_->chain_marks_drive and not policy_enabled(); }
+    { return params_ != nullptr and params_->chain_marks_drive and chain_hybrid_on(); }
     std::ofstream chain_csv_;                  ///< chain_monitor.csv
     rc::chain::MarkSet chain_marks_;           ///< controller-local marks (room frame of chain_marks_room_)
     std::string chain_marks_room_;             ///< the room whose frame the marks are in (a room switch drops them)
@@ -1079,44 +1043,6 @@ private:
     std::uint64_t yawfix_log_ms_ = 0;
     void monitor_footprint_orientation(const ControllerPlanningStep &step, std::uint64_t timestamp_ms);
 
-    // ── FINAL-APPROACH RE-CHECK (see recheck_standpoint_on_approach) ─────────────────────────────
-    // Where the live LiDAR moved the standpoint to, and which target it belongs to. HELD once taken,
-    // for the same reason unroutable_fix_ is: a displacement recomputed from scratch every cycle
-    // against a flickering cloud is a target that jitters, and a target that moves when the evidence
-    // blinks is not a target. It is dropped the moment it stops being admissible, never on a whim.
-    // ONE optional, not three members synced by hand. They were cleared in pairs at four sites and
-    // approach_fix_anchor_ was cleared at none of them — a sync that was already partial. Bundled, every
-    // one of those sites is a single .reset() and the inconsistency is unrepresentable.
-    struct ApproachFix
-    {
-        Eigen::Vector2f pos;
-        std::string name;      // the target it belongs to; the identity that survives a repair
-        Eigen::Vector2f anchor;   // the standpoint it was derived FROM (see the anchor-moved guard)
-        // ★THE HEADING THE FIX WAS JUDGED AT, frozen when it was taken. The admissibility of a FIXED
-        // pose must not depend on where the observer currently stands, and it did: the re-test derived
-        // the arrival heading from `centre - plan_origin`, so every metre the robot advanced rotated
-        // the footprint at the held standpoint, swept a different rectangle, and pulled returns that
-        // were outside the body inside it. The pose was then declared "no longer clear" and re-solved
-        // FURTHER OUT, with nothing in the world having changed. Measured 2026-08-19 over 139 s:
-        // 57 relocations, the standpoint fleeing 0.084 m per cycle against 0.027 m of robot closure —
-        // 3.1x faster than the robot could close — 77% of them in the robot's own travel direction,
-        // and NOT ONE arrival in the whole run (d_target never below 0.60 m, 0 `reached` rows).
-        // A carrot on a stick, manufactured entirely by re-judging a static pose from a moving eye.
-        float arrival_yaw;
-        // ★AND THE FACING, FROZEN WITH IT. `aim_at_object` re-derives the commanded yaw from the
-        // object's LIVE position every cycle, so freezing only the standpoint's position left the
-        // pose half-static: the robot stood still and kept being told to face somewhere new.
-        // Measured 2026-08-19 on the first run with the static standpoint: 0.73 rad of commanded
-        // turning PER METRE travelled, |cmd_rot| at its cap on 70% of approach cycles, 6.3 whole
-        // revolutions over one file, and not one `ALIGN` or `reached` row in 1478.
-        // A pose is a position AND a heading. Freezing half of one is not freezing it.
-        float object_yaw;
-    };
-    // `anchor` is the standpoint the fix was derived FROM. A producer is free to republish its viewpoint
-    // somewhere else under the same name, and a fix that outlived the pose it repaired would silently
-    // ignore that — the robot driving to a correction for a problem that has moved.
-    std::optional<ApproachFix> approach_fix_;
-
     // ── AN APPROACH IS A COMMITMENT, AND THE PRODUCER DOES NOT GET TO REVOKE IT MID-FLIGHT ───────
     // ★★★MEASURED 2026-08-23, one 11.4 min affordance run: `afford_room`'s standpoint was republished
     // MORE THAN A METRE AWAY 39 times — a republish every 9.4 s, the closest pair 3.0 s apart, single
@@ -1210,7 +1136,6 @@ private:
     }
     bool anchor_returns_binding_logged_ = false;   // Task 14: the returns' ceiling binds (logged on transitions)
     bool returns_hold_in_window_ = false;   // Task 14 fix 1: the live returns held the command in the open judge window
-    bool returns_backoff_logged_ = false;   // Task 14 fix 1: the returns' backoff is driving (logged on transitions)
     bool startup_census_done_ = false;      // Task 14 fix 1: the parked start-up census line, once
     std::string anchor_census_for_;         // Task 14 fix 1: the cross whose first-cycle census was logged
     std::string anchor_band_logged_for_;    // Task 14 fix 3: the cross whose first band return was logged
@@ -1457,7 +1382,7 @@ private:
     };
     [[nodiscard]] DrivenCurve driven_curve() const;
 
-    // obstacle_tracker: the policy's contact returns, read only when [Route] NearFieldClearance is on (Task 6).
+    // obstacle_tracker: unused since the near-field arm was removed (kept so the call sites are unchanged).
     void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
                          ControllerObstacleTracker *obstacle_tracker = nullptr);
     // Truncate band_diag.csv for THIS run, whether or not the band is enabled. Called before any early
@@ -1471,11 +1396,6 @@ private:
     long long band_cycle_ = 0;
     // ── Task 6: the near field and [Route] BandDrivesCross ──
     float band_solve_ms_ = 0.f;              // this cycle's band wall time (band_diag.csv solve_ms)
-    int   band_near_elements_ = 0;           // the near model's size this cycle (band_diag.csv near_elems)
-    std::optional<rc::policy::DoorwayRisk> band_cross_risk_;   // the opening's jambs this cycle (F4's two hypotheses)
-    std::string band_cross_route_for_;       // the cross whose route through the opening is installed
-    bool  band_cross_logged_ = false;
-    rc::policy::DoorwayRisk band_cross_doorway_risk(const CrossProtocol &cp, const ControllerRobotPose &cpose) const;
     bool route_active_ = false;
     // ── Live tracking accumulator (see live_tracking) ──────────────────────────────────────────────
     // Deliberately NOT hosted in MissionRunner. Sampling that outside a run would fold idle affordance
@@ -1493,8 +1413,6 @@ private:
     void sample_live_tracking(bool driving, const ControllerRobotPose &robot_pose, float cross_track_m,
                               float rot_rps, std::uint64_t now_ms);
     bool waypoint_mode_logged_ = false;
-    std::uint64_t last_route_build_ms_ = 0;
-    bool build_route(const ControllerRobotPose &robot_pose);
     // Why the last hop the planner refused was refused. GridPlanner computes eight distinct reasons
     // (goal not footprint-feasible at any heading / start inside an obstacle / enclosed / expansion cap
     // / outside the grid ...) and the route builder was discarding all of them, which left "no path"
@@ -1502,7 +1420,6 @@ private:
     std::string last_plan_failure_;
     // Speed ceiling from the route's own curvature, looking ahead far enough to brake for what is coming.
     // Returns v_cap unchanged when there is no route (a click target has no curve).
-    float route_speed_limit(float v_cap, float a_decel) const;
     // ── SPEED FROM CLEARANCE: THE BRAKING-DISTANCE MODEL (2026-10-09) ─────────────────────────────
     // The plain tracker queries no field by design (it is built on PathWorld), so "slow down for what
     // the LiDAR sees" has to reach it as a CEILING, exactly as the curvature limit does. For a route
@@ -1519,19 +1436,12 @@ private:
     [[nodiscard]] std::optional<float> clearance_speed_limit(const DrivenCurve &curve,
                                                              const ControllerRobotPose &robot_pose,
                                                              const rc::TrajectoryController &path_controller) const;
-    // Nearest live return to a probe point (ROOM frame), from the RAW buffer with the body hull as the
-    // only self-filter. The ESDF deletes every return inside max(0.40, circumscribed + 0.08) = 0.405 m
-    // of the centre (read_lidar_points_robot), so it is blind to exactly the obstacles a wedged body
-    // is touching; the escape must not decide "may I reverse" from it.
-    [[nodiscard]] float raw_return_clearance(const Eigen::Vector2f &probe_room, const ControllerRobotPose &pose,
-                                             ControllerObstacleTracker &tracker) const;
     // ROUTE REPAIR. Set by the recovery reflexes (visible blockage, or a wedge that dropped a virtual
     // disc) and consumed in the continuous-route branch of ensure_current_plan. Without it those
     // reflexes are inert in route mode: they create the obstacle and reset current_plan_, but the route
     // branch re-installs the SAME curve, so the robot backs off and drives at the blocker again.
     bool          route_repair_pending_ = false;
     std::uint64_t last_route_repair_ms_ = 0;
-    int           route_repair_count_ = 0;
     // Fit the C2 curve to ANY planned polyline — a click target and an affordance target deserve the
     // same smooth path a mission gets. Returns the polyline unchanged if smoothing is off or fails.
     // One place builds the optimiser's configuration; the mission route and every other planned path
@@ -1547,38 +1457,11 @@ private:
     // door_axis_anchors: the [door-axis] centreline anchors for a passage's cross step (false for BandDrivesCross's route,
     // which is built on the anchor's opening itself).
     ControllerPolygon smooth_plan(const ControllerPolygon &poly, bool door_axis_anchors = true);
-    // Task 14 fix round 4 (try79): the RETURNS' BACKOFF on the tracker path — owns the base while it opens clearance from the
-    // live returns, then hands back to the planner (re-plan). `returns_held_since_ms_`: the net has held the tracker's whole
-    // command since then (0 = not held). `returns_block_pending_`: the stall judge called a window BLOCKED BY A REAL RETURN.
-    // `returns_backoff_failed_`: the last backoff found nothing that opens clearance — not re-triggered from the same hold
-    // until the target changes or a plan drives again.
-    bool          returns_backoff_active_ = false;
+    // The live-returns net on the tracker path: returns_held_since_ms_ = it has held the tracker's whole command since then
+    // (0 = not held); returns_block_pending_ = the stall judge called a window BLOCKED BY A REAL RETURN. Either hands the
+    // stretch to the policy (chain_ep_request_ "backoff").
     std::uint64_t returns_held_since_ms_ = 0;
     bool          returns_block_pending_ = false;
-    bool          returns_backoff_failed_ = false;
-    bool          escape_active_ = false;       // an escape maneuver currently owns the base
-    std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
-    Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)
-    float         escape_turn_sign_ = 1.0f;     // +1 / −1: rotation direction during escape
-    float         escape_rear_raw_m_ = 100.f;   // raw-return clearance behind the body at escape start
-    int           escape_count_ = 0;            // consecutive escapes (alternating fallback for turn dir)
-    // ESCALATING RECOVERY (user 2026-10-31): the escapes of ONE stuck episode — the robot not having left a body radius
-    // of where it first wedged — grow: further back, faster, turning both ways; past kMaxEscapeLevels it gives up.
-    int             escape_level_ = 0;          ///< escapes in the current stuck episode (1 = the first)
-    Eigen::Vector2f escape_episode_origin_ = Eigen::Vector2f::Zero();
-    bool            escape_phase2_ = false;     ///< level ≥ 2: the second half of the escape turns the other way
-    bool            stuck_given_up_ = false;    ///< the recovery gave up: the task failed "stuck" (chat-agent reads it)
-    static constexpr int kMaxEscapeLevels = 4;  ///< ⚠ a decision bound: escapes per episode before giving up
-    // ── REJECT RATHER THAN STRUGGLE ──────────────────────────────────────────────────────────────
-    // Escapes charged to the affordance they happened under, because escape_count_ is a session-lifetime
-    // counter and says nothing about WHICH target the robot keeps failing to reach. Measured live: 12
-    // escapes in 3 minutes, all against one refrigerator standpoint, while three other affordances sat
-    // Offered — the robot achieving 2-19% of every commanded metre. An affordance the robot cannot
-    // physically reach is worth abandoning, not grinding at; the gain it advertises is unreachable gain.
-    std::uint64_t escapes_target_id_ = 0;       // which affordance the count below belongs to
-    int           escapes_on_target_ = 0;
-    std::uint64_t reject_affordance_id_ = 0;    // set by begin_escape, acted on where the manager is reachable
-    std::string   reject_affordance_name_;
     // ── SPOTS THE ROBOT HAS ALREADY FAILED TO REACH ──────────────────────────────────────────────
     // Remembered by POSITION, not by affordance id: the producer is not told that the approach failed,
     // so it re-publishes the same standpoint the moment the suppression lapses — and a re-created node

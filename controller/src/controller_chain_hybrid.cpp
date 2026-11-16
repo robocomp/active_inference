@@ -56,6 +56,7 @@ ControllerSession::ChainObs ControllerSession::chain_observe(const rc::policy::P
         if (chain_wait_)
         {   // STEP 4: the way may be open — the planner tries map + marks again
             chain_wait_ = false;
+            note_mode("recover", [&]{ return std::format("{} mark(s) seen gone: re-plan on map + {} marks", o.cleared, chain_marks_.marks.size()); });
             current_plan_.reset();
             plan_spline_valid_ = false;
             std::println("[chain] WAIT over: {} mark(s) seen gone, re-planning on map + {} marks", o.cleared, chain_marks_.marks.size());
@@ -135,6 +136,7 @@ void ControllerSession::chain_episode_failed(const rc::policy::Pose2 &bel, const
     chain_ep_ = {};
     policy_reset();
     chain_progress_.clear();
+    note_mode("recover", [&]{ return std::format("the episode failed ({}): re-plan on map + marks", why); });
     // (1) re-plan on map + LIVE marks (the mock's replan_live) — unless the last re-plan was within a body radius: it did not help
     if ((bel.p - chain_last_replan_at_).norm() > body.circumscribed_radius())
     {
@@ -211,7 +213,7 @@ bool ControllerSession::chain_drive_episode(const rc::policy::GoalSpec &final_sp
         {
             chain_ep_ = {};
             if (consume_goal_reached(true, robot_pose, path_controller, obstacle_tracker, motion_commander, display, affordance_manager,
-                                     time_source, /*drive_base=*/false))
+                                     time_source))
                 if (not lockon_.active()) policy_reset();
             return true;
         }

@@ -20,9 +20,14 @@
 // ends.
 //
 // Build+run (from controller/; one line):
-//   g++ -std=c++23 -O2 -Wall -Wextra -pthread -I/usr/include/eigen3 tests/test_policy_scenarios.cpp
+//   g++ -std=c++23 -O2 -pthread -I/usr/include/eigen3 -I$HOME/robocomp/robocomp_core/classes tests/test_policy_scenarios.cpp
 //     src/local_policy/local_policy.cpp src/local_policy/contact.cpp src/local_policy/cost_to_go.cpp src/local_policy/navigator.cpp
+//     src/grid_planner.cpp src/route_spline.cpp src/chain_monitor/chain_monitor.cpp src/trajectory_controller.cpp
+//     src/route_optimizer.cpp src/trackers/plain_tracker.cpp src/trackers/pd_tracker.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tps && /tmp/tps
+//   (from a git worktree add  -iquote $HOME/robocomp/components/active_inference/controller/src : lidar_buffer_types.h
+//    reaches robocomp_core by a relative path that is one level short there)
+//   REGIME=policy (default) | hybrid : the look-ahead policy alone, or the hybrid (spline chain + policy episodes + recovery).
 //   Env: POLICY_CAMERA=0 turns the Task-R camera model OFF (default ON, as in the controller); POLICY_NOFACING=1 drops the doorway facing term;
 //        ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
