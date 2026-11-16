@@ -118,3 +118,10 @@ target_include_directories(lidar_only_update_test PRIVATE ../src ../../common ..
 target_compile_options(lidar_only_update_test PRIVATE -O2)
 target_link_libraries(lidar_only_update_test PRIVATE Eigen3::Eigen)
 add_test(NAME lidar_only_update_test COMMAND lidar_only_update_test)
+
+# The persistent shared-error latents (spec 2026-11-15 lidar-measures §7c.2): header-only common/ai_belief/persistent_update.h.
+add_executable(persistent_update_test persistent_update_test.cpp)
+target_include_directories(persistent_update_test PRIVATE ../../common)
+target_compile_options(persistent_update_test PRIVATE -O2)
+target_link_libraries(persistent_update_test PRIVATE Eigen3::Eigen)
+add_test(NAME persistent_update_test COMMAND persistent_update_test)
