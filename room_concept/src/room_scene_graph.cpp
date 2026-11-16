@@ -986,7 +986,19 @@ void RoomSceneGraph::reap_archived_rooms()
             {
                 const auto c = G_->get_node(e.to());
                 if (not c.has_value() or c->type() == "robot" or c->type() == "root") continue;
-                if (c->type() != "wall" and c->type() != "floor") { foreign = true; break; }
+                if (c->type() != "wall" and c->type() != "floor")
+                {
+                    foreign = true;
+                    // ★DIAGNOSTIC (11-15, ltom_recall p1: room_1 never reaped, so ltsm withheld recall_room_1): who holds the room; once per change
+                    static std::unordered_map<std::uint64_t, std::string> last_holder;
+                    const std::string who = std::format("{} ({}) under {}", c->name(), c->type(), n->name());
+                    if (auto [it, added] = last_holder.try_emplace(room, who); added or it->second != who)
+                    {
+                        it->second = who;
+                        std::println("[room] archived room {} not reaped yet: a foreign node holds it: {}", room, who);
+                    }
+                    break;
+                }
                 ours.emplace_back(c->id(), depth + 1);
                 stack.emplace_back(c->id(), depth + 1);
             }
