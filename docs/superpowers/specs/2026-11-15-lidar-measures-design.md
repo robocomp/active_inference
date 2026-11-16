@@ -416,6 +416,24 @@ mot_pos_var; the mask lag is in σ_px only, not in any b), the divergence net, �
   two-sided check on one-face views is the expected boost outcome (7c.1), reported, not tuned. One nightstand run with
   its class means shifted by 1σ is added to live8, so a belief that merely sits at the class mean cannot pass.
 
+### 7c.6 First-crossing rays and fixed-precision one-sided constraints (11-16, owner: yes; creep investigation)
+
+Measured (`.superpowers/sdd/2026-11-15-lidar-measures/creep-investigation.md`): the shared ray factor's sphere-trace
+counts a ray passing within `surf_eps` (2 mm) of a box edge as a HIT without crossing the surface; the Jacobian there
+explodes or mixes face normals and the residual is large, and such rays switch on and off with sub-mm changes of
+unobserved DOFs (cx, w). On a 16-case set (cx offsets 0–2 mm, with/without wall returns, 4000 sweeps) the persistent
+path fails 10/16 (w to 1.27 m, back face 13 cm through the wall); the flag-off path fails on the same scene. The
+one-sided terms (2c), (2b) have λ ∝ violation with half their energy's Hessian, which overshoots when unsaturated.
+On the persistent path only (flag-off bit-identical; the flag-off defect is a later, owner-visible decision):
+- **(A) A ray hits the box only where it crosses it:** the first sign change of the box SDF along the ray, refined to
+  the surface; a near miss is a miss (no term). The range variance gains the surface-incidence term σ_s²/(n̂·u)²,
+  σ_s = `model_sigma_m`. Behind a `LidarRays` field (default: today's loop) so every other caller is unchanged.
+- **(B) (2c) and (2b) are one-sided Gaussian factors with FIXED precision:** zero on the legal side, ½λ r² when
+  violated, exact Hessian λJJᵀ. (2c): λ = 1/σ_wall² with σ_wall = `f.wall.sigma_m`; (2b): its existing gain as the
+  fixed precision. A probit (−log Φ) wall term was rejected (pushed the box 3.6 cm off the wall in one update).
+- Stated limit: cx and w stay unobserved by front rays (a miss carries no information); a beam model in which a miss
+  is evidence is later work.
+
 ## 8. Pass
 
 - **Unit:** a LiDAR-only frame whose memberships all vanish leaves the belief at the prediction (state, Σ and ω);

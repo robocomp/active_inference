@@ -12,7 +12,7 @@
 
 **Revision 3 (11-16):** Tasks 0–2 are done (commits ff49e768, 6569e6b1, b58f697b; merged to main 8f4cc821). Tasks 3–10 replace rev 2's Tasks 3–5.
 
-**Execution order (owner 11-16, "go with the shorter"):** 3 → 4 → 5 → 6 → 9 → 10. Tasks 7–8 (the ownership mixture) are DEFERRED until live8 shows whether a wrong-attribution pull exists with physical returns; until then the rays carry the camera's m as a plain weight (Task 1). Task 9 is built WITHOUT the rest scene (no `RestScene` parameter, no `resp_sum` log column); they are added with Tasks 7–8 if live8 asks for them.
+**Execution order (owner 11-16, "go with the shorter"):** 3 → 4 → 5 → 6 → 6b → 9 → 10. Tasks 7–8 (the ownership mixture) are DEFERRED until live8 shows whether a wrong-attribution pull exists with physical returns; until then the rays carry the camera's m as a plain weight (Task 1). Task 9 is built WITHOUT the rest scene (no `RestScene` parameter, no `resp_sum` log column); they are added with Tasks 7–8 if live8 asks for them.
 
 ## Global Constraints
 
@@ -227,6 +227,23 @@ The worktree holds Task 4c rev 2 uncommitted (8 files). It resumes after this pl
   - `sanitize_reseeds`: corrupt P_ ⇒ after `sanitize_covariance` θθ = P, latents = marginals, `prior_added_ == false`.
 - [ ] **Step 2:** Run → fail. **Step 3:** Implement. **Step 4:** Run the new test + every countable test → pass (`lidar_golden_test` included); build `countable_concept` at -j8.
 - [ ] **Step 5: Commit** `git commit -m "countable belief: persistent shared errors (b_chain, b_cam, b_L) and the class prior counted once, behind Model.LidarMeasuresOnGated (spec 7c.1–7c.2)"`
+
+---
+
+### Task 6b: First-crossing rays and fixed-precision one-sided constraints on the persistent path (spec 7c.6)
+
+**Files:**
+- Modify: `common/ai_belief/lidar_ray_factor.h` (`LidarRays`: `bool first_crossing = false;` `float surface_sigma_m = 0;`; `accumulate_lidar_rays` honours them), `countable_concept/src/countable_belief.h/.cpp` (persistent path sets them; (2c)/(2b) fixed precision on the θ-only channel)
+- Modify: `countable_concept/tests/persistent_belief_test.cpp`; Create: `countable_concept/tests/creep_set_test.cpp`; Modify `countable_concept/tests/CMakeLists.txt`
+
+**Interfaces:**
+- Consumes: Task 6 persistent path; Task 3 `raycast_scene`. Reference candidate (scratch, not to be copied blindly): `/tmp/claude-1000/-home-pbustos-robocomp-components-active-inference-chair-concept/4f658c0f-b2ab-436b-8611-7d4e8ef6597a/scratchpad/creep/src/ray_v2.h`, `creep_hooks.h`; evidence in `.superpowers/sdd/2026-11-15-lidar-measures/creep-investigation.md`.
+- Produces: `LidarRays::first_crossing` — when true a ray contributes only if the box SDF changes sign along it before the measured range (+ the factor's existing tolerance band), the crossing refined by bisection to `1e-4` m; the residual and Jacobian are taken at the crossing; variance σ_r² + σ_s²/(n̂·u)², σ_s = `surface_sigma_m`. Default false ⇒ bit-identical for every caller. Persistent countable path: `first_crossing = true`, `surface_sigma_m = model_sigma_m`; (2c) λ = 1/`f.wall.sigma_m`² and (2b) λ = its existing gain, both constant, ½λr² on violation only.
+- [ ] **Step 1: Failing tests.** `creep_set_test`: the 16-case set (cx offsets {0, 0.5, 1, 2} mm × w offsets {0, 1} mm × wall returns {on, off}), persistent path, 4000 LiDAR-only sweeps each ⇒ |Δback face| < 1 mm, |Δw| < 2 mm, |Δfront face| < 2 mm, no NaN; prints every case. `persistent_belief_test`: `physical_lidar_only_sigma_bounded` also asserts |Δw| < 2 mm; `no_cross_pushes_back_persistent` LiDAR-only and camera cases assert convergence (last GN step < 1 mm) and final gap > −0.005 m. Unit: `first_crossing_ignores_near_miss` (a ray passing 1 mm outside an edge contributes nothing; the legacy loop does), `first_crossing_hit_matches_legacy_on_face` (a ray square on a face: same residual, Jacobian within 1e-4).
+- [ ] **Step 2:** Run → fail (creep set fails 10/16 on HEAD per the investigation).
+- [ ] **Step 3:** Implement as specified. Flag-off and every non-countable caller unchanged.
+- [ ] **Step 4:** All countable tests pass (config_migration_test excepted, fixed in Task 9); `lidar_golden_test` bit-exact; build `table_concept` and run `test_door_leaf_freespace` (shared header) → pass; one 20 000-sweep run of the creep set printed in the report.
+- [ ] **Step 5: Commit** `git commit -m "persistent path: first-crossing LiDAR hits and fixed-precision one-sided constraints (spec 7c.6)"`
 
 ---
 
