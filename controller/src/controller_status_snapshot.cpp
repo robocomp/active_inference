@@ -43,7 +43,6 @@ rc::ControllerStatusSnapshot ControllerSession::status_snapshot(const std::optio
     }
     s.marks = static_cast<int>(chain_marks_.marks.size());
     s.fail_marks = static_cast<int>(chain_marks_.fail.size());
-    s.escape_active = escape_active_;
     s.backoff_active = returns_backoff_active_;
     s.lockon_active = lockon_.active();
     s.approach_order_active = approach_order_.active();

@@ -41,7 +41,6 @@ struct ControllerStatusSnapshot
     float chain_ahead_m = 0.f;                ///< how far ahead along the route the failing stretch starts
     bool  chain_stall = false;                ///< the progress monitor's last judgement failed
     int marks = 0, fail_marks = 0;            ///< obstacles not on the map; failure marks (where the policy could not pass)
-    bool escape_active = false;               ///< the physical-stuck escape owns the base
     bool backoff_active = false;              ///< backing off live returns that hem the body in
     bool lockon_active = false;               ///< the lock-on micro-search owns the base
     bool approach_order_active = false;       ///< an "approach <object>" order is running

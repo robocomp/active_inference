@@ -561,22 +561,6 @@ struct ControllerParams
     float stuck_meas_rot_eps     = 0.08f;   // rad/s — LEGACY (see above)
     float stuck_slip_ratio       = 0.25f;   // wedge = measured base speed < this × commanded (prediction error)
     float stuck_confirm_ms       = 1500.0f; // sustained command-without-motion before escape fires
-    float escape_adv_speed_mps   = 0.15f;   // reverse speed (issued negative)
-    float escape_rot_speed_rps   = 0.35f;   // slight turn rate during escape
-    float escape_distance_m      = 0.30f;   // back up at most this far …
-    float escape_max_ms          = 1500.0f; // … or this long, whichever comes first
-    float escape_side_probe_m    = 0.50f;   // lateral ESDF probe for turn-direction choice
-    float escape_rear_probe_m    = 0.45f;   // rear ESDF probe distance
-    float escape_rear_min_m      = 0.30f;   // rear clearance below this → rotate-in-place, no reverse
-    // On stuck, drop a LOCAL-ONLY virtual obstacle at the wedge spot: visible to the planner/MPPI
-    // (set_static_obstacles) but NEVER uploaded to DSR. Covers the case where MPPI wedges on
-    // something residual_concept never modelled (e.g. below the LiDAR plane) — the LiDAR-based
-    // temp obstacle would find no points and create nothing, so replanning alone can't help. The
-    // disc ages out on this TTL so it doesn't permanently pollute the map (a dynamic obstacle that
-    // moved on is forgotten); if the robot re-wedges, stuck recovery drops a fresh one.
-    float         stuck_virtual_obstacle_radius_m = 0.30f;   // half-extent of the virtual disc
-    float         stuck_virtual_obstacle_forward_m = 0.40f;  // placed this far ahead of the robot
-    std::uint64_t stuck_virtual_obstacle_ttl_ms   = 5000;    // lifetime before it ages out
 };
 
 struct ControllerGraphState

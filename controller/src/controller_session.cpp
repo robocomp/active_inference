@@ -1180,33 +1180,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // ★ Task 3e (3): a flagged hand-back is reported on the node it names BEFORE the selection can move the claim on.
     report_flagged_unreachable(affordance_manager);
 
-    // ── ACT ON A PENDING REJECTION, BEFORE THE NEXT SELECTION ────────────────────────────────────
-    // Set by begin_escape after kMaxEscapesPerAffordance wedges against one standpoint. Done here
-    // because this is where the manager is reachable, and it must land BEFORE read_target_in_room or
-    // the very next selection hands the same unreachable affordance straight back.
-    if (reject_affordance_id_ != 0)
-    {
-        std::println("[controller] ABANDONING '{}' after {} escapes without reaching it — releasing the "
-                     "claim so another affordance can win. An affordance the body cannot reach advertises "
-                     "gain it cannot deliver; grinding at it serves nothing.",
-                     reject_affordance_name_, escapes_on_target_);
-        affordance_manager.suppress_target(graph_, reject_affordance_id_, kUnreachableRounds);
-        affordance_manager.release_execution_claim(graph_);
-        // Remember the spot as PUBLISHED, so the same proposal is recognised next time it arrives.
-        if (last_raw_target_pos_.has_value())
-            remember_useless_spot(*last_raw_target_pos_, reject_affordance_name_, timestamp_ms);
-        reject_affordance_id_ = 0;
-        reject_affordance_name_.clear();
-        escapes_on_target_ = 0;
-        escapes_target_id_ = 0;
-        // Drop every trace of the abandoned goal so the next selection starts clean rather than
-        // re-planning to the pose we just gave up on.
-        last_target_info_.reset();
-        current_target_room_.reset();
-        active_target_id_ = 0;
-        current_plan_.reset();
-        plan_spline_valid_ = false;
-    }
 
     // Door passage: the selector may take only the step's affordance. On its start the claim on whatever was being
     // executed (the explorer's afford_room, typically) is released, exactly as an abandoned goal is above.
@@ -3105,30 +3078,6 @@ std::optional<float> ControllerSession::clearance_speed_limit(const DrivenCurve 
     return v;
 }
 
-float ControllerSession::raw_return_clearance(const Eigen::Vector2f &probe_room, const ControllerRobotPose &pose,
-                                              ControllerObstacleTracker &tracker) const
-{
-    constexpr float kFar = 100.f;
-    auto *lidar = tracker.lidar_buffer();
-    if (lidar == nullptr) return kFar;
-    const auto [cloud_opt] = lidar->read_last();
-    if (not cloud_opt.has_value()) return kFar;
-    const auto &[xs, ys, zs] = cloud_opt.value();
-    const std::size_t n = std::min({xs.size(), ys.size(), zs.size()});
-    // The same body band and the same hull self-filter recheck_standpoint_on_approach uses.
-    constexpr float kBodyZLo = 0.05f, kBodyZHi = 1.45f;
-    const float yaw = pose.theta + static_cast<float>(M_PI_2);
-    float best = kFar;
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        if (zs[i] < kBodyZLo or zs[i] > kBodyZHi) continue;
-        const Eigen::Vector2f p{xs[i], ys[i]};
-        if (approach_body_.contains_yaw(p, pose.pos, yaw)) continue;   // the robot seeing itself
-        best = std::min(best, (p - probe_room).norm());
-    }
-    return best;
-}
-
 float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
 {
     if (not route_active_ or not route_.valid() or params_ == nullptr) return v_cap;
@@ -3269,16 +3218,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         }
     }
 
-    // Task 8: with the local policy driving, the escape and the returns' backoff are OFF (the policy's Release is the only
-    // recovery) — neither may own the base.
-    if (escape_active_ and not policy_enabled())
-    {
-        display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
-        step_escape(step.robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
-        note_hold("escape manoeuvre owns the base");   // step_escape notes the why
-        return false;
-    }
-    // Task 14 fix round 4: the returns' backoff owns the base the same way, until clearance is open; then the planner.
+    // The returns' backoff owns the base until clearance is open; then the planner.
     if (returns_backoff_active_ and not policy_enabled()
         and step_returns_backoff(step.robot_pose, path_controller, obstacle_tracker, motion_commander, "returns' backoff"))
     {
@@ -6543,9 +6483,6 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                    max_lidar_draw_points,
                    lidar_correction);
 
-    // Light the toolbar stuck indicator while an escape maneuver owns the base (robot is
-    // reversing/turning out of a wedge). Pushed every cycle; the widget dedups same-state calls.
-    display.set_stuck_active(escape_active_);
 }
 
 ControllerSession::DrivenCurve ControllerSession::driven_curve() const
@@ -7289,15 +7226,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         }
     }
 
-    // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
-    // out — bypass the planner/follower entirely, just like the lock-on micro-search below.
-    // It survives the current_plan_ reset done in begin_escape(), so it's gated FIRST.
-    if (escape_active_)
-    {
-        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
-        refresh_view_only();
-        return;
-    }
     if (returns_backoff_active_
         and step_returns_backoff(robot_pose, path_controller, obstacle_tracker, motion_commander, "returns' backoff"))
     {
@@ -7941,7 +7869,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                // The escape fires when this crosses the threshold — the last row before the
                                // "[recovery] STUCK -> escape" line is the smoking gun (cmd_* ~0, this ~confirm_ms).
                                << (stall_judge_.since_ms() != 0 ? t_ms - stall_judge_.since_ms() : 0) << ','
-                               << (escape_active_ ? 1 : 0) << ',' << od.n_temp << ',' << od.n_virtual << ','
+                               << 0 << ',' << od.n_temp << ',' << od.n_virtual << ','
                                << od.near_temp_m << ',' << od.near_virtual_m << ','
                                << od.near_temp_log_odds << ',' << od.near_temp_missed << ','
                                << od.near_temp_age_ms << ','
@@ -8191,9 +8119,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                          /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
         {
             // PORT STEP 5: in the hybrid a spin that nets nothing is the policy's stretch, not the escape reflex's
-            if (chain_hybrid_on()) { chain_ep_request_ = "spin"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
-            begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-            step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
+            chain_ep_request_ = "spin"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot();
             return;
         }
         if (adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f and returns_hold)
@@ -8227,9 +8153,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                      /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
     {
         // PORT STEP 5: in the hybrid a wedge is the policy's stretch (its Release), not the escape reflex's
-        if (chain_hybrid_on()) { chain_ep_request_ = "wedge"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
-        begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
+        chain_ep_request_ = "wedge"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot();
         return;
     }
 
@@ -9158,7 +9082,6 @@ void ControllerSession::clear_manual_target(rc::AffordanceManager &affordance_ma
 void ControllerSession::reset_stuck_state()
 {
     reset_stuck_window();   // the anchor and the commanded-travel accumulator go with the clock
-    escape_active_ = false;
     returns_held_since_ms_ = 0;   // Task 14 fix round 4: a held window starts again with the stuck clock
 }
 
@@ -9315,222 +9238,6 @@ void ControllerSession::reset_stuck_window()
     // Task 11 fix 3: the verdict belongs to the window it closed. Kept past a reset, a verdict from before (a wait cycle
     // that was not judged, an escape, a new target) was read as this window's by the anchor spin bound.
     last_judged_verdict_ = rc::StallVerdict::None;
-}
-
-void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
-                                     ControllerObstacleTracker &obstacle_tracker,
-                                     rc::TrajectoryController &path_controller,
-                                     std::uint64_t now_ms)
-{
-    // Choose the turn direction toward whichever side has more ESDF clearance.
-    //
-    // ⚠ TWO DIFFERENT ROBOT FRAMES ARE IN PLAY HERE — they are NOT the same one.
-    //   • The COMMAND frame (OmniRobot / send_speed_command): adv = forward, side = +y left.
-    //   • The ESDF frame that clearance_at(rx, ry) queries: +Y IS FORWARD, +X IS RIGHT.
-    //     That is the frame TrajectoryController integrates its rollouts in
-    //     (trajectory_controller.cpp: `x += adv*sin(theta)`, `y += adv*cos(theta)`, with the
-    //     explicit comment "Differential-drive kinematics (Y+ = forward, X+ = right)").
-    // So a SIDE probe varies rx, and a FRONT/REAR probe varies ry. This block previously
-    // probed (0, +probe)/(0, −probe) and called them left/right — they were front and rear,
-    // which meant the turn direction was picked by comparing FRONT clearance against REAR,
-    // and since a wedge means something is in front, the sign came out the same nearly every
-    // time. Do not "simplify" these back to the y axis.
-    const float probe = params_ ? params_->escape_side_probe_m : 0.5f;
-    // ★READ THE RAW RETURNS AS WELL. The ESDF these probes query has had every return inside 0.405 m of
-    // the centre deleted (its disc self-filter), so a chair leg touching the flank — the thing that
-    // wedged us — is not in it, and the probe reads the distance to whatever survived further out.
-    // Live 19:06: "clearance L 0.15 R 0.17" from a field blind to the contact itself, then the escape
-    // reversed and turned into the tighter side. The raw cloud with the HULL as self-filter sees it.
-    const Eigen::Affine2f T = robot_pose.as_transform();       // robot (x right, y forward) -> room
-    const float cl = std::min(path_controller.clearance_at(-probe, 0.f),   // left clearance  (−x = left)
-                              raw_return_clearance(T * Eigen::Vector2f(-probe, 0.f), robot_pose, obstacle_tracker));
-    const float cr = std::min(path_controller.clearance_at(+probe, 0.f),   // right clearance (+x = right)
-                              raw_return_clearance(T * Eigen::Vector2f(+probe, 0.f), robot_pose, obstacle_tracker));
-    const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
-    escape_rear_raw_m_ = raw_return_clearance(T * Eigen::Vector2f(0.f, -rear_probe), robot_pose, obstacle_tracker);
-    // ★ ESCALATION (user 2026-10-31: "progressively more energetic, more movement backwards and rotations in both
-    //   directions; eventually it has to give up and publish that it is stuck"). One EPISODE = the escapes while the robot
-    //   has not left a body radius of where it first wedged; each one backs further and turns harder, the first toward
-    //   the clearer side, then alternating, and from the second on turning both ways within the escape.
-    {
-        const float r_episode = path_controller.footprint().circumscribed_radius();
-        if (escape_level_ > 0 and (robot_pose.pos - escape_episode_origin_).norm() > r_episode)
-        {
-            escape_level_ = 0;          // it got out last time: a new episode
-            stuck_given_up_ = false;
-        }
-        if (escape_level_ == 0) escape_episode_origin_ = robot_pose.pos;
-        ++escape_level_;
-    }
-    if (door_passage_.active() and door_passage_.view().step == rc::DoorPassage::Step::Cross)
-        cross_status_ += std::format(" | STUCK: escape {} of {}", escape_level_, kMaxEscapeLevels);
-    if (escape_level_ > kMaxEscapeLevels)
-    {
-        stuck_given_up_ = true;
-        escape_active_ = false;
-        clear_tracking_state();
-        current_plan_.reset();
-        plan_spline_valid_ = false;
-        path_controller.stop();
-        const std::string why = std::format("{} escalating escapes within {:.2f} m of where it wedged", kMaxEscapeLevels,
-                                            path_controller.footprint().circumscribed_radius());
-        door_passage_.fail_stuck(why);
-        if (last_target_info_.has_value() and last_target_info_->from_affordance and active_target_id_ != 0)
-        {
-            reject_affordance_id_ = active_target_id_;
-            reject_affordance_name_ = last_target_info_->node_name;
-        }
-        note_why(rc::why::Cause::Escape, std::format("STUCK — gave up: {}", why));
-        std::println("[recovery] STUCK — gave up after {}; the task fails 'stuck'", why);
-        return;
-    }
-    if (escape_level_ == 1)
-    {
-        if (std::abs(cl - cr) > 0.05f)
-            escape_turn_sign_ = (cl > cr) ? +1.f : -1.f;
-        else
-            escape_turn_sign_ = (escape_count_ % 2 == 0) ? +1.f : -1.f;
-    }
-    else
-        escape_turn_sign_ = -escape_turn_sign_;   // the other way from the last attempt
-    escape_phase2_ = false;
-
-    // Mark the stuck spot just ahead of the robot so the replanner routes around whatever we
-    // wedged on. We drop a LOCAL-ONLY VIRTUAL obstacle (not the LiDAR-observed temp obstacle):
-    // the whole point of a stuck event is that the blocker is invisible to the pipeline — the
-    // LiDAR path would find no points and create nothing, so the planner would just reproduce the
-    // same blocked route. The virtual disc is geometric, always succeeds, is visible to the
-    // planner/MPPI, and is NOT uploaded to DSR. It ages out on its TTL so a since-moved obstacle
-    // is forgotten; if we re-wedge, another one is dropped.
-    const float vrad        = params_ ? params_->stuck_virtual_obstacle_radius_m  : 0.30f;
-    const float fwd_off_cfg = params_ ? params_->stuck_virtual_obstacle_forward_m : 0.40f;
-    // Worst-case body extent: the disc is dropped ahead of the robot before it turns, so it must clear the
-    // body at any heading. Asked of the footprint, not of a config knob that also meant three other things.
-    const float body_radius = path_controller.footprint().circumscribed_radius();
-    // Push the disc far enough ahead that its NEAR edge clears the robot footprint. Otherwise the marker
-    // overlaps the body (default 0.40 ahead − 0.30 radius = 0.10 m from centre, well inside clearance),
-    // the planner/MPPI reads the robot as "already colliding" with its own marker, no rollout escapes,
-    // and we re-stick on ourselves. Near edge = fwd_off − vrad ≥ body_radius (+ a small margin).
-    const float fwd_off = std::max(fwd_off_cfg, body_radius + vrad + 0.05f);
-    const Eigen::Vector2f fwd(std::cos(robot_pose.theta), std::sin(robot_pose.theta));
-    const Eigen::Vector2f stuck_center = robot_pose.pos + fwd_off * fwd;
-    // Gated with the rest of controller-side obstacle creation. This disc was the one source NOT covered by
-    // obstacle_creation_enabled, and it is the one that litters the map: every wedge drops a fresh 0.30 m disc
-    // ~0.85 m ahead, and the robot has been wedging constantly (the no-route branch counts as a wedge, so an
-    // unreachable target alone produces a disc every few seconds along the whole approach). The escape
-    // maneuver itself — reverse and turn out — is a genuinely useful reflex and still runs; only the map
-    // pollution is removed. Re-enable with Controller.ObstacleCreationEnabled once residual_concept is trusted
-    // as the sole obstacle source.
-    if (!params_ || params_->obstacle_creation_enabled)
-        obstacle_tracker.add_virtual_obstacle(now_ms, stuck_center, vrad);
-    // An escape is an exceptional state transition, so it gets one line — but only the facts that identify
-    // the episode. The geometry dump that used to live here existed to prove the disc was not trapping the
-    // robot on itself; that is now guaranteed by construction (fwd_off clears the footprint above).
-    std::println("[controller] ESCAPE #{} (level {}/{} of this episode) — wedged, reversing and turning {}{}. Side clearance "
-                 "L={:.2f} R={:.2f} m.", escape_count_ + 1, escape_level_, kMaxEscapeLevels, escape_turn_sign_ > 0 ? "left" : "right",
-                 escape_level_ >= 2 ? " then back the other way" : "", cl, cr);
-
-    mission_.note_escape();
-    escape_active_   = true;
-    escape_start_ms_ = now_ms;
-    escape_start_pos_ = robot_pose.pos;
-    ++escape_count_;
-    reset_stuck_window();
-
-    // ── CHARGE THIS ESCAPE TO THE AFFORDANCE IT HAPPENED UNDER ───────────────────────────────────
-    // An escape is a reflex, not a plan: it reverses out and lets the planner try again. That is right
-    // ONCE. Repeated against the same standpoint it becomes a livelock — wedge, escape, retry, wedge —
-    // and the robot spends minutes achieving a few centimetres while other affordances go unserved.
-    // After kMaxEscapesPerAffordance the honest conclusion is that this approach is not available to
-    // this body right now, so give the affordance up and let the selector choose another.
-    if (last_target_info_.has_value() and last_target_info_->from_affordance and active_target_id_ != 0)
-    {
-        constexpr int kMaxEscapesPerAffordance = 3;
-        if (active_target_id_ != escapes_target_id_)
-        {
-            escapes_target_id_ = active_target_id_;
-            escapes_on_target_ = 0;
-        }
-        if (++escapes_on_target_ >= kMaxEscapesPerAffordance)
-        {
-            reject_affordance_id_ = active_target_id_;
-            reject_affordance_name_ = last_target_info_->node_name;
-        }
-    }
-
-    clear_tracking_state();
-    current_plan_.reset();
-    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
-    // Same reason as the visible-blockage path: the virtual disc just dropped ahead of the robot is only
-    // useful if something re-plans against it, and in continuous-route mode nothing does unless asked.
-    route_repair_pending_ = true;
-    path_controller.stop();
-
-    qInfo() << "[recovery] STUCK -> escape | reverse + turn"
-            << (escape_turn_sign_ > 0 ? "LEFT" : "RIGHT")
-            << "| clearance L" << cl << "R" << cr << "| attempt" << escape_count_;
-}
-
-void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
-                                    rc::TrajectoryController &path_controller,
-                                    ControllerObstacleTracker &obstacle_tracker,
-                                    ControllerMotionCommander &motion_commander,
-                                    std::uint64_t now_ms)
-{
-    const float backed = (robot_pose.pos - escape_start_pos_).norm();
-    note_why(rc::why::Cause::Escape,
-             std::format("wedged: reverse + turn {} out of it, {:.2f} m backed so far (escape {} on this target)",
-                         escape_turn_sign_ > 0.f ? "LEFT" : "RIGHT", backed, escapes_on_target_));
-    // escalation: level k backs k times as far, for k times as long, faster and turning harder (to the base's limits)
-    const float k = static_cast<float>(std::max(1, escape_level_));
-    const float max_ms = k * (params_ ? params_->escape_max_ms : 1500.f);
-    const float max_dist = k * (params_ ? params_->escape_distance_m : 0.30f);
-    if (escape_level_ >= 2 and not escape_phase2_ and (backed > 0.5f * max_dist or now_ms - escape_start_ms_ > 0.5f * max_ms))
-    {
-        escape_phase2_ = true;
-        escape_turn_sign_ = -escape_turn_sign_;   // both directions: the second half turns back the other way
-    }
-    // ★ BACK INTO FREE SPACE, NOT A FIXED DISTANCE (user 2026-10-31: "it has to move back further into free space to have
-    //   a chance to replan"; pingpong17 leg 2: ended 0.135 m back, still at 0.00 m side clearance). The escape ends once
-    //   the body is at least its level's distance back AND free to turn in place — no live return within its
-    //   circumscribed radius (the hull self-filtered) — so any heading is open to the replan. The time is only a cap
-    //   (twice the level's), for a body that cannot get free (the next wedge escalates, the 5th gives up).
-    const float free_turn = raw_return_clearance(robot_pose.pos, robot_pose, obstacle_tracker);
-    const bool free_now = free_turn > path_controller.footprint().circumscribed_radius();
-    if (now_ms - escape_start_ms_ > static_cast<std::uint64_t>(2.f * max_ms) or (backed > max_dist and free_now))
-    {
-        escape_active_ = false;
-        motion_commander.stop_robot();   // plan already reset in begin_escape → next cycle replans
-        qInfo() << "[recovery] escape done | backed" << backed << "m | nearest return" << free_turn << "m"
-                << (free_now ? "(free to turn)" : "(NOT free: time cap)");
-        return;
-    }
-
-    // Rear-clearance guard: don't reverse into a wall. If the space behind is tight, escape
-    // by rotating in place only (adv = 0).
-    //
-    // ⚠ clearance_at() is in the ESDF/rollout frame: +Y FORWARD, +X RIGHT (see begin_escape
-    // above for why this is not the OmniRobot command frame). REAR is therefore −y, not −x.
-    // This read used to be clearance_at(−rear_probe, 0) — that is the LEFT side, so the guard
-    // was gating "may I reverse?" on whether the robot's LEFT was clear, and would happily
-    // reverse into a wall behind it any time the left flank was open.
-    const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
-    const float rear_min   = params_ ? params_->escape_rear_min_m   : 0.30f;
-    // The raw-return reading taken at escape start (see begin_escape) ANDed with the live field: the
-    // field is blind inside its 0.405 m self-filter disc, which is where a wedged body's contacts are.
-    const float rear = std::min(path_controller.clearance_at(0.f, -rear_probe), escape_rear_raw_m_);
-    const float v_lim = params_ ? params_->max_adv_speed_mps : 0.35f, w_lim = params_ ? params_->max_rot_speed_rps : 1.0f;
-    const float adv = (rear < rear_min) ? 0.f : -std::min(v_lim, k * (params_ ? params_->escape_adv_speed_mps : 0.15f));
-    float rot = escape_turn_sign_ * std::min(w_lim, k * (params_ ? params_->escape_rot_speed_rps : 0.35f));
-    // ★ Task 14 fix round 1, item 2 (a): the escape's reverse-and-turn goes through the SAME live-returns net as every
-    //   other command — it may not back a corner into a real return or turn one into a jamb it is beside.
-    float adv_c = adv, side_c = 0.f;
-    const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    const auto cap = cap_by_returns(live_returns(pose, obstacle_tracker, path_controller), adv_c, side_c, rot);
-    if (cap.bound_lin or cap.bound_rot)
-        std::println("[recovery] escape capped by the live returns: adv {:+.3f} -> {:+.3f}, rot -> {:+.3f}", adv, adv_c, rot);
-    if (adv_c == 0.f and rot == 0.f) { note_no_command(); motion_commander.stop_robot(); return; }
-    motion_commander.send_speed_command(adv_c, 0.f, rot);
 }
 
 void ControllerSession::stop(rc::TrajectoryController &path_controller,

@@ -1285,28 +1285,6 @@ void SpecificWorker::load_params()
          "wedge = measured base speed < this × commanded (prediction error)");
 	cfgr.opt_cast<double>("Controller.StuckConfirmMs", params.stuck_confirm_ms,
          "sustained command-without-motion before escape fires");
-	cfgr.opt_cast<double>("Controller.EscapeAdvSpeedMps", params.escape_adv_speed_mps,
-         "reverse speed (issued negative)");
-	cfgr.opt_cast<double>("Controller.EscapeRotSpeedRps", params.escape_rot_speed_rps,
-         "slight turn rate during escape");
-	cfgr.opt_cast<double>("Controller.EscapeDistanceM", params.escape_distance_m,
-         "back up at most this far …");
-	cfgr.opt_cast<double>("Controller.EscapeMaxMs", params.escape_max_ms,
-         "… or this long, whichever comes first");
-	cfgr.opt_cast<double>("Controller.EscapeSideProbeM", params.escape_side_probe_m,
-         "lateral ESDF probe for turn-direction choice");
-	cfgr.opt_cast<double>("Controller.EscapeRearProbeM", params.escape_rear_probe_m,
-         "rear ESDF probe distance");
-	cfgr.opt_cast<double>("Controller.EscapeRearMinM", params.escape_rear_min_m,
-         "rear clearance below this → rotate-in-place, no reverse");
-	cfgr.opt_cast<double>("Controller.StuckVirtualObstacleRadiusM", params.stuck_virtual_obstacle_radius_m,
-         "half-extent of the virtual disc");
-	cfgr.opt_cast<double>("Controller.StuckVirtualObstacleForwardM", params.stuck_virtual_obstacle_forward_m,
-         "placed this far ahead of the robot");
-	int stuck_virtual_obstacle_ttl_ms = static_cast<int>(params.stuck_virtual_obstacle_ttl_ms);
-	cfgr.opt("Controller.StuckVirtualObstacleTTLms", stuck_virtual_obstacle_ttl_ms,
-         "lifetime before it ages out");
-	params.stuck_virtual_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, stuck_virtual_obstacle_ttl_ms));
 	cfgr.opt("Controller.ProximityLogEnabled", params.proximity_log_enabled,
          "Near-obstacle 'black box': when the robot comes within proximity_log_distance_m of a tracked obstacle (or the trajectory ESDF drops that low), append…");
 	cfgr.opt("Controller.ProximityCsvPath", params.proximity_csv_path,

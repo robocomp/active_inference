@@ -514,14 +514,6 @@ private:
                       const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps, std::uint64_t now_ms,
                       bool spin_is_not_a_wedge = false, bool returns_hold = false);
     void reset_stuck_window();
-    // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
-    // the stuck spot, reset the plan, and record the start pose/time.
-    void begin_escape(const ControllerRobotPose &robot_pose,
-                      ControllerObstacleTracker &obstacle_tracker,
-                      rc::TrajectoryController &path_controller,
-                      std::uint64_t now_ms);
-    // Step the active escape (owns the base). Reverses with a slight turn (or rotates in
-    // place if the rear is blocked) until distance/time bound is met, then stops + clears.
     // Task 14 fix round 4: one cycle of the returns' backoff on the tracker path. true = it commanded the base this cycle;
     // false = clearance is open (or nothing opens it): the backoff ended, the plan was dropped so the planner re-plans.
     bool step_returns_backoff(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
@@ -529,11 +521,6 @@ private:
                               const char *why);
     // Are real returns inside the band the net acts on (the robot hemmed in)?
     [[nodiscard]] bool hemmed_in_by_returns(const LiveReturns &lr) const;
-    void step_escape(const ControllerRobotPose &robot_pose,
-                     rc::TrajectoryController &path_controller,
-                     ControllerObstacleTracker &obstacle_tracker,
-                     ControllerMotionCommander &motion_commander,
-                     std::uint64_t now_ms);
     void reset_stuck_state();
 
     const ControllerParams *params_ = nullptr;
@@ -1519,12 +1506,6 @@ private:
     [[nodiscard]] std::optional<float> clearance_speed_limit(const DrivenCurve &curve,
                                                              const ControllerRobotPose &robot_pose,
                                                              const rc::TrajectoryController &path_controller) const;
-    // Nearest live return to a probe point (ROOM frame), from the RAW buffer with the body hull as the
-    // only self-filter. The ESDF deletes every return inside max(0.40, circumscribed + 0.08) = 0.405 m
-    // of the centre (read_lidar_points_robot), so it is blind to exactly the obstacles a wedged body
-    // is touching; the escape must not decide "may I reverse" from it.
-    [[nodiscard]] float raw_return_clearance(const Eigen::Vector2f &probe_room, const ControllerRobotPose &pose,
-                                             ControllerObstacleTracker &tracker) const;
     // ROUTE REPAIR. Set by the recovery reflexes (visible blockage, or a wedge that dropped a virtual
     // disc) and consumed in the continuous-route branch of ensure_current_plan. Without it those
     // reflexes are inert in route mode: they create the obstacle and reset current_plan_, but the route
@@ -1556,29 +1537,6 @@ private:
     std::uint64_t returns_held_since_ms_ = 0;
     bool          returns_block_pending_ = false;
     bool          returns_backoff_failed_ = false;
-    bool          escape_active_ = false;       // an escape maneuver currently owns the base
-    std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
-    Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)
-    float         escape_turn_sign_ = 1.0f;     // +1 / −1: rotation direction during escape
-    float         escape_rear_raw_m_ = 100.f;   // raw-return clearance behind the body at escape start
-    int           escape_count_ = 0;            // consecutive escapes (alternating fallback for turn dir)
-    // ESCALATING RECOVERY (user 2026-10-31): the escapes of ONE stuck episode — the robot not having left a body radius
-    // of where it first wedged — grow: further back, faster, turning both ways; past kMaxEscapeLevels it gives up.
-    int             escape_level_ = 0;          ///< escapes in the current stuck episode (1 = the first)
-    Eigen::Vector2f escape_episode_origin_ = Eigen::Vector2f::Zero();
-    bool            escape_phase2_ = false;     ///< level ≥ 2: the second half of the escape turns the other way
-    bool            stuck_given_up_ = false;    ///< the recovery gave up: the task failed "stuck" (chat-agent reads it)
-    static constexpr int kMaxEscapeLevels = 4;  ///< ⚠ a decision bound: escapes per episode before giving up
-    // ── REJECT RATHER THAN STRUGGLE ──────────────────────────────────────────────────────────────
-    // Escapes charged to the affordance they happened under, because escape_count_ is a session-lifetime
-    // counter and says nothing about WHICH target the robot keeps failing to reach. Measured live: 12
-    // escapes in 3 minutes, all against one refrigerator standpoint, while three other affordances sat
-    // Offered — the robot achieving 2-19% of every commanded metre. An affordance the robot cannot
-    // physically reach is worth abandoning, not grinding at; the gain it advertises is unreachable gain.
-    std::uint64_t escapes_target_id_ = 0;       // which affordance the count below belongs to
-    int           escapes_on_target_ = 0;
-    std::uint64_t reject_affordance_id_ = 0;    // set by begin_escape, acted on where the manager is reachable
-    std::string   reject_affordance_name_;
     // ── SPOTS THE ROBOT HAS ALREADY FAILED TO REACH ──────────────────────────────────────────────
     // Remembered by POSITION, not by affordance id: the producer is not told that the approach failed,
     // so it re-publishes the same standpoint the moment the suppression lapses — and a re-created node

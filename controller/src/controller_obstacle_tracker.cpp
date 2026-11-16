@@ -1303,26 +1303,6 @@ void ControllerObstacleTracker::update_active_obstacle_polygons(std::uint64_t ti
     path_controller.set_static_obstacles(obstacle_polygons_);
 }
 
-void ControllerObstacleTracker::add_virtual_obstacle(std::uint64_t now_ms,
-                                                     const Eigen::Vector2f &center,
-                                                     float radius_m)
-{
-    const float radius = std::max(0.05f, radius_m);
-    const std::uint64_t ttl = params_ ? params_->stuck_virtual_obstacle_ttl_ms : 5000;
-    const std::uint64_t expires_at = ttl != 0 ? now_ms + ttl : 0;
-    // Refresh-or-create: if a virtual disc already covers this spot (repeated escapes at the same
-    // wedge), grow it to the larger radius and reset its TTL instead of stacking duplicates.
-    for (auto &vo : virtual_obstacles_)
-        if ((vo.center - center).norm() <= std::max(vo.radius_m, radius))
-        {
-            vo.center = center;
-            vo.radius_m = std::max(vo.radius_m, radius);
-            vo.expires_at_ms = expires_at;
-            return;
-        }
-    virtual_obstacles_.push_back(VirtualObstacle{.center = center, .radius_m = radius, .expires_at_ms = expires_at});
-}
-
 void ControllerObstacleTracker::refresh_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
                                                                  const ControllerRobotPose &robot_pose,
                                                                  rc::TrajectoryController &path_controller)

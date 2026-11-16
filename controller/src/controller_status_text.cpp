@@ -162,8 +162,6 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
         L.emplace_back("Nobody: the base output is DISARMED; commands are not sent.");
     else if (c.relative_motion_active)
         L.push_back("A move/turn order" + (c.relative_motion_progress.empty() ? std::string(".") : ": " + c.relative_motion_progress));
-    else if (c.escape_active or in.stuck_active)
-        L.emplace_back("Escape manoeuvre: the robot got stuck and is backing out.");
     else if (c.backoff_active)
         L.emplace_back("Backing away from obstacles that hem the robot in.");
     else if (c.lockon_active)
