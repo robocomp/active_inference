@@ -75,6 +75,16 @@ but still moves the mean, and accumulation over hundreds of frames beats attenua
 enter through the per-frame common-mode `Σc` (Woodbury-marginalised in the engine) so N correlated points
 cannot collapse σ. Add new quality signals there, not as `if` statements.
 
+**A LiDAR ray set attributed by an assigned mask is a frame of its own** *(countable_concept, behind
+`Model.LidarMeasuresOnGated`; spec `docs/superpowers/specs/2026-11-15-lidar-measures-design.md` G1–G6, §7c)*. On a cycle
+whose camera frame is gated, the rays selected around the assigned mask's cloud still update the belief, with the camera
+points left out (the camera gate keeps its meaning for camera points); a cycle with no assigned mask stays predict-only.
+Its "resolvable" is the existing ray-count/coverage precision; its "centred" is attribution by the mask (each return's
+precision × its membership m = π_mask·Φ(s/σ_px) in the mask, σ_px the projection's own uncertainty, no new constant); its
+"still" is the shared error it carries — no longer a per-frame common mode but a persistent latent. The class prior is
+counted once (birth + the first admissible camera frame's relational terms); a shared sensor error persists across frames
+and decorrelates with the viewpoint, so a parked look is one look.
+
 **Observability covariates must not be circular.** A covariate that decides whether a DOF is observable must
 not be derived from the point estimate of that same DOF — a wrong estimate then declares its own error
 unobservable and protects it. Evaluate under the posterior (or from data) instead. *Live precedent:* the
@@ -227,7 +237,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ restores from ltsm `remembered_door` notes; refuted places in a private phantom file *(2026-11-14, Task 6)* | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* | — not audited (Phase 0: countable only) | — |
 | refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ | ✅ | ✅ birth + existence |
 | hood *(2026-11-13, Phase 0)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ⚠️ `[Owns]` says `hood_concept 21`, `[Agent].id` is 17 (on main HEAD; an uncommitted fix to 17 sits in the main checkout) | ✅ | ✅ birth (wall-mounted: tolerance = depth/2) + existence |
-| countable_concept *(2026-11-14; classes nightstand 29, bed 30, toilet 31)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist`; existence = occupancy × class *(2026-11-14)*: the class factor (own L_cls, own debounce, same `RemovalPolicy`) removes only on its own measured shape evidence Λ and holds on an unmeasured cycle; occupancy (sensor debounce, out-of-view HOLD) unchanged | ✅ (fleet-prior envelope, uncalibrated) | ✅ shared helper | ✅ | ✅ `[Owns]` = `<class>_concept <id>` per class | ✅ | ✅ birth (tolerance = ½·max(width, depth)) + existence |
+| countable_concept *(2026-11-14; classes nightstand 29, bed 30, toilet 31)* | ✅ resurrects from ltom recall | ✅ (`rc::ai::update`; under `Model.LidarMeasuresOnGated` the shared `common/ai_belief/persistent_update.h`) | ✅ trunc + confirm_only for camera points; mask-attributed LiDAR-only updates on gated cycles; persistent shared errors (2026-11-16) | ✅ `rc::exist`; existence = occupancy × class *(2026-11-14)*: the class factor (own L_cls, own debounce, same `RemovalPolicy`) removes only on its own measured shape evidence Λ and holds on an unmeasured cycle; occupancy (sensor debounce, out-of-view HOLD) unchanged | ✅ (fleet-prior envelope, uncalibrated) | ✅ shared helper | ✅ | ✅ `[Owns]` = `<class>_concept <id>` per class | ✅ | ✅ birth (tolerance = ½·max(width, depth)) + existence |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ | — | — |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | — | — |
 | language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ | — | — |
