@@ -33,8 +33,12 @@ collect(){
 # door_concept's DoorCore tapes (DoorConcept.RecordInputs / DecisionLog): copied AFTER the fleet stops, so the SIGTERM
 # path has flushed and closed them. The glob takes this run's files only (rotated runs end in .<stamp>, not .bin).
 collect_tapes(){
-  for f in $B/door_concept/etc/door_inputs*.bin $B/door_concept/etc/door_decisions*.bin; do
-    [[ -f $f ]] && cp $f $OUT/ && log "tape $(basename $f): $(stat -c %s $f) bytes"
+  # Only a tape THIS run wrote (newer than teleport.txt, touched just before the fleet starts), from the tree door_concept
+  # ran in ($WT when set, else $B). With recording off no tape is written, and a stale one left from an earlier run was
+  # copied into every run before (2 GB each, 57 copies filled the disk on 11-16).
+  local d=$B/door_concept/etc; [[ -n "$WT" ]] && d=$WT/door_concept/etc
+  for f in $d/door_inputs*.bin $d/door_decisions*.bin; do
+    [[ -f $f && $f -nt $OUT/teleport.txt ]] && cp $f $OUT/ && log "tape $(basename $f): $(stat -c %s $f) bytes"
   done
   return 0   # a missing tape (recording off) is not a failure
 }
