@@ -39,6 +39,8 @@ public:
     // fresh sweep is staged this cycle.
     std::optional<Eigen::Vector3f> helios_origin() const
     { return lidar_have_sweep_ ? std::optional<Eigen::Vector3f>(lidar_origin_room_) : std::nullopt; }
+    // Any sweep (helios or bpearl) staged this cycle: without one, feed() stages nothing.
+    bool has_sweep() const { return lidar_have_sweep_ or lidar_have_bpearl_; }
     // clear() each cycle first so a stale sweep never leaks into a frame with no fresh LiDAR.
     void clear() { lidar_have_sweep_ = false; lidar_have_bpearl_ = false; }
 

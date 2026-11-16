@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include <optional>
+
 #include <Eigen/Dense>
 
 namespace rc {
@@ -35,6 +37,26 @@ float rho_camera(const ViewpointPath& p, float z_m, float w_perp_m);
 float rho_lidar_lateral(const ViewpointPath& p, float ring_gap_rad);
 // exp(−|Δz||tan ε|/(g z)), ε = elevation of the beam. g ≤ 0 ⇒ 1.
 float rho_lidar_height(const ViewpointPath& p, float z_m, float eps_rad, float ring_gap_rad);
+// ── The localiser's correction for ρ_chain (§7c.2), as testable bookkeeping. ─────────────────────────────────────────
+// c = (pose at the last odometry-consistent sample − ref) − odometry integrated since ref. It must FAIL CLOSED like the
+// camera/LiDAR paths: a stretch whose odometry cannot be integrated (no speed, a stale stamp, an unknown interval) is
+// NOT a localiser correction, so the reference absorbs that stretch's pose increment (ref += Δpose) — the corrections
+// accumulated before it are kept. ref and odo restart at the last consistent sample when the chain latent is updated.
+struct ChainTracker
+{
+    Eigen::Vector2f ref  = Eigen::Vector2f::Zero();   // pose the correction is measured from
+    Eigen::Vector2f prev = Eigen::Vector2f::Zero();   // pose at the last observed (odometry-consistent) sample
+    Eigen::Vector2f odo  = Eigen::Vector2f::Zero();   // odometry displacement integrated since ref
+    bool have = false;
+};
+// One sample: pose now, and the odometry step over the interval since the previous sample (nullopt ⇔ it cannot be
+// integrated ⇒ the stretch is absorbed into ref). The first sample initialises the tracker.
+void chain_observe(ChainTracker& t, const Eigen::Vector2f& pose_xy, std::optional<Eigen::Vector2f> odo_step);
+// c, the localiser's correction since ref (zero before the first sample).
+Eigen::Vector2f chain_correction(const ChainTracker& t);
+// After the chain latent's update: measure from the last consistent sample.
+void chain_rebase(ChainTracker& t);
+
 // exp(−½(cx²/var_xx + cy²/var_yy)). A zero variance contributes 0 when its correction is 0, else rho = 0.
 float rho_chain(const Eigen::Vector2f& correction_xy, float var_xx, float var_yy);
 

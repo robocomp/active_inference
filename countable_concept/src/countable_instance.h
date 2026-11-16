@@ -72,17 +72,16 @@ struct CountableInstance
     //    written only when the flag is on. ───────────────────────────────────────────────────────────────────────────
     // Odometry path of each sensor about this object since its channel last updated the instance (ρ_cam, ρ_L).
     rc::ViewpointPath path_cam, path_L;
-    // Robot pose (room frame, body centre) at the last update of the chain latent, and the odometry displacement integrated
-    // since then: ρ_chain = exp(−½cᵀΣ⁻¹c), c = (pose now − last_pose_xy) − odo_since_chain (the localiser's own correction).
-    Eigen::Vector2f last_pose_xy = Eigen::Vector2f::Zero();
-    float           last_pose_yaw = 0.0f;
-    bool            have_last_pose = false;
-    Eigen::Vector2f odo_since_chain = Eigen::Vector2f::Zero();
+    // The localiser's correction since the chain latent's last update (robot body centre, room frame): ρ_chain =
+    // exp(−½cᵀΣ⁻¹c), c = rc::chain_correction(chain). Fails closed on a stretch whose odometry cannot be integrated.
+    rc::ChainTracker chain;
     std::uint64_t   last_odo_ts = 0;           // robot_current_speed_timestamp of the last integrated odometry sample
     int   dbg_lidar_only  = 0;                 // 1 ⇔ this cycle's update was a LiDAR-only frame (a gated camera cycle)
     float dbg_lidar_msum  = 0.0f;              // Σ membership of the staged helios rays (0 = no membership this cycle)
-    float dbg_rho_cam = 1.0f, dbg_rho_L = 1.0f, dbg_rho_chain = 1.0f;   // ρ used at the last update (cx component)
-    float dbg_dphi_cam = 0.0f, dbg_dz_cam = 0.0f;   // the camera path consumed by that ρ (rad, m)
+    // ρ USED by THIS cycle's accepted update (cx component), per channel that measured; 1 = none applied (no update, a
+    // rejected update, or that channel did not measure). Δφ/Δz = the camera path that ρ_cam consumed; 0 otherwise.
+    float dbg_rho_cam = 1.0f, dbg_rho_L = 1.0f, dbg_rho_chain = 1.0f;
+    float dbg_dphi_cam = 0.0f, dbg_dz_cam = 0.0f;
     int   dbg_ray_n = 0;                       // rays in the frame the belief was updated with this cycle
     float dbg_itr_cam = 0.0f, dbg_itr_L = 0.0f;   // trace of each channel's information I_ch at the last accepted update
     bool  dbg_rhoL_absent_logged = false;      // "no Helios SensorModel ⇒ ρ_L = 1" printed once per instance

@@ -264,8 +264,8 @@ private:
         std::array<float, 2> sig2_chain{};
     };
     void stage_persistent(CountableInstance& inst, CountableFrame& frame, const LatentInputs& li) const;
-    // After an ACCEPTED persistent update: reset the path of each channel that measured, and the chain's reference pose.
-    void consume_paths(CountableInstance& inst, bool camera, bool lidar);
+    // After an ACCEPTED persistent update: log the ρ it used, reset the path of each channel that measured, rebase the chain.
+    void consume_paths(CountableInstance& inst, const CountableFrame& frame, bool camera, bool lidar);
     // The camera's membership m(p) for this cycle's slice (empty ⇒ unavailable: no slice, no camera, no delivered size).
     std::function<float(const Eigen::Vector3f&)> build_membership(const CountableInstance& inst, int slice_index,
                                                                    const Eigen::Matrix4f& zed_T_room, bool have_cam,

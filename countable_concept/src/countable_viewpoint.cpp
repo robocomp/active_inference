@@ -43,6 +43,31 @@ float rho_lidar_height(const ViewpointPath& p, float z_m, float eps_rad, float g
     return std::exp(-std::abs(p.dz_m) * std::abs(std::tan(eps_rad)) / (g * z_m));
 }
 
+void chain_observe(ChainTracker& t, const Eigen::Vector2f& pose_xy, std::optional<Eigen::Vector2f> odo_step)
+{
+    if (not t.have)
+    {
+        t.ref = t.prev = pose_xy;
+        t.odo.setZero();
+        t.have = true;
+        return;
+    }
+    if (odo_step.has_value()) t.odo += *odo_step;
+    else                      t.ref += pose_xy - t.prev;   // unknown odometry: not a correction (fail closed)
+    t.prev = pose_xy;
+}
+
+Eigen::Vector2f chain_correction(const ChainTracker& t)
+{
+    return t.have ? Eigen::Vector2f((t.prev - t.ref) - t.odo) : Eigen::Vector2f::Zero();
+}
+
+void chain_rebase(ChainTracker& t)
+{
+    t.ref = t.prev;
+    t.odo.setZero();
+}
+
 float rho_chain(const Eigen::Vector2f& c, float var_xx, float var_yy)
 {
     float e = 0.f;

@@ -449,8 +449,10 @@ public:
     const Mat20d& joint_covariance() const { return P_; }
     // The relational class anchors, ONE FLAG PER ANCHOR (ruling T6-1): wall flush/parallel and room axis each enter once, on
     // the first admissible camera update whose frame stages their context (f.wall.ok / f.room_axis_ok); the flag is set only
-    // then, so an object first seen without a wall still gets the wall prior when the wall becomes known. A recall
-    // (LTOM/LTSM) restores a belief with them set; sanitize_covariance clears both (the prior re-enters once).
+    // then, so an object first seen without a wall still gets the wall prior when the wall becomes known. No recall path
+    // stores them or the latents: an LTOM recall cold-starts the belief in run_inference's lazy init, so the anchors
+    // re-enter once and every latent is a new source (the first look after a recall is new). sanitize_covariance clears
+    // both flags (the prior re-enters once). set_prior_added is a test hook.
     bool wall_prior_added() const { return wall_prior_added_; }
     bool axis_prior_added() const { return axis_prior_added_; }
     void set_prior_added(bool wall, bool axis) { wall_prior_added_ = wall; axis_prior_added_ = axis; }

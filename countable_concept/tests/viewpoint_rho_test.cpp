@@ -129,8 +129,37 @@ static void degenerate_geometry_unchanged()
     CHECK(p.dphi_rad == 0.f and p.dz_m == 0.f);
 }
 
+// ρ_chain fails CLOSED when odometry cannot be integrated (final review I1).
+static void chain_fails_closed()
+{
+    const V2 p0(1.f, 2.f), moved = p0 + V2(0.2f, 0.f);
+    const float var = 0.02f * 0.02f;
+    {   // pose moves 0.2 m, no odometry for the stretch ⇒ not a correction
+        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, std::nullopt);
+        CHECK(rho_chain(chain_correction(t), var, var) == 1.f);
+    }
+    {   // pose moves 0.2 m with matching odometry
+        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V2(0.2f, 0.f));
+        CHECK(rho_chain(chain_correction(t), var, var) == 1.f);
+    }
+    {   // pose moves 0.2 m, odometry VALID and zero ⇒ a real localiser correction
+        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V2::Zero());
+        CHECK(rho_chain(chain_correction(t), var, var) < 1.f);
+        CHECK((chain_correction(t) - V2(0.2f, 0.f)).norm() < 1e-6f);
+    }
+    {   // an unknown stretch after a known correction keeps the earlier correction; rebase restarts it
+        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V2::Zero());
+        chain_observe(t, moved + V2(0.f, 0.5f), std::nullopt);
+        CHECK((chain_correction(t) - V2(0.2f, 0.f)).norm() < 1e-6f);
+        chain_rebase(t);
+        CHECK(chain_correction(t).norm() == 0.f);
+    }
+    CHECK(chain_correction(ChainTracker{}).norm() == 0.f);   // before the first sample
+}
+
 int main()
 {
+    chain_fails_closed();
     parked_is_one(); stale_odometry_is_parked(); odometry_axes(); camera_efold_is_half_width(); lidar_efold();
     composes(); rotation_in_place_is_one(); absent_ring_gap_is_one(); rho_chain_zero_correction_is_one();
     degenerate_geometry_unchanged();

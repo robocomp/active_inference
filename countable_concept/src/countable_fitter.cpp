@@ -153,24 +153,44 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
 // nothing. A stale or absent speed gives no step (fails closed, ρ → 1).
 void CountableFitter::integrate_odometry(CountableInstance& inst)
 {
-    if (odo_ts_ == 0 or not have_pose_now_) return;
-    if (inst.last_odo_ts != 0 and odo_ts_ > inst.last_odo_ts)
+    if (not have_pose_now_) return;   // no pose: nothing is consumed; the next interval covers this one
+    // Three outcomes for the interval since this instance's last odometry sample:
+    //  - integrable (stamp advanced, producer interval < 1 s): the step goes into both paths and the chain's odometry;
+    //  - unknown (no speed/stamp, first sample, interval ≥ 1 s, or a stamp frozen for ≥ 1 s of producer time): no step
+    //    (Δ = 0, ρ_cam/ρ_L fail closed), and the chain absorbs the stretch's pose increment — it is not a localiser
+    //    correction (final review I1: fail closed, like the paths);
+    //  - pending (stamp not advanced yet, < 1 s old): nothing is consumed, so the next sample's interval covers it.
+    // "1 s ⇒ unknown" is the producer's convention (robot_concept specificworker.cpp ~2288:
+    // `period_ms = … own_ms - prev < 1000 ? … : 0`, "0 (unknown) on the first or after a gap"), not a new constant.
+    std::optional<Eigen::Vector2f> step;
+    bool pending = false;
+    if (odo_ts_ != 0 and inst.last_odo_ts != 0)
     {
-        const double dt = sim_clock_.interval_s(static_cast<std::int64_t>(inst.last_odo_ts),
-                                                static_cast<std::int64_t>(odo_ts_));
-        // An interval of 1 s or more is UNKNOWN, by the producer's own convention (robot_concept specificworker.cpp ~2288:
-        // `period_ms = … own_ms - prev < 1000 ? … : 0` — "0 (unknown) on the first or after a gap"). Unknown ⇒ Δ = 0
-        // (spec §7c.2: stale ⇒ Δ = 0); the producer's constant, not a new one.
-        if (dt < 1.0)
+        if (odo_ts_ > inst.last_odo_ts)
         {
-            const Eigen::Vector2f step = rc::odometry_step_room(odo_adv_, odo_side_, robot_yaw_now_, static_cast<float>(dt));
-            const auto& s = inst.ai2_belief.state();
-            const Eigen::Vector2f centre(s.cx, s.cy);
-            rc::accumulate_path(inst.path_cam, zed_xy_now_, step, centre);
-            if (have_helios_) rc::accumulate_path(inst.path_L, helios_now_.head<2>(), step, centre);
-            inst.odo_since_chain += step;
+            // dt is PRODUCER-clock time (rc::rt::SimClockRate, as door_concept's anchor): the twist is per simulation
+            // second on a simulator, and a paused simulator integrates nothing. Identity on real hardware.
+            const double dt = sim_clock_.interval_s(static_cast<std::int64_t>(inst.last_odo_ts),
+                                                    static_cast<std::int64_t>(odo_ts_));
+            if (dt < 1.0)
+                step = rc::odometry_step_room(odo_adv_, odo_side_, robot_yaw_now_, static_cast<float>(dt));
+        }
+        else
+        {
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count();
+            pending = sim_clock_.interval_s(static_cast<std::int64_t>(odo_ts_), now_ms) < 1.0;
         }
     }
+    if (pending) return;
+    if (step.has_value())
+    {
+        const auto& s = inst.ai2_belief.state();
+        const Eigen::Vector2f centre(s.cx, s.cy);
+        rc::accumulate_path(inst.path_cam, zed_xy_now_, *step, centre);
+        if (have_helios_) rc::accumulate_path(inst.path_L, helios_now_.head<2>(), *step, centre);
+    }
+    rc::chain_observe(inst.chain, robot_xy_now_, step);
     if (odo_ts_ > inst.last_odo_ts) inst.last_odo_ts = odo_ts_;
 }
 
@@ -211,9 +231,8 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
     // Chain: ρ_chain = exp(−½cᵀΣ⁻¹c), c = the localiser's correction = pose increment ⊖ odometry increment since the chain
     // latent's last update (a relocalisation jump gives ρ ≈ 0 by the formula itself).
     float rho_ch = 1.0f;
-    if (inst.have_last_pose and have_pose_now_)
-        rho_ch = rc::rho_chain((robot_xy_now_ - inst.last_pose_xy) - inst.odo_since_chain,
-                               inst.chain_cov_xx, inst.chain_cov_yy);
+    if (inst.chain.have)
+        rho_ch = rc::rho_chain(rc::chain_correction(inst.chain), inst.chain_cov_xx, inst.chain_cov_yy);
     frame.rho_cam.fill(rho_cam);
     frame.rho_L   = {rho_lat, rho_lat, rho_H, rho_lat, rho_lat, rho_lat};
     frame.rho_chain = {rho_ch, rho_ch};
@@ -222,21 +241,27 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
     frame.sig2_chain = li.sig2_chain;
     frame.fresh_cam  = li.fresh;
     frame.fresh_L    = li.fresh;
-    inst.dbg_rho_cam = rho_cam; inst.dbg_rho_L = rho_lat; inst.dbg_rho_chain = rho_ch;
-    inst.dbg_dphi_cam = inst.path_cam.dphi_rad; inst.dbg_dz_cam = inst.path_cam.dz_m;
 }
 
 // After an ACCEPTED persistent update: the measuring channels' paths restart, and the chain's reference pose moves here.
-void CountableFitter::consume_paths(CountableInstance& inst, bool camera, bool lidar)
+void CountableFitter::consume_paths(CountableInstance& inst, const CountableFrame& frame, bool camera, bool lidar)
 {
-    if (camera) inst.path_cam = {};
-    if (lidar)  inst.path_L   = {};
+    // The log records the ρ THIS accepted update used, per channel that measured (neutral 1 / 0 otherwise, see run_inference).
+    if (camera)
+    {
+        inst.dbg_rho_cam  = frame.rho_cam[0];
+        inst.dbg_dphi_cam = inst.path_cam.dphi_rad; inst.dbg_dz_cam = inst.path_cam.dz_m;
+        inst.path_cam = {};
+    }
+    if (lidar)
+    {
+        inst.dbg_rho_L = frame.rho_L[0];
+        inst.path_L    = {};
+    }
     if (camera or lidar)
     {
-        inst.last_pose_xy    = robot_xy_now_;
-        inst.last_pose_yaw   = robot_yaw_now_;
-        inst.have_last_pose  = have_pose_now_;
-        inst.odo_since_chain = Eigen::Vector2f::Zero();
+        inst.dbg_rho_chain = frame.rho_chain[0];
+        rc::chain_rebase(inst.chain);
     }
 }
 
@@ -1090,7 +1115,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     //    empty, latent_inputs / stage_persistent are never called, and both branches below run exactly as before. ──
     // The camera's membership m(p) of THIS slice (extrinsic at the mask stamp); empty ⇒ unavailable.
     std::function<float(const Eigen::Vector3f&)> membership;
-    if (cfg_.lidar_measures_on_gated)
+    // Only with a staged sweep: the membership is consumed by the ray selection alone (final review M4; result-preserving).
+    if (cfg_.lidar_measures_on_gated and lidar_channel_.has_sweep())
         membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var);
     // The latents' marginals (§7c.2): b_chain = the localisation part of the chain cov; b_cam = the config floors + range
     // lateral/size + the obliquity yaw cap (today's camera fill WITHOUT chain and ego-motion); b_L = the config floors.
@@ -1122,7 +1148,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     // After an ACCEPTED flag-on update: the measuring channels' paths restart, and each channel's information is logged.
     const auto record_channels = [&](const CountableFrame& f, bool camera, bool lidar)
     {
-        consume_paths(inst, camera, lidar);
+        consume_paths(inst, f, camera, lidar);
         const auto itr = [](const Eigen::Matrix<float, 6, 6>& Id, const std::array<float, 6>& fresh)
         {
             Eigen::Matrix<float, 6, 6> Sf = Eigen::Matrix<float, 6, 6>::Zero();
@@ -1521,7 +1547,8 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << "lik_H,lik_w,lik_h,lik_sd_H,lik_sd_w,lik_sd_h,lam,"
                  // Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 §7c.2 "Log per cycle").
                  // lidar_only = this cycle's update was a LiDAR-only frame; lidar_msum = Σ membership of the staged rays
-                 // (0 = no membership); rho_* = the lag-1 correlation used (cx component); dphi_cam/dz_cam = the camera path
+                 // (0 = no membership); rho_* = the lag-1 correlation THIS cycle's accepted update used, per channel that measured (cx
+                 // component; 1 when none was applied: no update, a rejected one, or the channel did not measure); dphi_cam/dz_cam = the camera path
                  // that ρ_cam consumed; b* / sb* = latent means / stds (chain on cx,cy; cam and LiDAR on H); ray_n = rays in
                  // the updating frame; Itr_* = trace of each channel's information after its fresh marginalisation.
                  // All zero / ρ = 1 with the flag off.
