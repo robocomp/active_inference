@@ -11,6 +11,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -34,6 +35,10 @@ public:
     // first-hit). Range factor only (the VACATE term stays on the primary helios sweep).
     void set_sweep_bpearl(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
     { lidar_sweep_bpearl_ = sweep_room; lidar_origin_bpearl_ = origin_room; lidar_have_bpearl_ = true; }
+    // The staged helios sweep's sensor origin (room frame, from the RT chain at the sweep's capture), or nullopt when no
+    // fresh sweep is staged this cycle.
+    std::optional<Eigen::Vector3f> helios_origin() const
+    { return lidar_have_sweep_ ? std::optional<Eigen::Vector3f>(lidar_origin_room_) : std::nullopt; }
     // clear() each cycle first so a stale sweep never leaks into a frame with no fresh LiDAR.
     void clear() { lidar_have_sweep_ = false; lidar_have_bpearl_ = false; }
 

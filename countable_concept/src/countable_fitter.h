@@ -40,6 +40,7 @@
 #include "countable_lidar_range_channel.h"   // rc::CountableLidarRangeChannel
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "countable_scene_graph.h"
+#include "../../common/rt_twist/rt_twist.h"   // rc::rt::robot_body_twist, SimClockRate
 
 namespace rc {
 
@@ -238,11 +239,14 @@ private:
 
     // ── Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 lidar-measures §7c) ──────────
     // Read once per cycle in update_ego_motion() (flag on only): the robot node's odometry (typed speed attributes) and
-    // the current robot pose in the room (from the same room_T_zed the fit uses; the body centre and the Helios position
-    // follow from the ZED/Helios mounts of ROBOT_GEOMETRY.md).
+    // the current robot pose in the room (from the same room_T_zed the fit uses; the body centre follows from the ZED mount
+    // of ROBOT_GEOMETRY.md) and the Helios position (the LiDAR channel's staged sweep origin).
     std::uint64_t   robot_node_id_ = 0;              // cached id of the "robot" node (Shadow)
-    float           odo_adv_ = 0.0f, odo_side_ = 0.0f;   // m/s, robot frame (+y forward, +x right)
-    std::uint64_t   odo_ts_  = 0;                    // robot_current_speed_timestamp (epoch ms); 0 ⇒ no odometry
+    float           odo_adv_ = 0.0f, odo_side_ = 0.0f;   // m/s (per PRODUCER second), robot frame, via rc::rt::robot_body_twist
+    std::uint64_t   odo_ts_  = 0;                    // robot_current_speed_timestamp (wall epoch ms); 0 ⇒ no odometry
+    rc::rt::SimClockRate sim_clock_;                 // wall → producer (sim) clock; identity on real hardware
+    bool            have_helios_ = false;            // helios_now_ holds a staged sweep origin (this or an earlier cycle)
+    bool            rgb_absent_logged_ = false;      // "no RGB frame ⇒ no membership" printed once
     bool            have_pose_now_ = false;
     Eigen::Vector2f robot_xy_now_  = Eigen::Vector2f::Zero();   // body centre, room frame
     float           robot_yaw_now_ = 0.0f;           // room yaw of the robot's +y (forward) axis, CCW

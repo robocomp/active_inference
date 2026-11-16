@@ -162,13 +162,7 @@ void CountableProjection::compute_projected_roi(CountableInstance& inst)
     inst.roi_valid = false;
     if (not inner_eigen_)
         return;
-    if (not camera_api_)
-    {
-        const auto zed = G_->get_node("zed");
-        if (not zed.has_value()) return;
-        camera_api_ = G_->get_camera_api(zed.value());
-        if (not camera_api_) return;
-    }
+    if (not ensure_camera()) return;
 
     const auto Mopt = room_T_zed_matrix();   // room_T_zed (camera→room)
     if (not Mopt.has_value())
@@ -245,13 +239,7 @@ SilhouetteExistence CountableProjection::compute_silhouette_existence(const Coun
     SilhouetteExistence out;
     if (not inner_eigen_)
         return out;
-    if (not camera_api_)
-    {
-        const auto zed = G_->get_node("zed");
-        if (not zed.has_value()) return out;
-        camera_api_ = G_->get_camera_api(zed.value());
-        if (not camera_api_) return out;
-    }
+    if (not ensure_camera()) return out;
     const auto Mopt = room_T_zed_matrix();   // room→zed pinned to current pose
     if (not Mopt.has_value())
         return out;
@@ -426,13 +414,7 @@ rc::edges::ContourSet CountableProjection::compute_contour_set(const CountableIn
     rc::edges::ContourSet out;
     if (not inner_eigen_)
         return out;
-    if (not camera_api_)
-    {
-        const auto zed = G_->get_node("zed");
-        if (not zed.has_value()) return out;
-        camera_api_ = G_->get_camera_api(zed.value());
-        if (not camera_api_) return out;
-    }
+    if (not ensure_camera()) return out;
     // Pinned to the FRAME's capture stamp — the contour is compared against those pixels. (ts = 0 would
     // ask for the current pose, which is a different instant and reads as a belief error.)
     const auto Mopt = room_T_zed_matrix(stamp_ms);
@@ -529,13 +511,7 @@ std::optional<FrontCue> CountableProjection::detect_front(const CountableState& 
 {
     if (rgb.empty() or not inner_eigen_)
         return std::nullopt;
-    if (not camera_api_)
-    {
-        const auto zed = G_->get_node("zed");
-        if (not zed.has_value()) return std::nullopt;
-        camera_api_ = G_->get_camera_api(zed.value());
-        if (not camera_api_) return std::nullopt;
-    }
+    if (not ensure_camera()) return std::nullopt;
     const auto Mopt = room_T_zed_matrix(stamp_ms);   // room_T_zed pinned to the frame's capture time
     if (not Mopt.has_value())
         return std::nullopt;

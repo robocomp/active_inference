@@ -86,13 +86,11 @@ void CountableFitter::update_ego_motion()
 
 // ─── Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 lidar-measures §7c) ────────────
 
-// Sensor mounts on the body frame (ROBOT_GEOMETRY.md, from robot_concept/shadow.json; body x-right, y-forward, z-up):
-// zed T[0, −0.075, +0.945], helios T[0, −0.155, +1.075]. Only their offsets from the ZED are used here, because the pose
-// comes from room_T_zed: the body centre is the ZED minus its mount, the Helios the body plus its mount.
+// The ZED mount on the body frame (ROBOT_GEOMETRY.md, from robot_concept/shadow.json; body x-right, y-forward, z-up):
+// zed T[0, −0.075, +0.945]. Used ONLY to recover the body centre from room_T_zed (the chain's reference pose); the Helios
+// position is the LiDAR channel's staged sweep origin, measured through the RT chain, not a mount constant.
 namespace {
 constexpr float kZedMountY      = -0.075f;
-constexpr float kHeliosMountY   = -0.155f;
-constexpr float kHeliosAboveZed =  1.075f - 0.945f;
 Eigen::Vector2f rotate_yaw(float yaw, const Eigen::Vector2f& v)
 {
     const float c = std::cos(yaw), s = std::sin(yaw);
@@ -116,10 +114,11 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
         robot_yaw_now_ = std::atan2(-fx, fy);   // R(yaw)·(0, 1) = (−sin yaw, cos yaw) = forward
         zed_xy_now_    = zed.head<2>();
         robot_xy_now_  = zed_xy_now_ - rotate_yaw(robot_yaw_now_, {0.0f, kZedMountY});
-        const Eigen::Vector2f hel = robot_xy_now_ + rotate_yaw(robot_yaw_now_, {0.0f, kHeliosMountY});
-        helios_now_    = Eigen::Vector3f(hel.x(), hel.y(), zed.z() + kHeliosAboveZed);
         have_pose_now_ = true;
     }
+    // The Helios position: this cycle's staged sweep origin (the worker stages the sweep before update_ego_motion); on a
+    // cycle without a fresh sweep the last staged origin is kept.
+    if (const auto o = lidar_channel_.helios_origin(); o.has_value()) { helios_now_ = *o; have_helios_ = true; }
     // The robot node (Shadow, type "robot"): found once by type, then read by id (no per-cycle copy of every robot node).
     std::optional<DSR::Node> robot;
     if (robot_node_id_ != 0) robot = G_->get_node(robot_node_id_);
@@ -130,11 +129,12 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
     }
     if (robot.has_value())
     {
-        const auto adv  = G_->get_attrib_by_name<robot_current_advance_speed_att>(robot.value());
-        const auto side = G_->get_attrib_by_name<robot_current_side_speed_att>(robot.value());
-        const auto ts   = G_->get_attrib_by_name<robot_current_speed_timestamp_att>(robot.value());
-        if (adv.has_value() and side.has_value() and ts.has_value())
-        { odo_adv_ = adv.value(); odo_side_ = side.value(); odo_ts_ = static_cast<std::uint64_t>(ts.value()); }
+        // The shared reader (one place for the advance/side axis convention): linear = [side (x), advance (y), 0].
+        if (const auto tw = rc::rt::robot_body_twist(*G_, robot.value()); tw.has_value() and tw->stamp_ms != 0)
+        { odo_adv_ = tw->linear.y(); odo_side_ = tw->linear.x(); odo_ts_ = tw->stamp_ms; }
+        // The twist is per SIMULATION second on a simulator: feed the wall→sim clock (identity on real hardware).
+        if (const auto st = rc::rt::robot_twist_sim_stamps(*G_, robot.value()); st.has_value())
+            sim_clock_.observe(st->first, st->second);
     }
     // The Helios beam pattern (spec §7c.2: g = max_ring_gap_rad of its SensorModel). It can be advertised late, so it is
     // looked up every cycle until found; absent ⇒ ρ_L = 1 (logged per instance in stage_persistent).
@@ -148,19 +148,28 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
 }
 
 // Integrate the odometry since this instance's last sample into the two viewpoint paths and the chain's odometry
-// displacement. dt is the speed-timestamp difference: a stale or absent speed gives no step (fails closed, ρ → 1).
+// displacement. dt is the PRODUCER-clock interval between the two speed stamps (rc::rt::SimClockRate::interval_s, as
+// door_concept's anchor does): the twist is per simulation second on a simulator, and a paused simulator integrates
+// nothing. A stale or absent speed gives no step (fails closed, ρ → 1).
 void CountableFitter::integrate_odometry(CountableInstance& inst)
 {
     if (odo_ts_ == 0 or not have_pose_now_) return;
     if (inst.last_odo_ts != 0 and odo_ts_ > inst.last_odo_ts)
     {
-        const float dt = static_cast<float>(odo_ts_ - inst.last_odo_ts) * 1e-3f;
-        const Eigen::Vector2f step = rc::odometry_step_room(odo_adv_, odo_side_, robot_yaw_now_, dt);
-        const auto& s = inst.ai2_belief.state();
-        const Eigen::Vector2f centre(s.cx, s.cy);
-        rc::accumulate_path(inst.path_cam, zed_xy_now_, step, centre);
-        rc::accumulate_path(inst.path_L, helios_now_.head<2>(), step, centre);
-        inst.odo_since_chain += step;
+        const double dt = sim_clock_.interval_s(static_cast<std::int64_t>(inst.last_odo_ts),
+                                                static_cast<std::int64_t>(odo_ts_));
+        // An interval of 1 s or more is UNKNOWN, by the producer's own convention (robot_concept specificworker.cpp ~2288:
+        // `period_ms = … own_ms - prev < 1000 ? … : 0` — "0 (unknown) on the first or after a gap"). Unknown ⇒ Δ = 0
+        // (spec §7c.2: stale ⇒ Δ = 0); the producer's constant, not a new one.
+        if (dt < 1.0)
+        {
+            const Eigen::Vector2f step = rc::odometry_step_room(odo_adv_, odo_side_, robot_yaw_now_, static_cast<float>(dt));
+            const auto& s = inst.ai2_belief.state();
+            const Eigen::Vector2f centre(s.cx, s.cy);
+            rc::accumulate_path(inst.path_cam, zed_xy_now_, step, centre);
+            if (have_helios_) rc::accumulate_path(inst.path_L, helios_now_.head<2>(), step, centre);
+            inst.odo_since_chain += step;
+        }
     }
     if (odo_ts_ > inst.last_odo_ts) inst.last_odo_ts = odo_ts_;
 }
@@ -187,7 +196,7 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
     }
     // LiDAR: lateral DOFs and yaw by the ring gap; H by the ring ε that grazes the top moving over it with range.
     float rho_lat = 1.0f, rho_H = 1.0f;
-    if (helios_ring_gap_rad_ > 0.0f and have_pose_now_)
+    if (helios_ring_gap_rad_ > 0.0f and have_helios_)
     {
         const float zl = (helios_now_.head<2>() - c).norm();
         rho_lat = rc::rho_lidar_lateral(inst.path_L, helios_ring_gap_rad_);
@@ -240,6 +249,12 @@ std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(c
                                                                                 const Eigen::Matrix4f& zed_T_room,
                                                                                 bool have_cam, float mot_pos_var)
 {
+    if (rgb_frame_.empty() and not rgb_absent_logged_)
+    {
+        std::print("[lidar-measures] no RGB frame staged ⇒ no delivered image size ⇒ no membership: gated cycles "
+                   "predict, admissible ones use unweighted rays\n");
+        rgb_absent_logged_ = true;
+    }
     if (slice_index < 0 or not have_cam or not mask_ingestor_ or rgb_frame_.empty())
         return {};
     const auto& pkt = mask_ingestor_->packet();
@@ -970,6 +985,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     // lidar-measures (spec 2026-11-15 §7c.2): the odometry since this instance's last call goes into the viewpoint paths on
     // EVERY call, stale ones included (aged and predict-only cycles add up). Flag off: nothing read, nothing integrated.
     inst.dbg_lidar_only = 0;
+    inst.dbg_lidar_msum = 0.0f;
+    inst.dbg_rho_cam = 1.0f; inst.dbg_rho_L = 1.0f; inst.dbg_rho_chain = 1.0f;   // neutral: no update ⇒ no ρ applied
+    inst.dbg_dphi_cam = 0.0f; inst.dbg_dz_cam = 0.0f;
     inst.dbg_ray_n = 0;
     inst.dbg_itr_cam = 0.0f; inst.dbg_itr_L = 0.0f;
     if (cfg_.lidar_measures_on_gated) integrate_odometry(inst);
