@@ -12,6 +12,8 @@
 
 **Revision 3 (11-16):** Tasks 0–2 are done (commits ff49e768, 6569e6b1, b58f697b; merged to main 8f4cc821). Tasks 3–10 replace rev 2's Tasks 3–5.
 
+**Execution order (owner 11-16, "go with the shorter"):** 3 → 4 → 5 → 6 → 9 → 10. Tasks 7–8 (the ownership mixture) are DEFERRED until live8 shows whether a wrong-attribution pull exists with physical returns; until then the rays carry the camera's m as a plain weight (Task 1). Task 9 is built WITHOUT the rest scene (no `RestScene` parameter, no `resp_sum` log column); they are added with Tasks 7–8 if live8 asks for them.
+
 ## Global Constraints
 
 - Everything new is behind `Model.LidarMeasuresOnGated` (bool, default false); false ⇒ bit-identical to today (`lidar_golden_test`). True in the nightstand, bed and toilet configs.
@@ -227,7 +229,7 @@ The worktree holds Task 4c rev 2 uncommitted (8 files). It resumes after this pl
 
 ---
 
-### Task 7: The ownership mixture in the ray factor and the rest ray-cast (shared, pure)
+### Task 7 (DEFERRED, see Execution order): The ownership mixture in the ray factor and the rest ray-cast (shared, pure)
 
 **Files:**
 - Modify: `common/ai_belief/lidar_ray_factor.h` (`LidarRays`, `accumulate_lidar_rays`)
@@ -251,7 +253,7 @@ The worktree holds Task 4c rev 2 uncommitted (8 files). It resumes after this pl
 
 ---
 
-### Task 8: The belief uses the mixture (countable, flag on)
+### Task 8 (DEFERRED, see Execution order): The belief uses the mixture (countable, flag on)
 
 **Files:**
 - Modify: `countable_concept/src/countable_belief.h/.cpp`
@@ -283,7 +285,7 @@ The worktree holds Task 4c rev 2 uncommitted (8 files). It resumes after this pl
 - Modify: `CONCEPT_AGENT_LIFECYCLE.md` (§2 paragraph + countable audit row)
 
 **Interfaces:**
-- Consumes: Tasks 5–8.
+- Consumes: Tasks 5–6 (Tasks 7–8 deferred: the `rest` parameter, `RestScene`, the rest-box staging and the `resp_sum` column are NOT built in this pass).
 - Produces:
   - `CountableObservation::slice_index` (int, −1) set by `observe_slice`.
   - `void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& frame, std::span<const Eigen::Vector3f> anchor_cloud, const std::function<float(const Eigen::Vector3f&)>& membership = {}, const RestScene* rest = nullptr) const` — empty membership ⇒ today's `select_into`; else `select_into_weighted`, Σm into `inst.dbg_lidar_msum`; with `rest`, fills `rest_t`, `rest_sigma`, `chord_L` per ray and `sigma_r2`. `struct RestScene { std::vector<Eigen::Vector2f> polygon; float wall_height; float sigma_room; std::vector<rc::raycast::RestBox> boxes; };`
