@@ -3477,13 +3477,17 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
                 current_plan_ = ControllerPathPlan{.room_path = {step.robot_pose.pos, step.target.room_pos}};   // display stub
             plan_spline_valid_ = false;
             plan_is_policy_stub_ = true;
+            if (step.target_changed) plan_stub_replaced_for_ = 0;   // a new or changed target may be planned onto the chain, once
         }
         return true;
     }
     // ★ 2026-11-16: a plan left by the branch above (the policy's unsmoothed display route, e.g. the first cycle of a target
     //   after a door cross or a lock-on, when chain_hybrid_place_ was still false) is NOT the chain's: it has no fitted spline,
     //   so drive_with_policy never handed the cycle to the tracker and the policy drove the whole target. Planned again, once.
-    const bool replace_stub = plan_is_policy_stub_;
+    //   ONCE PER TARGET (plan_stub_replaced_for_): a target that goes back to the policy later — a hold at its standpoint,
+    //   a lock-on — and returns here is not planned onto the chain a second time by this rule.
+    const bool replace_stub = plan_is_policy_stub_ and plan_stub_replaced_for_ != active_target_id_;
+    if (replace_stub) plan_stub_replaced_for_ = active_target_id_;
     plan_is_policy_stub_ = false;
     // ── PORT STEP 4 — WAIT. The way is blocked by what the map does not have (no route on map + marks, one on the map alone):
     //    stopped and watching, never "unreachable" — a mark that clears (chain_observe) ends the wait and the planner tries the

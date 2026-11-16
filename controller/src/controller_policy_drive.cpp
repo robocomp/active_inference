@@ -1141,7 +1141,15 @@ bool ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     const std::string who = place_t.node_name.empty() ? std::string("target") : place_t.node_name;
     // ── PORT STEP 5: THE HYBRID. A plain Place is the CHAIN's (planner -> spline -> PLAIN tracker, with the monitors); the policy
     //    drives here only an EPISODE the chain handed it, and while the chain has no route yet. A WAIT (step 4) holds and watches.
-    if (chain_hybrid_on() and not place_pre.has_value())
+    // ★ 2026-11-16 (hy2_warm1, aff_door_24_close: 247 mode flips): A HOLD AT THE STANDPOINT IS NOT A PLACE TO DRIVE TO. Once a
+    //   Reach whose goal is the world's to bring about has arrived, consume_goal_reached keeps the claim and waits there
+    //   (reach_wait_target_). The chain still held its fitted route, so every other cycle it took the base, its window test
+    //   failed at the standpoint, it handed off, the policy re-arrived, and the wait's protocol ran only on those cycles.
+    //   While the hold is in force the goal is the policy's, exactly as without the hybrid: it re-arrives every cycle and the
+    //   wait runs in consume_goal_reached. No chain route, no episode, no re-plan for a target that has been reached.
+    const bool standpoint_hold = active_target_id_ != 0 and reach_wait_target_ == active_target_id_;
+    if (standpoint_hold and (chain_ep_.active or chain_ep_request_ != nullptr)) { chain_ep_ = {}; chain_ep_request_ = nullptr; }
+    if (chain_hybrid_on() and not place_pre.has_value() and not standpoint_hold)
     {
         chain_hybrid_place_ = true;
         const rc::policy::Pose2 bel = rc::policy::to_policy_pose(robot_pose);

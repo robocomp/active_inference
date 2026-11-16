@@ -862,6 +862,7 @@ private:
     { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled; }
     bool chain_hybrid_place_ = false;          ///< drive_with_policy reached its PLACE branch last cycle (the chain plans for it)
     bool plan_is_policy_stub_ = false;         ///< current_plan_ is the policy branch's unsmoothed display route, not the chain's
+    std::uint64_t plan_stub_replaced_for_ = 0; ///< the target whose stub was already re-planned onto the chain (once per target)
     struct ChainEpisode
     {
         bool active = false, final = false;    ///< final: the episode's goal is the target itself (its Arrived completes it)
