@@ -198,9 +198,6 @@ public:
     // old chain is switched OFF, not deleted. The protocol halves (arrival → finalize_reached, the cross's through /
     // hand-back, the lock-on and orient completion predicates, Unreachable) are unchanged and shared.
     [[nodiscard]] bool policy_enabled() const { return params_ != nullptr and params_->policy_enabled; }
-    // [Route] BandDrivesCross in force: the spline/band drives a door cross (needs NearFieldClearance; never with the policy)
-    [[nodiscard]] bool band_drives_cross() const
-    { return params_ != nullptr and params_->route_band_drives_cross and params_->route_near_field_clearance and not params_->policy_enabled; }
     // One policy tick toward `spec` (also the relative-motion path, SpecificWorker::step_relative_motion): builds the
     // input, keeps the Navigator's goal (set_goal only when the goal moved beyond its own tolerance), steps it, sends the
     // command, logs policy_decisions.csv and a [policy] line per mode change. `who` names the goal's owner in the logs.
@@ -1388,7 +1385,7 @@ private:
     };
     [[nodiscard]] DrivenCurve driven_curve() const;
 
-    // obstacle_tracker: the policy's contact returns, read only when [Route] NearFieldClearance is on (Task 6).
+    // obstacle_tracker: unused since the near-field arm was removed (kept so the call sites are unchanged).
     void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
                          ControllerObstacleTracker *obstacle_tracker = nullptr);
     // Truncate band_diag.csv for THIS run, whether or not the band is enabled. Called before any early
@@ -1402,11 +1399,6 @@ private:
     long long band_cycle_ = 0;
     // ── Task 6: the near field and [Route] BandDrivesCross ──
     float band_solve_ms_ = 0.f;              // this cycle's band wall time (band_diag.csv solve_ms)
-    int   band_near_elements_ = 0;           // the near model's size this cycle (band_diag.csv near_elems)
-    std::optional<rc::policy::DoorwayRisk> band_cross_risk_;   // the opening's jambs this cycle (F4's two hypotheses)
-    std::string band_cross_route_for_;       // the cross whose route through the opening is installed
-    bool  band_cross_logged_ = false;
-    rc::policy::DoorwayRisk band_cross_doorway_risk(const CrossProtocol &cp, const ControllerRobotPose &cpose) const;
     bool route_active_ = false;
     // ── Live tracking accumulator (see live_tracking) ──────────────────────────────────────────────
     // Deliberately NOT hosted in MissionRunner. Sampling that outside a run would fold idle affordance

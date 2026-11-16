@@ -1345,12 +1345,6 @@ void SpecificWorker::load_params()
          "Length of the deformable window beyond the lead");
 	cfgr.opt("Controller.BandPeriodCycles", params.band_period_cycles,
          "Run the band every N control cycles. 1 = every cycle");
-	cfgr.opt("Route.NearFieldClearance", params.route_near_field_clearance,
-         "Task 6 (A/B arm B): the band's clearance near the robot = expected clearance to the policy's fitted surfaces, "
-         "joined to the live ESDF by a model weight (near_field_clearance.h). false = the old field, unchanged");
-	cfgr.opt("Route.BandDrivesCross", params.route_band_drives_cross,
-         "Task 6 fix round 1: with NearFieldClearance and the policy off, the spline/band drives a door cross through the "
-         "opening (jambs in the near field) instead of the anchor servo; completion stays the cross protocol's. false = servo");
 	cfgr.opt_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias,
          "Route optimiser: speed (0) <-> safety (1)");
 	cfgr.opt_cast<double>("Controller.RouteSafetyMargin", params.route_safety_margin_m,
