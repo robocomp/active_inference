@@ -599,10 +599,8 @@ private:
     void accumulate_top(const CountableBeliefState& s, const CountableFrame& f,
                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     void accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
-    // curvature_scale multiplies the information only (1 = the historic, flag-off term; 2 = E's exact Hessian, T6-2).
     void accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
-                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
-                             float curvature_scale = 1.0f) const;
+                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     void accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     // The camera points' GN information, exactly as ai::update's accumulate lambda.

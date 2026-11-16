@@ -625,14 +625,8 @@ void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eig
 //      residual = min(0, gap − margin) is driven to 0 with a precision that GROWS as the back penetrates
 //      further (λ = wall_no_cross_precision · how-far-past). Flush (gap≈0) feels ~nothing; a wall is a hard
 //      boundary so it is strong. Continuous (soft), no clamp. Inert when f.wall.ok==false.
-// ★CURVATURE (ruling T6-2). λ = k·|r| makes the gradient term bd = −λ J r the gradient of E = (k/3)|r|³, whose Gauss-Newton
-// Hessian is 2k|r| J Jᵀ = 2λ J Jᵀ — but the historic term enters λ J Jᵀ, HALF of it. In the flag-off path saturate() damps
-// the term and the deficit is invisible; entered UNSATURATED in the persistent θ-only channel the Newton step overshoots by
-// ~2× and the GN oscillates (measured: cy −0.138 → −0.253 → −0.224 → −0.196 over 4 iterates). The persistent path passes
-// curvature_scale = 2 (E's exact Hessian); the flag-off path keeps 1 (golden trajectory bit-exact). Gradient unchanged.
 void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
-                                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
-                                          float curvature_scale) const
+                                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
     if (f.wall.ok and params_.wall_no_cross_precision > 0.0f)
     {
@@ -655,8 +649,7 @@ void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const C
                 Jg(k) = std::clamp((gap_of(CountableBeliefState::from_vec(vp))
                                   - gap_of(CountableBeliefState::from_vec(vm))) / (2.0f * eps), -g, g);
             }
-            if (curvature_scale == 1.0f) Id.noalias() += lam_nc * (Jg * Jg.transpose());   // the historic float ops, exactly
-            else                         Id.noalias() += (curvature_scale * lam_nc) * (Jg * Jg.transpose());
+            Id.noalias() += lam_nc * (Jg * Jg.transpose());
             bd.noalias() += -lam_nc * Jg * residual;   // residual<0 ⇒ push the gap UP (back out of the wall)
         }
     }
@@ -720,7 +713,7 @@ void CountableBelief::accumulate_channels(const CountableBeliefState& s_th, cons
     if (admissible and not size_prior_off_ and f.room_axis_ok and not axis_prior_added_)
         accumulate_room_axis(s_th, f, Id_th, bd_th);
     accumulate_short_height(s_th, Id_th, bd_th);
-    accumulate_no_cross(s_th, f, Id_th, bd_th, /*curvature_scale*/ 2.0f);   // unsaturated: E = (k/3)|r|³'s exact Hessian (T6-2)
+    accumulate_no_cross(s_th, f, Id_th, bd_th);
 }
 
 // The params may be set after construction (the fitter does), so the joint state is seeded from Sigma_ on first use.
