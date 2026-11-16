@@ -39,6 +39,9 @@ int main()
         const auto ids = decode_topology(rc::ltsm::encode_topology({{"room_1", true}}, {}, {2, 7}));
         assert(ids.has_value() and ids->room_ids.has_value() and *ids->room_ids == std::vector<std::uint64_t>({2, 7}));
         assert(not decode_topology(R"({"rooms":[],"passages":[]})")->room_ids.has_value());   // an older publisher: unknown, not "none"
+        assert(not t->door_memory.has_value());                       // none given: none published
+        const auto dm = decode_topology(rc::ltsm::encode_topology({}, {}, {}, rc::doormem::DoorMemory{27, 1, 5.281}));
+        assert(dm.has_value() and dm->door_memory == (rc::doormem::DoorMemory{27, 1, 5.281}));
         assert(t->passages.size() == 1);
         const auto& q = t->passages[0];
         assert(q.id == "p0" and q.room_a == "room_1" and q.face_a == "n" and q.room_b == "room_2" and q.face_b == "s");

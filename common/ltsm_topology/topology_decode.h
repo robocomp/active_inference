@@ -17,6 +17,8 @@
 #include <string_view>
 #include <vector>
 
+#include "door_memory.h"
+
 namespace rc::topo
 {
 struct TopoRoomInfo { std::string name; bool live = false; };
@@ -35,6 +37,7 @@ struct Topology
     std::vector<TopoRoomInfo> rooms;
     std::vector<TopoPassageInfo> passages;
     std::optional<std::vector<std::uint64_t>> room_ids;   // every room_id in LTSM memory; nullopt = the publisher predates the field
+    std::optional<rc::doormem::DoorMemory> door_memory;   // door names' counter + change hazard; nullopt = none kept yet / older publisher
 };
 
 inline std::expected<Topology, std::string> decode_topology(std::string_view json)
@@ -55,6 +58,12 @@ inline std::expected<Topology, std::string> decode_topology(std::string_view jso
     {
         t.room_ids.emplace();
         for (const auto& v : root.value("room_ids").toArray()) t.room_ids->push_back(static_cast<std::uint64_t>(v.toDouble()));
+    }
+    if (root.contains("door_memory"))
+    {
+        const auto o = root.value("door_memory").toObject();
+        t.door_memory = rc::doormem::DoorMemory{static_cast<std::uint64_t>(o.value("next_index").toDouble()),
+                                                 o.value("changes").toDouble(), o.value("exposure_s").toDouble()};
     }
     for (const auto& v : root.value("passages").toArray())
     {

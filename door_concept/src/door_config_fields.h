@@ -190,6 +190,8 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "merge two instances whose seat footprints overlap ≥ this");
     out.exist_enabled            = getb("Existence.Enabled", true,
             "Existence.Enabled — run the existence update (false: no existence judgement)");
+    out.names_from_ltsm          = getb("Identity.NamesFromLtsm", true,
+            "Identity.NamesFromLtsm - the door names' counter and the change hazard are kept by ltsm (ltsm_topology door_memory): no door is named before they arrive. false = a fleet without ltsm (counter from the live door names only, hazard from its prior).");
     out.exist_one_model          = getb("Existence.OneModel", false,
             "Existence.OneModel - the one-model door decisions (per-wall rate from the other doors' beliefs, typical-size prior in the existence prior). false = today's behaviour.");
     out.exist_one_currency       = getb("Existence.OneCurrency", false,

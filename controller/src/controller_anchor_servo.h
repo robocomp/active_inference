@@ -385,10 +385,16 @@ enum class CrossProgress { Going, Through, NotACrossing };
 // driven (review NB2). The cross ENDS instead: the session stops the base and drops `engaged`, so the passage takes its
 // room-switch end (rc::anchor_cross_end(false, true, ·) == RoomSwitch) on the next cycle and reports the step's outcome.
 // Without this the passage stayed `clearing` for ever (anchored_ still true, through_ never reached) — an unbounded hang.
-enum class AnchorGoneAction { RoomRoute, CarryOnGap, EndClearing };
-[[nodiscard]] inline AnchorGoneAction anchor_gone_action(bool gap_carries, bool clearing)
+// The door-route DRIVE-IN (UseRoute, past THROUGH: the body was already judged wholly past the plane) is the same case: its
+// leg's cross pose is the room left's, so a lost anchor ENDS the drive-in (DoorPassage::note_drive_in_done, whose contract
+// already lists "no anchor") and the passage completes by its room-switch + archive rule. names_ltsm2 (2026-11-15): the
+// anchor was removed 1.1 m past the plane, the room route was built on room_1's cross pose in room_2's grid ("goal outside
+// the grid") and the leg failed cross_unreachable with the robot in room_2.
+enum class AnchorGoneAction { RoomRoute, CarryOnGap, EndClearing, EndDriveIn };
+[[nodiscard]] inline AnchorGoneAction anchor_gone_action(bool gap_carries, bool clearing, bool driving_in = false)
 {
     if (gap_carries) return AnchorGoneAction::CarryOnGap;
+    if (driving_in) return AnchorGoneAction::EndDriveIn;
     return clearing ? AnchorGoneAction::EndClearing : AnchorGoneAction::RoomRoute;
 }
 

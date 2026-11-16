@@ -719,6 +719,13 @@ void anchor_gone_while_clearing_ends()
     CHECK(rc::anchor_gone_action(true, false) == A::CarryOnGap);
     CHECK(rc::anchor_gone_action(false, false) == A::RoomRoute);    // before the switch: the room route is this room's
     CHECK(rc::anchor_gone_action(false, true) == A::EndClearing);   // past it, nothing to carry: end
+    // names_ltsm2 (2026-11-15): the door-route DRIVE-IN (past THROUGH, the body already wholly past the plane) lost its anchor
+    // 1.1 m past the plane and fell back to the room route on the cross pose of the room just left ("goal outside the grid",
+    // cross_unreachable, the leg failed with the robot in room_2). With no gap to carry it, a drive-in ENDS: never a room route.
+    CHECK(rc::anchor_gone_action(false, false, /*driving_in=*/true) == A::EndDriveIn);
+    CHECK(rc::anchor_gone_action(false, true, /*driving_in=*/true) == A::EndDriveIn);
+    CHECK(rc::anchor_gone_action(true, false, /*driving_in=*/true) == A::CarryOnGap);   // a held gap still carries it in
+    CHECK(rc::anchor_gone_action(false, false, /*driving_in=*/false) == A::RoomRoute);
     // The session drops `engaged` on EndClearing; the passage's decision then ends the cross by the room-switch rule.
     CHECK(rc::anchor_cross_end(/*anchored=*/false, /*clearing=*/true, /*through=*/false) == rc::AnchorCrossEnd::RoomSwitch);
     // Before the fix `engaged` stayed true: Continue for ever.

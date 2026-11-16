@@ -32,5 +32,8 @@ int main()
     assert(live_name("r12_room_1") == "room_1" and live_name("r1_door_3") == "door_3");
     assert(live_name("room_1") == "room_1" and live_name("r_x") == "r_x" and live_name("rx1_a") == "rx1_a");
     assert(live_name("r") == "r" and live_name("") == "");
+    // door_memory (door_memory.h): absent unless given; numbers through std::format (never a comma decimal)
+    assert(encode_topology(rooms, {}, {1}, rc::doormem::DoorMemory{27, 2, 5.25})
+           .ends_with(R"("room_ids":[1],"door_memory":{"next_index":27,"changes":2,"exposure_s":5.25}})"));
     std::println("test_topology_digest: ok");
 }
