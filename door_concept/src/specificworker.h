@@ -236,7 +236,8 @@ private:
     void save_identities();                                            // the counter + change hazard to ltsm (publish_door_memory); the table stays in memory
     // ── Door memory through ltsm (common/ltsm_topology/door_memory.h) ──
     bool door_memory_adopted_ = false;                                 // ltsm's counter + hazard taken (or Identity.NamesFromLtsm = false)
-    bool door_memory_wait_logged_ = false;
+    std::string door_memory_wait_reason_;                              // the last logged reason ltsm's door memory is not adopted yet
+    std::chrono::steady_clock::time_point door_memory_wait_logged_at_{};
     std::optional<rc::doormem::DoorMemory> door_memory_published_;     // what this agent's node carries now
     std::chrono::steady_clock::time_point door_memory_checked_{};      // last check that the agent node still carries it
     // No door is named before ltsm's counter is in, nor in a RECALLED room before its notes are read: a door born in that window

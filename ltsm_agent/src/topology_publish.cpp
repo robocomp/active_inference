@@ -168,12 +168,14 @@ bool TopologyPublisher::refresh()
         live_->add_or_modify_attrib_local<level_att>(n, 0);   // like passage_live: no parent, no RT edge
         live_->add_or_modify_attrib_local<pos_x_att>(n, -300.f);   // viewer placement only
         live_->add_or_modify_attrib_local<pos_y_att>(n, -300.f);
-        if (not live_->insert_node(n).has_value()) return false;
+        const auto id = live_->insert_node(n);
+        if (not id.has_value()) { qWarning() << "[topology] ltsm_topology insert FAILED"; return false; }
+        qInfo() << "[topology] ltsm_topology inserted as node" << id.value();   // diagnostic (stab_explore3, 11-15)
     }
     else
     {
         live_->add_or_modify_attrib_local<ltsm_topology_att>(node.value(), json);
-        live_->update_node(node.value());
+        if (not live_->update_node(node.value())) qWarning() << "[topology] ltsm_topology update FAILED on node" << node->id();
     }
     last_ = json;
     return true;

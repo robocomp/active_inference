@@ -1841,11 +1841,25 @@ void SpecificWorker::step_door_memory()
     {
         const auto t = G->get_node("ltsm_topology");
         const auto j = t.has_value() ? G->get_attrib_by_name<ltsm_topology_att>(t.value()) : std::nullopt;
-        const auto topo = j.has_value() ? rc::topo::decode_topology(j.value()) : std::unexpected(std::string("no ltsm_topology yet"));
+        const auto topo = j.has_value() ? rc::topo::decode_topology(j.value())
+                                        : std::unexpected(std::string(t.has_value() ? "ltsm_topology has no topology attribute" : "no ltsm_topology yet"));
         if (not topo.has_value())
         {
-            if (not std::exchange(door_memory_wait_logged_, true))
-                std::print("door_concept: [names] waiting for ltsm's door memory (ltsm_topology) before naming any door ({})\n", topo.error());
+            // DIAGNOSTIC (stab_explore3, 11-15: never adopted though ltsm published twice). Say what this graph holds: the node by
+            // NAME (cortex's name index) and by TYPE (a walk that skips the index), so a lost insert and a stale index tell apart.
+            // Logged when the reason changes and every 10 s while it lasts (a log period, not a model constant).
+            std::string by_type = "none";
+            for (const auto& n : G->get_nodes_by_type("metaconcept"))
+                if (n.name() == "ltsm_topology") by_type = std::to_string(n.id());
+            const auto reason = std::format("{}; by name {}, by type {}", topo.error(),
+                                            t.has_value() ? std::to_string(t->id()) : std::string("none"), by_type);
+            const auto now = std::chrono::steady_clock::now();
+            if (reason != door_memory_wait_reason_ or now - door_memory_wait_logged_at_ > std::chrono::seconds(10))
+            {
+                std::print("door_concept: [names] waiting for ltsm's door memory (ltsm_topology) before naming any door ({})\n", reason);
+                door_memory_wait_reason_ = reason;
+                door_memory_wait_logged_at_ = now;
+            }
             return;
         }
         const auto m = topo->door_memory.value_or(rc::doormem::DoorMemory{});   // an older ltsm / a fresh memory: nothing kept yet
