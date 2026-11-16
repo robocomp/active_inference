@@ -514,13 +514,6 @@ private:
                       const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps, std::uint64_t now_ms,
                       bool spin_is_not_a_wedge = false, bool returns_hold = false);
     void reset_stuck_window();
-    // Task 14 fix round 4: one cycle of the returns' backoff on the tracker path. true = it commanded the base this cycle;
-    // false = clearance is open (or nothing opens it): the backoff ended, the plan was dropped so the planner re-plans.
-    bool step_returns_backoff(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
-                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                              const char *why);
-    // Are real returns inside the band the net acts on (the robot hemmed in)?
-    [[nodiscard]] bool hemmed_in_by_returns(const LiveReturns &lr) const;
     void reset_stuck_state();
 
     const ControllerParams *params_ = nullptr;
@@ -1197,7 +1190,6 @@ private:
     }
     bool anchor_returns_binding_logged_ = false;   // Task 14: the returns' ceiling binds (logged on transitions)
     bool returns_hold_in_window_ = false;   // Task 14 fix 1: the live returns held the command in the open judge window
-    bool returns_backoff_logged_ = false;   // Task 14 fix 1: the returns' backoff is driving (logged on transitions)
     bool startup_census_done_ = false;      // Task 14 fix 1: the parked start-up census line, once
     std::string anchor_census_for_;         // Task 14 fix 1: the cross whose first-cycle census was logged
     std::string anchor_band_logged_for_;    // Task 14 fix 3: the cross whose first band return was logged
@@ -1528,15 +1520,11 @@ private:
     // door_axis_anchors: the [door-axis] centreline anchors for a passage's cross step (false for BandDrivesCross's route,
     // which is built on the anchor's opening itself).
     ControllerPolygon smooth_plan(const ControllerPolygon &poly, bool door_axis_anchors = true);
-    // Task 14 fix round 4 (try79): the RETURNS' BACKOFF on the tracker path — owns the base while it opens clearance from the
-    // live returns, then hands back to the planner (re-plan). `returns_held_since_ms_`: the net has held the tracker's whole
-    // command since then (0 = not held). `returns_block_pending_`: the stall judge called a window BLOCKED BY A REAL RETURN.
-    // `returns_backoff_failed_`: the last backoff found nothing that opens clearance — not re-triggered from the same hold
-    // until the target changes or a plan drives again.
-    bool          returns_backoff_active_ = false;
+    // The live-returns net on the tracker path: returns_held_since_ms_ = it has held the tracker's whole command since then
+    // (0 = not held); returns_block_pending_ = the stall judge called a window BLOCKED BY A REAL RETURN. Either hands the
+    // stretch to the policy (chain_ep_request_ "backoff").
     std::uint64_t returns_held_since_ms_ = 0;
     bool          returns_block_pending_ = false;
-    bool          returns_backoff_failed_ = false;
     // ── SPOTS THE ROBOT HAS ALREADY FAILED TO REACH ──────────────────────────────────────────────
     // Remembered by POSITION, not by affordance id: the producer is not told that the approach failed,
     // so it re-publishes the same standpoint the moment the suppression lapses — and a re-created node

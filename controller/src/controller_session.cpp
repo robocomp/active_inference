@@ -3218,18 +3218,10 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         }
     }
 
-    // The returns' backoff owns the base until clearance is open; then the planner.
-    if (returns_backoff_active_ and not policy_enabled()
-        and step_returns_backoff(step.robot_pose, path_controller, obstacle_tracker, motion_commander, "returns' backoff"))
-    {
-        note_hold("returns' backoff owns the base");
-        return false;
-    }
 
     if (step.target_changed)
     {
         reset_stuck_state();   // a fresh target = fresh navigation; don't inherit a stale stuck clock
-        returns_backoff_failed_ = false;
         chain_marks_off_ = false;   // a new target is planned with the marks again (port step 3)
         chain_wait_ = false;        // ...and neither a WAIT nor an episode carries over to it (steps 4, 5)
         chain_ep_ = {};
@@ -4181,20 +4173,6 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         // So: hold the base, and SAY SO. A stationary robot with a clear message is diagnosable; one thrashing
         // backwards looks like a perception or traction fault and hides the real cause. The stuck clock is
         // reset here so a genuine wedge later starts from a clean window rather than inheriting this one.
-        // ★ Task 14 fix round 4 (try79: "HOLDING — no route" for 300 s beside room_2's east wall): a planner that cannot
-        //   route from a pose hemmed in by REAL returns is not "a planner fault reversing cannot fix" — the start pose is
-        //   inside the band the body's own margin claims. Back off those returns first (step_returns_backoff), then re-plan.
-        if (not returns_backoff_failed_ and not policy_enabled())   // Task 8: no backoff while the policy drives
-        {
-            const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
-            if (hemmed_in_by_returns(live_returns(pose, obstacle_tracker, path_controller))
-                and step_returns_backoff(step.robot_pose, path_controller, obstacle_tracker, motion_commander,
-                                         "no route from a pose hemmed in by real returns"))
-            {
-                note_hold("returns' backoff owns the base (no route from a hemmed-in pose)");
-                return false;
-            }
-        }
         reset_stuck_state();
         path_controller.stop();
         motion_commander.stop_robot();
@@ -4203,9 +4181,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
                  std::format("no route to '{}' at ({:.2f},{:.2f}) for {:.1f} s: {}{}", step.target.node_name,
                              step.target.room_pos.x(), step.target.room_pos.y(),
                              double(time_source() - no_route_since_ms_) * 1e-3, grid_planner_.last_failure(),
-                             unroutable_fix_.has_value() ? " (a reachability fallback is held)"
-                                                         : returns_backoff_failed_ ? " (the returns' backoff found no way out)"
-                                                                                   : ""));
+                             unroutable_fix_.has_value() ? " (a reachability fallback is held)" : ""));
         if (time_source() - last_no_route_log_ms_ >= 3000)
         {
             last_no_route_log_ms_ = time_source();
@@ -4671,59 +4647,6 @@ rc::LidarCapResult ControllerSession::cap_by_returns(const LiveReturns &lr, floa
                                  adv, side, rot);
 }
 
-bool ControllerSession::hemmed_in_by_returns(const LiveReturns &lr) const
-{
-    return lr.valid and rc::lidar_band_penetration(lr.r.obstacles, returns_body(), lr.margin + lr.sigma,
-                                                   0.f, 0.f, 0.f) > 0.f;
-}
-
-bool ControllerSession::step_returns_backoff(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
-                                             ControllerObstacleTracker &obstacle_tracker,
-                                             ControllerMotionCommander &motion_commander, const char *why)
-{
-    const auto &pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    const auto lr = live_returns(pose, obstacle_tracker, path_controller);
-    const bool holonomic = base_capability_.holonomic.value_or(false);
-    const auto b = lr.valid ? rc::lidar_return_backoff(lr.r.obstacles, returns_body(), lr.margin, lr.sigma, lr.a_dec,
-                                                       lr.v_max, lr.w_max, holonomic)
-                            : std::nullopt;
-    if (not returns_backoff_active_)
-    {
-        if (not b.has_value())
-        {
-            returns_backoff_failed_ = true;
-            std::println("[controller] {} — HEMMED IN by real returns, and no motion opens clearance from them (turn, drive, "
-                         "turn-then-drive all touch or gain nothing): holding, said once", why);
-            return false;
-        }
-        returns_backoff_active_ = true;
-        std::println("[controller] {} — BACKING OFF the real returns (the motion that opens clearance from them): adv {:+.3f} "
-                     "rot {:+.3f}; the plan is dropped and re-planned once clearance is open", why, b->adv, b->rot);
-        current_plan_.reset();
-        path_controller.stop();
-    }
-    if (not b.has_value())
-    {
-        returns_backoff_active_ = false;
-        returns_held_since_ms_ = 0;
-        const bool open = not hemmed_in_by_returns(lr);
-        returns_backoff_failed_ = not open;
-        std::println("[controller] returns' backoff ends — {}: re-planning", open ? "clearance open beyond the margin"
-                                                                                  : "nothing opens it further");
-        note_why(rc::why::Cause::ReturnsBackoff, std::format("the returns' backoff ends ({}) — re-planning next cycle",
-                                                             open ? "clearance open" : "nothing opens it further"));
-        reset_stuck_state();
-        current_plan_.reset();
-        path_controller.stop();
-        note_no_command(); motion_commander.stop_robot();
-        return false;
-    }
-    note_why(rc::why::Cause::ReturnsBackoff,
-             std::format("{} — backing off the real returns: adv {:+.2f} rot {:+.2f} ({} returns around the body)", why,
-                         b->adv, b->rot, lr.r.obstacles.size()));
-    motion_commander.send_speed_command(b->adv, holonomic ? b->side : 0.f, b->rot);
-    return true;
-}
 
 void ControllerSession::log_returns_census(const char *when, const LiveReturns &lr) const
 {
@@ -7226,12 +7149,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         }
     }
 
-    if (returns_backoff_active_
-        and step_returns_backoff(robot_pose, path_controller, obstacle_tracker, motion_commander, "returns' backoff"))
-    {
-        refresh_view_only();
-        return;
-    }
 
     // The door cross on its interaction anchor is the LOCAL POLICY's (drive_with_policy step 1). Without [Policy] Enabled there is
     // no driver for it: the base holds (the old anchor servo and its guard chain are gone).
@@ -8035,7 +7952,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         if (returns_hold)
             returns_cap_text = std::format("v <= {:.3f} m/s{}, |w| <= {:.3f} rad/s{}", cap.v_lim, cap.bound_lin ? " (binding)" : "",
                                            cap.w_lim, cap.bound_rot ? " (binding)" : "");
-        if (not returns_hold) returns_backoff_failed_ = false;   // a command the net lets through: a later hold may back off
         if (returns_hold != anchor_returns_binding_logged_)
         {
             anchor_returns_binding_logged_ = returns_hold;
@@ -8046,10 +7962,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 std::println("[controller] the live returns no longer bind the tracker's command");
         }
     }
-    // ★ Task 14 fix round 4 (try79: 213 "LIVE RETURN caps the tracker's command" lines, the base motionless 300 s). When the
-    //   net holds the tracker's WHOLE command (nothing left to send) the judge opens no window — a robot commanded nothing
-    //   predicts nothing, by design — so the hold was silent for ever. Held for one judge window (stuck_confirm_ms, the
-    //   judge's own length), or a window the judge called BLOCKED BY A REAL RETURN: the returns' backoff takes the base.
+    // When the net holds the tracker's WHOLE command (nothing left to send) the judge opens no window — a robot commanded
+    // nothing predicts nothing, by design — so the hold was silent for ever (try79: the base motionless 300 s). Held for one
+    // judge window (stuck_confirm_ms, the judge's own length), or a window the judge called BLOCKED BY A REAL RETURN: the
+    // stretch is the POLICY's (owner 2026-11-16: the returns' back-off manoeuvre is gone; a held tracker hands off, as a
+    // wedge and a spin do).
     {
         const bool held_now = returns_hold and adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f;
         const std::uint64_t now = time_source();
@@ -8057,17 +7974,16 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         else if (returns_held_since_ms_ == 0) returns_held_since_ms_ = now;
         const float window_ms = params_ != nullptr ? params_->stuck_confirm_ms : 1500.f;
         const bool held_window = held_now and double(now - returns_held_since_ms_) >= double(window_ms);
-        if ((held_window or returns_block_pending_) and not returns_backoff_failed_)
+        if (held_window or returns_block_pending_)
         {
             returns_block_pending_ = false;
             if (held_window)
                 std::println("[controller] BLOCKED BY A REAL RETURN — the live-returns net has held the tracker's whole command "
                              "for {:.1f} s", (now - returns_held_since_ms_) * 1e-3);
-            if (step_returns_backoff(robot_pose, path_controller, obstacle_tracker, motion_commander,
-                                     "the tracker is held by real returns"))
-                return;
+            returns_held_since_ms_ = 0;
+            chain_ep_request_ = "backoff"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot();
+            return;
         }
-        returns_block_pending_ = false;
     }
     // Publish what the limiter did into the actuation stream. It sits between the MPPI's command and the
     // wheels, and until now a lap could show a 17% gap between the two with no way to say whether this

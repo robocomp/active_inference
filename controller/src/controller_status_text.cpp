@@ -42,6 +42,7 @@ std::string handoff_words(std::string_view why)
     if (why == "blocked") return "the tracker found the path blocked";
     if (why == "finish") return "the tracker stopped short of the goal";
     if (why == "wedge") return "the robot got wedged";
+    if (why == "backoff") return "obstacles too close held the tracker";
     if (why == "spin") return "the robot was spinning in place";
     if (why == "extend") return "the tight stretch goes on";
     return std::string(why);
@@ -162,8 +163,6 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
         L.emplace_back("Nobody: the base output is DISARMED; commands are not sent.");
     else if (c.relative_motion_active)
         L.push_back("A move/turn order" + (c.relative_motion_progress.empty() ? std::string(".") : ": " + c.relative_motion_progress));
-    else if (c.backoff_active)
-        L.emplace_back("Backing away from obstacles that hem the robot in.");
     else if (c.lockon_active)
         L.emplace_back("Lock-on: small corrective moves to line up with the target.");
     else if (c.chain_wait)
