@@ -149,3 +149,11 @@ target_compile_options(persistent_belief_test PRIVATE -O2)
 target_link_libraries(persistent_belief_test PRIVATE Eigen3::Eigen)
 add_dependencies(persistent_belief_test lidar_golden_test)
 add_test(NAME persistent_belief_test COMMAND persistent_belief_test)
+
+# First-crossing LiDAR hits + fixed-precision one-sided constraints on the persistent path (spec 2026-11-15 lidar-measures
+# §7c.6): factor unit cases + the 16-case creep set. Run: ./creep_set_test [sweeps=4000]
+add_executable(creep_set_test creep_set_test.cpp ../src/countable_belief.cpp)
+target_include_directories(creep_set_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(creep_set_test PRIVATE -O2)
+target_link_libraries(creep_set_test PRIVATE Eigen3::Eigen)
+add_test(NAME creep_set_test COMMAND creep_set_test)

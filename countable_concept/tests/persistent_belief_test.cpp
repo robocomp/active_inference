@@ -241,7 +241,7 @@ static void no_cross_pushes_back_persistent()
     for (const bool camera : {true, false})
     {
         CountableFrame f = camera ? fcam : flid; set_latents(f, 1.0f);
-        float g[2], th = 0.0f;
+        float g[2], th = 0.0f, last_step = 0.0f;
         float g_off = 0.0f;
         {   // diagnostic: the flag-off path on the same update
             CountableBeliefParams p = params(); p.persistent = false; p.depth_unobs_precision = 0.0f;
@@ -260,15 +260,28 @@ static void no_cross_pushes_back_persistent()
             b.set_prior_added(true, true);
             b.update(f);
             g[on ? 0 : 1] = gap(b);
-            if (on) th = b.dbg_Id_th().norm();
+            if (on)
+            {
+                th = b.dbg_Id_th().norm();
+                const auto& its = b.dbg_iterates();
+                std::printf("    iterates (gap):");
+                for (const auto& v : its) std::printf(" %+.5f", 0.0f - (v(1) + 0.5f * v(4)));
+                std::printf("\n");
+                last_step = its.size() >= 2 ? (its.back() - its[its.size() - 2]).head<5>().cwiseAbs().maxCoeff() : 0.0f;
+            }
         }
-        std::printf("  no_cross (%s, %zu data): start gap -0.03000 ; after one update gap %.5f with (2c), %.5f without ; |Id_th| %.3e ; flag-off path %.5f\n",
-                    camera ? "camera" : "LiDAR-only", camera ? f.points.size() : f.lidar.endpoints.size(), g[0], g[1], th, g_off);
+        std::printf("  no_cross (%s, %zu data): start gap -0.03000 ; after one update gap %.5f with (2c), %.5f without ; |Id_th| %.3e ; "
+                    "last GN step %.2e m ; flag-off path %.5f\n",
+                    camera ? "camera" : "LiDAR-only", camera ? f.points.size() : f.lidar.endpoints.size(), g[0], g[1], th, last_step, g_off);
         // camera: the view says nothing about depth, so the whole move is (2c)'s and it is toward the legal side. LiDAR-only:
         // this sweep's rays (left face + top, belief 3 cm off) themselves push the box deeper; (2c) must counter that push.
         if (camera) CHECK(g[0] > -0.03f + 0.005f);
         CHECK(g[0] - g[1] > 0.005f);          // the (2c)-attributable move toward the legal side
         CHECK(th > 0.0f);
+        // (spec 7c.6) fixed-precision (2c) + first-crossing rays: the iterates converge (no half-Hessian overshoot, no wall ray
+        // switching on and off) and land at the wall
+        CHECK(last_step < 0.001f);
+        CHECK(g[0] > -0.005f);
     }
 }
 
@@ -341,13 +354,14 @@ static void physical_lidar_only_sigma_bounded()
 {
     CountableBelief b = make_belief(0.0f, 0.0f, 0.0f);
     CountableFrame f = lidar_frame(front_rays()); set_latents(f, 1.0f);
-    const float back0 = b.state().cy + 0.5f * b.state().h;
+    const float back0 = b.state().cy + 0.5f * b.state().h, w0 = b.state().w;
     for (int k = 0; k < 2000; ++k) b.update(f);
     const float sh = std::sqrt(b.covariance()(4, 4)), back = b.state().cy + 0.5f * b.state().h;
-    std::printf("  sigma bounded: sigma_h after 2000 LiDAR-only sweeps (front, %zu returns) %.4f m (class std %.4f) ; back face moved %.5f m\n",
-                f.lidar.endpoints.size(), sh, params().prior_footprint_std, back - back0);
+    std::printf("  sigma bounded: sigma_h after 2000 LiDAR-only sweeps (front, %zu returns) %.4f m (class std %.4f) ; back face moved %.5f m ; "
+                "w moved %.5f m\n", f.lidar.endpoints.size(), sh, params().prior_footprint_std, back - back0, b.state().w - w0);
     CHECK(sh <= 1.01f * params().prior_footprint_std);
     CHECK(std::abs(back - back0) < 0.001f);
+    CHECK(std::abs(b.state().w - w0) < 0.002f);
 }
 
 static void parked_camera_is_one_look()

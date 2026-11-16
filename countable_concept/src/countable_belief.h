@@ -598,11 +598,16 @@ private:
     void accumulate_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     void accumulate_top(const CountableBeliefState& s, const CountableFrame& f,
                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
-    void accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    // fixed_precision (the persistent θ-only channel, spec §7c.6): ½λr² on violation with a CONSTANT λ (exact Hessian);
+    // false: the historic λ ∝ violation (the flag-off path, bit-identical).
+    void accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                                 bool fixed_precision = false) const;
     void accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
-                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision = false) const;
+    // first_crossing (the persistent LiDAR channel, spec §7c.6): every ray-set with LidarRays::first_crossing = true and
+    // surface_sigma_m = model_sigma_m; false: the ray-sets as staged (the historic sphere-trace).
     void accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
-                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool first_crossing = false) const;
     // The camera points' GN information, exactly as ai::update's accumulate lambda.
     void accumulate_points(const CountableBeliefState& s, const CountableFrame& f,
                            Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;

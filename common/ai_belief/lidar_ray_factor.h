@@ -57,6 +57,15 @@ struct LidarRays
     float surf_eps_m  = 2e-3f;   // surface-hit tolerance + finite-difference step (m)
     float max_range_m = 6.0f;    // stop marching (scene bound)
     int   max_steps   = 64;      // sphere-trace iteration cap
+
+    // FIRST CROSSING (spec 2026-11-15 lidar-measures §7c.6). false (default) ⇒ the historic loop below, bit for bit, for
+    // every caller. true ⇒ a ray hits the model only where the model SDF CHANGES SIGN along it (outside → inside) before
+    // the measured range + the Cauchy band (5·robust_c_m); the crossing is refined onto the surface, and the residual and
+    // Jacobian are taken there. A ray that dips under surf_eps past an edge WITHOUT crossing is a miss (no term).
+    bool  first_crossing  = false;
+    // Model-surface std σ_s (m), first_crossing only: a surface offset δ ~ N(0, σ_s²) moves the range by δ/(n̂·u), so the
+    // range variance gains σ_s²/(n̂·u)². 0 ⇒ the range variance alone.
+    float surface_sigma_m = 0.0f;
 };
 
 // ─── First-hit range COST (the same march, as a scalar objective) ───────────────────────────────
@@ -142,6 +151,90 @@ template <int N, class Model, class State>
 
 // ─── First-hit range factor (sphere-trace the model's own SDF → GN normal equations) ─────────────
 
+// ─── First-CROSSING variant (LidarRays::first_crossing; spec 2026-11-15 lidar-measures §7c.6) ────────────────────
+// Measured on the countable persistent path (creep investigation 11-16): the sphere-trace below declares a hit where
+// SDF < surf_eps, so a ray passing within 2 mm of a model EDGE without crossing the surface is scored at its point of
+// closest approach, where ∂SDF/∂t ≈ 0 — the implicit Jacobian explodes or mixes face normals, and the term switches
+// on and off with sub-mm motion of DOFs nothing else pins. Here "first hit" means what it says:
+//  - a hit is the first SIGN CHANGE of the model SDF along the ray (outside → inside) within the measured range + the
+//    Cauchy band; the bracket is bisected to 1e-4 m and the crossing placed inside it by linear interpolation of the
+//    SDF (exact on a face, and continuous in θ so the residual has no 1e-4 m staircase); no sign change ⇒ no term;
+//  - the residual and the Jacobian are taken ON the surface; n̂·u = ∂SDF/∂t is the outside-side difference there,
+//    the true incidence cosine;
+//  - the range variance is R_range + σ_s²/(n̂·u)² (σ_s = surface_sigma_m): with J = a/(n̂·u) the information is
+//    w·a·aᵀ/((n̂·u)²·R_range + σ_s²), bounded at grazing incidence with no skip.
+// The march steps by max(d, surf_eps) as the legacy loop does; it is bounded by the range only (the step is ≥ surf_eps).
+template <int N, class Model, class State>
+void accumulate_lidar_rays_first_crossing(const Model& m, const State& s, const LidarRays& rays,
+                                          Eigen::Matrix<float, N, N>& Id, Eigen::Matrix<float, N, 1>& bd)
+{
+    const int   P    = m.n_prims();
+    const float c2   = rays.robust_c_m * rays.robust_c_m;
+    const float tcap = std::min(rays.max_range_m, 1e9f);
+    const float ss2  = rays.surface_sigma_m * rays.surface_sigma_m;
+    constexpr float kBracket = 1e-4f;                     // bisection width (m)
+    // n̂·u by a one-sided (outside) difference over kSlope: short enough to stay on the entered face's side of an edge,
+    // long enough that float rounding of the positions (~3e-8 m at room scale) costs < 1e-4 in the slope.
+    constexpr float kSlope   = 1e-3f;
+    const auto sdf_min = [&](const Eigen::Vector3f& p, int& best) -> float
+    {
+        best = 0;
+        float d = m.sdf_prim(p, s, 0);
+        for (int k = 1; k < P; ++k)
+        {
+            const float dk = m.sdf_prim(p, s, k);
+            if (dk < d) { d = dk; best = k; }
+        }
+        return d;
+    };
+    for (std::size_t i = 0; i < rays.endpoints.size(); ++i)
+    {
+        const float wi = rays.weights.empty() ? 1.0f : rays.weights[i];
+        if (wi <= 0.0f) continue;
+        Eigen::Vector3f u = rays.endpoints[i] - rays.origin;
+        const float rho_obs = u.norm();
+        if (rho_obs < 1e-4f) continue;
+        u /= rho_obs;
+        const float tend = std::min(tcap, rho_obs + 5.0f * rays.robust_c_m);
+
+        int   best = 0;
+        float t = 0.0f, d = sdf_min(rays.origin, best);
+        if (d <= 0.0f) continue;                          // sensor inside the model: no outside → inside crossing
+        float ta = 0.0f, da = d;                          // last sample outside
+        bool  crossed = false;
+        while (true)
+        {
+            t += std::max(d, rays.surf_eps_m);
+            if (t > tend) break;
+            d = sdf_min(rays.origin + t * u, best);
+            if (d <= 0.0f) { crossed = true; break; }
+            ta = t; da = d;
+        }
+        if (not crossed) continue;                        // a near miss is a miss
+
+        float tb = t, db = d;                             // sdf(ta) > 0 ≥ sdf(tb)
+        while (tb - ta > kBracket)
+        {
+            const float tm = 0.5f * (ta + tb);
+            const float dm = sdf_min(rays.origin + tm * u, best);
+            if (dm > 0.0f) { ta = tm; da = dm; } else { tb = tm; db = dm; }
+        }
+        const float tc = ta + (tb - ta) * (da / (da - db));
+        const Eigen::Vector3f p = rays.origin + tc * u;
+        const float dc = sdf_min(p, best);                // arg-primitive AT the crossing
+        int tmp;
+        const float cinc = (dc - sdf_min(rays.origin + (tc - kSlope) * u, tmp)) / kSlope;   // n̂·u (< 0 entering)
+
+        const float e   = tc - rho_obs;
+        const float Rr  = (1.0f + (e * e) / c2) / rays.precision;
+        const float den = cinc * cinc * Rr + ss2;          // (n̂·u)²·var(range along J's scale)
+        if (not (den > 0.0f)) continue;                   // n̂·u = 0 exactly with σ_s = 0: the range says nothing
+        const Eigen::Matrix<float, N, 1> a = -m.sdf_jacobian(p, s, best);   // J = a / (n̂·u)
+        Id.noalias() += (wi / den) * (a * a.transpose());
+        bd.noalias() += -(wi * cinc * e / den) * a;
+    }
+}
+
 // Generic first-hit range factor. Templated on the belief model so it reuses the model's own SDF; N is the
 // state dimension (deduced call sites pass it explicitly). Folds into (Id, bd) with the engine convention.
 template <int N, class Model, class State>
@@ -169,6 +262,11 @@ void accumulate_lidar_rays(const Model& m, const State& s, const LidarRays& rays
     };
 
     assert(rays.weights.empty() or rays.weights.size() == rays.endpoints.size());
+    if (rays.first_crossing)
+    {
+        accumulate_lidar_rays_first_crossing<N>(m, s, rays, Id, bd);
+        return;
+    }
     for (std::size_t i = 0; i < rays.endpoints.size(); ++i)
     {
         const float wi = rays.weights.empty() ? 1.0f : rays.weights[i];

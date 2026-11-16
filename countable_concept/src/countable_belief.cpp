@@ -603,15 +603,19 @@ void CountableBelief::accumulate_top(const CountableBeliefState& s, const Counta
 //      hard. A plausibly-tall bed (deficit ≤ 0) feels NOTHING. Continuous covariance, not a clamp — the
 //      effect is that fitting a short cloud as a bed fights this prior → worse data fit → lower plausibility.
 //      A CLASS prior like (2)/(2a), so it is off in the likelihood-only size summary too (size_prior_off_).
+//      PERSISTENT θ-ONLY CHANNEL (fixed_precision, spec §7c.6): E = ½·gain·deficit² on violation, λ = gain CONSTANT. The
+//      growing λ above carries only half its energy's Hessian, and re-entered every GN iterate on the unsaturated θ-only
+//      channel it overshoots (measured: H 0.345 → 0.303 → 0.325 → 0.315 → 0.320); the fixed precision's GN step is exact.
 void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id,
-                                              Eigen::Matrix<float, 6, 1>& bd) const
+                                              Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision) const
 {
     if (params_.plaus_height_prior_gain > 0.0f and params_.plaus_height_soft > 1e-4f and not size_prior_off_)
     {
         const float deficit = params_.plaus_height_min - s.H;   // >0 ⇒ implausibly short
         if (deficit > 0.0f)
         {
-            const float lam_h = params_.plaus_height_prior_gain * (deficit / params_.plaus_height_soft);
+            const float lam_h = fixed_precision ? params_.plaus_height_prior_gain
+                                                : params_.plaus_height_prior_gain * (deficit / params_.plaus_height_soft);
             Id(2, 2) += lam_h;  bd(2) += lam_h * deficit;   // residual = (height_min − H) = deficit ⇒ pull H up (idx 2)
         }
     }
@@ -625,10 +629,17 @@ void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eig
 //      residual = min(0, gap − margin) is driven to 0 with a precision that GROWS as the back penetrates
 //      further (λ = wall_no_cross_precision · how-far-past). Flush (gap≈0) feels ~nothing; a wall is a hard
 //      boundary so it is strong. Continuous (soft), no clamp. Inert when f.wall.ok==false.
+//      PERSISTENT θ-ONLY CHANNEL (fixed_precision, spec §7c.6): a one-sided Gaussian (censored) factor "the back face is not
+//      beyond the wall, as known to σ_wall": E = ½·r²/σ_wall² on violation, λ = 1/f.wall.sigma_m² CONSTANT, exact Hessian
+//      λJJᵀ. Its restoring force is linear (k·r, not k·r²) and its Newton step on an active hinge is exact, so no
+//      half-Hessian overshoot on the unsaturated channel; zero on the legal side, so re-entering it every sweep cannot push a
+//      flush box off its wall. wall_no_cross_precision > 0 stays the on/off switch; f.wall.sigma_m ≤ 0 (no wall std) ⇒ the
+//      term is inert (a wall of unknown position std states no precision).
 void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
-                                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+                                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                                          bool fixed_precision) const
 {
-    if (f.wall.ok and params_.wall_no_cross_precision > 0.0f)
+    if (f.wall.ok and params_.wall_no_cross_precision > 0.0f and (not fixed_precision or f.wall.sigma_m > 0.0f))
     {
         const auto gap_of = [&](const CountableBeliefState& st)
         { return (back_centre(st) - f.wall.p).dot(f.wall.n); };   // >0 interior side, <0 crossed the wall
@@ -637,7 +648,8 @@ void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const C
         if (residual < 0.0f)
         {
             const float how_far_past = -residual;                                       // m past the boundary (>0)
-            const float lam_nc = params_.wall_no_cross_precision * how_far_past;         // precision grows with penetration
+            const float lam_nc = fixed_precision ? 1.0f / (f.wall.sigma_m * f.wall.sigma_m)
+                                                 : params_.wall_no_cross_precision * how_far_past;   // grows with penetration
             const float eps = params_.fd_eps;
             const float g   = params_.jac_slope_clamp;
             const Eigen::Matrix<float, 6, 1> v = s.vec();
@@ -656,12 +668,23 @@ void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const C
 }
 
 // (3) YOLO-independent LiDAR first-hit range factor, once per device ray-set (each own origin).
+//     first_crossing (the persistent LiDAR channel, spec §7c.6): a ray hits the box only where it CROSSES it, and the range
+//     variance carries the surface std model_sigma_m along the ray, σ_s²/(n̂·u)² (common/ai_belief/lidar_ray_factor.h).
 void CountableBelief::accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
-                                      Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+                                      Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool first_crossing) const
 {
-    rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
+    const auto one = [&](const rc::ai::LidarRays& lr)
+    {
+        if (not first_crossing) { rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd); return; }
+        if (lr.precision <= 0.0f or lr.endpoints.empty()) return;
+        rc::ai::LidarRays r = lr;
+        r.first_crossing  = true;
+        r.surface_sigma_m = params_.model_sigma_m;
+        rc::ai::accumulate_lidar_rays<6>(*this, s, r, Id, bd);
+    };
+    one(f.lidar);
     for (const auto& lr : f.lidar_extra)   // extra per-device ray-sets (e.g. low bpearl) — each own origin
-        rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd);
+        one(lr);
 }
 
 // ─── Persistent shared errors + the class prior counted once (spec lidar-measures §7c.1–7c.2) ──────────────────────
@@ -705,15 +728,15 @@ void CountableBelief::accumulate_channels(const CountableBeliefState& s_th, cons
         }
     }
     // LIDAR: the ray-sets, through b_L.
-    accumulate_rays(s_L, f, Id_L, bd_L);
+    accumulate_rays(s_L, f, Id_L, bd_L, /*first_crossing*/ true);
     // θ-ONLY, unsaturated: the biases cannot absorb a wall crossing or the class's relational prior.
     // The relational class prior, once PER ANCHOR (T6-1): each only when its context is staged on this admissible frame.
     if (admissible and not size_prior_off_ and f.wall.ok and not wall_prior_added_)
         accumulate_wall(s_th, f, Id_th, bd_th, /*base*/ true, /*boost*/ false, /*parallel*/ true);
     if (admissible and not size_prior_off_ and f.room_axis_ok and not axis_prior_added_)
         accumulate_room_axis(s_th, f, Id_th, bd_th);
-    accumulate_short_height(s_th, Id_th, bd_th);
-    accumulate_no_cross(s_th, f, Id_th, bd_th);
+    accumulate_short_height(s_th, Id_th, bd_th, /*fixed_precision*/ true);
+    accumulate_no_cross(s_th, f, Id_th, bd_th, /*fixed_precision*/ true);
 }
 
 // The params may be set after construction (the fitter does), so the joint state is seeded from Sigma_ on first use.
