@@ -410,7 +410,8 @@ float CountableBelief::flush_weight(const CountableBeliefState& s, const Countab
 // (width-axis · wall-normal → 0). Both precisions are scaled by the flush mixture weight, so an island
 // feels ~nothing. Finite-difference Jacobians (slope-clamped), mirroring cabinet_concept::accumulate_wall.
 void CountableBelief::accumulate_wall(const CountableBeliefState& s, const CountableFrame& f,
-                                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+                                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                                         bool base, bool boost, bool parallel) const
 {
     dbg_wall_gap_ = 0.0f; dbg_wall_lambda_ = 0.0f;
     if (not f.wall.ok or params_.wall_precision <= 0.0f) return;
@@ -432,7 +433,8 @@ void CountableBelief::accumulate_wall(const CountableBeliefState& s, const Count
     const float depth_unobs = 1.0f - two_sided_along(s, f, false);
     const float wgt = flush_posterior(s, f);
     const float lam_base = 1.0f / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
-    const float lam_flush = wgt * (lam_base + params_.depth_unobs_precision * depth_unobs);
+    // (base, boost) = (true, true) evaluates exactly the historic wgt·(lam_base + boost): the selects change no float op.
+    const float lam_flush = wgt * ((base ? lam_base : 0.0f) + (boost ? params_.depth_unobs_precision * depth_unobs : 0.0f));
     dbg_wall_lambda_ = lam_flush;
     if (not(lam_flush > 1e-6f)) return;
 
@@ -451,7 +453,7 @@ void CountableBelief::accumulate_wall(const CountableBeliefState& s, const Count
     Id.noalias() += lam_flush * (Jg * Jg.transpose());
     bd.noalias() += -lam_flush * Jg * gap;
 
-    if (params_.wall_parallel_precision > 0.0f)
+    if (parallel and params_.wall_parallel_precision > 0.0f)
     {
         // ★★AN OBJECT ADJACENT TO A WALL IS ALIGNED TO IT, WHATEVER POSE THE MASKS CAME FROM. The yaw was
         // decided by a flat constant of 200 against thousands of mask points seen obliquely, and the points
@@ -489,13 +491,29 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
     // A LiDAR-only frame (f.lidar_only) skips every Gaussian class anchor — flush/parallel, room axis, (2) footprint, (2a)
     // height: the predicted belief already contains them, and re-adding them each frame counts the prior as a measurement
     // (spec lidar-measures §7b, C1 = A). The one-sided constraints (2b), (2c) and the rays stay: zero unless violated.
+    // This is the FLAG-OFF path (params.persistent = false); the persistent path routes the same blocks to its channels in
+    // accumulate_channels. Order of the blocks is the historic one (the golden trajectory is bit-exact).
     if (not size_prior_off_ and not f.lidar_only)
         accumulate_wall(s, f, Id, bd);
+    if (not f.lidar_only)
+        accumulate_room_axis(s, f, Id, bd);
+    if (not size_prior_off_ and not f.lidar_only)
+        accumulate_footprint(s, f, Id, bd, true);
+    if (not size_prior_off_ and not f.lidar_only)
+        accumulate_height(s, Id, bd);
+    accumulate_top(s, f, Id, bd);
+    accumulate_short_height(s, Id, bd);
+    accumulate_no_cross(s, f, Id, bd);
+    accumulate_rays(s, f, Id, bd);
+}
 
-    // ROOM-AXIS ALIGNMENT (furniture prior): furniture is aligned with the room's axes whether or not it touches
-    // a wall. ¼·sin(4Δ) vanishes at every multiple of 90°, so the four yaws a box can take on the room grid are
-    // equally good and the front/back (and width/depth) decision stays with the data and the clearance prior.
-    if (f.room_axis_ok and params_.room_axis_std > 0.0f and not f.lidar_only)
+// ROOM-AXIS ALIGNMENT (furniture prior): furniture is aligned with the room's axes whether or not it touches
+// a wall. ¼·sin(4Δ) vanishes at every multiple of 90°, so the four yaws a box can take on the room grid are
+// equally good and the front/back (and width/depth) decision stays with the data and the clearance prior.
+void CountableBelief::accumulate_room_axis(const CountableBeliefState& s, const CountableFrame& f,
+                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+{
+    if (f.room_axis_ok and params_.room_axis_std > 0.0f)
     {
         const float dlt = s.yaw - f.room_axis;
         const float r   = 0.25f * std::sin(4.0f * dlt);
@@ -504,14 +522,18 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
         Id(5, 5) += lam * dr * dr;
         bd(5)    += -lam * dr * r;
     }
+}
 
-    // (2) FOOTPRINT prior: a TIGHT Gaussian pulling w → prior_footprint_m and h(depth) → prior_footprint_m
-    //     (a standard bed footprint ≈ 0.60×0.60 is very consistent), precision λ_wd = 1/prior_footprint_std².
-    //     H (index 2) is anchored separately just below (2a) — the top-of-box float needs a static anchor too.
-    if (params_.prior_footprint_std > 0.0f and not size_prior_off_ and not f.lidar_only)
+// (2) FOOTPRINT prior: a TIGHT Gaussian pulling w → prior_footprint_m and h(depth) → prior_footprint_m
+//     (a standard bed footprint ≈ 0.60×0.60 is very consistent), precision λ_wd = 1/prior_footprint_std².
+//     H (index 2) is anchored separately (2a) — the top-of-box float needs a static anchor too.
+//     anchor = false keeps only the depth_unobs_precision boost (the persistent path: the class Gaussian is Σ₀, counted once).
+void CountableBelief::accumulate_footprint(const CountableBeliefState& s, const CountableFrame& f,
+                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool anchor) const
+{
+    if (params_.prior_footprint_std > 0.0f and not size_prior_off_)
     {
-        const float lam_wd = 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std);
-
+        const float lam_wd = anchor ? 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std) : 0.0f;
         // An extent is IDENTIFIABLE only when the cloud spans it — points on BOTH opposing faces, which is what
         // separates the extent from the centre. A one-face view puts points on a single face and its many points
         // still drag that extent outward (the size common-mode caps σ, not the mean), so the footprint prior must
@@ -538,40 +560,52 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
         Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.depth_mean() - s.h);   // h≡depth(index 4)
     }
+}
 
-    // (2a) HEIGHT anchor (H, index 2): the box TOP is unconstrained-from-above — points at the real bed top
-    //      (z ≈ 1.9 m) sit on a SIDE face of any TALLER box, so they never pull H down, and prior_cov_diag's broad
-    //      hh is only the recursive-filter DRIFT allowance, NOT a static anchor. Without this term H random-walks
-    //      UP (observed: 2.37 m for a 1.9 m cloud) with no restoring force. This is a static Gaussian anchor toward
-    //      prior_height_m with precision 1/prior_height_std² — the DATA still sets the LOWER bound (points force
-    //      H ≥ cloud-top), the anchor only prevents float ABOVE it. Broad enough to let a genuinely tall/short
-    //      bed move when the cloud top demands it, firm enough to stop the runaway.
-    if (params_.prior_height_std > 0.0f and not size_prior_off_ and not f.lidar_only)
+// (2a) HEIGHT anchor (H, index 2): the box TOP is unconstrained-from-above — points at the real bed top
+//      (z ≈ 1.9 m) sit on a SIDE face of any TALLER box, so they never pull H down, and prior_cov_diag's broad
+//      hh is only the recursive-filter DRIFT allowance, NOT a static anchor. Without this term H random-walks
+//      UP (observed: 2.37 m for a 1.9 m cloud) with no restoring force. This is a static Gaussian anchor toward
+//      prior_height_m with precision 1/prior_height_std² — the DATA still sets the LOWER bound (points force
+//      H ≥ cloud-top), the anchor only prevents float ABOVE it. Broad enough to let a genuinely tall/short
+//      bed move when the cloud top demands it, firm enough to stop the runaway.
+void CountableBelief::accumulate_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id,
+                                        Eigen::Matrix<float, 6, 1>& bd) const
+{
+    if (params_.prior_height_std > 0.0f)
     {
         const float lam_H = 1.0f / (params_.prior_height_std * params_.prior_height_std);
         Id(2, 2) += lam_H;  bd(2) += lam_H * (params_.prior_height_m - s.H);        // H (index 2)
     }
+}
 
-    // (2d) TOP TRACKS THE OBSERVED ROBUST CLOUD TOP. The floor-anchored box top is a "free" upper boundary — empty
-    //      surface above the cloud is unpenalised, so H ratchets up on the over-segmented JUNK TAIL above the bed
-    //      (a mask whose real top is ~1.93 m still has a few % of points running to ~2.3 m → H floated to 2.37). A
-    //      soft one-sided cap loses to that tail (its force grows AS H drops and more junk is exposed). Instead pin H
-    //      FIRMLY to z_top_obs (the p97 top, which sits BELOW the junk tail): a two-sided anchor whose force competes
-    //      directly with the tail. The data lower-bound (front points force H ≥ real top) keeps it from under-fitting.
-    //      z_top_obs is data-derived (the observed top), so a firm precision is honest, not a magic height number.
+// (2d) TOP TRACKS THE OBSERVED ROBUST CLOUD TOP. The floor-anchored box top is a "free" upper boundary — empty
+//      surface above the cloud is unpenalised, so H ratchets up on the over-segmented JUNK TAIL above the bed
+//      (a mask whose real top is ~1.93 m still has a few % of points running to ~2.3 m → H floated to 2.37). A
+//      soft one-sided cap loses to that tail (its force grows AS H drops and more junk is exposed). Instead pin H
+//      FIRMLY to z_top_obs (the p97 top, which sits BELOW the junk tail): a two-sided anchor whose force competes
+//      directly with the tail. The data lower-bound (front points force H ≥ real top) keeps it from under-fitting.
+//      z_top_obs is data-derived (the observed top), so a firm precision is honest, not a magic height number.
+void CountableBelief::accumulate_top(const CountableBeliefState& s, const CountableFrame& f,
+                                     Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+{
     if (f.z_top_obs > 0.0f and params_.top_no_float_precision > 0.0f)
     {
         const float lam_tf = params_.top_no_float_precision;
         const float target = f.z_top_obs + params_.top_no_float_margin_m;
         Id(2, 2) += lam_tf;  bd(2) += lam_tf * (target - s.H);   // pull H → observed robust top (both directions)
     }
+}
 
-    // (2b) SHORT-HEIGHT prior (the "a 70 cm bed is improbable" term): a ONE-SIDED Gaussian factor that acts
-    //      ONLY when H < plaus_height_min, pulling H up toward it. Its precision GROWS as H falls further below
-    //      (λ_h = gain·deficit/soft), so a mildly-short bed is nudged gently and a 70 cm cloud is resisted
-    //      hard. A plausibly-tall bed (deficit ≤ 0) feels NOTHING. Continuous covariance, not a clamp — the
-    //      effect is that fitting a short cloud as a bed fights this prior → worse data fit → lower plausibility.
-    //      A CLASS prior like (2)/(2a), so it is off in the likelihood-only size summary too (size_prior_off_).
+// (2b) SHORT-HEIGHT prior (the "a 70 cm bed is improbable" term): a ONE-SIDED Gaussian factor that acts
+//      ONLY when H < plaus_height_min, pulling H up toward it. Its precision GROWS as H falls further below
+//      (λ_h = gain·deficit/soft), so a mildly-short bed is nudged gently and a 70 cm cloud is resisted
+//      hard. A plausibly-tall bed (deficit ≤ 0) feels NOTHING. Continuous covariance, not a clamp — the
+//      effect is that fitting a short cloud as a bed fights this prior → worse data fit → lower plausibility.
+//      A CLASS prior like (2)/(2a), so it is off in the likelihood-only size summary too (size_prior_off_).
+void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id,
+                                              Eigen::Matrix<float, 6, 1>& bd) const
+{
     if (params_.plaus_height_prior_gain > 0.0f and params_.plaus_height_soft > 1e-4f and not size_prior_off_)
     {
         const float deficit = params_.plaus_height_min - s.H;   // >0 ⇒ implausibly short
@@ -581,15 +615,19 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
             Id(2, 2) += lam_h;  bd(2) += lam_h * deficit;   // residual = (height_min − H) = deficit ⇒ pull H up (idx 2)
         }
     }
+}
 
-    // (2c) WALL NO-CROSS (one-sided): the flush term (accumulate_wall) is TWO-SIDED — it drives the back-face gap
-    //      → 0 but does NOT resist the box being fit CROSSING the wall (back extending PAST it into the wall/
-    //      exterior), and its flush weight exp(−(gap/reach)²) has decayed to ~0 once the back is well past, so it
-    //      cannot pull it back. This ONE-SIDED factor (same form as the short-height prior above) resists
-    //      penetration only: with gap = (back_centre − wall.p)·(inward normal) (>0 inside the room, <0 crossed),
-    //      residual = min(0, gap − margin) is driven to 0 with a precision that GROWS as the back penetrates
-    //      further (λ = wall_no_cross_precision · how-far-past). Flush (gap≈0) feels ~nothing; a wall is a hard
-    //      boundary so it is strong. Continuous (soft), no clamp. Inert when f.wall.ok==false.
+// (2c) WALL NO-CROSS (one-sided): the flush term (accumulate_wall) is TWO-SIDED — it drives the back-face gap
+//      → 0 but does NOT resist the box being fit CROSSING the wall (back extending PAST it into the wall/
+//      exterior), and its flush weight exp(−(gap/reach)²) has decayed to ~0 once the back is well past, so it
+//      cannot pull it back. This ONE-SIDED factor (same form as the short-height prior above) resists
+//      penetration only: with gap = (back_centre − wall.p)·(inward normal) (>0 inside the room, <0 crossed),
+//      residual = min(0, gap − margin) is driven to 0 with a precision that GROWS as the back penetrates
+//      further (λ = wall_no_cross_precision · how-far-past). Flush (gap≈0) feels ~nothing; a wall is a hard
+//      boundary so it is strong. Continuous (soft), no clamp. Inert when f.wall.ok==false.
+void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
+                                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+{
     if (f.wall.ok and params_.wall_no_cross_precision > 0.0f)
     {
         const auto gap_of = [&](const CountableBeliefState& st)
@@ -615,11 +653,235 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
             bd.noalias() += -lam_nc * Jg * residual;   // residual<0 ⇒ push the gap UP (back out of the wall)
         }
     }
+}
 
-    // (3) YOLO-independent LiDAR first-hit range factor, once per device ray-set (each own origin).
+// (3) YOLO-independent LiDAR first-hit range factor, once per device ray-set (each own origin).
+void CountableBelief::accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
+                                      Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+{
     rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
     for (const auto& lr : f.lidar_extra)   // extra per-device ray-sets (e.g. low bpearl) — each own origin
         rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd);
+}
+
+// ─── Persistent shared errors + the class prior counted once (spec lidar-measures §7c.1–7c.2) ──────────────────────
+
+// The camera points' information, exactly ai::update's accumulate lambda (same R, same responsibilities, same skip).
+void CountableBelief::accumulate_points(const CountableBeliefState& s, const CountableFrame& f,
+                                        Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+{
+    const float sig2 = sigma2();
+    for (std::size_t i = 0; i < f.points.size(); ++i)
+    {
+        const float R = (i < f.R.size() and f.R[i] > 0.0f) ? f.R[i] : sig2;
+        const auto  r = responsibilities(f.points[i], s, R);
+        const float w = r[0] / R;
+        if (w < 1e-6f) continue;
+        const float d = sdf_prim(f.points[i], s, 0);
+        const Eigen::Matrix<float, 6, 1> J = sdf_jacobian(f.points[i], s, 0);
+        Id.noalias() += w * (J * J.transpose());
+        bd.noalias() += -w * J * d;
+    }
+}
+
+void CountableBelief::accumulate_channels(const CountableBeliefState& s_th, const CountableBeliefState& s_cam,
+                                          const CountableBeliefState& s_L, const CountableFrame& f,
+                                          Eigen::Matrix<float, 6, 6>& Id_cam, Eigen::Matrix<float, 6, 1>& bd_cam,
+                                          Eigen::Matrix<float, 6, 6>& Id_L,   Eigen::Matrix<float, 6, 1>& bd_L,
+                                          Eigen::Matrix<float, 6, 6>& Id_th,  Eigen::Matrix<float, 6, 1>& bd_th) const
+{
+    Id_cam.setZero(); bd_cam.setZero(); Id_L.setZero(); bd_L.setZero(); Id_th.setZero(); bd_th.setZero();
+    const bool camera     = not f.points.empty();
+    const bool admissible = camera and not f.lidar_only;
+    if (camera)
+    {   // CAMERA: what the points say, through b_cam. The depth_unobs_precision shares stay here every camera frame (§7c.1:
+        // the one class-mean term still counted per frame, counted once while parked through b_cam).
+        accumulate_points(s_cam, f, Id_cam, bd_cam);
+        accumulate_top(s_cam, f, Id_cam, bd_cam);
+        if (not size_prior_off_)
+        {
+            accumulate_wall(s_cam, f, Id_cam, bd_cam, /*base*/ false, /*boost*/ true, /*parallel*/ false);
+            accumulate_footprint(s_cam, f, Id_cam, bd_cam, /*anchor*/ false);
+        }
+    }
+    // LIDAR: the ray-sets, through b_L.
+    accumulate_rays(s_L, f, Id_L, bd_L);
+    // θ-ONLY, unsaturated: the biases cannot absorb a wall crossing or the class's relational prior.
+    if (admissible and not prior_added_ and not size_prior_off_)
+    {   // the relational class prior, once: flush/parallel (its anchor share) and the room axis
+        accumulate_wall(s_th, f, Id_th, bd_th, /*base*/ true, /*boost*/ false, /*parallel*/ true);
+        accumulate_room_axis(s_th, f, Id_th, bd_th);
+    }
+    accumulate_short_height(s_th, Id_th, bd_th);
+    accumulate_no_cross(s_th, f, Id_th, bd_th);
+}
+
+// The params may be set after construction (the fitter does), so the joint state is seeded from Sigma_ on first use.
+void CountableBelief::ensure_joint()
+{
+    if (joint_init_) return;
+    P_.setZero();
+    P_.topLeftCorner<N, N>() = Sigma_.cast<double>();
+    b_.setZero(); sig_prev_.setZero();
+    joint_init_ = true;
+}
+
+// sanitize_covariance under persistent: the same self-sealing hazard, on P_. Re-seed θθ to the class P, each latent to its
+// last marginal (σ_prev²), cross terms 0, b = 0, and clear prior_added_ so the relational prior re-enters once.
+void CountableBelief::sanitize_joint()
+{
+    ensure_joint();
+    bool bad = not (P_.allFinite() and b_.allFinite());
+    for (int i = 0; i < N and not bad; ++i) bad = not (P_(i, i) > 0.0);
+    for (int j = 0; j < K and not bad; ++j) bad = not (P_(N + j, N + j) >= 0.0);
+    if (not bad) return;
+    P_.setZero();
+    P_.diagonal().head<N>() = prior_cov_diag().cast<double>();
+    P_.diagonal().tail<K>() = sig_prev_.cwiseProduct(sig_prev_);
+    b_.setZero();
+    prior_added_ = false;
+    Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
+    omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();
+    size_lik_ = {};
+    std::printf("CountableBelief: DEGENERATE joint P (non-finite or non-positive diagonal) — re-seeded from prior\n");
+}
+
+// θ's predict on the θθ block of P_: Σ ← Σ + q_scale·Q (F = I, static), then the engine's clamp_to_prior congruence
+// (ai::predict) on θ's rows AND columns of P_, so the θ–b cross blocks scale with it and P_ stays PSD. The latents are
+// predicted only on the update that measures them (their ρ spans the time since their channel's last update).
+void CountableBelief::predict_theta_joint(float q_scale)
+{
+    ensure_joint();
+    const Eigen::Matrix<float, 6, 1> q  = process_noise_diag();
+    const Eigen::Matrix<float, 6, 1> p0 = prior_cov_diag();
+    for (int i = 0; i < N; ++i) P_(i, i) += double(std::max(0.0f, q_scale)) * double(q(i));
+    for (int i = 0; i < N; ++i)
+        if (p0(i) > 0.0f and P_(i, i) > double(p0(i)))
+        {
+            const double sc = std::sqrt(double(p0(i)) / P_(i, i));   // symmetric rescale keeps P PSD
+            P_.row(i) *= sc;
+            P_.col(i) *= sc;
+        }
+    Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
+    prior_mean_ = state_.vec();
+}
+
+// One persistent update (§7c.2 steps 1–4): predict; per GN iterate restart the biases at b̄, linearise each channel at its
+// own measured quantity, marginalise the channel's fresh (ego-motion) covariance, joint step; joint covariance at the
+// converged θ (b̄ restart, as the engine re-accumulates at its converged state).
+float CountableBelief::update_persistent(const CountableFrame& f)
+{
+    using Mat6 = Eigen::Matrix<float, 6, 6>;
+    using Vec6 = Eigen::Matrix<float, 6, 1>;
+    using Vec6d = Eigen::Matrix<double, 6, 1>;
+    using VecXd = Eigen::Matrix<double, N + K, 1>;
+    namespace pu = rc::ai::persistent;
+
+    predict_theta_joint(1.0f);                                         // step 1, θ
+    dbg_iterates_.clear();
+    dbg_Pbar_tt_ = Sigma_;
+    const bool camera = not f.points.empty();
+    const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
+    const bool lidar  = usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);   // has_extra_data's test
+    if (not camera and not (f.lidar_only and lidar))
+        return 0.0f;                                                   // predict-only, as the engine
+
+    {   // step 1, latents: those whose channel measures this frame (the chain whenever either does)
+        VecKd rho = VecKd::Ones(), sn = sig_prev_;
+        const auto take = [&](int off, int n, const float* r, const float* s2)
+        { for (int j = 0; j < n; ++j) { rho(off + j) = r[j]; sn(off + j) = std::sqrt(std::max(0.0, double(s2[j]))); } };
+        take(kChain, 2, f.rho_chain.data(), f.sig2_chain.data());
+        if (camera) take(kCam, 6, f.rho_cam.data(), f.sig2_cam.data());
+        if (lidar)  take(kL,   6, f.rho_L.data(),   f.sig2_L.data());
+        VecXd x; x << state_.vec().cast<double>(), b_;
+        pu::predict_latents<N, K>(P_, x, rho, sig_prev_, sn);
+        b_ = x.tail<K>();
+        sig_prev_ = sn;
+    }
+    const Mat20d P_bar = P_;
+    VecXd x_bar; x_bar << state_.vec().cast<double>(), b_;
+    Sigma_ = P_bar.topLeftCorner<N, N>().cast<float>();                // flush_weight reads the predicted Σ, as in the engine
+
+    // Channel selectors: camera points measure θ + E b_chain + b_cam, rays θ + E b_chain + b_L.
+    Eigen::Matrix<double, N, K> B_cam = Eigen::Matrix<double, N, K>::Zero(), B_L = B_cam;
+    B_cam(0, kChain) = 1.0; B_cam(1, kChain + 1) = 1.0; B_cam.block<N, 6>(0, kCam) = Eigen::Matrix<double, 6, 6>::Identity();
+    B_L(0, kChain)   = 1.0; B_L(1, kChain + 1)   = 1.0; B_L.block<N, 6>(0, kL)     = Eigen::Matrix<double, 6, 6>::Identity();
+    Mat6 Sf_cam = Mat6::Zero(), Sf_L = Mat6::Zero();
+    for (int i = 0; i < 6; ++i) { Sf_cam(i, i) = std::max(0.0f, f.fresh_cam[i]); Sf_L(i, i) = std::max(0.0f, f.fresh_L[i]); }
+    const Vec6d bbar_cam = B_cam * b_, bbar_L = B_L * b_;
+
+    std::vector<pu::Channel<N, K>> channels;
+    pu::FreshInfo<N> theta_only;
+    Mat6 Id_cam, Id_L, Id_th; Vec6 bd_cam, bd_L, bd_th;
+    const auto build = [&](const Vec6d& th)
+    {
+        const auto st  = CountableBeliefState::from_vec(th.cast<float>());
+        const auto sc  = CountableBeliefState::from_vec((th + bbar_cam).cast<float>());
+        const auto sl  = CountableBeliefState::from_vec((th + bbar_L).cast<float>());
+        accumulate_channels(st, sc, sl, f, Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th);
+        channels.clear();
+        if (camera) { pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Id_cam, bd_cam, Sf_cam); c.B = B_cam; channels.push_back(c); }
+        if (lidar)  { pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Id_L,   bd_L,   Sf_L);   c.B = B_L;   channels.push_back(c); }
+        theta_only.I = Id_th.cast<double>();
+        theta_only.g = bd_th.cast<double>();
+    };
+
+    Vec6d theta = x_bar.head<N>();
+    VecKd b_post = b_;
+    for (int it = 0; it < params_.gn_iters; ++it)
+    {
+        build(theta);                                                  // step 2: x̃_k = (θ_k, b̄)
+        VecXd x_tilde; x_tilde << theta, b_;
+        const VecXd xn = pu::joint_step<N, K>(x_tilde, x_bar, P_bar,
+                                              std::span<const pu::Channel<N, K>>(channels), theta_only);   // step 3
+        if (not xn.allFinite()) break;
+        CountableBeliefState s = CountableBeliefState::from_vec(xn.head<N>().cast<float>());
+        apply_constraints(s);
+        theta  = s.vec().cast<double>();                               // keep θ_{k+1}
+        b_post = xn.tail<K>();                                         // the last iterate's b is the posterior b
+        dbg_iterates_.push_back(s.vec());
+    }
+    CountableBeliefState s = CountableBeliefState::from_vec(theta.cast<float>());
+    apply_constraints(s);
+    canonicalize(s);
+    state_ = s;
+
+    build(state_.vec().cast<double>());                                // step 4 at the converged θ (b̄ restart)
+    P_ = pu::joint_cov<N, K>(P_bar, std::span<const pu::Channel<N, K>>(channels), theta_only);
+    b_ = b_post;
+    Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
+    dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
+    if (camera and not f.lidar_only) prior_added_ = true;              // the relational prior has entered, once
+
+    if (not camera) return 0.0f;
+    // Per-point energy at what the camera measures (θ + E b_chain + b_cam, posterior b), as the engine's surface energy.
+    const auto s_cam = CountableBeliefState::from_vec((state_.vec().cast<double>() + B_cam * b_).cast<float>());
+    const float sig2 = sigma2();
+    double energy = 0.0;
+    for (std::size_t i = 0; i < f.points.size(); ++i)
+    {
+        const float R = (i < f.R.size() and f.R[i] > 0.0f) ? f.R[i] : sig2;
+        const auto  r = responsibilities(f.points[i], s_cam, R);
+        const float d = sdf_prim(f.points[i], s_cam, 0);
+        energy += 0.5 * r[0] * d * d / R;
+    }
+    return static_cast<float>(energy / static_cast<double>(f.points.size()));
+}
+
+// update() under persistent: the same cycle around the joint update. The size summary is unchanged (§7c.1). ω learns from
+// camera-measured cycles only (post minus previous posterior), as today: a LiDAR-only frame is the rays' correction of a
+// belief the camera cycles built, and a point-free cycle measured nothing.
+float CountableBelief::update_persistent_cycle(const CountableFrame& frame)
+{
+    point_wall_ = frame.wall;
+    sanitize_covariance();
+    const Eigen::Matrix<float, 6, 1> before = state_.vec();
+    const float fe = update_persistent(frame);
+    sanitize_covariance();
+    predict_size_likelihood(1.0f);
+    if (not frame.points.empty()) update_size_likelihood(frame);
+    if (not frame.lidar_only and not frame.points.empty()) update_volatility(state_.vec() - before);
+    return fe;
 }
 
 // ─── Footprint second-moment (geometry helper for the optional birth seed) ──────────────────────────
@@ -737,6 +999,19 @@ void CountableBelief::apply_mode_rotation(int k)
         Sigma_.row(3).swap(Sigma_.row(4));
         Sigma_.col(3).swap(Sigma_.col(4));
         std::swap(prior_mean_(3), prior_mean_(4));
+        if (joint_init_)
+        {   // the persistent joint state relabels with θ: w, h of θ, b_cam and b_L (b_chain is a room-frame error, untouched)
+            for (const int off : {0, N + kCam, N + kL})
+            {
+                P_.row(off + 3).swap(P_.row(off + 4));
+                P_.col(off + 3).swap(P_.col(off + 4));
+            }
+            for (const int off : {kCam, kL})
+            {
+                std::swap(b_(off + 3), b_(off + 4));
+                std::swap(sig_prev_(off + 3), sig_prev_(off + 4));
+            }
+        }
         size_lik_.mean.tail<2>().reverseInPlace();                       // the data summary relabels with the state
         size_lik_.info.row(1).swap(size_lik_.info.row(2));
         size_lik_.info.col(1).swap(size_lik_.info.col(2));

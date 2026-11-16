@@ -26,6 +26,7 @@
 #include "countable_class_evidence.h"
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
+#include "../../common/ai_belief/persistent_update.h"    // persistent shared-error latents (lidar-measures §7c.2)
 
 namespace rc
 {
@@ -240,6 +241,14 @@ struct CountableBeliefParams
     float common_mode_size_std = 0.02f;  // shared size error H,w,h (m)
     float common_mode_yaw_std  = 0.03f;  // shared yaw error (rad)
 
+    // ── PERSISTENT SHARED ERRORS + THE CLASS PRIOR COUNTED ONCE (spec 2026-11-15 lidar-measures §7c.1–7c.2) ──────────
+    // false ⇒ today's per-frame Woodbury path, bit-identical (lidar_golden_test). true ⇒ the belief carries latents
+    // b = (b_chain (cx,cy), b_cam (6), b_L (6)) beside θ in a 20×20 double covariance; the camera points measure
+    // θ + E b_chain + b_cam, the rays θ + E b_chain + b_L; the relational anchors (wall flush/parallel, room axis) enter once,
+    // at the first admissible camera update; the footprint (2) and height (2a) anchors never (Σ₀ = the class P carries them);
+    // predict clamps Σθθ to the class P (the engine's clamp_to_prior congruence). Set from Model.LidarMeasuresOnGated (Task 9).
+    bool  persistent = false;
+
     // Optimiser
     int   gn_iters = 4;              // Gauss-Newton iterations per frame
     float fd_eps   = 1e-3f;          // finite-difference step for SDF Jacobians (m / rad)
@@ -298,6 +307,21 @@ struct CountableFrame
     // no-cross). The Gaussian class anchors (flush/parallel, room axis, footprint, height) are NOT added: the predicted
     // belief already contains them, and re-adding them each frame would count the prior as a measurement.
     bool lidar_only = false;
+
+    // ── Persistent shared errors (spec lidar-measures §7c.2). READ ONLY WHEN params.persistent; the defaults (ρ = 0, zero
+    //    variances) are never read on the flag-off path. Order of the 6-vectors: θ's [cx, cy, H, w, h, yaw]. ──────────────
+    // Lag-1 correlation of each latent since ITS channel's previous update of this instance (1 = parked, 0 = a new view).
+    std::array<float, 6> rho_cam{};      // camera points' sensor-specific shared error b_cam
+    std::array<float, 6> rho_L{};        // LiDAR rays' sensor-specific shared error b_L
+    std::array<float, 2> rho_chain{};    // localisation (pose-chain) error b_chain on (cx, cy)
+    // The latents' marginal variances at THIS frame (σ_now²): b_cam = floors + range + obliquity + moments (no chain, no
+    // ego-motion); b_L = the config floors; b_chain = the localisation part of the chain cov. 0 = a zero-variance latent.
+    std::array<float, 6> sig2_cam{};
+    std::array<float, 6> sig2_L{};
+    std::array<float, 2> sig2_chain{};
+    // Per-frame FRESH (ego-motion) variances of each channel, marginalised inside the channel (ρ = 0 by construction).
+    std::array<float, 6> fresh_cam{};
+    std::array<float, 6> fresh_L{};
 };
 
 // The bed generative model wired onto the shared rc::ai recursive-Laplace engine. Supplies only the
@@ -348,6 +372,7 @@ public:
     // (Belongs in common/ai_belief eventually — every agent on this engine has the same exposure.)
     void sanitize_covariance()
     {
+        if (params_.persistent) { sanitize_joint(); return; }
         bool bad = not Sigma_.allFinite();
         for (int i = 0; i < N and not bad; ++i) bad = not (Sigma_(i, i) > 0.0f);
         if (not bad) return;
@@ -360,6 +385,7 @@ public:
 
     float update(const CountableFrame& frame)
     {
+        if (params_.persistent) return update_persistent_cycle(frame);
         point_wall_ = frame.wall;
         sanitize_covariance();
         const Eigen::Matrix<float, 6, 1> before = state_.vec();
@@ -393,14 +419,55 @@ public:
     const Eigen::Matrix<float, 6, 1>& log_volatility() const { return omega_; }
     // Retention time constant per DOF: τ = Σ_ii / exp(ω_i) frames — "how long this DOF remembers".
     Eigen::Matrix<float, 6, 1> retention_frames() const;
-    void  predict()                               { sanitize_covariance(); ai::predict<N>(*this, Sigma_, state_, prior_mean_); predict_size_likelihood(1.0f); }
+    void  predict()
+    {
+        sanitize_covariance();
+        if (params_.persistent) predict_theta_joint(1.0f);
+        else ai::predict<N>(*this, Sigma_, state_, prior_mean_);
+        predict_size_likelihood(1.0f);
+    }
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     {
-        ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s);
+        if (params_.persistent) predict_theta_joint(dt_nominal_s > 1e-6f ? dt_s / dt_nominal_s : 1.0f);   // ai::inflate_for_age's q_scale
+        else ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s);
         predict_size_likelihood(dt_nominal_s > 1e-6f ? dt_s / dt_nominal_s : 1.0f);   // same q_scale as inflate_for_age
     }
     Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
+
+    // ── Persistent shared errors (params.persistent; spec lidar-measures §7c.1–7c.2) ─────────────────────────────────
+    // Joint state x = (θ, b) ∈ ℝ²⁰, b = (b_chain (cx, cy), b_cam (6), b_L (6)); covariance() is P's θθ block in float.
+    static constexpr int K = 14;                          // latent DOFs
+    static constexpr int kChain = 0, kCam = 2, kL = 8;    // offsets of each latent inside b
+    using Mat20d = Eigen::Matrix<double, N + K, N + K>;
+    using VecKd  = Eigen::Matrix<double, K, 1>;
+    const VecKd&  latent_mean() const { return b_; }
+    VecKd         latent_std()  const { return P_.diagonal().tail<K>().cwiseMax(0.0).cwiseSqrt(); }
+    const Mat20d& joint_covariance() const { return P_; }
+    // The relational class anchors (wall flush/parallel, room axis) have entered this belief (first admissible camera
+    // update). A recall (LTOM/LTSM) restores a belief with it set; sanitize_covariance clears it (the prior re-enters once).
+    bool prior_added() const { return prior_added_; }
+    void set_prior_added(bool v) { prior_added_ = v; }
+    // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
+    // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the ray-sets; θ-only = (2b), (2c) and,
+    // on the first admissible camera update only (not prior_added_), wall flush/parallel (1) + the room axis. Each channel
+    // is linearised at its own state: s_th = θ_k, s_cam = θ_k + E b̄_chain + b̄_cam, s_L = θ_k + E b̄_chain + b̄_L.
+    void accumulate_channels(const CountableBeliefState& s_th, const CountableBeliefState& s_cam,
+                             const CountableBeliefState& s_L, const CountableFrame& f,
+                             Eigen::Matrix<float, 6, 6>& Id_cam, Eigen::Matrix<float, 6, 1>& bd_cam,
+                             Eigen::Matrix<float, 6, 6>& Id_L,   Eigen::Matrix<float, 6, 1>& bd_L,
+                             Eigen::Matrix<float, 6, 6>& Id_th,  Eigen::Matrix<float, 6, 1>& bd_th) const;
+    // Test/diagnostic record of the last persistent update: θ after each GN iterate, the predicted θθ block, and the
+    // channel information at the converged state.
+    const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return dbg_iterates_; }
+    const Eigen::Matrix<float, 6, 6>& dbg_Pbar_tt() const { return dbg_Pbar_tt_; }
+    const Eigen::Matrix<float, 6, 6>& dbg_Id_th()   const { return dbg_Id_th_; }
+    const Eigen::Matrix<float, 6, 6>& dbg_Id_cam()  const { return dbg_Id_cam_; }
+    const Eigen::Matrix<float, 6, 6>& dbg_Id_L()    const { return dbg_Id_L_; }
+    // Test hooks.
+    Mat20d& joint_covariance_for_test() { ensure_joint(); return P_; }
+    void    set_latent_mean_for_test(const VecKd& b) { ensure_joint(); b_ = b; }
+    void    apply_mode_rotation_for_test(int k) { apply_mode_rotation(k); }
 
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
     float sdf_box(const Eigen::Vector3f& p, const CountableBeliefState& s) const;
@@ -512,9 +579,37 @@ public:
     static bool self_test();
 
 private:
-    // Wall-flush + wall-parallel structural factor (ported from cabinet_concept). Inert if f.wall.ok==false.
+    // Wall-flush + wall-parallel structural factor (ported from cabinet_concept). Inert if f.wall.ok==false. The flush
+    // precision is wgt·(lam_base + depth_unobs_precision·depth_unobs): `base` keeps the anchor share, `boost` the
+    // depth-unobservability share, `parallel` the wall-parallel term (all true = the flag-off factor, bit for bit).
     void accumulate_wall(const CountableBeliefState& s, const CountableFrame& f,
+                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                         bool base = true, bool boost = true, bool parallel = true) const;
+    // The blocks of accumulate_extra, each adding its term into (Id, bd); accumulate_extra calls them in its historic order
+    // (bit-identical), the persistent path routes them to channels.
+    void accumulate_room_axis(const CountableBeliefState& s, const CountableFrame& f,
+                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    // (2) footprint: anchor = the class Gaussian (λ = 1/prior_footprint_std²); the depth_unobs_precision boost always.
+    void accumulate_footprint(const CountableBeliefState& s, const CountableFrame& f,
+                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool anchor) const;
+    void accumulate_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    void accumulate_top(const CountableBeliefState& s, const CountableFrame& f,
+                        Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    void accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    void accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
+                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    void accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    // The camera points' GN information, exactly as ai::update's accumulate lambda.
+    void accumulate_points(const CountableBeliefState& s, const CountableFrame& f,
+                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+
+    // Persistent path (params.persistent).
+    void  ensure_joint();                                 // P_ from Sigma_ the first time (params may be set after construction)
+    void  sanitize_joint();                               // sanitize_covariance under persistent
+    void  predict_theta_joint(float q_scale);             // θθ: +Q, then the clamp_to_prior congruence on θ's rows/cols of P_
+    float update_persistent(const CountableFrame& frame); // predict + GN with the latent restart + joint covariance
+    float update_persistent_cycle(const CountableFrame& frame);   // update() under persistent (size summary, ω as today)
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
     float two_sided_along(const CountableBeliefState& s, const CountableFrame& f, bool along_x) const;
     // The same identifiability statistic with no feature switch: fraction in [0, 1] of the cloud that spans the extent
@@ -581,6 +676,20 @@ private:
     mutable float   dbg_wall_gap_    = 0.0f;
     mutable float   dbg_wall_lambda_ = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
+
+    // Persistent joint state (params.persistent): P_ over x = (θ, b), b_ the latent mean, sig_prev_ the σ each latent was
+    // last predicted at (0 ⇒ never measured: the next predict draws it as a new source), prior_added_ = the relational
+    // anchors have entered. Sigma_ mirrors P_'s θθ block in float for every reader of covariance().
+    Mat20d P_ = Mat20d::Zero();
+    VecKd  b_ = VecKd::Zero();
+    VecKd  sig_prev_ = VecKd::Zero();
+    bool   joint_init_  = false;
+    bool   prior_added_ = false;
+    std::vector<Eigen::Matrix<float, 6, 1>> dbg_iterates_;
+    Eigen::Matrix<float, 6, 6> dbg_Pbar_tt_ = Eigen::Matrix<float, 6, 6>::Zero();
+    Eigen::Matrix<float, 6, 6> dbg_Id_th_   = Eigen::Matrix<float, 6, 6>::Zero();
+    Eigen::Matrix<float, 6, 6> dbg_Id_cam_  = Eigen::Matrix<float, 6, 6>::Zero();
+    Eigen::Matrix<float, 6, 6> dbg_Id_L_    = Eigen::Matrix<float, 6, 6>::Zero();
 };
 
 }  // namespace rc

@@ -140,3 +140,12 @@ target_include_directories(viewpoint_rho_test PRIVATE ../src)
 target_compile_options(viewpoint_rho_test PRIVATE -O2)
 target_link_libraries(viewpoint_rho_test PRIVATE Eigen3::Eigen)
 add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)
+
+# The countable belief with persistent shared errors and the class prior counted once (spec 2026-11-15 lidar-measures §7c.1–7c.2).
+add_executable(persistent_belief_test persistent_belief_test.cpp ../src/countable_belief.cpp)
+target_include_directories(persistent_belief_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(persistent_belief_test PRIVATE GOLDEN_BIN="$<TARGET_FILE:lidar_golden_test>")
+target_compile_options(persistent_belief_test PRIVATE -O2)
+target_link_libraries(persistent_belief_test PRIVATE Eigen3::Eigen)
+add_dependencies(persistent_belief_test lidar_golden_test)
+add_test(NAME persistent_belief_test COMMAND persistent_belief_test)
