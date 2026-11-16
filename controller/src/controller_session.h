@@ -19,7 +19,6 @@
 #include "motion_verdict.h"
 #include "controller_anchor_servo.h"
 #include "lidar_guard_buffer.h"
-#include "doorway_gap.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
@@ -1304,17 +1303,6 @@ private:
     std::optional<AnchorCrossReading> anchor_drawn_;
     std::uint64_t door_views_last_ms_ = 0;   // throttle of the canvas's believed-door drawing (door_leaf_geometry.h)
     std::uint64_t approach_view_last_ms_ = 0;   // throttle of the canvas's approach-options drawing (controller_approach_view.h)
-    // ── Task 18: THE DOORWAY AS THE LIDAR MEASURES IT (doorway_gap.h) ──────────────────────────────────────────────────
-    // From the first cycle the through-span of the anchor's wall is SEEN, the cross steers on it (re-measured every cycle;
-    // carried by the robot's own motion — room-frame pose deltas within one room — while it is not seen). The anchor stays
-    // the prior until then and says where along which wall to look. Reset with every claim (reset_anchor_cross_state).
-    std::optional<rc::interaction::RelPose> gap_line_;          // the gap's line, robot frame (anchor convention), seen or carried
-    float gap_width_ = 0.f;                                     // its clear width as last MEASURED
-    float gap_score_ = 0.f;                                     // ...and that measurement's score (doorway_gap.h, in [0, 1])
-    bool gap_seen_now_ = false;                                 // this cycle measured it (else carried)
-    std::optional<ControllerRobotPose> gap_carry_pose_;         // the pose gap_line_ is expressed at
-    std::string gap_carry_room_;                                // ...and its room frame
-    bool gap_steering_logged_ = false, gap_lost_logged_ = false;
     // try89 fix: `through` needs the robot OBSERVED on the near side (s < −body half-length, on a seen gap or a seen anchor)
     // earlier in this claim; a claim that never was cannot complete as through.
     rc::CrossThroughGate cross_gate_;
@@ -1322,21 +1310,7 @@ private:
     // near side goes on with it (rc::cross_continues_without_anchor): the reading is kept only for its name and door width.
     std::optional<AnchorCrossReading> anchor_last_reading_;
     bool anchor_gone_logged_ = false;
-    [[nodiscard]] bool gap_carries_cross(const std::string &cross_name) const
-    {
-        return anchor_latched_for_ == cross_name and anchor_last_reading_.has_value()
-           and rc::cross_continues_without_anchor(gap_line_.has_value(), cross_gate_);
-    }
-    Eigen::Vector3f gap_logged_{0.f, 0.f, 0.f};                 // e, (unused), width at the last "[gap] seen" line
-    float gap_logged_heading_ = 0.f;
     std::string current_room_name_;                             // the room frame robot poses are read in (this cycle)
-    // try105 leg 5: the yaw the room polygon's wall gave the anchor's prior at acquisition (doorway_gap.h
-    // doorway_gap_fuse_wall_yaw): the correction applied (rad) and the wall's yaw σ, for the "[gap] seen" line.
-    float gap_room_yaw_fix_ = 0.f, gap_room_yaw_sigma_ = -1.f;
-    // One gap cycle: carry, measure on the prior (the carried gap, else the anchor — its yaw fused with the room wall's), log.
-    // `heading_var`: the localiser's heading variance (rad²; < 0 = unknown ⇒ no room yaw). True = steer on gap_line_.
-    bool update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
-                            float heading_var);
     bool anchor_hoist_logged_ = false;                              // build_planning_step's bypass: log on change
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
