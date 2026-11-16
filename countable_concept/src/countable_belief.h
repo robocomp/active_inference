@@ -200,6 +200,9 @@ struct CountableBeliefParams
     // WALL NO-CROSS (one-sided): resist the back face penetrating PAST the wall into the wall/exterior. Active only
     // when the gap goes negative (crossed) or within wall_no_cross_margin_m; precision GROWS with penetration
     // (λ = wall_no_cross_precision · how-far-past), leaving flush (gap≈0) untouched. Strong; continuous, no clamp.
+    // PERSISTENT PATH (persistent = true, spec §7c.6): the term is a one-sided Gaussian with FIXED precision
+    // λ = 1/σ_wall² (σ_wall = the staged wall's sigma_m), and wall_no_cross_precision > 0 is ONLY its on/off switch (its
+    // value is unused there); a wall with σ_wall ≤ 0 makes the term inert. The flag-off path keeps λ as above.
     float wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> wall_precision). 0 = OFF
     float wall_no_cross_margin_m  = 0.0f;     // interior margin (m) inside which the no-cross term activates
     // ── WALL as a COMPETING EXPLANATION (per-point mixture component) ────────────────────────────────────

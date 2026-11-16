@@ -6,7 +6,8 @@
 //  2. The 16-case creep set: the parked flush scene of persistent_belief_test's physical_lidar_only_sigma_bounded (belief =
 //     truth, front LiDAR returns ray-cast from the TRUE scene, wall y = 0 behind the box), belief offset by
 //     cx ∈ {0, 0.5, 1, 2} mm × w ∈ {0, 1} mm, with and without the wall returns, N LiDAR-only sweeps on the persistent path.
-//     Pass: |Δback face| < 1 mm, |Δw| < 2 mm, |Δfront face| < 2 mm, no NaN (Δ from the start state).
+//     Pass: |Δback face| < 1 mm, |Δw| < 2 mm, |Δfront face| < 2 mm at the end AND at every sweep (the maxima), no NaN
+//     (Δ from the start state).
 // Run: ./creep_set_test [N=4000]
 #include <cmath>
 #include <cstdio>
@@ -172,7 +173,8 @@ static void creep_set(int N)
                 }
                 const auto& s = b.state();
                 const float db = s.cy + 0.5f * s.h - back0, dfr = s.cy - 0.5f * s.h - front0, dww = s.w - s0.w;
-                const bool ok = finite and std::abs(db) < 0.001f and std::abs(dww) < 0.002f and std::abs(dfr) < 0.002f;
+                const bool ok = finite and std::abs(db) < 0.001f and std::abs(dww) < 0.002f and std::abs(dfr) < 0.002f
+                                and maxb < 0.001f and maxw < 0.002f and maxf < 0.002f;
                 fails += not ok;
                 std::printf("  wall %-3s dcx %.4f dw %.4f | Δback %+.5f (max %.5f) Δw %+.5f (max %.5f) Δfront %+.5f (max %.5f) | "
                             "cx %.5f H %.5f sig_h %.4f sig_cx %.4f | %zu rays %s\n",

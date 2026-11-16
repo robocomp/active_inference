@@ -227,7 +227,7 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     out.ai2_wall_explain_sigma_m    = getf("Model.AI2WallExplainSigmaM", 0.05f,
             "extra wall-plane std (m): room-polygon + localization slack (adds to WallRef σ)");
     out.ai2_wall_no_cross_precision = getf("Model.WallNoCrossPrecision", 2000.0f,
-            "1/m² per m of penetration past the wall (>> the flush precision)");
+            "1/m² per m of penetration past the wall (>> the flush precision); persistent path: on/off only, λ = 1/σ_wall²");
     out.ai2_wall_no_cross_margin_m  = getf("Model.WallNoCrossMarginM", 0.0f,
             "interior offset (m) inside which the constraint activates");
     out.ai2_process_std_m    = getf("Model.AI2ProcessStdM", 0.005f,

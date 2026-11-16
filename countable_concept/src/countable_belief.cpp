@@ -673,14 +673,15 @@ void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const C
 void CountableBelief::accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
                                       Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool first_crossing) const
 {
+    // No copy of the ray-set per GN iterate: the first-crossing factor takes σ_s and convexity as arguments. The plain box
+    // (no headboard) is one convex solid; box ∪ headboard is not, so the convex early exit is off for it.
+    const bool convex = not (params_.headboard_h_m > 0.0f);
     const auto one = [&](const rc::ai::LidarRays& lr)
     {
-        if (not first_crossing) { rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd); return; }
-        if (lr.precision <= 0.0f or lr.endpoints.empty()) return;
-        rc::ai::LidarRays r = lr;
-        r.first_crossing  = true;
-        r.surface_sigma_m = params_.model_sigma_m;
-        rc::ai::accumulate_lidar_rays<6>(*this, s, r, Id, bd);
+        if (first_crossing)
+            rc::ai::accumulate_lidar_rays_first_crossing<6>(*this, s, lr, Id, bd, params_.model_sigma_m, convex);
+        else
+            rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd);
     };
     one(f.lidar);
     for (const auto& lr : f.lidar_extra)   // extra per-device ray-sets (e.g. low bpearl) — each own origin

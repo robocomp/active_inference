@@ -164,14 +164,22 @@ template <int N, class Model, class State>
 //  - the range variance is R_range + σ_s²/(n̂·u)² (σ_s = surface_sigma_m): with J = a/(n̂·u) the information is
 //    w·a·aᵀ/((n̂·u)²·R_range + σ_s²), bounded at grazing incidence with no skip.
 // The march steps by max(d, surf_eps) as the legacy loop does; it is bounded by the range only (the step is ≥ surf_eps).
+// convex_model: the model SDF is the distance to ONE convex solid, so d(t) is convex along the ray; once d rises between
+// two samples with no crossing in between, none can follow and the march stops (same result, fewer samples). Only the
+// caller knows this (a box ∪ panel compound is ONE primitive and not convex), so it is an argument, default false.
+// surface_sigma_m is passed explicitly so a caller can run this without copying its LidarRays (accumulate_lidar_rays
+// passes rays.surface_sigma_m when rays.first_crossing is set).
 template <int N, class Model, class State>
 void accumulate_lidar_rays_first_crossing(const Model& m, const State& s, const LidarRays& rays,
-                                          Eigen::Matrix<float, N, N>& Id, Eigen::Matrix<float, N, 1>& bd)
+                                          Eigen::Matrix<float, N, N>& Id, Eigen::Matrix<float, N, 1>& bd,
+                                          float surface_sigma_m, bool convex_model = false)
 {
+    if (rays.precision <= 0.0f or rays.endpoints.empty())
+        return;
+    assert(rays.weights.empty() or rays.weights.size() == rays.endpoints.size());
     const int   P    = m.n_prims();
     const float c2   = rays.robust_c_m * rays.robust_c_m;
-    const float tcap = std::min(rays.max_range_m, 1e9f);
-    const float ss2  = rays.surface_sigma_m * rays.surface_sigma_m;
+    const float ss2  = surface_sigma_m * surface_sigma_m;
     constexpr float kBracket = 1e-4f;                     // bisection width (m)
     // n̂·u by a one-sided (outside) difference over kSlope: short enough to stay on the entered face's side of an edge,
     // long enough that float rounding of the positions (~3e-8 m at room scale) costs < 1e-4 in the slope.
@@ -195,24 +203,26 @@ void accumulate_lidar_rays_first_crossing(const Model& m, const State& s, const 
         const float rho_obs = u.norm();
         if (rho_obs < 1e-4f) continue;
         u /= rho_obs;
-        const float tend = std::min(tcap, rho_obs + 5.0f * rays.robust_c_m);
+        const float tend = std::min(rays.max_range_m, rho_obs + 5.0f * rays.robust_c_m);
 
         int   best = 0;
-        float t = 0.0f, d = sdf_min(rays.origin, best);
-        if (d <= 0.0f) continue;                          // sensor inside the model: no outside → inside crossing
-        float ta = 0.0f, da = d;                          // last sample outside
-        bool  crossed = false;
+        float ta = 0.0f, da = sdf_min(rays.origin, best); // last sample outside
+        if (da <= 0.0f) continue;                         // sensor inside the model: no outside → inside crossing
+        float tb = 0.0f, db = 0.0f;                       // first sample inside, once found
+        bool crossed = false;
         while (true)
         {
-            t += std::max(d, rays.surf_eps_m);
+            const float step = std::max(da, rays.surf_eps_m);
+            const float t = ta + step;
             if (t > tend) break;
-            d = sdf_min(rays.origin + t * u, best);
-            if (d <= 0.0f) { crossed = true; break; }
+            const float d = sdf_min(rays.origin + t * u, best);
+            if (d <= 0.0f) { tb = t; db = d; crossed = true; break; }
+            if (convex_model and d > da) break;           // past the minimum of a convex d(t): no crossing can follow
             ta = t; da = d;
         }
         if (not crossed) continue;                        // a near miss is a miss
 
-        float tb = t, db = d;                             // sdf(ta) > 0 ≥ sdf(tb)
+        // sdf(ta) > 0 ≥ sdf(tb)
         while (tb - ta > kBracket)
         {
             const float tm = 0.5f * (ta + tb);
@@ -264,7 +274,7 @@ void accumulate_lidar_rays(const Model& m, const State& s, const LidarRays& rays
     assert(rays.weights.empty() or rays.weights.size() == rays.endpoints.size());
     if (rays.first_crossing)
     {
-        accumulate_lidar_rays_first_crossing<N>(m, s, rays, Id, bd);
+        accumulate_lidar_rays_first_crossing<N>(m, s, rays, Id, bd, rays.surface_sigma_m);
         return;
     }
     for (std::size_t i = 0; i < rays.endpoints.size(); ++i)

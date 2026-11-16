@@ -267,7 +267,7 @@ static void no_cross_pushes_back_persistent()
                 std::printf("    iterates (gap):");
                 for (const auto& v : its) std::printf(" %+.5f", 0.0f - (v(1) + 0.5f * v(4)));
                 std::printf("\n");
-                last_step = its.size() >= 2 ? (its.back() - its[its.size() - 2]).head<5>().cwiseAbs().maxCoeff() : 0.0f;
+                last_step = its.size() >= 2 ? (its.back() - its[its.size() - 2]).cwiseAbs().maxCoeff() : 0.0f;
             }
         }
         std::printf("  no_cross (%s, %zu data): start gap -0.03000 ; after one update gap %.5f with (2c), %.5f without ; |Id_th| %.3e ; "
