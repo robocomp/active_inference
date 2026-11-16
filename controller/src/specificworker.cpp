@@ -642,8 +642,6 @@ void SpecificWorker::initialize()
 	// and truncated by the next run, so without this a comparison destroys its own baseline.
 	session_.mission().archive_on_stop("tracker_diag.csv");
 	session_.mission().archive_on_stop("band_diag.csv");
-	session_.mission().archive_on_stop("route_events.csv");
-	session_.mission().archive_on_stop("route_geometry.csv");
 	// ★2026-08-05 — THE WORLD SNAPSHOT MUST BE ARCHIVED PER RUN TOO. route_world.txt is what
 	// tools/route_bench and tools/tracker_sim replay, and it is REWRITTEN AT EVERY ROUTE BUILD. Two sim
 	// results taken on different days therefore described DIFFERENT ROUTES while appearing comparable —

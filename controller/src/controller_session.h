@@ -85,10 +85,6 @@ public:
                                                               ControllerDisplay &display);
 
     // Dispatcher: what both modes share, then hand off. Neither helper below serves the other's mode.
-    bool drive_mission_route(const ControllerPlanningStep &step,
-                             rc::TrajectoryController &path_controller,
-                             ControllerMotionCommander &motion_commander,
-                             const TimeSource &time_source);
     bool drive_point_target(const ControllerPlanningStep &step,
                             ControllerObstacleTracker &obstacle_tracker,
                             rc::TrajectoryController &path_controller,
@@ -575,14 +571,9 @@ private:
     // ROUTE EVENTS. One row per route build / repair, appended immediately. These are RARE events whose
     // diagnostics used to exist only on stdout, where they scroll away and cannot be compared between
     // runs — a number you cannot read later is not a measurement.
-    std::ofstream route_events_csv_;
     // Both geometries, side by side: the A* polyline as planned and the smoothed curve as driven.
     // A deviation NUMBER says how far they differ; this says WHERE, which is the question when the
     // driven path visibly does not follow the planned one.
-    std::ofstream route_geom_csv_;
-    bool route_geom_csv_open_ = false;
-    int  route_event_id_ = 0;
-    void log_route_geometry();
     // ── WHAT THE PLANNER'S WORLD CONTAINS, OVER TIME ─────────────────────────────────────────────
     // With retina down, residual_concept's occupancy grid is the ONLY channel that can put a real
     // obstacle in front of A*, and nothing recorded whether it was doing so. See the definition.
@@ -608,27 +599,15 @@ private:
     // by tools/route_bench against exactly this world — the route optimiser has weights whose effect is
     // GEOMETRIC, and measuring a geometric effect by driving one lap per weight costs a run apiece
     // against a 14.5%-noise reversal count. Written on every build; one file, last build wins.
-    void dump_route_world(const Eigen::Vector2f &start,
-                          const std::vector<Eigen::Vector2f> &raw,
-                          const std::vector<Eigen::Vector2f> &repaired,
-                          int laps,
-                          const rc::RouteOptimizerConfig &opt) const;
-    bool route_events_csv_open_ = false;
     // Rate limit for the deferred-waypoint re-offer (see drive_mission_route). ~1 Hz: the test is cheap,
     // but a recovery re-authors a route window and that is not.
     std::uint64_t last_reinstate_ms_ = 0;
     // The planner callbacks the route path hands to RouteFollower. ONE spelling: they were written out
     // character-for-character at the repair site and again at the reinstate site.
-    rc::RouteFollower::PlanFn route_plan_fn();
     rc::RouteFollower::FreeFn route_free_fn();
     // THE INVARIANT after anything re-authors the curve under the follower: count it, tell the mission,
     // and make the follower re-install. It was five statements copied twice; a missed line means the
     // robot keeps driving the old curve, which is not a failure that announces itself.
-    void on_route_reauthored(const char *event, float window_m, rc::TrajectoryController &path_controller,
-                             std::uint64_t now_ms);
-    void log_route_event(const char *event, bool ok, std::uint64_t t_ms,
-                         const rc::TrajectoryController &path_controller,
-                         float window_m);
 
     // THE PER-CYCLE CONTROL RECORD (tracker_diag.csv). One row per control cycle: the command issued,
     // the clearance it was issued against, the tracker's own Frenet error and arc length, the safety
@@ -1433,8 +1412,6 @@ private:
     void sample_live_tracking(bool driving, const ControllerRobotPose &robot_pose, float cross_track_m,
                               float rot_rps, std::uint64_t now_ms);
     bool waypoint_mode_logged_ = false;
-    std::uint64_t last_route_build_ms_ = 0;
-    bool build_route(const ControllerRobotPose &robot_pose);
     // Why the last hop the planner refused was refused. GridPlanner computes eight distinct reasons
     // (goal not footprint-feasible at any heading / start inside an obstacle / enclosed / expansion cap
     // / outside the grid ...) and the route builder was discarding all of them, which left "no path"
@@ -1442,7 +1419,6 @@ private:
     std::string last_plan_failure_;
     // Speed ceiling from the route's own curvature, looking ahead far enough to brake for what is coming.
     // Returns v_cap unchanged when there is no route (a click target has no curve).
-    float route_speed_limit(float v_cap, float a_decel) const;
     // ── SPEED FROM CLEARANCE: THE BRAKING-DISTANCE MODEL (2026-10-09) ─────────────────────────────
     // The plain tracker queries no field by design (it is built on PathWorld), so "slow down for what
     // the LiDAR sees" has to reach it as a CEILING, exactly as the curvature limit does. For a route
@@ -1465,7 +1441,6 @@ private:
     // branch re-installs the SAME curve, so the robot backs off and drives at the blocker again.
     bool          route_repair_pending_ = false;
     std::uint64_t last_route_repair_ms_ = 0;
-    int           route_repair_count_ = 0;
     // Fit the C2 curve to ANY planned polyline — a click target and an affordance target deserve the
     // same smooth path a mission gets. Returns the polyline unchanged if smoothing is off or fails.
     // One place builds the optimiser's configuration; the mission route and every other planned path
