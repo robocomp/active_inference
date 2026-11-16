@@ -174,6 +174,24 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         return false;
     }
     room_wait_logged_ = false;
+    // ★ THE MARKS BELONG TO ONE VISIT OF ONE ROOM (owner 2026-11-16). They record transient obstacles the map does not have,
+    //   in that room's frame; on the room switch they are forgotten, so a re-entry starts with none. Done HERE, where the room
+    //   name changes — step_chain_monitor's own check runs only while the chain's tracker drives, so a room crossed and left
+    //   under the policy never dropped them, and coming back to a room of the same name found the old visit's marks still
+    //   "in its frame" (hy2_explore2: room_1 -> room_2 -> room_1, a WAIT on 60 marks of the first visit).
+    if (const std::string &room_now = world_model.graph_state().room_name; room_now != current_room_name_)
+    {
+        if (not chain_marks_.empty() or chain_wait_)
+            std::println("[chain] room switch '{}' -> '{}': {} marks and {} failure marks forgotten{}", current_room_name_, room_now,
+                         chain_marks_.marks.size(), chain_marks_.fail.size(), chain_wait_ ? " — the WAIT on them ends" : "");
+        chain_marks_ = {};
+        chain_ep_marks_.clear();
+        chain_marks_room_ = room_now;
+        chain_marks_off_ = false;
+        chain_clear_check_ = false;
+        chain_have_prev_ = false;
+        chain_wait_ = false;
+    }
     current_room_name_ = world_model.graph_state().room_name;   // Task 18: the frame the gap line is carried in
 
     const auto room_polygon = world_model.read_room_polygon();
