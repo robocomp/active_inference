@@ -351,9 +351,41 @@ Per selected return i (range r_i; ρ is reserved for correlation):
   scale uses Σ r at the predicted state, computed in `CountableBelief::update` before the solve and frozen for it.
   Empty inputs ⇒ today's behaviour bit-exact for table/chair/bottle/door. The ray-count down-weight counts Σ r.
 - **Information:** complete-data r·JJᵀ/σ², slightly optimistic where r is ambiguous (R1-M2), as the point mixture.
-- **The responsibility table** the tests pin is computed from THIS formula (σ_r from the nightstand config, σ_rest
-  0.05, L 0.6 m) by the plan's first task and written into the spec before any code (R2-I7); rev 2's numbers mixed
-  three formulas and are withdrawn.
+- **The responsibility table** the tests pin, computed from THIS formula by `countable_concept/tools/responsibility_table.py`
+  (σ_r² = 1/2500 + 0.02², σ_rest 0.05, L 0.6 m, w_u 0.2; rev 2's numbers mixed three formulas and are withdrawn). Assumptions
+  the script states: "room hit in chord" puts the rest surface 30 cm behind the return; "wall" puts the rest surface ON the
+  return; the belief face is e in front of the return; σ_box is along the ray. Read row E with care: a mask that claims wall
+  pixels at π = 0.9, s = +3σ_px keeps m ≈ 0.90, and then the range alone (a wall 2 cm behind the face) does NOT refute it
+  (r 0.94 at σ_box 0) — ownership of an over-segmented mask is the camera's job, not the range's.
+
+```
+Constants: sigma_r^2 = 1/2500 + 0.02^2 = 0.00080 m^2 (sigma_r = 2.8 cm), sigma_rest = 5 cm, L = 0.6 m, w_u = 0.2
+
+A. TRUE return on the object (m = 0.9); belief face offset by e, box sigma along the ray 5 cm
+| rest prediction                                | e = 10 cm | e = 14 cm | e = 23 cm |
+|---|---|---|---|
+| room hit in chord (wall 30 cm behind the return) |     0.976 |     0.906 |     0.058 |
+| none predicted                                 |     0.892 |     0.658 |     0.012 |
+
+B/C. FOREIGN returns; the belief face is e in front of the return; s_box in cm
+| case (m = 0.1 unless stated)                   | s_box 0 | s_box 2 | s_box 4 | s_box 6 |
+|---|---|---|---|---|
+| wall 2 cm behind the face (rest = the wall)    |   0.172 |   0.155 |   0.124 |   0.098 |
+| wall 5 cm behind the face (rest = the wall)    |   0.053 |   0.071 |   0.084 |   0.079 |
+| neighbour 2 cm off, UNPUBLISHED (rest = none)  |   0.423 |   0.394 |   0.333 |   0.277 |
+| neighbour 5 cm off, UNPUBLISHED (rest = none)  |   0.165 |   0.213 |   0.244 |   0.232 |
+
+D. COINCIDENT foreign box (return at e = 0 on this object and on the foreign box; s_box = s_rest = 5 cm)
+| m = 0.9 | m = 0.5 |
+|---|---|
+|   0.914 |   0.541 |
+
+E. OVER-SEGMENTED wall return: pi = 0.9 at s = +3 sigma_px gives m = 0.8988; the return is on the wall (rest = the wall)
+| belief face e in front of the wall                          | s_box 0 | s_box 2 | s_box 4 | s_box 6 |
+|---|---|---|---|---|
+| e = 2 cm                                       |   0.943 |   0.936 |   0.919 |   0.897 |
+| e = 5 cm                                       |   0.817 |   0.860 |   0.879 |   0.872 |
+```
 
 ### 7c.4 What stays from §7b
 

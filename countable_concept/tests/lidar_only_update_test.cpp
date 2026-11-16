@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <Eigen/Eigenvalues>
 #include "countable_belief.h"
+#include "test_scene.h"
 
 using namespace rc;
 using Mat6 = Eigen::Matrix<float, 6, 6>;
@@ -43,24 +44,29 @@ static CountableFrame lidar_frame(const rc::ai::LidarRays& r, float wall_y = 0.0
     f.room_axis_ok = true; f.room_axis = 0.0f;
     return f;
 }
-static rc::ai::LidarRays front_rays(float cy = ty)           // 120 first hits on the truth front face
+// ---- Physical fixtures (spec 7c.0): returns come from ray-casting the TRUE scene (box, wall y = 0, floor), first hit only. ----
+static const auto kElev = rc::test::helios_ring_elev_deg();
+static rc::test::SceneBox truth_box(float cy = ty) { return {Eigen::Vector2f(tx, cy), 0.0f, tw, tw, tH}; }
+static const rc::test::SceneWall kWall{Eigen::Vector2f(-4.0f, 0.0f), Eigen::Vector2f(4.0f, 0.0f), 2.5f};
+// Returns of a Helios at `origin` that the mask selects: those within `margin` of the truth box (floor + wall included).
+static rc::ai::LidarRays scene_rays(const Eigen::Vector3f& origin, float cy, float margin, bool with_wall = true,
+                                    std::vector<float>* on_wall = nullptr)
 {
+    const auto box = truth_box(cy);
+    const std::vector<rc::test::SceneBox> boxes{box};
+    const std::vector<rc::test::SceneWall> walls = with_wall ? std::vector<rc::test::SceneWall>{kWall} : std::vector<rc::test::SceneWall>{};
+    const auto all = rc::test::raycast_scene(origin, boxes, walls, true, rc::test::kHeliosAzStepDeg, kElev, 12.0f);
     rc::ai::LidarRays r;
-    r.origin = Eigen::Vector3f(tx, cy - 0.5f * tw - 1.5f, 1.1075f);
-    for (int i = 0; i < 12; ++i) for (int j = 0; j < 10; ++j)
-        r.endpoints.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 12.0f, cy - 0.5f * tw, tH * (j + 0.5f) / 10.0f);
+    r.origin = origin; r.endpoints = rc::test::select_near(all, box, margin);
+    if (on_wall) for (const auto& p : r.endpoints) on_wall->push_back(std::abs(p.y() - kWall.a.y()) < 1e-3f ? 1.0f : 0.0f);
     r.precision = 2500.0f; r.robust_c_m = 0.05f;
     return r;
 }
-static rc::ai::LidarRays two_face_rays()                      // front (120) + left (80) + top (36) first hits, from a diagonal origin
+static rc::ai::LidarRays front_rays(float cy = ty)           // Helios 1.5 m in front of the front face
+{ return scene_rays(Eigen::Vector3f(tx, cy - 0.5f * tw - 1.5f, 1.1075f), cy, 0.10f); }
+static rc::ai::LidarRays two_face_rays()                      // diagonal origin: front + left + top faces
 {   // (the top face is what the sensor, mounted above the box, sees of H: side faces alone leave H unobserved)
-    rc::ai::LidarRays r = front_rays();
-    r.origin = Eigen::Vector3f(tx - 1.5f, ty - 1.5f, 1.1075f);
-    for (int i = 0; i < 8; ++i) for (int j = 0; j < 10; ++j)
-        r.endpoints.emplace_back(tx - 0.5f * tw, ty - 0.5f * tw + tw * (i + 0.5f) / 8.0f, tH * (j + 0.5f) / 10.0f);
-    for (int i = 0; i < 6; ++i) for (int j = 0; j < 6; ++j)
-        r.endpoints.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 6.0f, ty - 0.5f * tw + tw * (j + 0.5f) / 6.0f, tH);
-    return r;
+    return scene_rays(Eigen::Vector3f(tx - 1.5f, ty - 1.5f, 1.1075f), ty, 0.10f);
 }
 static float centre_err(const CountableBelief& b)
 { const auto& s = b.state(); return std::hypot(s.cx - tx, s.cy - ty); }
@@ -103,12 +109,12 @@ static void lidar_only_moves_toward_rays()
 
 // Run 300 LiDAR-only frames whose rays all carry membership w; return {state move, worst Sigma-diag ratio-1, omega move}.
 struct Vanish { float move, sig, omega; };
-static Vanish run_vanishing(float w, bool lidar_only)
+static Vanish run_vanishing(float w)
 {
     auto sweep = two_face_rays(); sweep.weights.assign(sweep.endpoints.size(), w);
     CountableBelief a = make_belief(), p = make_belief();
     const Vec6 start = a.state().vec(), om0 = a.log_volatility();
-    for (int k = 0; k < 300; ++k) { auto f = lidar_frame(sweep); f.lidar_only = lidar_only; a.update(f); p.predict(); }
+    for (int k = 0; k < 300; ++k) { a.update(lidar_frame(sweep)); p.predict(); }
     float worst = 0.0f;
     for (int i = 0; i < 6; ++i) worst = std::max(worst, std::abs(a.covariance()(i, i) / p.covariance()(i, i) - 1.0f));
     return {(a.state().vec() - start).norm(), worst, (a.log_volatility() - om0).norm()};
@@ -120,16 +126,13 @@ static void lidar_only_vanishing_membership_is_predict()
     // 200 rays x 2500, so ~90 over 300 frames against a prior of ~11). That is the model being continuous, not a leak.
     // So the printed ladder shows the move scaling ~linearly with w, and the claim is asserted where the accumulated
     // information is below the 1e-4 tolerance.
-    const Vanish v6 = run_vanishing(1e-6f, true), v9 = run_vanishing(1e-9f, true), v12 = run_vanishing(1e-12f, true);
-    const Vanish ctl = run_vanishing(1e-12f, false);
+    const Vanish v6 = run_vanishing(1e-6f), v9 = run_vanishing(1e-9f), v12 = run_vanishing(1e-12f);
     std::printf("  vanishing (lidar_only): w=1e-6 move %.3e sig %.3e | w=1e-9 move %.3e sig %.3e | w=1e-12 move %.3e sig %.3e omega %.1e\n",
                 v6.move, v6.sig, v9.move, v9.sig, v12.move, v12.sig, v12.omega);
-    std::printf("  vanishing CONTROL (w=1e-12, lidar_only=false: class anchors re-added): move %.3e\n", ctl.move);
     CHECK(v12.move < 1e-4f);
     CHECK(v12.sig < 1e-3f);
     CHECK(v12.omega == 0.0f);
     CHECK(v9.move < v6.move and v12.move < v9.move);          // continuous: more vanishing membership, closer to predict()
-    if (not (ctl.move > 1e-2f)) std::printf("  NOTE: control did NOT move > 1e-2 -- the test does not discriminate\n");
 }
 
 static Vec6 invdiag(const CountableBelief& b, const CountableFrame& f) { return b.common_mode_inv_diag(f); }
@@ -207,26 +210,72 @@ static void lidar_only_one_face_keeps_depth()
     CHECK(dcy < 0.02f);
 }
 
+static void scene_first_hit_only()
+{   // a box 5 cm in front of the wall, Helios 1.5 m away: no wall return lies behind the box's silhouette
+    const float cy = -(0.5f * tw + 0.05f);
+    const Eigen::Vector3f o(tx, cy - 0.5f * tw - 1.5f, 1.1075f);
+    const auto box = truth_box(cy);
+    const std::vector<rc::test::SceneBox> boxes{box};
+    const std::vector<rc::test::SceneWall> walls{kWall};
+    const auto pts = rc::test::raycast_scene(o, boxes, walls, true, rc::test::kHeliosAzStepDeg, kElev, 12.0f);
+    int nbox = 0, nwall = 0, occluded = 0;
+    for (const auto& p : pts)
+    {
+        if (std::abs(p.y()) < 1e-3f)                                       // a wall return: does its segment cross the box?
+        {
+            ++nwall;
+            const std::vector<rc::test::SceneBox> bx{box};
+            const Eigen::Vector3f d = (p - o).normalized();
+            // sample the segment finely; any sample strictly inside the box (shrunk 1 mm) is an occlusion violation
+            for (float t = 0.0f; t < (p - o).norm() - 0.01f; t += 0.002f)
+            {
+                const Eigen::Vector3f q = o + t * d;
+                if (std::abs(q.x() - box.c.x()) < 0.5f * box.w - 1e-3f and std::abs(q.y() - box.c.y()) < 0.5f * box.h - 1e-3f
+                    and q.z() > 1e-3f and q.z() < box.H - 1e-3f) { ++occluded; break; }
+            }
+        }
+        else if (std::abs(p.y() - (box.c.y() - 0.5f * box.h)) < 1e-3f and p.z() <= box.H + 1e-3f) ++nbox;
+    }
+    std::printf("  first-hit scene: %zu returns, %d on the box front face, %d on the wall, %d wall returns through the box\n",
+                pts.size(), nbox, nwall, occluded);
+    CHECK(nbox > 0);
+    CHECK(nwall > 0);
+    CHECK(occluded == 0);
+}
+
 static void wall_behind_does_not_pull()
 {
-    // wall_no_cross_margin_m is 0 (default) < 0.05, so the box sits exactly 5 cm off the wall (no margin offset needed).
-    const float off = 0.05f + params().wall_no_cross_margin_m;
-    const float cy = -(0.5f * tw + off);                        // back face at y = -off, wall plane y = 0
+    // Belief AND truth: back face 2 cm from the wall (y = 0). Physical returns, wall returns at weight 0.1, 2000 LiDAR-only
+    // sweeps. The gap must stay within 0.5 cm of a baseline run on the box returns only (spec 7c.0: no pull with physical data).
+    const float off = 0.02f;
+    const float cy = -(0.5f * tw + off);
     auto build = [&]() { CountableBelief b(CountableBeliefState{tx, cy, tH, tw, tw, 0.0f}, params());
                          b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f)); return b; };
-    rc::ai::LidarRays r = front_rays(cy);
-    const std::size_t nbox = r.endpoints.size();
-    for (int i = 0; i < 12; ++i) for (int j = 0; j < 10; ++j)   // wall hits above and beside the box, y = 0
-        r.endpoints.emplace_back(tx - 1.0f + 2.0f * (i + 0.5f) / 12.0f, 0.0f, 0.05f + 1.2f * (j + 0.5f) / 10.0f);
-    CountableBelief b = build(), ctl = build();
-    auto f = lidar_frame(r);
-    f.lidar.weights.assign(r.endpoints.size(), 0.001f);
-    std::fill(f.lidar.weights.begin(), f.lidar.weights.begin() + nbox, 1.0f);
-    auto fc = lidar_frame(r); fc.lidar.weights.assign(r.endpoints.size(), 1.0f);
-    for (int k = 0; k < 100; ++k) { b.update(f); ctl.update(fc); }
-    const float mv = b.state().cy - cy, cmv = ctl.state().cy - cy;     // +y = toward the wall
-    std::printf("  wall behind: centre moved toward wall %.5f m (weights 0.001) ; CONTROL weights=1: %.5f m\n", mv, cmv);
-    CHECK(mv < 0.02f);
+    std::vector<float> is_wall;
+    const rc::ai::LidarRays r = scene_rays(Eigen::Vector3f(tx, cy - 0.5f * tw - 1.5f, 1.1075f), cy, 0.50f, true, &is_wall);
+    rc::ai::LidarRays rb = r; rb.endpoints.clear();
+    for (std::size_t i = 0; i < r.endpoints.size(); ++i) if (is_wall[i] == 0.0f) rb.endpoints.push_back(r.endpoints[i]);
+    auto fw = lidar_frame(r);
+    fw.lidar.weights.resize(r.endpoints.size());
+    for (std::size_t i = 0; i < r.endpoints.size(); ++i) fw.lidar.weights[i] = is_wall[i] != 0.0f ? 0.1f : 1.0f;
+    auto fb = lidar_frame(rb);
+    CountableBelief w = build(), base = build();
+    for (int k = 0; k < 2000; ++k) { w.update(fw); base.update(fb); }
+    auto gap = [](const CountableBelief& b) { return 0.0f - (b.state().cy + 0.5f * b.state().h); };   // wall y = 0
+    const float gw = gap(w), gb = gap(base);
+    std::printf("  wall behind: %zu returns (%zu box, %zu wall at 0.1); back-face gap after 2000 sweeps: weighted %.5f m, baseline (box only) %.5f m, diff %.5f m (start %.3f)\n",
+                r.endpoints.size(), rb.endpoints.size(), r.endpoints.size() - rb.endpoints.size(), gw, gb, gw - gb, off);
+    CHECK(std::abs(gw - gb) < 0.005f);
+}
+
+static void sigma_h_after_2000_sweeps()
+{   // printed for the spec (7c.0: 20.9 cm on the old fixture); diagnostic, only finiteness is asserted
+    CountableBelief b = make_belief(0.0f, 0.0f, 0.0f);
+    const auto f = lidar_frame(front_rays());
+    for (int k = 0; k < 2000; ++k) b.update(f);
+    const float sh = std::sqrt(b.covariance()(4, 4));
+    std::printf("  sigma_h after 2000 LiDAR-only sweeps (front view, %zu returns): %.4f m\n", f.lidar.endpoints.size(), sh);
+    CHECK(std::isfinite(sh));
 }
 
 int main()
@@ -237,7 +286,9 @@ int main()
     lidar_only_saturates();
     lidar_only_repeated_sweeps();
     lidar_only_one_face_keeps_depth();
+    scene_first_hit_only();
     wall_behind_does_not_pull();
+    sigma_h_after_2000_sweeps();
     std::printf("lidar_only_update_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }
