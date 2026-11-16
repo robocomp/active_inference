@@ -236,7 +236,8 @@ localisation error, with the same deprojection and mask bias as frame t−1. 100
   chain latent (stated). A zero marginal (chain cov disabled, transform missing) is a zero-variance latent: handled
   by the inverse-free update below.
 - b_cam ∈ ℝ⁶: the camera points' sensor-specific shared error. Marginal = today's camera common mode WITHOUT the chain
-  and WITHOUT the ego-motion terms: config floors + range lateral/size + obliquity yaw + moment variance.
+  and WITHOUT the ego-motion terms: config floors + range lateral/size + obliquity yaw (the moment variance is inert in
+  this model — no footprint-moment factor — and carries motion terms, so it is left out; Task 9 review).
 - b_L ∈ ℝ⁶: the LiDAR rays' sensor-specific shared error. Marginal = the config floors (§7b, without chain and
   ego-motion).
 - The ego-motion terms (`mot_pos_var`, `mot_size_var`, `mot_yaw_var`) are fresh every frame by construction: they
