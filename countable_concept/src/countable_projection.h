@@ -142,6 +142,14 @@ public:
     rc::edges::ContourSet compute_contour_set(const CountableInstance& inst, std::uint64_t stamp_ms,
                                               int frame_cols, int frame_rows);
 
+    // A room point in the DELIVERED image: (col, row, depth) with depth = the camera-frame forward coordinate, scaled
+    // intrinsic->delivered exactly as compute_contour_set. nullopt when depth < 0.20 m (near clip), the point is
+    // outside the image, there is no CameraAPI (not bound yet; this method never binds), or a size is <= 0.
+    std::optional<Eigen::Vector3f> project_to_zed(const Eigen::Matrix4f& zed_T_room, const Eigen::Vector3f& p_room,
+                                                  int frame_cols, int frame_rows) const;
+    // Mean focal length in DELIVERED pixels, 1/2 (fx*sx + fy*sy); 0 when unavailable.
+    float focal_px(int frame_cols, int frame_rows) const;
+
     // Config knobs for detect_front: minimum projected face area (px²) to score, and the minimum door-ness
     // margin (confidence) below which the cue is suppressed (returned as nullopt). Set once from config.
     void set_front_params(float min_face_area_px, float min_confidence)

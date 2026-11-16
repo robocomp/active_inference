@@ -477,6 +477,41 @@ rc::edges::ContourSet CountableProjection::compute_contour_set(const CountableIn
 
 // ─── Appearance-based FRONT (door) detection ──────────────────────────────────────────────────────
 
+std::optional<Eigen::Vector3f> CountableProjection::project_to_zed(const Eigen::Matrix4f& zed_T_room,
+                                                                      const Eigen::Vector3f& p_room,
+                                                                      int frame_cols, int frame_rows) const
+{
+    if (not camera_api_ or frame_cols <= 0 or frame_rows <= 0)
+        return std::nullopt;
+    const float W = static_cast<float>(camera_api_->get_width());
+    const float H = static_cast<float>(camera_api_->get_height());
+    if (W <= 0.f or H <= 0.f)
+        return std::nullopt;
+    const float sx = static_cast<float>(frame_cols) / W, sy = static_cast<float>(frame_rows) / H;
+    const Eigen::Vector4f Pc = zed_T_room * p_room.homogeneous();
+    if (Pc.y() < 0.20f)                                              // behind / at the image plane (near clip)
+        return std::nullopt;
+    const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+    if (not std::isfinite(uv.x()) or not std::isfinite(uv.y()))
+        return std::nullopt;
+    const float col = static_cast<float>(uv.x()) * sx, row = static_cast<float>(uv.y()) * sy;
+    if (col < 0.f or col >= static_cast<float>(frame_cols) or row < 0.f or row >= static_cast<float>(frame_rows))
+        return std::nullopt;
+    return Eigen::Vector3f(col, row, Pc.y());   // depth = camera-frame forward coordinate (y), as the depth plane stores it
+}
+
+float CountableProjection::focal_px(int frame_cols, int frame_rows) const
+{
+    if (not camera_api_ or frame_cols <= 0 or frame_rows <= 0)
+        return 0.f;
+    const float W = static_cast<float>(camera_api_->get_width());
+    const float H = static_cast<float>(camera_api_->get_height());
+    if (W <= 0.f or H <= 0.f)
+        return 0.f;
+    return 0.5f * (camera_api_->get_focal_x() * static_cast<float>(frame_cols) / W
+                   + camera_api_->get_focal_y() * static_cast<float>(frame_rows) / H);
+}
+
 // Project the FITTED box's 4 vertical side faces into the live ZED RGB, warp each visible face to an upright
 // patch, score its door-ness, and return the winning face's outward-normal bearing + a confidence margin. See
 // the header. All geometry mirrors compute_projected_roi / compute_silhouette_existence (near-clip + CameraAPI).

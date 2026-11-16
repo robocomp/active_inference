@@ -125,3 +125,18 @@ target_include_directories(persistent_update_test PRIVATE ../../common)
 target_compile_options(persistent_update_test PRIVATE -O2)
 target_link_libraries(persistent_update_test PRIVATE Eigen3::Eigen)
 add_test(NAME persistent_update_test COMMAND persistent_update_test)
+
+# Mask membership m = pi_mask * Phi(s/sigma_px) (spec 2026-11-15 lidar-measures G2); OpenCV only for the distance transform.
+find_package(OpenCV REQUIRED)
+add_executable(mask_membership_test mask_membership_test.cpp ../src/countable_mask_membership.cpp)
+target_include_directories(mask_membership_test PRIVATE ../src ${OpenCV_INCLUDE_DIRS})
+target_compile_options(mask_membership_test PRIVATE -O2)
+target_link_libraries(mask_membership_test PRIVATE Eigen3::Eigen ${OpenCV_LIBS})
+add_test(NAME mask_membership_test COMMAND mask_membership_test)
+
+# Viewpoint rho from the odometry path relative to the object (spec 2026-11-15 lidar-measures §7c.2). Pure Eigen.
+add_executable(viewpoint_rho_test viewpoint_rho_test.cpp ../src/countable_viewpoint.cpp)
+target_include_directories(viewpoint_rho_test PRIVATE ../src)
+target_compile_options(viewpoint_rho_test PRIVATE -O2)
+target_link_libraries(viewpoint_rho_test PRIVATE Eigen3::Eigen)
+add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)
