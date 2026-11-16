@@ -1049,44 +1049,6 @@ private:
     std::uint64_t yawfix_log_ms_ = 0;
     void monitor_footprint_orientation(const ControllerPlanningStep &step, std::uint64_t timestamp_ms);
 
-    // ── FINAL-APPROACH RE-CHECK (see recheck_standpoint_on_approach) ─────────────────────────────
-    // Where the live LiDAR moved the standpoint to, and which target it belongs to. HELD once taken,
-    // for the same reason unroutable_fix_ is: a displacement recomputed from scratch every cycle
-    // against a flickering cloud is a target that jitters, and a target that moves when the evidence
-    // blinks is not a target. It is dropped the moment it stops being admissible, never on a whim.
-    // ONE optional, not three members synced by hand. They were cleared in pairs at four sites and
-    // approach_fix_anchor_ was cleared at none of them — a sync that was already partial. Bundled, every
-    // one of those sites is a single .reset() and the inconsistency is unrepresentable.
-    struct ApproachFix
-    {
-        Eigen::Vector2f pos;
-        std::string name;      // the target it belongs to; the identity that survives a repair
-        Eigen::Vector2f anchor;   // the standpoint it was derived FROM (see the anchor-moved guard)
-        // ★THE HEADING THE FIX WAS JUDGED AT, frozen when it was taken. The admissibility of a FIXED
-        // pose must not depend on where the observer currently stands, and it did: the re-test derived
-        // the arrival heading from `centre - plan_origin`, so every metre the robot advanced rotated
-        // the footprint at the held standpoint, swept a different rectangle, and pulled returns that
-        // were outside the body inside it. The pose was then declared "no longer clear" and re-solved
-        // FURTHER OUT, with nothing in the world having changed. Measured 2026-08-19 over 139 s:
-        // 57 relocations, the standpoint fleeing 0.084 m per cycle against 0.027 m of robot closure —
-        // 3.1x faster than the robot could close — 77% of them in the robot's own travel direction,
-        // and NOT ONE arrival in the whole run (d_target never below 0.60 m, 0 `reached` rows).
-        // A carrot on a stick, manufactured entirely by re-judging a static pose from a moving eye.
-        float arrival_yaw;
-        // ★AND THE FACING, FROZEN WITH IT. `aim_at_object` re-derives the commanded yaw from the
-        // object's LIVE position every cycle, so freezing only the standpoint's position left the
-        // pose half-static: the robot stood still and kept being told to face somewhere new.
-        // Measured 2026-08-19 on the first run with the static standpoint: 0.73 rad of commanded
-        // turning PER METRE travelled, |cmd_rot| at its cap on 70% of approach cycles, 6.3 whole
-        // revolutions over one file, and not one `ALIGN` or `reached` row in 1478.
-        // A pose is a position AND a heading. Freezing half of one is not freezing it.
-        float object_yaw;
-    };
-    // `anchor` is the standpoint the fix was derived FROM. A producer is free to republish its viewpoint
-    // somewhere else under the same name, and a fix that outlived the pose it repaired would silently
-    // ignore that — the robot driving to a correction for a problem that has moved.
-    std::optional<ApproachFix> approach_fix_;
-
     // ── AN APPROACH IS A COMMITMENT, AND THE PRODUCER DOES NOT GET TO REVOKE IT MID-FLIGHT ───────
     // ★★★MEASURED 2026-08-23, one 11.4 min affordance run: `afford_room`'s standpoint was republished
     // MORE THAN A METRE AWAY 39 times — a republish every 9.4 s, the closest pair 3.0 s apart, single

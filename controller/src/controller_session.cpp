@@ -5292,7 +5292,7 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                                            : std::numeric_limits<float>::quiet_NaN()) << ','
                   << (last_raw_target_pos_ ? last_raw_target_pos_->y()
                                            : std::numeric_limits<float>::quiet_NaN()) << ','
-                  << (approach_fix_.has_value() ? 1 : 0) << ','
+                  << 0 << ','
                   << (path_controller.endpoint_arrival() ? 1 : 0) << ','
                   << path_controller.goal_threshold() << ','
                   << (o.arrival_test_ran ? 1 : 0) << ',' << (o.arrival_endpoint_on ? 1 : 0) << ','
@@ -5598,19 +5598,15 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                                                        std::uint64_t timestamp_ms)
 {
     const float window = params_ != nullptr ? params_->affordance_approach_recheck_m : 0.f;
-    if (window <= 0.f or not step.target.from_affordance) { approach_fix_.reset(); return; }
+    if (window <= 0.f or not step.target.from_affordance) return;
     // Keyed by NAME, like the reachability repair: the name is the identity that survives every repair
     // that moves the pose, and it needs no tolerance to compare.
-    if (approach_fix_.has_value() and approach_fix_->name != step.target.node_name)
-        approach_fix_.reset();
 
     // The anchor is the standpoint as the grid repair left it — that is the pose the robot is actually
     // driving to, and searching around anything else would be answering about a pose already rejected.
     const Eigen::Vector2f anchor = step.target.room_pos;
     // A held fix belongs to the pose it repaired. If that pose has moved further than the fix itself was
     // allowed to move, it is a different standpoint and the old correction is about a problem elsewhere.
-    if (approach_fix_.has_value() and (anchor - approach_fix_->anchor).squaredNorm() > window * window)
-        approach_fix_.reset();
 
     // ★★★ALREADY STANDING THERE ⇒ THERE IS NOTHING TO APPROACH, AND NOTHING TO REPAIR. Leave the target
     // exactly as the producer published it and let the ordinary arrival path have it.
@@ -5634,7 +5630,6 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     // there is nothing left to approach" are one question, so they must not be two numbers.
     if ((step.robot_pose.pos - anchor).norm() <= path_controller.params.goal_threshold)
     {
-        approach_fix_.reset();
         return;
     }
     // ── Task 3c ([Policy] Enabled): RE-ASKED CLOSE IN, BUT NEVER RE-SITED ─────────────────────────────────────────────
@@ -5646,10 +5641,7 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     // cycle — which is how the cloud reaches this test, and why it is re-asked close in, where the LiDAR sees the spot;
     // soft cells are priced, never a hand-back). Not ⇒ hand it back (Reach and object alike) so the producer re-solves
     // inside its own band. No fix is ever taken: the policy's contact model keeps the body off every live return on the way.
-    // The old chain ([Policy] Enabled = false) keeps the disc test and the repair below unchanged.
-    if (policy_enabled())
     {
-        approach_fix_.reset();
         if (window <= 0.f or (step.plan_origin - anchor).squaredNorm() > window * window) return;
         // fix round 1 (I-2): the same pure decision as build_planning_step, at the ApproachWindow stage (every hard cell
         // counts, live returns included — this is where the LiDAR measures the spot); Reach is judged here too.
@@ -5670,213 +5662,6 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                          step.target.node_name, (step.plan_origin - anchor).norm(), anchor.x(), anchor.y());
         return;
     }
-    // ★MEASURED TO WHAT WE ARE DRIVING TO, not to the anchor. Once a fix is taken the robot approaches
-    // the MOVED pose, so a window measured against the anchor walks out of range exactly because the fix
-    // worked — which would drop it and put the target straight back where the returns said it must not
-    // be, once per lap of that loop, forever.
-    // Measured to the pose actually being driven to, so a held fix does not walk itself out of the
-    // window and get dropped. ★The gate applies WHETHER OR NOT a fix is held: the earlier spelling
-    // (`not approach_fix_.has_value() and ...`) disabled it outright once a fix existed, so the full
-    // cloud read and scan below then ran every cycle for the rest of the target's life however far away
-    // the robot was. That is the opposite of what the comment above claims. Caught by review 2026-08-17.
-    const Eigen::Vector2f driving_to = approach_fix_.has_value() ? approach_fix_->pos : anchor;
-    if ((step.plan_origin - driving_to).squaredNorm() > window * window) return;
-
-    auto *lidar = obstacle_tracker.lidar_buffer();
-    if (lidar == nullptr) return;
-    const auto [cloud_opt] = lidar->read_last();
-    if (not cloud_opt.has_value()) return;
-    const auto &[xs, ys, zs] = cloud_opt.value();
-    const std::size_t n_pts = std::min({xs.size(), ys.size(), zs.size()});
-    if (n_pts == 0) return;
-
-    // The SAME standoff the planner obeys — footprint_safety_margin_m, the one number robot_footprint.h
-    // exists to keep from multiplying. Nothing here introduces a second one.
-    // ★HELD AS A MEMBER, not rebuilt per call: shadow() allocates an 18-vertex polygon, and this runs on
-    // the control thread. The margin is re-set only when the configured one moves.
-    const float margin = params_ != nullptr ? params_->footprint_safety_margin_m : 0.f;
-    if (std::abs(approach_body_.safety_margin() - margin) > 1e-6f)
-        approach_body_.set_safety_margin(margin);
-    const auto &body = approach_body_;
-    // ★NOT `+ safety_margin()`. circumscribed_radius() ALREADY adds the margin (robot_footprint.cpp:48),
-    // so adding it again stacked a second 0.05 m — 0.375 m where the body reaches 0.325 — which is the
-    // exact multiplying-margin failure robot_footprint.h was written to abolish, reintroduced inside the
-    // file that quotes it. Caught by review 2026-08-17.
-    const float reach = body.circumscribed_radius();
-    const float reach2 = reach * reach;
-
-    // ── THE STANDPOINT MUST BE CLEAR WITH THE ROOM THE ARRIVAL ITSELF NEEDS ──────────────────────
-    // ★★★A POSE VALIDATED AS CLEAR IS NOT WHERE THE ROBOT STOPS. Arrival completes anywhere within
-    // goal_threshold of the standpoint, in any direction, so a body that merely FITS at the validated
-    // pose can be a quarter of a metre deeper into the furniture when the robot actually halts — which
-    // is the reported behaviour: targets that drive the robot into contact with the table.
-    // ★THE MARGIN IS THE ARRIVAL BAND, not a comfort preference. ComfortStandoff (0.6 m) is the wrong
-    // instrument: a standpoint exists to SEE something, and holding it two thirds of a metre off every
-    // return would refuse most of the cells worth standing in. goal_threshold is the honest number
-    // because it is exactly how far the arrival test permits the robot to be from the pose we checked.
-    // Nothing new is introduced — the same quantity the arrival gate already compares.
-    rc::RobotFootprint standoff_body = approach_body_;
-    standoff_body.set_safety_margin(margin + path_controller.params.goal_threshold);
-    const float standoff_reach2 = standoff_body.circumscribed_radius() * standoff_body.circumscribed_radius();
-
-    // Returns that could touch ANY candidate the search may return, with the robot's own body removed.
-    // Self-returns must go first: the wheels sit at 0.25 m and the robot is by definition standing next
-    // to the standpoint by the time this runs, so leaving them in would condemn every standpoint the
-    // moment the robot got close enough to check it.
-    constexpr float kBodyZLo = 0.05f;   // above this is the body, below it is the floor beneath us
-    constexpr float kBodyZHi = 1.45f;   // the mesh tops out at 1.42 m
-    const float robot_yaw = step.robot_pose.theta + static_cast<float>(M_PI_2);
-    std::vector<Eigen::Vector2f> returns;
-    returns.reserve(256);                    // typical near-anchor count; avoids ~10 reallocations
-    for (std::size_t i = 0; i < n_pts; ++i)
-    {
-        if (zs[i] < kBodyZLo or zs[i] > kBodyZHi) continue;
-        const Eigen::Vector2f p{xs[i], ys[i]};
-        if ((p - anchor).squaredNorm() > (window + reach) * (window + reach)) continue;
-        if (body.contains_yaw(p, step.robot_pose.pos, robot_yaw)) continue;   // the robot seeing itself
-        returns.push_back(p);
-    }
-    if (returns.empty()) return;   // no evidence is not the same as clear, and it licenses nothing
-
-    // WHICH HEADINGS THE BODY WILL ACTUALLY HOLD THERE decides the shape of the test, because a rigid
-    // footprint is not rotation-invariant and assuming a disc is what the footprint planner exists to
-    // stop doing. A target that ends in a terminal rotation sweeps every heading, so it must clear the
-    // circumscribed disc; one that does not is tested at the two headings it really occupies — the
-    // arrival heading (it drives in along the bearing from wherever it is) and the commanded facing.
-    const bool rotates = wants_final_facing(step.target);
-    // ★THE ARRIVAL HEADING IS AN ARGUMENT NOW, NOT A RE-DERIVATION. Deriving it inside from
-    // `centre - plan_origin` made the admissibility of a FIXED pose a function of where the robot
-    // currently stands, which is what produced the fleeing standpoint (see ApproachFix::arrival_yaw).
-    // Choosing a NEW fix still asks the question from where the robot is — that is the heading it will
-    // really arrive on — but RE-TESTING a held one must ask it at the heading the fix was chosen for.
-    const auto arrival_yaw_from = [&](const Eigen::Vector2f &centre)
-    {
-        const Eigen::Vector2f approach_dir = centre - step.plan_origin;
-        return approach_dir.squaredNorm() > 1e-8f
-             ? std::atan2(approach_dir.y(), approach_dir.x())
-             : step.target.yaw_rad;
-    };
-    const auto clear_of_returns_at = [&](const Eigen::Vector2f &centre, const float arrival_yaw)
-    {
-        // ★★★ THE PATCH UNDER THE ROBOT IS A BLIND SPOT, NOT FREE SPACE. The self-return filter above
-        // deletes every point inside the robot's own body — it must, or the wheels at 0.25 m would
-        // condemn every standpoint the moment the robot got close enough to test it. But that leaves a
-        // body-shaped hole GUARANTEED to hold no returns whatever is really there, and
-        // nearest_free_where, searching outward from an anchor the object itself occupies, lands on it
-        // almost every time. Live 2026-08-19, robot at (-0.81,-2.26):
-        //     [approach] (-1.00,-2.38) is OCCUPIED ... Standpoint moved to (-0.81,-2.26)
-        //     [affordance] REFUSED: already at this standpoint on the first cycle
-        // — the standpoint relocated onto the robot ITSELF, was instantly refused as already-reached,
-        // and the pair looped there indefinitely.
-        // ★This file already states the rule, about an empty cloud: "no evidence is not the same as
-        // clear, and it licenses nothing". Same rule, applied to the hole we punch in the cloud
-        // ourselves. A viewpoint the robot already occupies also yields exactly the image it already
-        // has, so there is nothing to be gained by moving there even if it IS free.
-        // ★★NOT AN ARRIVAL TEST, and that is the whole point. This rejects a candidate RELOCATION and
-        // never a completion, so it cannot turn a legitimate arrival into a refusal — which is what
-        // forced the revert of 31faa35 (af7ba55). A normal approach relocates nothing and never
-        // reaches this line.
-        if (body.contains_yaw(centre, step.robot_pose.pos, robot_yaw)) return false;
-        for (const auto &p : returns)
-        {
-            // ★JUDGED WITH THE ARRIVAL BAND ADDED, so the pose stays clear wherever inside that band
-            // the robot actually stops. The self-return filter above still uses the TRUE body: growing
-            // it there would delete returns from the very furniture this is meant to keep away from.
-            if ((p - centre).squaredNorm() > standoff_reach2) continue;   // out of reach at any heading
-            if (rotates) return false;                                   // ...and it turns through all
-            if (standoff_body.contains_yaw(p, centre, arrival_yaw)) return false;
-            if (standoff_body.contains_yaw(p, centre, step.target.yaw_rad)) return false;
-        }
-        return true;
-    };
-    // The predicate nearest_free_where takes: a CANDIDATE is judged at the heading the robot would
-    // really arrive on, which is the honest question when choosing where to go.
-    const auto clear_of_returns = [&](const Eigen::Vector2f &centre)
-    { return clear_of_returns_at(centre, arrival_yaw_from(centre)); };
-
-    const auto aim_at_object = [&]()
-    {
-        // The producer's yaw faced the object from the viewpoint it published; the standpoint has moved.
-        if (step.target.parent_node_id == 0) return;
-        if (const auto obj = world_model.read_node_room_xy(step.target.parent_node_id, timestamp_ms);
-            obj.has_value())
-            step.target.yaw_rad = std::atan2(obj->y() - step.target.room_pos.y(),
-                                             obj->x() - step.target.room_pos.x());
-    };
-
-    // ★A FIX, ONCE TAKEN, IS STATIC FOR THE LIFE OF THE TARGET. Validated ONCE against the live LiDAR
-    // at the moment it is chosen (that is what `clear_of_returns` below does), and then held — no
-    // re-test, no re-solve.
-    // ★★WHY THE RE-TEST IS GONE (user, watching a live run, 2026-08-19: "you are moving the target
-    // before the robot can reach it" / "just leave it static in a place that the local lidar validates
-    // as reachable"). This block used to re-ask, every cycle, whether the held standpoint was still
-    // clear, and re-solve when the answer came back no. Freezing the arrival heading removed the
-    // systematic FLEE (measured: 77% of moves in the robot's own travel direction, down to 57% with
-    // 50% being no correlation at all) but not the MOTION: 197 target moves over 5 cm in one 120 s
-    // run, p50 0.30 m. A standpoint that is re-decided is not a standpoint.
-    // ★The re-test could never be a stable question, because its evidence is not stable. The LiDAR
-    // returns it judges against are re-gathered every cycle from a moving robot, at a viewpoint that
-    // is by construction getting CLOSER to the standpoint — so occlusion, incidence and density at
-    // that patch of floor all change under it, and a boundary case flickers. Holding a flickering
-    // predicate's FIRST answer is not worse than holding its latest one; it is merely honest about
-    // which answer it is holding.
-    // ★What replaces it is not nothing. If the held standpoint really is unstandable, the robot fails
-    // to arrive, the wedge or Spinning verdict fires, and after kMaxEscapesPerAffordance the affordance
-    // is given up and the claim released (begin_escape). That path reports the failure to the producer
-    // instead of silently re-siting its viewpoint — which is what room_concept asked for on 2026-08-19
-    // ("refuse, never move": a relocated-then-completed standpoint makes the producer record an
-    // observation that never happened, corrupting its exploration drive).
-    // The lifecycle guards above still drop the fix when it stops belonging to this target: a changed
-    // node name (:1751) and a producer that republishes its viewpoint elsewhere (:1759).
-    if (approach_fix_.has_value())
-    {
-        step.target.room_pos = approach_fix_->pos;
-        // ★THE FROZEN FACING, not a fresh aim. See ApproachFix::object_yaw: re-aiming every cycle at a
-        // live object estimate is a second moving target wearing the first one's clothes.
-        step.target.yaw_rad  = approach_fix_->object_yaw;
-        return;
-    }
-
-    // One search, both questions: the grid (which knows about walls, and about obstacles no longer in
-    // view) AND the cloud (which knows about what is there now). nearest_free_where returns the anchor
-    // itself when the anchor already satisfies both, so this both tests and repairs in one call.
-    const auto fix = grid_planner_.nearest_free_where(anchor, step.target.yaw_rad, clear_of_returns, window);
-    if (not fix.has_value())
-    {
-        // Nowhere within the window is clear under both. Say so and leave the target alone: inventing a
-        // standpoint outside the window would service the affordance from somewhere it cannot see its
-        // object, and driving on silently is what this whole function exists to stop.
-        if (timestamp_ms - approach_blocked_log_ms_ >= 3000)
-        {
-            approach_blocked_log_ms_ = timestamp_ms;
-            std::println("[approach] ⚠ '{}' at ({:.2f},{:.2f}) is occupied by {} live LiDAR return(s) the "
-                         "planner grid no longer carries, and NOTHING within {:.2f} m is clear under both. "
-                         "Holding the target as published — it will drive into that.",
-                         step.target.node_name, anchor.x(), anchor.y(), returns.size(), window);
-        }
-        return;
-    }
-    if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
-    // ── A REACH STANDPOINT THE LIVE LiDAR SAYS IS OCCUPIED: HAND IT BACK (2026-10-09) ───────────────────────────
-    // For an exploration standpoint the exact spot does not matter, and nudging it a few cm drove the robot into
-    // the furniture that occupied it (live: moved 5 cm, then WEDGE, then 3 blind escapes into a wall). The
-    // producer owns the choice: report Unreachable and it offers another. Object approaches keep the repair.
-    if (flag_reach_unreachable(std::format("live LiDAR: standpoint ({:.2f},{:.2f}) occupied", anchor.x(), anchor.y())))
-        return;
-
-
-    step.target.room_pos = *fix;      // aim_at_object reads room_pos, so the move lands first
-    aim_at_object();                  // ONE aim, at the moment of the repair, and it is kept
-    approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor,
-                               .arrival_yaw = arrival_yaw_from(*fix),
-                               .object_yaw = step.target.yaw_rad};
-    std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
-                 "something the grid has forgotten (residual decays; returns do not). Standpoint moved to "
-                 "({:.2f},{:.2f}), {:.2f} m away.",
-                 step.target.node_name, (step.plan_origin - anchor).norm(),
-                 anchor.x(), anchor.y(), fix->x(), fix->y(), (*fix - anchor).norm());
-    // (room_pos and yaw_rad were both set above, before the fix was recorded, so that the frozen
-    // object_yaw is exactly the heading this run of the function chose — not one re-derived later.)
 }
 
 bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) const
@@ -6750,7 +6535,6 @@ void ControllerSession::report_flagged_unreachable(rc::AffordanceManager &afford
     if (not named_is_current) return;   // the claim being driven now is another one: its route and state are its own
     route_dropped_ = true;
     approach_commit_.reset();
-    approach_fix_.reset();
     reset_anchor_cross_state();      // the claim is over: its re-offer starts a fresh one (fix round 1)
     contract_for_node_id_ = 0;       // ...and is resolved again even if the producer keeps the same epoch
     no_route_since_ms_ = 0;
@@ -8618,7 +8402,6 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     current_target_room_.reset();
     // The final-approach correction belongs to the standpoint just retired. Re-selecting the same
     // affordance later must re-measure, not inherit an answer taken against a scan that is now old.
-    approach_fix_.reset();
     end_manual_target(outcome_override == rc::affordance::Outcome::Abandoned ? ManualTargetEnd::Cleared
                                                                              : ManualTargetEnd::Reached);
     manual_target_room_.reset();
