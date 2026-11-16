@@ -156,6 +156,7 @@ std::string compose(const Inputs &in, const StatusEvents &events, std::uint64_t 
 
     // ── who drives
     section("WHO DRIVES");
+    L.push_back(std::format("Mode: {}{}", c.mode, c.mode_why.empty() ? std::string{} : " — " + c.mode_why));
     const bool policy_driving = not c.hybrid_on or c.episode_active or not c.hybrid_place;
     if (not in.mission.driving)
         L.push_back(std::format("Nobody: driving is {} (press Run or click a target).", in.mission.paused ? "PAUSED" : "off"));

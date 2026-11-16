@@ -4079,6 +4079,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         {
             chain_wait_ = true;
             chain_marks_off_ = false;   // the marks are back in the world; a clear ends the wait (chain_observe)
+            note_mode("wait", [&]{ return std::format("no route on map + {} marks, one on the map alone", chain_marks_.marks.size()); });
             current_plan_.reset();
             plan_spline_valid_ = false;
             std::println("[chain] WAIT: no route to '{}' with {} marks, one on the map alone — stopped, watching the marks",
@@ -6773,9 +6774,17 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                                     affordance_manager, time_source);
         if (not chain_drives)
         {
+            if (chain_wait_)
+                note_mode("wait", [&]{ return std::format("no route on map + {} marks, one on the map alone", chain_marks_.marks.size()); });
+            else if (chain_ep_.active)
+                note_mode("policy", [&]{ return std::format("episode: {}", chain_ep_.why); });
+            else if (drive_mode_ != "recover" or current_plan_.has_value())   // a re-plan in progress stays "recover" until a plan exists
+                note_mode("policy", [&]{ return chain_hybrid_on() and chain_hybrid_place_ ? std::string("no fitted chain route for this goal yet")
+                                                                                         : std::string("this goal is the policy's (cross / door route / lock-on / orient / tour)"); });
             refresh_view_only();
             return;
         }
+        note_mode("spline", [&]{ return std::format("a fitted route of {:.2f} m, the chain's window passes", plan_spline_.length()); });
     }
 
 
@@ -6914,6 +6923,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         plan_spline_valid_ = false;
         route_repair_pending_ = true;
         std::println("[chain] re-plan on map + {} marks (plan-first)", chain_marks_.marks.size());
+        note_mode("recover", [&]{ return std::format("plan-first: the window ahead fails on unmapped returns, re-plan on map + {} marks", chain_marks_.marks.size()); });
     }
     else if (act == ChainAction::Episode)
     {

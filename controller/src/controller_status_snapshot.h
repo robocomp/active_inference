@@ -24,6 +24,7 @@ struct ControllerStatusSnapshot
     std::uint64_t now_ms = 0;                 ///< the worker's clock when this was taken (current_time_ms)
 
     // ── WHO DRIVES ──────────────────────────────────────────────────────────────────────────────────────────────────
+    std::string mode, mode_why;               ///< spline / policy / recover / wait / none, and why it was entered (changes only)
     bool hybrid_on = false;                   ///< [Policy] HybridChain + chain monitor + policy: a PLACE is the chain's
     bool hybrid_place = false;                ///< the last drive_with_policy cycle reached its PLACE branch (the chain plans it)
     bool chain_monitor_on = false;            ///< [Chain] Monitor enabled

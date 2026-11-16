@@ -18,6 +18,8 @@ rc::ControllerStatusSnapshot ControllerSession::status_snapshot(const std::optio
     s.now_ms = now_ms;
 
     // who drives
+    s.mode = drive_mode_;
+    s.mode_why = drive_mode_why_;
     s.hybrid_on = chain_hybrid_on();
     s.hybrid_place = chain_hybrid_place_;
     s.chain_monitor_on = params_ != nullptr and params_->chain_monitor_enabled;

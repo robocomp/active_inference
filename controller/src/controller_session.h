@@ -863,6 +863,21 @@ private:
     int chain_last_verdict_ = -1; float chain_last_ahead_m_ = 0.f; bool chain_last_stall_ = false; std::uint64_t chain_last_monitor_ms_ = 0;
     // ── PORT STEP 4 — WAIT: no route on map + marks, one on the map alone -> stopped and watching until a mark clears
     bool chain_wait_ = false;
+    // ── THE MODE, and its switches (owner 2026-11-16: three modes, switched automatically, every switch logged once).
+    //    "spline"  = the chain's tracker drives a fitted route;  "policy" = the local policy drives (an episode the chain
+    //    handed it, or a goal that is the policy's: a cross, a door route, a lock-on, an orient, a tour, a target with no chain
+    //    route yet);  "recover" = the route failed and is being re-planned on map + marks;  "wait" = recover found no route
+    //    on map + marks but one on the map alone — stopped, watching the marks.  Set from the monitors' verdicts only.
+    //    note_mode costs one comparison per call; the reason is built, and the line printed, only on a change.
+    std::string drive_mode_ = "none";
+    std::string drive_mode_why_;
+    template <class WhyFn> void note_mode(std::string_view mode, WhyFn &&why)
+    {
+        if (drive_mode_ == mode) return;
+        drive_mode_why_ = why();
+        std::println("[mode] {} -> {} (why: {})", drive_mode_, mode, drive_mode_why_);
+        drive_mode_ = mode;
+    }
     // ── PORT STEP 5 — THE HYBRID (Policy.HybridChain; controller_chain_hybrid.cpp) ──
     [[nodiscard]] bool chain_hybrid_on() const
     { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled; }
