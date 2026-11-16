@@ -28,12 +28,20 @@ collect(){
   [[ -d $R/tmp/snapshots ]] && cp -r $R/tmp/snapshots $OUT/
   cp $(ls -t $R/tmp/agent_events_*.jsonl | head -1) $OUT/events.jsonl 2>/dev/null
   cp $B/door_concept/etc/door_events.csv $B/door_concept/etc/door_existence_log.csv $B/door_concept/etc/ai2_log.csv $B/door_concept/etc/ai2_log_phi.csv $B/door_concept/etc/anchor_log.csv $B/door_concept/etc/anchor_frames.bin $OUT/ 2>/dev/null
-  for f in $(ls -t $B/layouts/learnt/*.svg | head -3); do cp $f $OUT/; done
+  find $B/layouts/learnt -maxdepth 1 -name '*.svg' -newer $OUT/teleport.txt -exec cp -p {} $OUT/ \;   # every SVG THIS run wrote: teleport.txt is touched just before the fleet starts
+}
+# door_concept's DoorCore tapes (DoorConcept.RecordInputs / DecisionLog): copied AFTER the fleet stops, so the SIGTERM
+# path has flushed and closed them. The glob takes this run's files only (rotated runs end in .<stamp>, not .bin).
+collect_tapes(){
+  for f in $B/door_concept/etc/door_inputs*.bin $B/door_concept/etc/door_decisions*.bin; do
+    [[ -f $f ]] && cp $f $OUT/ && log "tape $(basename $f): $(stat -c %s $f) bytes"
+  done
+  return 0   # a missing tape (recording off) is not a failure
 }
 case "$2" in
   run)     echo run  > $B/controller/remote_cmd.txt; log "controller RUN"; exit 0;;
   stop)    echo stop > $B/controller/remote_cmd.txt; log "controller STOP"; exit 0;;
-  collect) echo stop > $B/controller/remote_cmd.txt; collect; stop_fleet; log "collected + fleet stopped"; exit 0;;
+  collect) echo stop > $B/controller/remote_cmd.txt; collect; stop_fleet; collect_tapes; log "collected + fleet stopped"; exit 0;;
 esac
 stop_fleet
 if [[ "$2" == "here" ]]; then

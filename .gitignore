@@ -117,3 +117,20 @@ retina/models/dinov3
 !/toilet_concept/bin/
 /toilet_concept/bin/*
 !/toilet_concept/bin/toilet_concept
+
+# Run outputs that pile up in the working tree (2026-11-16): tour runs, tapes, dumps, datasets, videos.
+# Tracked files under these paths stay tracked; only new outputs are ignored.
+controller/policy_field_dump_*.txt
+controller/runs_archive/
+room_concept/etc/scan_tape_*.bin
+room_concept/estimation_scripts/crossing_try*.out
+room_concept/estimation_scripts/crossing/*
+!room_concept/estimation_scripts/crossing/fixtures/
+room_concept/estimation_scripts/synthetic/
+room_concept/datasets/
+kinova_controller/experiments/
+layouts/learnt/
+runs/
+*.mp4
+*.bak_*
+*.swp

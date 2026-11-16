@@ -85,9 +85,18 @@ qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
 #get id of open session
 sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
 #change to the saved working directory
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference"
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/episodic_agent"
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "episodic"
+
+#create new tab for ltsm
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#get id of open session
+sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
+#change to the saved working directory
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/ltsm_agent"
+#change the title of session
+qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "ltsm"
 
 #create new tab for cortex
 qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
@@ -97,6 +106,15 @@ sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
 qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/cortex/build"
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "cortex"
+
+#create new tab for claude_room
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#get id of open session
+sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
+#change to the saved working directory
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/room_concept"
+#change the title of session
+qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude_room"
 
 #create new tab for claude-chat
 qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
@@ -125,15 +143,6 @@ qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pb
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude waf paper"
 
-#create new tab for hover
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
-#get id of open session
-sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
-#change to the saved working directory
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/hoverboard"
-#change the title of session
-qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "hover"
-
 #create new tab for montevideo
 qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
 #get id of open session
@@ -142,15 +151,6 @@ sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
 qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference.worktrees/course-montevideo"
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "montevideo"
-
-#create new tab for claude-retina
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
-#get id of open session
-sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
-#change to the saved working directory
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/retina"
-#change the title of session
-qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude-retina"
 
 #create new tab for claude-em
 qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
@@ -169,3 +169,39 @@ sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
 qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/ltsm_agent"
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude_ltsm"
+
+#create new tab for claude_calib
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#get id of open session
+sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
+#change to the saved working directory
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference"
+#change the title of session
+qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude_calib"
+
+#create new tab for claude_retina
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#get id of open session
+sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
+#change to the saved working directory
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/retina"
+#change the title of session
+qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude_retina"
+
+#create new tab for calib
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#get id of open session
+sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
+#change to the saved working directory
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/self_calibration"
+#change the title of session
+qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "calib"
+
+#create new tab for claude world
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
+#get id of open session
+sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
+#change to the saved working directory
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/webots-shadow/worlds/piso"
+#change the title of session
+qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude world"

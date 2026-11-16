@@ -38,7 +38,7 @@ rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv
 # DOOR_1 starts shut (the cross mission opens it); DOOR_0 and DOOR_2 stay shut for the whole run
 for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py close $d; done
 sleep 3
-# graph recorder (passive DSR participant, agent id 28): every structural write with its writer — for trace_check.py
+# graph recorder (passive DSR participant, agent id 40): every structural write with its writer — for trace_check.py
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
 [ -x $REC ] && { setsid $REC crossing/$1/graph_trace.csv > crossing/$1/graph_recorder.log 2>&1 < /dev/null & REC_PID=$!; }
 NORUN=1 bash $S/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1

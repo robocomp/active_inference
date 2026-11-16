@@ -10,7 +10,7 @@
 // changes only for a whitelist of protocol attributes (state, room_id, parent, recall_late), with their new value.
 // A snapshot of every node and edge is written once the graph has synced.
 // Signals are connected QUEUED to the main thread (CLAUDE.md: never Qt::DirectConnection).
-// usage: graph_recorder <out.csv> [agent_id=28] [domain=0]      stop with SIGTERM / SIGINT (flushes and leaves).
+// usage: graph_recorder <out.csv> [agent_id=40] [domain=0]      stop with SIGTERM / SIGINT (flushes and leaves).
 #include <dsr/api/dsr_api.h>
 
 #include <QCoreApplication>
@@ -135,8 +135,8 @@ void on_signal(int) { QCoreApplication::quit(); }
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    if (argc < 2) { std::println(stderr, "usage: graph_recorder <out.csv> [agent_id=28] [domain=0]"); return 2; }
-    std::uint32_t agent_id = 28;
+    if (argc < 2) { std::println(stderr, "usage: graph_recorder <out.csv> [agent_id=40] [domain=0]"); return 2; }
+    std::uint32_t agent_id = 40;   // 28 was taken by ltom_agent (2026-11-15): two participants on one id clash in the CRDT
     int domain = 0;
     const auto parse = [](const char* s, auto& v) { std::from_chars(s, s + std::strlen(s), v); };   // locale-free (CLAUDE.md)
     if (argc > 2) parse(argv[2], agent_id);

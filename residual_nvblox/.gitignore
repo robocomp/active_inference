@@ -1,0 +1,12 @@
+bin/
+build/
+tests/build/
+etc/checkpoint.toml
+*.new
+nvblox_bridge/build/
+nvblox_bridge/lib/
+etc/archive/
+etc/heaptrack/
+etc/self_mask_prev*/
+*.bak-*
+*.png

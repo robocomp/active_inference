@@ -54,7 +54,7 @@ echo "fixture installed: $FIX (hwm $(cat ../etc/room_name_hwm.txt))"
 # to contradict (warm24: DOOR_1 opened at start, then closed by hand, was believed open for minutes).
 for d in DOOR_0 DOOR_1 DOOR_2; do python3 $S/door.py close $d; done
 sleep 3
-# graph recorder (passive DSR participant, agent id 28): every structural write with its writer — for trace_check.py
+# graph recorder (passive DSR participant, agent id 40): every structural write with its writer — for trace_check.py
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
 [ -x $REC ] && { setsid $REC crossing/$1/graph_trace.csv > crossing/$1/graph_recorder.log 2>&1 < /dev/null & REC_PID=$!; }
 NORUN=1 bash $S/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1

@@ -11,7 +11,7 @@ LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK;
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
 EXPLORE_S=${2:-60}
 echo stop > $B/controller/remote_cmd.txt
-rm -f ../etc/last_robot_pose.txt $B/ltsm_agent/etc/ltsm_memory.json
+rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json
 # door_concept's remembered faces are keyed by ROOM NAME, meaningless across runs (recog_proto15: a previous run's
 # 'room_2:door_46' was restored onto a fresh detection). Archived, then cleared — the run starts with no door memory.
 [ -f $B/door_concept/etc/door_identities.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_identities.csv crossing/door_identities_archive/door_identities_before_$1_$(date +%Y%m%d_%H%M%S).csv
