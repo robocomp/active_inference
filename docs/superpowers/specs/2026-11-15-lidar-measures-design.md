@@ -2,8 +2,9 @@
 
 Date: 2026-11-15. Status: APPROVED by the owner 11-15 ("Approved, after lidar": the cabinet exit-release fix comes after this); §7b and §8
 amended 11-15 after Fable's plan review (owner: C1 = A, C2 = two-sided); §7c added 11-16 (owner: "apply active
-inference rigorously" — yes to the mixture with the camera prior, yes to LiDAR-first); §7c rev 2 11-16 (owner: OU
-stationary class prior yes; camera persistence now, C4 = A). Tasks 1–2 built; §7c rev 2 awaits Fable's review.
+inference rigorously" — yes to the mixture with the camera prior, yes to LiDAR-first); §7c rev 3 11-16 (owner: class
+prior counted once + Σ bounded by it (B); camera persistence now with the object-size scale). Tasks 1–2 built and
+merged to main 8f4cc821; §7c rev 3 awaits Fable's review.
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
@@ -137,196 +138,218 @@ Commits local on `feat/cost-removal`; Webots shared (claim from chat and room, F
   ray count is Σ m (effective rays), so a mostly-outside set gets little coverage credit.
 - **Divergence net:** the existing snapshot-and-reject around the update applies to LiDAR-only updates too.
 
-## 7c. Three corrected assumptions (rev 2, 11-16; owner: "can't we apply active inference rigorously?")
+## 7c. Corrected assumptions (rev 3, 11-16; owner: "can't we apply active inference rigorously?")
 
-Owner rulings 11-16: (1) the class prior becomes a stationary (Ornstein–Uhlenbeck) prior on every countable frame,
-behind `Model.LidarMeasuresOnGated`; (2) the camera gets the same persistent shared error as the LiDAR now (Fable
-C4 = A); (3) the camera's m is the ownership prior of a mixture (not the camera-free explaining-away mixture of §1).
-This section supersedes G3, the §7b bullet "m and the down-weights", and rev 1 of §7c (2e5c9213), whose review is
-`.superpowers/sdd/2026-11-15-lidar-measures/fable-7c-review.md` (cited below as C1–C4, I1–I11, M1–M6).
+Owner rulings 11-16: the class prior is counted ONCE (at birth) and the belief's Σ is bounded by it, on every countable
+frame, behind `Model.LidarMeasuresOnGated` (rev 3 decision B, replacing rev 2's OU transition after Fable's rev 2
+review C4); the camera gets the same persistent shared error as the LiDAR now (rev 1 C4 = A), its decorrelation scale
+taken from the object's own angular size (no new constant); the camera's m is the ownership prior of a mixture (not
+the camera-free explaining-away mixture of §1). Reviews: rev 1 `fable-7c-review.md`, rev 2 `fable-7c-rev2-review.md`
+(cited R1-…, R2-…), both in `.superpowers/sdd/2026-11-15-lidar-measures/`. This section supersedes G3, the §7b bullet
+"m and the down-weights", and §7c revs 1–2.
 
-### 7c.0 The mechanism (measured 11-16, Task 2 fixture, per-ray diagnostic)
+### 7c.0 What was measured (corrected, R2-C1)
 
-The back-face pull in `wall_behind` (back face −5.0 → −1.3 cm, h 0.51 → 0.546 over 100 sweeps; box rays alone
-−4.9 cm) is not one strong ray. From a front view the direction g = (Δcy, Δh) = (δ/2, δ) — back face moves, front
-face fixed — has no data. With the class anchors removed from the LiDAR-only frame (C1 = A) and Q added on every
-predict, σ along g grows without bound (σ_h 6.0 → 7.5 cm in 100 frames), and the sum of the tiny wall-ray forces
-(weights 0.001, ≈ 1e-5 per frame each) walks the mean along g as far as Σ lets it. Fable's hand trace (I7) found no
-single strong ray because there is none. Two faults in the generative model make it possible: the class prior is
-used as a per-frame measurement instead of a prior (7c.1), and every frame's shared error is assumed new (7c.2).
-The attribution of an individual return (7c.3) is a third, separate fault.
+- **The real fault: Σ grows without bound along directions no LiDAR ray sees.** On a LiDAR-only frame (C1 = A, no
+  anchors) seen from the front, the depth/back-face direction g = (Δcy, Δh) = (δ/2, δ) has no data, and Q is added on
+  every predict: σ_h 6.0 → 20.9 cm over 2000 sweeps (Task 2 fixture, R2-C1). Any existence or removal score that
+  marginalises Σ then reads an honest-looking but unfounded uncertainty.
+- **The back-face pull reported in rev 1/rev 2 was a fixture artefact.** The Task 2 `wall_behind` fixture put 120 wall
+  returns on a grid with no visibility test; 20 of them lie on rays the TRUE box occludes. With those 20 removed the
+  pull is exactly zero at weights 0.001, 0.1 and 1.0 over 2000 sweeps, on today's code (R2-C1 table). Reason: a ray that
+  does not cross the belief box has no term (`lidar_ray_factor.h:190`).
+- **Consequence for attribution.** With physical returns, a foreign return carries a term only when the belief differs
+  from the truth: (i) the belief over-extends (deeper or taller than the object), so real wall returns cross it — those
+  are CORRECT refutations; (ii) a neighbour's face lies within σ of the belief's face; (iii) the mask is
+  over-segmented onto the wall. 7c.3 is specified and tested on those three cases only.
+- **Every fixture builds its returns by ray-casting a TRUE scene** (box ∪ walls ∪ floor ∪ neighbour; first hit only).
+  The Task 2 tests `wall_behind_does_not_pull` and the dead vanishing control are rewritten under this rule in the
+  same change.
 
-### 7c.1 The class prior is a stationary prior, not a per-frame measurement
+### 7c.1 The class prior is counted once (decision B; supersedes rev 2's OU transition)
 
-**What the model said.** The class anchors — footprint (w, h ~ N(prior_footprint_m / depth_mean, prior_footprint_std²)),
-height (H ~ N(prior_height_m, prior_height_std²)), the depth-unobserved boost (`depth_unobs_precision`), the room-axis
-alignment and the wall flush/parallel term — are added to Id on EVERY camera frame, while `predict` adds Q. That is a
-filter told "a fresh measurement of the class mean arrives every frame". Its fixed point along a direction no datum
-sees is σ = (Q/λ)^¼ (nightstand depth: (0.005² · 0.06²)^¼ = 1.7 cm), three times tighter than the class's own 6 cm, and
-the mean is held at the class mean by 700 fake measurements per run. On a LiDAR-only frame the anchors are rightly
-left out (C1 = A), so the same direction then has NO prior and diffuses: 7c.0.
+**What the model said.** The class anchors — footprint (2), height (2a), room-axis alignment, wall flush/parallel (1)
+— are added to Id on every camera frame while `predict` adds Q: a filter told that a fresh measurement of the class
+mean arrives every frame. Its fixed point along an unseen direction is 1–3 cm (R2-M1: 0.97 cm at the floor, 2.8 cm at
+2 m), several times tighter than the class's own spread, from no data. On a LiDAR-only frame the same direction has
+no prior at all (7c.0).
 
-**What is true.** The class prior is p₀(θ): where an object of this class is BEFORE any measurement, and where an
-unobserved object's belief returns to as its evidence ages. In a state-space model that is a property of the
-TRANSITION, not of the likelihood: the static object's state follows a mean-reverting (Ornstein–Uhlenbeck) process
-whose stationary distribution is p₀. Per predict step with process variance Q_i (the existing `process_noise_diag`,
-including the inferred volatility exp(ω) and the `q_scale` of an aged step) and class variance P_i:
+**What is true.** The class prior p₀(θ) is what is known about an object of this class before any measurement. A
+recursive Bayesian filter multiplies it in once. The relational parts (stands against a wall with π_flush, aligned
+with the room axis) are prior knowledge too, and enter on the same footing.
 
-  a_i = exp(−Q_i / (2 P_i))
-  θ_i ← μ_i + a_i (θ_i − μ_i),   Σ ← A Σ A + diag(P_i (1 − a_i²)),   A = diag(a)
+**The model, under the flag.**
+- **Birth.** The belief is born as today (`birth_on_priors`: mean, Σ = `prior_cov_diag` = the class P, R2-M3). The
+  FIRST update of the instance carries the anchors (1), (2), (2a) and the room axis, exactly as today's code computes
+  them; that is the only time they enter. Their information at that update, Λ_birth (6×6), is stored with the belief
+  (used by the size summary, below).
+- **Every later frame** (camera, LiDAR-only, admissible or gated): no anchor. The one-sided constraints (2b)
+  short-height and (2c) wall no-cross stay on every frame — they are likelihood terms (zero unless violated), not
+  priors. Camera data terms (z_top_obs / top-no-float, moments, per-point azimuth) stay.
+- **Predict.** Today's: the mean is held (static object), Σ ← Σ + Q (Q = exp(ω) learnt, R2-I4 unchanged: ω learns
+  from the post-minus-previous-posterior step of camera-measured cycles), followed by the engine's existing
+  `clamp_to_prior` congruence with the class P: Σ never says LESS is known than before the object was seen. This is
+  the one bound in the design; it is the engine's documented stationary-prior saturation (recursive_laplace.h
+  predict, already used by table and chair), it acts on Σ only and never on data or the mean. The aged predict
+  (`inflate_for_age`) uses the same bound.
+- **`depth_unobs_precision` stays in the camera frame for now (R2-I5).** It counters a likelihood bias (one-face
+  points drag the extent outward; the size common mode caps Σ, not the mean), which the class prior counted once does
+  not hold. It is removed only when a camera one-face replay on recorded live6 frames (parked and approaching) passes
+  without it — a separate later change. It is stated here as the known remaining per-frame prior term.
 
-Stationary marginal exactly N(μ_i, P_i), for any Q and any step size (the exponential form composes; no clamp, no
-max(0,·)). For Q ≪ P the injected variance P(1 − a²) ≈ Q, so a measured direction behaves as today. No new constant:
-μ, P from the class config, Q from the existing process noise. Time constants (nightstand, Q = 0.005² per frame,
-10 Hz): w, h 288 frames ≈ 29 s; H 800 frames ≈ 80 s; yaw toward the room axis (3°, Q = 0.01²) 55 frames ≈ 5.5 s.
+**Consequences.**
+- A measured size is kept: nothing pulls the mean back to the class after birth (R2-C4: rev 2 forgot a measured
+  depth in 30–80 s; gone). A parked look does not leak into the bias (R2-I6: that came from the reversion; gone).
+- Σ along an unseen direction rises to the class P and stays there (nightstand depth ±6 cm), on camera and LiDAR-only
+  frames alike: the honest statement, and what the existence/removal marginals need.
+- Camera frames change with the flag on (anchors leave after birth). The flag-off live run (objects_live8off) is the
+  A/B; the golden 40-frame trajectory pins flag-off bit-exact.
+- No mean reversion means no bound on a mean walk under a CONSTANT false force; 7c.0 shows no such force exists with
+  physical returns. The mean is protected by 7c.2 (a parked look is one look) and 7c.3 (ownership).
+- The room axis no longer holds yaw after birth: yaw is held by its data. The flag-off A/B notes yaw at |Δ| > 22.5°
+  (R2-I3: today's term has a stable minimum at 45°) so a difference there is not read as a regression.
 
-**Which prior terms move into the transition.**
-- Size (H, w, h): the class Gaussians above. μ = (prior_height_m, prior_footprint_m, depth_mean()), P = std².
-- Yaw: the room-axis term is a 4-fold periodic prior; locally it is N(nearest room-axis yaw, room_axis_std²). μ_yaw =
-  the room-axis multiple of 90° nearest the current yaw (recomputed at each predict; it never decides front/back —
-  the same property as today's ¼·sin 4Δ). No room axis staged ⇒ P_yaw = prior_yaw_std² about the current yaw, i.e.
-  free (a = exp(−Q/(2P)) ≈ 1 − 1e-4).
-- Position along the wall normal (the flush term): the furniture prior "stands against a wall with probability
-  π_flush" is a two-component prior on the back-face gap d to the staged wall: flush N(0, σ_wall²) with weight
-  π_flush, free otherwise. Its OU reversion acts on d with weight = the current flush posterior w_flush (already
-  computed, `flush_posterior`): μ_d = 0, P_d = σ_wall² / w_flush (w_flush → 0 ⇒ P → ∞ ⇒ a → 1, no pull; continuous).
-  The parallel part acts on yaw exactly like the room axis, toward the wall's direction.
-- Position along the wall and in a free room: the class has no prior mean there (prior_pos_std = 0.30 m is birth
-  slack). μ = the current mean, P = prior_pos_std² ⇒ Σ bounded at 30 cm instead of a free walk; the mean does not move.
-- `depth_unobs_precision` (20 000 /m² on the nightstand) is NOT carried over. Its job — "the footprint prior must
-  prevail absent two-face evidence" — is what the stationary prior does by construction: an unseen extent stays at
-  N(depth_mean, 6 cm²) for ever. OPEN for review: the boost was also fighting the one-face points dragging the extent
-  outward (a likelihood bias: the size common mode caps Σ, not the mean). With 7c.2's persistent b_cam that drag is
-  bounded by one look's worth; whether that suffices is checked by `one_face_keeps_depth` (§8) with the boost gone.
-- The one-sided constraints (wall no-cross 2c, short-height 2b) are not priors; they stay in the likelihood of every
-  frame. The camera-data terms (z_top_obs / top-no-float, moments, per-point azimuth) are data and stay.
+**The size summary (R2-I10).** `size_lik_` (the parallel recursion behind `class_log_evidence`) is, under the flag,
+taken from the belief instead: the size information of the belief, pose marginalised (Schur complement of Σθθ⁻¹ onto
+H, w, h), minus the class prior's size information P_size⁻¹ and minus Λ_birth's size block; mean from θ. Gaussian
+division of the posterior by what was multiplied in once. Where the belief has aged back to P the result is no
+information on that DOF (eigen-decomposed; a negative eigenvalue from linearisation reads as 0 = "no data", logged).
+This makes the class evidence count a parked camera as one look, as the belief does, and lets LiDAR-only frames reach
+it ("H follows the LiDAR top").
 
-**Consequence for the LiDAR-only frame.** The C1 = A frame keeps its exact content; it is now consistent because the
-prior is in the predict that every frame runs. Along g (7c.0) the restoring force of the stationary prior bounds the
-walk: a constant per-frame gradient f (1/m) along a direction with OU coefficient a and steady variance Σ_ss moves the
-mean by Σ_ss·f per frame and reverts it by (1 − a)·Δ, so it settles at Δ = Σ_ss·f/(1 − a) ≈ 2 P² f / Q when nothing
-else sees that direction (Σ_ss → P). Today's LiDAR-only walk is the a = 1 case: no fixed point. 7c.5 pins the number.
+### 7c.2 Shared errors persist across frames (supersedes G3; R1-C1, C4, I1–I5, I10; R2-C2, C3, I8)
 
-**Consequence for camera frames.** They change with the flag on: the anchors leave Id and enter the predict. An
-unseen extent is honestly ±6 cm, not ±1.7 cm; existence and removal scores that marginalise Σ see the honest value.
-The flag-off live run (objects_live8off) is the A/B; the golden 40-frame trajectory pins flag-off bit-exact.
+**What the model said.** Each frame's shared error is drawn afresh (the per-frame Woodbury `saturate`). **What is
+true.** The world is static; while the viewpoint does not change, frame t sees the same surface, through the same
+localisation error, with the same deprojection and mask bias as frame t−1. 100 parked frames are about one look.
 
-**Existing engine mechanism.** `clamp_to_prior` (recursive_laplace.h, table/chair) bounds Σ by a congruence but does
-not move the mean and uses `prior_cov_diag` (the birth prior, not the class prior). The OU predict replaces it for the
-countable belief; table/chair are untouched (§4).
+**Latents (R2-I8).** Three, carried in the belief beside θ (state x ∈ ℝ²¹, covariance P 21×21 in double):
+- b_chain ∈ ℝ³ on (cx, cy, yaw): the localisation (pose-chain) error at the object. SHARED by both channels — it is
+  the same robot pose. Marginal Σ_chain,t = (`chain_cov_xx`, `chain_cov_yy`, `chain_cov_yaw`) of the frame.
+- b_cam ∈ ℝ⁶: the camera points' sensor-specific shared error. Marginal = today's camera common mode WITHOUT the chain
+  and WITHOUT the ego-motion terms: config floors + range lateral/size + obliquity yaw + moment variance.
+- b_L ∈ ℝ⁶: the LiDAR rays' sensor-specific shared error. Marginal = the config floors (§7b, without chain and
+  ego-motion).
+- The ego-motion terms (`mot_pos_var`, `mot_size_var`, `mot_yaw_var`) are fresh every frame by construction: they
+  stay in the per-frame Woodbury of their channel (ρ = 0), outside every b.
+- Camera points measure θ + E b_chain + b_cam; rays measure θ + E b_chain + b_L (E embeds (cx, cy, yaw) into ℝ⁶).
+  b_chain, b_cam, b_L are a priori independent of each other and of θ.
 
-### 7c.2 Every channel's shared error persists across frames (supersedes G3; Fable C1, C4, I1–I5, I10)
+**Dynamics.** Per latent and per DOF: b_t = ρ_t D_t b_{t−1} + w_t, D_t = σ_t / σ_{t−1} (one source per latent, so the
+rescale is physical: a deprojection bias scales with its σ), w_t ~ N(0, (1 − ρ_t²) σ_t²). Marginal exactly σ_t²,
+lag-1 correlation exactly ρ_t. ρ = 0 for all three is today's Woodbury: the regression test. The θ–b and b–b cross
+blocks are propagated with the same F = blockdiag(I, ρD) (the b_cam–b_L block included, R2-C3).
 
-**What the model said.** Each frame's shared error (pose chain, extrinsic, mask boundary, which surface points the
-beams sample, the deprojection bias) is drawn afresh: the per-frame Woodbury `saturate`. **What is true.** The world is
-static; while the viewpoint does not change, frame t sees the same surface, through the same pose, with the same
-mask bias as frame t−1. 100 parked frames are about one look.
+**ρ (R2-C2; decision: camera scale from the object's angular size).** Viewpoint change is measured from ODOMETRY, not
+from the estimated pose (pose jitter is not motion): the robot node's typed `robot_current_advance_speed`,
+`robot_current_side_speed`, `robot_current_angular_speed` (+ `robot_current_speed_timestamp`), integrated between the
+channel's updates of THIS instance (aged and predict-only cycles add up). Parked ⇒ Δ = 0 ⇒ ρ = 1 exactly.
+- From the integrated sensor motion relative to the object centre: Δφ = change of the sensor's bearing ABOUT the
+  object (aspect), Δz = change of its range.
+- **Camera:** ρ_cam = exp(−|Δφ| / φ_obj − |Δz| / z), φ_obj = atan(w_⊥ / 2z), w_⊥ the belief's extent perpendicular to
+  the line of sight: a new face starts to show after the camera has turned about the object by its angular half-width,
+  and the range-proportional deprojection terms decorrelate with a relative range change. From the state; no constant.
+- **LiDAR:** lateral DOFs and yaw: ρ = exp(−z|Δφ| / (g·z)) = exp(−|Δφ| / g), g = `max_ring_gap_rad()` of the Helios
+  `SensorModel` (the beam pattern shifts by a footprint); H: ρ = exp(−|Δz| |tan ε| / (g z)) (ring ε moves over the top
+  with range). SensorModel absent ⇒ ρ_L = 1, logged per instance (R2-M6).
+- **Chain:** ρ_chain = exp(−½ cᵀ Σ_chain⁻¹ c), c = (pose increment from the localiser) ⊖ (odometry increment) over the
+  same stamps = the localiser's own correction. Parked without correction ⇒ 1; a relocalisation ⇒ ≈ 0. Scale = the
+  chain covariance itself.
+- The exponential (OU-in-path) form composes for any update rate (R1-I1). Stated limit: a path that returns to the
+  same viewpoint counts as new.
 
-**Model.** Two latents carried in the belief beside θ: b_cam (camera points' shared error) and b_L (LiDAR rays'),
-each ∈ ℝ⁶, prior N(0, Σc_ch,t) (Σc_cam = today's camera common mode; Σc_L = §7b's LiDAR-only common mode: floors +
-pose chain + ego-motion). Camera points measure θ + b_cam, rays measure θ + b_L. Dynamics per channel and per DOF
-(Fable I3: Σc changes every frame):
+**Update (R2-C3), in order, one predict and one GN per cycle:**
+1. Predict x̄, P̄ (θ by 7c.1's predict on the θθ block, applied as a congruence on θ's rows/columns of P; b by the
+   dynamics above).
+2. Per GN iterate k, with b̄ (the PREDICTED biases) held fixed: trace/linearise the camera points at θ_k + E b̄_chain +
+   b̄_cam and the rays at θ_k + E b̄_chain + b̄_L, exactly as `accumulate_*` do now, giving (Id_ch, bd_ch) per channel;
+   pass each through `saturate` with ITS per-frame fresh covariance only (ego-motion), giving (I_ch, g_ch).
+3. Joint Newton step on x in information form, 21×21 in double (LDLT):
+   Λ = P̄⁻¹ + Σ_ch H_chᵀ I_ch H_ch + H_θᵀ I_θ H_θ,  x_{k+1} = x_k + Λ⁻¹ (Σ_ch H_chᵀ g_ch + H_θᵀ g_θ − P̄⁻¹ (x_k − x̄))
+   H_cam = [I E I 0], H_L = [I E 0 I], H_θ = [I 0 0 0]. The θ-only channel (I_θ, g_θ) carries the one-sided
+   constraints (2b), (2c), unsaturated: the biases cannot absorb a wall crossing. The relinearisation term
+   P̄⁻¹ (x_k − x̄) is what rev 2 lacked.
+4. P = Λ⁻¹ at the last iterate. Published Σ = the θθ block.
+At ρ = 0 the b's have prior N(0, Σc) independent of θ and the objective is quadratic in b, so marginalising them
+reproduces today's saturated update exactly: the regression, tolerance measured in float32 (float input, double S).
+The divergence snapshot copies x and P. `sanitize_covariance` re-seeds the b blocks at their marginals with zero
+cross terms; `canonicalize` / `apply_mode_rotation` permute b_cam, b_L and their blocks like θ, and rotate b_chain's
+yaw. LTSM restore stores no b: the first look after a restart is new (stated). Lives in a new
+`common/ai_belief/persistent_update.h`, generic in the latent layout; `ai::update` and the 8 other agents unchanged.
 
-  b_t = ρ_t D_t b_{t−1} + w_t,  D_t = Σc_t^{½} Σc_{t−1}^{−½} (diagonal),  w_t ~ N(0, (1 − ρ_t²) Σc_t)
+**Consequences.** Parked: each channel counts as one look, and the chain error once for both. H at 2 m parked: the
+LiDAR's share is set by the two channels' sensor-specific σ (R2-C2: ~95 % with ρ_cam = ρ_L = 1), so H follows the LiDAR
+top. Moving around an object earns information — the active-inference reading of "look from elsewhere". Σ along a
+direction one channel alone sees cannot go below P σ²/(P + σ²) of that channel's persistent errors; the MEAN of a
+direction no datum holds is held only by the absence of force (7c.0), not by 7c.2 (R1-C1).
 
-Marginal exactly Σc_t, lag-1 correlation exactly ρ_t. ρ = 0 is today's Woodbury: the regression test.
+**Log per cycle:** ρ_cam, ρ_L, ρ_chain, Δφ, Δz, b̂ and √diag of each latent, Σm, Σr, ray count, trace of each
+channel's I_ch, and the measured Δ while parked (so pose jitter vs odometry becomes a number, R2-C2).
 
-**ρ (Fable I1, I2).** The Markov kernel in path length, which composes for any sweep rate: ρ_t = exp(−Δ_t / ℓ), per
-DOF, Δ_t the viewpoint change of the channel's sensor relative to the object since the channel's last update of THIS
-instance (path lengths add across predict-only and aged cycles).
-- LiDAR: lateral (cx, cy, w, h) and yaw from the tangential path, ℓ = ring_gap·z; H from the radial path,
-  ℓ = ring_gap·z / |tan ε| (ε the elevation of the ring hitting the object top). ring_gap = `max_ring_gap_rad()` of the
-  Helios `SensorModel`.
-- Camera: ℓ = q·z / f (the mask's pixel footprint at the object), all DOFs from the tangential + radial path.
-- Stated limits: the footprint is the FASTEST-decorrelating source; model mismatch and neighbour returns decorrelate
-  with aspect (tens of degrees), so ρ is optimistic while moving and exact while parked (the case that matters, C4).
-  A path that returns to the same viewpoint counts as new.
-- Pose-chain part: ρ_chain = 1 within a localisation session (the localiser publishes no cross-time covariance and
-  the odometry increment is not read by this agent); a relocalisation event resets it to 0. Combined per DOF:
-  ρ_i = (ρ_f Σf_i + ρ_chain Σchain_i)/(Σf_i + Σchain_i), exact for the lag-1 correlation of a sum of two independent
-  processes.
-- SensorModel field absent ⇒ ρ = 1 for that channel (conservative: no new information until the viewpoint is known);
-  logged once.
+### 7c.3 The camera's m is a prior on ownership (supersedes "m and the down-weights"; R1-C2, C3, I6, I8, I9, I11; R2-I7)
 
-**Update (Fable I4, I5).** One joint GN per cycle on x = [θ; b_cam; b_L], one predict (θ by 7c.1, each b by its
-Gauss–Markov step, cross-blocks multiplied by A·ρ). Per iterate: points linearised at θ_k + b̄_cam, rays traced at
-θ_k + b̄_L (b̄ = the PREDICTED bias, held over the iterates); each channel's (Id, bd) enters through `saturate` with
-S_ch = the predicted covariance of θ + b_ch (Pθθ + Pθb + Pθbᵀ + Pbb), then x ← x̄ + P Hᵀ beff, P ← P − P Hᵀ Ieff H P.
-Only 6×6 inverses and the existing stable operator; S in double. At ρ = 0 it is the matrix-inversion-lemma form of
-today's update. A frame without camera points updates only through the rays (the LiDAR-only frame); a frame without
-rays only through the points.
-
-**Consequences, by construction.**
-- Σ: a repeated look cannot add more than Σc_ch⁻¹ per channel; the posterior of θ in a direction one channel alone sees
-  stays ≥ P Σc/(P + Σc). Fable C1 is right that this bounds Σ, not the mean: the mean of a direction the data does not
-  hold is held by 7c.1's stationary prior, and a wrongly attributed return is refused by 7c.3.
-- Parked: camera and LiDAR are each one look; the LiDAR's share of H is no longer ~11 % (C4) but set by the two
-  channels' Σc. Moving around an object earns information on both — the active-inference reading of "look from
-  elsewhere".
-- Life of b (I10): `sanitize_covariance` resets b and its blocks; `canonicalize` / `apply_mode_rotation` permute b and
-  Pθb with θ; the divergence snapshot copies them; the published Σ is the θ marginal; LTSM restore does not store b, so
-  the first look after a restart counts as new (stated). ω is updated from camera-measured cycles only (§7b).
-- Log per cycle: ρ_cam, ρ_L, b̂_cam, b̂_L, √diag Pbb per channel, Σm, Σr, ray count, trace of each channel's Ieff.
-
-### 7c.3 The camera's m is a prior on ownership (supersedes "m and the down-weights"; Fable C2, C3, I6, I8, I9, I11)
-
-The camera says p(return i is the object) = m_i; the return then comes from the box or from the rest of the scene,
-and the room model knows its walls and floor. Per selected return (range r_i, M3: r for range, ρ only for correlation):
+Per selected return i (range r_i; ρ is reserved for correlation):
 
   p(r_i) = m_i · N(r_i; t_i, σ_r² + J_i S_L J_iᵀ) + (1 − m_i) · p(r_i | rest)
-  p(r_i | rest) = (1 − w_u) · N(r_i; t_room,i, σ_r² + σ_room²) + w_u / L_i     (the room predicts a hit inside the box)
-               = 1 / L_i                                                     (it predicts none; M1)
+  p(r_i | rest) = (1 − w_u) · N(r_i; t_rest,i, σ_r² + σ_rest,i²) + w_u / L_i   (some rest surface predicted inside the box)
+               = 1 / L_i                                                      (none predicted)
 
-- Box component (C3): the PDA innovation variance, σ_r² + J_i S_L J_iᵀ, J_i the range Jacobian the factor already
-  computes, S_L the predicted covariance of θ + b_L. No Cauchy factor on the mixture path (the mixture IS the outlier
-  model); every other caller of `accumulate_lidar_rays` unchanged. Capture: a true return m = 0.9 with the belief
-  14 cm off keeps r = 0.99 at 5 cm σ along the ray (Fable C3). Price (stated): an uncertain box refuses the wall less
-  firmly (wall 5 cm behind, box σ 4 cm, m = 0.1 ⇒ r = 0.045).
-- Unexplained component (C2): uniform over the ray's chord through the SELECTION box, 1/L_i (≈ 1.67 /m), because the
-  returns were selected inside it. Limit (stated, inherent to any range mixture): a foreign surface within σ of the
-  predicted face cannot be told from the face (neighbour at e = 2 cm, m = 0.1 ⇒ r = 0.45; e = 5 cm ⇒ 0.055).
-  Neighbour boxes published by the other countable agents as further "rest" components: later work, owner to accept
-  (named, not built).
-- m (I8): m_i = π_mask · Φ(s_i / σ_px), π_mask the slice's published detector `confidence` (`MaskIngestor` slice).
-  Limit: confidence is not a calibrated pixel precision; inside an over-segmented mask m stays high (Fable: 0.98 for a
-  wall return 3σ_px inside), and there 7c.1/7c.2 bound the damage. Retina-side mask precision: later work.
-- First-hit physics (I9): kept out. A return beyond the box's predicted hit gets r ≈ 0 and no term; an over-deep box is
-  corrected by camera frames and by the stationary prior, not by LiDAR-only frames. The full model (range = first hit
-  of box ∪ room) is later work.
-- Sources, one each (I11): σ_r = the Helios `SensorModel` range σ (absent ⇒ `ExistenceSensorSigmaM`), consumer
-  constants in quadrature as `sensor_model.h` says; σ_room = `wall_explain_sigma_m` (the camera-point wall component's
-  σ, shared: 7c.3 is its LiDAR counterpart); w_u = 0.2 (the fleet beam model's form, `lidar_ray_cost`); t_room,i = first
-  hit of the ray on the room polygon's vertical faces (extruded to the wall height the room publishes, else unbounded)
-  and on z = 0, a small new `common/` function on the compute thread; L_i from the selection box.
-- Interface (I6): `LidarRays::weights` keeps the prior m (Task 1). New per-ray θ-independent inputs: t_room,i (or
-  none), L_i; the factor computes r_i per GN iterate from the current trace. Coverage uses Σ r at the predicted state,
-  computed once at the first accumulation and frozen for the update. Empty inputs ⇒ today's behaviour bit-exact for
-  table/chair/bottle/door. The ray-count down-weight is kept but counts Σ r (one face is still one look; 7c.2 covers
-  across frames, the count within one).
-- The complete-data information r·JJᵀ/σ² is slightly optimistic where r is ambiguous (M2); the same practice as the
-  camera-point wall mixture; noted.
+- **Box component (R1-C3):** the PDA innovation variance; J_i the range Jacobian the factor already computes; S_L the
+  predicted covariance of θ + E b_chain + b_L. No Cauchy factor on the mixture path; every other caller of
+  `accumulate_lidar_rays` unchanged.
+- **Rest (R1-C2, and the neighbour in scope — my call under "go with your recommendations", owner may cut it):** t_rest,i
+  = the first hit, inside the selection box, of the ray on (a) the room polygon's vertical faces and z = 0 (σ_rest =
+  `wall_explain_sigma_m`, shared with the camera-point wall component — 7c.3 is its LiDAR counterpart), and (b) every
+  OTHER object box published in the graph (countable, cabinet, table, chair, refrigerator, … `box`-type nodes with
+  their pose and size attributes, read through the graph as agents must; σ_rest = that box's published σ along the ray,
+  or the common floor 3 cm when it publishes none). The neighbour R2-I7 named (bed beside the nightstand, r > m within
+  8–10 cm) is then explained by its own box, not by the uniform floor. An object no agent publishes falls back to the
+  uniform 1/L_i (stated limit). The ray-cast is a small `common/` function on the compute thread (box set staged per
+  cycle from the graph, deep copies).
+- **Unexplained:** uniform over the ray's chord through the selection box, 1/L_i. Limit: a surface within σ of the
+  predicted face cannot be told apart by range (any mixture).
+- **m = π_mask · Φ(s_i / σ_px)**, π_mask = the slice's published detector `confidence` (an upper bound on pixel
+  ownership, R2-M4). σ_px has no segmentation-boundary term yet (stated).
+- **First-hit physics stays out (R1-I9, R2-M8):** a return beyond the box's predicted hit gets r ≈ 0 and no term. With
+  physical data those are the only wall returns that carry a term at all, and they are correct refutations of an
+  over-extended belief; giving them r ≈ 0 is a choice, so an over-deep box is corrected by camera frames only. The
+  full model (range = first hit of box ∪ rest) is later work.
+- **σ_r² = 1/`LidarPrecision` + σ_sensor²** (σ_sensor from the Helios `SensorModel`, 0 when absent; R2-M5). w_u = 0.2
+  (the fleet beam model's form). L_i from the selection box.
+- **Interface (R1-I6, R2-M7):** `LidarRays::weights` keeps the prior m. New per-ray θ-independent inputs: the rest
+  hits (t_rest,i, σ_rest,i) or none, L_i. The factor computes r_i per GN iterate from its own trace. The coverage
+  scale uses Σ r at the predicted state, computed in `CountableBelief::update` before the solve and frozen for it.
+  Empty inputs ⇒ today's behaviour bit-exact for table/chair/bottle/door. The ray-count down-weight counts Σ r.
+- **Information:** complete-data r·JJᵀ/σ², slightly optimistic where r is ambiguous (R1-M2), as the point mixture.
+- **The responsibility table** the tests pin is computed from THIS formula (σ_r from the nightstand config, σ_rest
+  0.05, L 0.6 m) by the plan's first task and written into the spec before any code (R2-I7); rev 2's numbers mixed
+  three formulas and are withdrawn.
 
-### 7c.4 What stays from rev 1 / §7b
+### 7c.4 What stays from §7b
 
 The LiDAR-only frame's content (C1 = A), the selection anchor on the mask-cloud centroid, membership G2 (σ_px with
-mot_pos_var; the mask-lag term is in σ_px only, not in Σc_L — I3), the divergence net, ω from camera cycles only.
+mot_pos_var; the mask lag is in σ_px only, not in any b), the divergence net, ω from camera cycles only.
 
-### 7c.5 Pass additions (replace rev 1's 7c.3; Fable I7)
-- Unit, 7c.1: an unobserved belief (no data, 5000 predicts) is N(μ_class, P_class) within 2 % in mean and σ; an
-  observed direction behaves as the flag-off predict within 1 % over 40 frames; a constant per-frame force along g
-  settles at the analytic OU offset (pinned).
-- Unit, 7c.2: ρ = 0 reproduces today's per-frame Woodbury (tolerance set after measuring it in float32 with S in
-  double); ρ = 1 and n identical sweeps equal ONE sweep with n·Id and the same predicts (analytic); N small steps and one
-  step of the same path length give the same Σ within 5 %; the chain-ρ combination formula; reset/permute of b under
-  sanitize and mode rotation.
-- Unit, 7c.2 alone (weights = m, no mixture): the analytic pull β·G/(G + 1/P) of C1 — a number, not a smallness pass.
-- Unit, 7c.3: responsibilities at the worked numbers above (C2, C3) within 10 %; `recovers_from_14cm`: a true box
-  offset 14 cm, m = 0.9, LiDAR-only sweeps bring the error below 3 cm; `neighbour_beside_does_not_pull`: an
-  unmodelled surface 5 cm beside the face at m = 0.1, 2000 sweeps, pull below a pinned bound.
-- Unit, whole: `wall_behind_does_not_pull` started with the back face 2 cm from the wall, m = 0.1 (the live value,
-  f ≈ 600 px, σ_px ≈ 12 px at 2 m), 2000 sweeps, back-face gap within 0.5 cm of the box-rays-only baseline.
-- Unit: `one_face_keeps_depth` with the depth boost gone (7c.1 OPEN item).
-- Live: §8 unchanged (two-sided Σ, ≤ 10 cm drift, H closer to the true top than live6, ~10 Hz).
+### 7c.5 Pass additions (replace revs 1–2; R2-I9). Every fixture ray-casts a true scene, first hit only.
+- 7c.1: born with the anchors once, then 5000 predict-only cycles: mean unchanged, Σ = the class P (2 %); 40 one-face
+  camera frames: the anchors' information appears in Λ_birth only; flag off: golden trajectory bit-exact.
+- 7c.1: Task 2's fixture with physical returns, 2000 LiDAR-only sweeps: σ_h ≤ prior_footprint_std (today 20.9 cm),
+  mean back face unchanged (1 mm).
+- 7c.2: ρ = 0 reproduces today's update at every GN iterate (measured float tolerance); ρ = 1, Q = 0, n identical
+  sweeps = ONE sweep with n·Id (analytic); N predict-only cycles then one update = one predict over the summed path
+  then one update (exact in ρ); the shared b_chain: parked camera + LiDAR give position information ≤ 1/Σ_chain
+  (R2-I8's √2); sanitize / mode-rotation permute b correctly; ρ from odometry = 1 when parked.
+- 7c.2 alone (weights = m, no mixture, a foreign surface within σ, belief ≠ truth): the analytic pull β·G/(G + 1/P)
+  (R1-C1) — a number.
+- 7c.3: the responsibility table (10 %); `recovers_from_14cm` (true box 14 cm off, m = 0.9, LiDAR-only sweeps bring the
+  error below 3 cm); `over_deep_belief_is_not_held` (belief 10 cm deeper than the truth against a wall: the result is
+  stated, r ≈ 0, depth held by Σ only — documents the choice); `neighbour_box_explains_its_returns` (a published
+  neighbour box 3 cm beside the face, m = 0.1, 2000 sweeps: pull within the analytic bound from the table);
+  `unpublished_neighbour` (same without the box: the stated limit, pinned).
+- Size summary: a parked camera (ρ = 1) gives the class evidence one look's information, not N.
+- Live: §8 unchanged (two-sided Σ, ≤ 10 cm drift, H closer to the true top than live6, ~10 Hz). Because the class
+  means in the configs are the Webots objects (R2-C4), one nightstand run with its class means shifted by 1σ is added
+  to live8, so a belief that merely sits at the class mean cannot pass.
 
 ## 8. Pass
 
