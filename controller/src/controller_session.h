@@ -890,9 +890,12 @@ private:
                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                              ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     void chain_episode_failed(const rc::policy::Pose2 &bel, const std::vector<rc::policy::Return> &cells, float s0, float s1, const char *why);
-    /// step 3 in force: the chain drives (policy off), the monitors are on and their marks are allowed to act
+    /// step 3 in force: the HYBRID's chain drives, the monitors are on and their marks are allowed to act — they enter the
+    /// planner's world, a plan-first re-plan follows a marked window, a cleared mark may shorten the route, and no route on
+    /// map + marks with one on the map alone is a WAIT. (Until 2026-11-16 this required the policy OFF — the gate of port
+    /// step 3, written before the hybrid existed — so in the live hybrid none of it ran, while the 2-D mock's hybrid had it.)
     [[nodiscard]] bool chain_marks_drive() const
-    { return params_ != nullptr and params_->chain_monitor_enabled and params_->chain_marks_drive and not policy_enabled(); }
+    { return params_ != nullptr and params_->chain_marks_drive and chain_hybrid_on(); }
     std::ofstream chain_csv_;                  ///< chain_monitor.csv
     rc::chain::MarkSet chain_marks_;           ///< controller-local marks (room frame of chain_marks_room_)
     std::string chain_marks_room_;             ///< the room whose frame the marks are in (a room switch drops them)
