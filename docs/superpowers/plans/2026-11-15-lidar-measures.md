@@ -219,6 +219,7 @@ The worktree holds Task 4c rev 2 uncommitted (8 files). It resumes after this pl
   - `rho0_lidar_only_equals_engine`: the same for a LiDAR-only frame.
   - `prior_added_once`: first update LiDAR-only ⇒ `prior_added_ == false`; first admissible camera update ⇒ true, and the relational anchors' information appears in that update only (a second identical camera frame adds no flush/axis term — check via the test hook's θ-only Id).
   - `aged_belief_returns_to_class_P`: after birth + one camera update, 5000 `predict()` ⇒ θ mean unchanged (1e-6), Σθθ diagonal = `prior_cov_diag()` within 2 %.
+  - `wall_behind_does_not_pull` (moved from Task 3, ruling T3-b): Task 3's physical scene, back face 2 cm from the wall, wall returns at weight 0.1, 2000 LiDAR-only sweeps, `persistent = true` ⇒ back-face gap within 0.5 cm of the box-returns-only baseline (both printed). A FAIL is reported to the owner as evidence for Tasks 7–8, not tuned.
   - `physical_lidar_only_sigma_bounded`: Task 3 scene, 2000 LiDAR-only sweeps ⇒ √Σ(h,h) ≤ `prior_footprint_std` (+1 %) and the back face moves < 1 mm.
   - `parked_camera_is_one_look`: 100 identical camera frames at ρ = 1, zero fresh covariance ⇒ Σθθ equals the one-frame result with 100·Id (rel 1 %).
   - `zero_chain_cov_runs`: `sig2_chain = 0` ⇒ no NaN, update proceeds.
