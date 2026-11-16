@@ -315,12 +315,6 @@ void ControllerDisplay::set_selected_affordance(const QString &current, const QS
     snapshot_.selected_affordance_text_pending = true;
 }
 
-void ControllerDisplay::set_stuck_active(bool active)
-{
-    std::lock_guard<std::mutex> lock(snapshot_mutex_);
-    snapshot_.stuck_active = active;
-}
-
 void ControllerDisplay::set_hold_reason(const std::string &why)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -515,7 +509,6 @@ QString ControllerDisplay::compose_status(const DisplaySnapshot &snap, std::uint
     in.goal_dist_m = snap.goal_dist_m;
     in.goal_yaw_err_rad = snap.goal_yaw_err_rad;
     in.goal_aligning = snap.goal_aligning;
-    in.stuck_active = snap.stuck_active;
     in.lidar_stalled = snap.lidar_stalled;
     in.lidar_stall_s = snap.lidar_stall_s;
     in.hold_reason = snap.hold_reason;
@@ -564,7 +557,6 @@ void ControllerDisplay::present()
         affordance_panel_->set_camera_view(snap.camera_masks);
     }
 
-    custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
     custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
     if (status_line_)

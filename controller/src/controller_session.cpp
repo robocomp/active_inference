@@ -5474,8 +5474,7 @@ ControllerSession::DrivenCurve ControllerSession::driven_curve() const
 
 void ControllerSession::step_route_band(const DrivenCurve &curve,
                                         const ControllerRobotPose &robot_pose,
-                                        rc::TrajectoryController &path_controller,
-                                        ControllerObstacleTracker *obstacle_tracker)
+                                        rc::TrajectoryController &path_controller)
 {
     // Truncate the diagnostic FIRST, before any early return. Otherwise a run with the band OFF never
     // opens the file, archive_on_stop copies the PREVIOUS run's rows under this run's stamp, and the
@@ -6135,7 +6134,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // itself against it. Runs on the ESDF built by the PREVIOUS compute — one cycle old, which is the
     // same age as everything else here and self-guarding on cycle 1, where the field is empty and every
     // query returns esdf_unknown_distance ⇒ no deficit ⇒ no force ⇒ the polygon does not move.
-    step_route_band(driven_curve(), robot_pose, path_controller, &obstacle_tracker);
+    step_route_band(driven_curve(), robot_pose, path_controller);
 
     // ── SESSION ODOMETER ────────────────────────────────────────────────────────────────────────
     // Metres actually driven since the agent started — every mission, target and affordance, not per
