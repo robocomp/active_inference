@@ -211,7 +211,7 @@ bool ControllerSession::chain_drive_episode(const rc::policy::GoalSpec &final_sp
         {
             chain_ep_ = {};
             if (consume_goal_reached(true, robot_pose, path_controller, obstacle_tracker, motion_commander, display, affordance_manager,
-                                     time_source, /*drive_base=*/false))
+                                     time_source))
                 if (not lockon_.active()) policy_reset();
             return true;
         }

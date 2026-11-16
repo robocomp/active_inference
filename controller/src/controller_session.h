@@ -138,8 +138,6 @@ public:
     };
     [[nodiscard]] LiveReturns live_returns(const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
                                            const rc::TrajectoryController &path_controller) const;
-    // Cap a command (robot-frame convention: side = +x right, rot CCW positive) by the live returns, unfloored.
-    rc::LidarCapResult cap_by_returns(const LiveReturns &lr, float &adv, float &side, float &rot) const;
     // One census line (review item 4): what the net sees around the body right now.
     void log_returns_census(const char *when, const LiveReturns &lr) const;
     bool ensure_current_plan(const ControllerPlanningStep &step,
@@ -317,13 +315,7 @@ private:
     // (LOCKED or GIVE_UP); drives the base directly via the motion commander.
     bool step_lockon(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                      ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                     const TimeSource &time_source, bool drive_base = true);   // Task 8: false = protocol only
-    // try104: the in-place turns and nudges that own the base (Orient, lock-on) go through the SAME live-returns net as
-    // the tracker, the escape and the anchor servo — they used to reach the base uncapped. Sends what the net allows,
-    // or stops when it holds the whole command.
-    void send_through_returns(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
-                              ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                              float adv, float side, float rot, const char *who);
+                     const TimeSource &time_source);   // protocol only: the policy drives the heading
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
     // Perception producer's monotonic frame counter (mask_frame_id), or -1. See the definition.
     [[nodiscard]] int masks_frame_seq() const;
@@ -334,7 +326,7 @@ private:
     // true once finished (LOOKED or GIVE_UP); drives the base rotation directly. Owns the base while active.
     bool step_orient(const ControllerRobotPose &robot_pose, const rc::TrajectoryController &path_controller,
                      ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                     const TimeSource &time_source, float target_yaw, bool drive_base = true);   // Task 8: false = protocol only
+                     const TimeSource &time_source, float target_yaw);   // protocol only: the policy drives the turn
     // What the 2D view draws for a running Orient: the bearing asked for, and whether to draw it at
     // all. Latched where the program is built (which is the only place that knows the policy) and
     // pushed to the display beside the rest of the overlay.
@@ -393,12 +385,11 @@ private:
                            ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     // The ARRIVAL protocol of a point target (servo → lock-on, already-there, approach-only retry, REACH), extracted from
     // execute_plan so the tracker and the policy consume an arrival through the same code. Returns true when the cycle is
-    // over (an arrival was consumed or a lock-on started). `drive_base` false: a lock-on started here does not move the
+    // over (an arrival was consumed or a lock-on started). A lock-on started here does not move the
     // base (the policy drives its heading).
     bool consume_goal_reached(bool goal_reached, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
                               ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
-                              ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source,
-                              bool drive_base);
+                              ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     // The cross's PROTOCOL half (step_anchor_cross's bookkeeping, shared with the policy): the measured gap, the near-side
     // gate, through / not-a-crossing / wait timeouts. `ended` = this cycle is over (finalized, handed back or stopped).
     struct CrossProtocol
@@ -855,7 +846,6 @@ private:
     // stuck/escape reflex (reversing cannot fix a planner), so this line is the only signal that it happened.
     std::uint64_t last_no_route_log_ms_ = 0;
     std::uint64_t no_route_since_ms_    = 0;   ///< first cycle of the current no-route HOLD (0 = routing fine)
-    std::uint64_t short_path_since_ms_  = 0;   ///< first cycle the path ENDED short of an affordance standpoint
     std::string   reach_unreachable_why_;      ///< non-empty ⇒ report this Reach standpoint Unreachable next cycle
     /// ★ Task 3e (3): the affordance node the flagged verdict is ABOUT (id + name), captured when it is flagged — the report
     /// completes THAT node (AffordanceManager::complete_claim), never whatever the current claim has become by then.

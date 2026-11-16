@@ -1030,7 +1030,7 @@ bool ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     if (lockon_.active() and last_target_info_.has_value())
     {
         note_why(rc::why::Cause::LockOn, std::format("lock-on micro-search on '{}' (policy heading)", why_target_name()));
-        if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source, /*drive_base=*/false))
+        if (step_lockon(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source))
         {
             finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
             policy_reset();
@@ -1081,7 +1081,7 @@ bool ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 note_why(rc::why::Cause::Orienting, std::format("orient '{}': {}", last_target_info_->node_name,
                                                                 at_standpoint ? "turning in place" : "driving to its standpoint"));
                 if (at_standpoint and step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
-                                                  last_target_info_->yaw_rad, /*drive_base=*/false))
+                                                  last_target_info_->yaw_rad))
                 {
                     finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
                     policy_reset();
@@ -1172,7 +1172,7 @@ bool ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     const bool precondition_met = place_pre.has_value() and place_pre->p >= place_pre->complete_at;
     // ARRIVAL: the same protocol the tracker's arrival goes through (servo → lock-on, already there, approach-only, REACH)
     if (consume_goal_reached(precondition_met or (not place_pre.has_value() and tick.verdict == PolicyVerdict::Arrived), robot_pose, path_controller, obstacle_tracker,
-                             motion_commander, display, affordance_manager, time_source, /*drive_base=*/false))
+                             motion_commander, display, affordance_manager, time_source))
     {
         if (not lockon_.active()) policy_reset();
         return false;
