@@ -12,7 +12,7 @@
 
 **Revision 3 (11-16):** Tasks 0–2 are done (commits ff49e768, 6569e6b1, b58f697b; merged to main 8f4cc821). Tasks 3–10 replace rev 2's Tasks 3–5.
 
-**Execution order (owner 11-16, "go with the shorter"):** 3 → 4 → 5 → 6 → 6b → 9 → 10. Tasks 7–8 (the ownership mixture) are DEFERRED until live8 shows whether a wrong-attribution pull exists with physical returns; until then the rays carry the camera's m as a plain weight (Task 1). Task 9 is built WITHOUT the rest scene (no `RestScene` parameter, no `resp_sum` log column); they are added with Tasks 7–8 if live8 asks for them.
+**Execution order (owner 11-16, "go with the shorter"):** 3 → 4 → 5 → 6 → 6b → 9 → 10 (live8: §8 not passed) → owner 11-17 "Go": wall-offset check → 6c → 7 → 8 → 10 again. Tasks 7–8 (the ownership mixture) are DEFERRED until live8 shows whether a wrong-attribution pull exists with physical returns; until then the rays carry the camera's m as a plain weight (Task 1). Task 9 is built WITHOUT the rest scene (no `RestScene` parameter, no `resp_sum` log column); they are added with Tasks 7–8 if live8 asks for them.
 
 ## Global Constraints
 
@@ -247,7 +247,19 @@ The worktree holds Task 4c rev 2 uncommitted (8 files). It resumes after this pl
 
 ---
 
-### Task 7 (DEFERRED, see Execution order): The ownership mixture in the ray factor and the rest ray-cast (shared, pure)
+### Task 6c: The class prior as a factor at the class mean, counted once (spec 7c.1 amendment 11-17)
+
+**Files:** Modify `countable_concept/src/countable_belief.h/.cpp` (persistent path's first update), `countable_concept/tests/persistent_belief_test.cpp`.
+
+**Interfaces:** Consumes Task 6's persistent path. Produces: under `persistent`, the instance's FIRST update uses prior mean x̄_θ = (seed cx, seed cy, class H = `prior_height_m`, class w = `prior_footprint_m`, class depth = `depth_mean()`, yaw = nearest multiple of 90° to the seed relative to `f.room_axis` when `f.room_axis_ok`, else the seed yaw) with P̄_θθ = `prior_cov_diag()`, and GN start θ₀ = the seed. A `first_update_done_` flag (cleared by `sanitize_covariance`, copied by the snapshot). Flag off unchanged.
+
+- [ ] **Step 1: Failing tests.** `bad_seed_recovers`: seed h = 2.14 (class depth 0.51), one-face camera frames of a true 0.51-deep nightstand (Task 3 scene) ⇒ after the first update |h − 0.51| < 0.10 and after 10 frames < 0.05; `good_seed_stays`: seed at the truth ⇒ first update moves size < 1 cm; `prior_counted_once`: a second identical update with the class mean changed in params moves nothing (the prior is not re-read); `first_update_flag_life`: sanitize clears it, snapshot copies it. `lidar_golden_test` bit-exact.
+- [ ] **Step 2:** Run → fail. **Step 3:** Implement. **Step 4:** All countable tests pass; agent builds.
+- [ ] **Step 5: Commit** `git commit -m "persistent path: class prior at the class mean, counted once; the seed is only the GN start (spec 7c.1 amendment)"`
+
+---
+
+### Task 7 (UN-DEFERRED 11-17 by live8 evidence): The ownership mixture in the ray factor and the rest ray-cast (shared, pure)
 
 **Files:**
 - Modify: `common/ai_belief/lidar_ray_factor.h` (`LidarRays`, `accumulate_lidar_rays`)
@@ -271,7 +283,7 @@ The worktree holds Task 4c rev 2 uncommitted (8 files). It resumes after this pl
 
 ---
 
-### Task 8 (DEFERRED, see Execution order): The belief uses the mixture (countable, flag on)
+### Task 8 (UN-DEFERRED 11-17 by live8 evidence): The belief uses the mixture (countable, flag on)
 
 **Files:**
 - Modify: `countable_concept/src/countable_belief.h/.cpp`

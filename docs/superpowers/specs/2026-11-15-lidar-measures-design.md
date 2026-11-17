@@ -187,6 +187,14 @@ with the room axis) are prior knowledge too, and enter on the same footing.
   class, R3-I2). The flush responsibility is evaluated at that pose only (stated: an object born mid-room that later
   settles on a wall never gets the term). `sanitize_covariance` re-seeds Σ to P and clears `prior_added` (the prior
   re-enters once); the divergence restore copies it; an LTOM/LTSM recall restores a belief with the flag set.
+- **Amendment 11-17 (live8 analysis fault 2; owner "Go"): the class prior is a factor AT THE CLASS MEAN, counted once.**
+  Centring Σ₀ on the data-seeded birth state (the stated limit above) turned a bad first mask into the prior's mean:
+  live8's nightstand_1 was born with h 2.14 from a mask over the bed side and never came back (live6's per-frame
+  anchors pulled the same birth back in 4 frames). Under the flag, the belief's FIRST update has prior mean x̄_θ =
+  (seed cx, seed cy, class H, class w, class depth, nearest room-axis yaw if staged else seed yaw) with Σ₀ = the class
+  P; the data seed is only the GN starting point θ₀ of that update (x̃₀ = (seed, b̄)). Position has no class mean
+  (prior centred on the seed, σ = prior_pos_std). From the second update on, the recursion is unchanged. Nothing is
+  added per frame; the relational anchors keep their per-anchor once-flags.
 - **Every later frame** (camera, LiDAR-only, admissible or gated): no anchor. The one-sided constraints (2b)
   short-height and (2c) wall no-cross stay on every frame — they are likelihood terms (zero unless violated), not
   priors. Camera data terms (z_top_obs / top-no-float, moments, per-point azimuth) stay.
