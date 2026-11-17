@@ -19,7 +19,7 @@ Conventions (printed again in the header of every report):
   * parked    = the gt_pose interval containing the row has speed < 0.02 m/s and yaw rate < 0.02 rad/s.
 Numbers are read with float() on the CSV text (written with '.'); output uses explicit format specs; no locale module.
 """
-import argparse, csv, math, os, statistics, sys
+import argparse, bisect, csv, math, os, statistics, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCENE = os.path.join(HERE, 'scene_threerooms.csv')
@@ -35,6 +35,9 @@ RATE_MIN = 8.0
 # Room frame -> world: the room frame's origin is the door the robot entered through (DOOR_1 for the bedroom, DOOR_2 for
 # the bathroom, threerooms-piso.wbt, see room_concept/estimation_scripts/scripts/true_room.py), rotated by the room's yaw.
 # Cross-check on objects_live6: bed / nightstands land 6 / 11 / 7 cm from GT with a rotation of 0 (carve-replay result).
+# ROOMS is only the NOMINAL frame (it identifies which room a fitted frame belongs to). By default each run's room frames are
+# FITTED (fit_room_frames, below): the published frame is not the door frame (wall-offset check 2026-11-17: bedroom is
+# (-4.844, 9.321) rot +0.0126, not DOOR_1 -- the nominal origin put every object 7.5 / 5.8 cm and 0.7 deg off).
 # Override with --room NAME=x,y,rot (NAME in bedroom, bathroom); --pin fits the translation to the class's own GT
 # (then the centre error of a single-object room is 0 by construction: reported as such).
 ROOMS = {'bedroom': (-4.769, 9.3796, 0.0), 'bathroom': (-1.705, 10.77, -math.pi / 2)}
@@ -44,6 +47,65 @@ TOP = {'bed': 0.65, 'nightstand': 0.62, 'toilet': 0.90}   # toilet 0.90 as in th
 # Webots node centre of the toilet (the live6 comparison used it; the bbox centre of its parts is (-0.884, 12.929)).
 NODE_CENTRE = {'toilet': (-0.874478, 12.8652)}
 SHIFT_TOL = {'w': 0.03, 'h': 0.03, 'H': 0.05}   # nightstand prior shifted +0.06 / +0.10: closer to the truth than to the shifted mean
+
+
+FIT_MIN_SAMPLES = 20
+FIT_MAX_RMS = 0.05
+FIT_EDGE_MS = 2000      # samples this close to the start/end of a gauge segment (door crossings) are dropped
+FIT_MATCH_MS = 100
+
+
+def fit_room_frames(run):
+    """Per-run room -> world rigid transform, by least squares of the robot's GT world position (gt_error.csv
+    gt_x_world/gt_y_world) against its estimated pose mapped into the PUBLISHED room frame (proto_room.csv x,y,theta through
+    the proto gauge T_pub_int = gauge_x/y/theta). Samples = rows where the gauge is valid (the graph says the robot is in
+    that room's frame: fs_free_cells > 0), minus FIT_EDGE_MS at both ends of each gauge segment (door crossings).
+    A fitted frame belongs to the room whose nominal origin (ROOMS) is nearest. Returns {room: dict(origin, rot, rms, n)
+    or dict(error=...)} for every room in ROOMS."""
+    out = {k: dict(error='no usable samples (no gauge segment near the nominal origin)') for k in ROOMS}
+    try:
+        gt = [(fnum(r['ts_ms']), fnum(r['gt_x_world']), fnum(r['gt_y_world'])) for r in csv.DictReader(open(os.path.join(run, 'gt_error.csv')))]
+        pr = list(csv.DictReader(open(os.path.join(run, 'proto_room.csv'))))
+    except (OSError, KeyError) as e:
+        return {k: dict(error='cannot read gt_error.csv / proto_room.csv (%s)' % e) for k in ROOMS}
+    gt = [g for g in gt if g[1] == g[1] and g[2] == g[2]]
+    gts = [g[0] for g in gt]
+    segs = []     # consecutive rows sharing one gauge triple
+    for r in pr:
+        G = tuple(fnum(r.get(k)) for k in ('gauge_x', 'gauge_y', 'gauge_theta'))
+        t, x, y = fnum(r.get('ts_ms')), fnum(r.get('x')), fnum(r.get('y'))
+        if any(v != v for v in G + (t, x, y)) or not fnum(r.get('fs_free_cells')) > 0: continue
+        i = bisect.bisect_left(gts, t)
+        cand = [j for j in (i - 1, i) if 0 <= j < len(gt)]
+        if not cand: continue
+        j = min(cand, key=lambda j: abs(gts[j] - t))
+        if abs(gts[j] - t) > FIT_MATCH_MS: continue
+        c, s = math.cos(G[2]), math.sin(G[2])
+        row = (c * x - s * y + G[0], s * x + c * y + G[1], gt[j][1], gt[j][2], t)
+        if segs and segs[-1][0] == G: segs[-1][1].append(row)
+        else: segs.append((G, [row]))
+    best = {}
+    for G, v in segs:
+        v = [a for a in v if v[0][4] + FIT_EDGE_MS <= a[4] <= v[-1][4] - FIT_EDGE_MS]
+        n = len(v)
+        if n < 3: continue
+        mx, my = sum(a[0] for a in v) / n, sum(a[1] for a in v) / n
+        gx, gy = sum(a[2] for a in v) / n, sum(a[3] for a in v) / n
+        sxx = sum((a[0] - mx) * (a[2] - gx) + (a[1] - my) * (a[3] - gy) for a in v)
+        sxy = sum((a[0] - mx) * (a[3] - gy) - (a[1] - my) * (a[2] - gx) for a in v)
+        th = math.atan2(sxy, sxx)
+        c, s = math.cos(th), math.sin(th)
+        ox, oy = gx - (c * mx - s * my), gy - (s * mx + c * my)
+        rr = rms([math.hypot(c * a[0] - s * a[1] + ox - a[2], s * a[0] + c * a[1] + oy - a[3]) for a in v])
+        room = min(ROOMS, key=lambda k: math.hypot(ox - ROOMS[k][0], oy - ROOMS[k][1]))
+        if math.hypot(ox - ROOMS[room][0], oy - ROOMS[room][1]) > 1.0: continue
+        if room not in best or n > best[room]['n']:
+            best[room] = dict(origin=(ox, oy), rot=th, rms=rr, n=n)
+    for room, f in best.items():
+        if f['n'] < FIT_MIN_SAMPLES: f['error'] = 'only %d samples (< %d)' % (f['n'], FIT_MIN_SAMPLES)
+        elif not f['rms'] <= FIT_MAX_RMS: f['error'] = 'rms %.4f m > %.2f m' % (f['rms'], FIT_MAX_RMS)
+        out[room] = f
+    return out
 
 
 def fnum(s):
@@ -163,10 +225,26 @@ def looks_of(rows):
 
 # ---- scoring ---------------------------------------------------------------------------------------------------------
 
-def score_run(run, gtobjs, walls, rooms, pin, shift):
+def score_run(run, gtobjs, walls, overrides, pin, shift):
     gtpose = load_gt_pose(os.path.join(run, 'gt_pose.tsv'))
     res, notes = {}, []
-    rooms = dict(rooms)
+    fits = fit_room_frames(run)
+    rooms, failed = {}, {}
+    for k in ROOMS:
+        if k in overrides:
+            rooms[k] = overrides[k]; notes.append('room %s: manual override origin (%.3f, %.3f) rot %.4f' % ((k,) + overrides[k]))
+        elif 'error' in fits[k] and 'origin' not in fits[k]:
+            failed[k] = fits[k]['error']
+        elif 'error' in fits[k]:
+            failed[k] = fits[k]['error']
+            notes.append('room %s: fitted origin (%.3f, %.3f) rot %.4f rms %.4f m n %d' % (k, fits[k]['origin'][0], fits[k]['origin'][1], fits[k]['rot'], fits[k]['rms'], fits[k]['n']))
+        else:
+            f = fits[k]
+            rooms[k] = (f['origin'][0], f['origin'][1], f['rot'])
+            notes.append('room %s: fitted origin (%.3f, %.3f) rot %+.4f rad rms %.4f m n %d  (nominal (%.3f, %.3f) rot %.4f)' % (
+                k, f['origin'][0], f['origin'][1], f['rot'], f['rms'], f['n'], *ROOMS[k]))
+    for k, why in failed.items():
+        notes.append('FAIL room %s: frame fit rejected: %s; its classes are NOT scored (use --room %s=x,y,rot to override)' % (k, why, k))
     data = {c: load_instances(run, c) for c in CLASSES}
     if pin:   # translation from the class's own GT: the mean over the room's final fits
         for room in rooms:
@@ -188,6 +266,7 @@ def score_run(run, gtobjs, walls, rooms, pin, shift):
                 notes.append('pinned %s origin to (%.3f, %.3f)' % (room, rooms[room][0], rooms[room][1]))
     for c in CLASSES:
         inst, cols = data[c]
+        if ROOM_OF[c] in failed: continue
         if not inst:
             notes.append('%s: no %s_ai2_log.csv' % (c, c)); continue
         missing = [k for k in NEW_COLS if k not in cols]
@@ -271,7 +350,7 @@ def score_run(run, gtobjs, walls, rooms, pin, shift):
             tw_, th_ = true_dims(g, last.get('yaw', 0.0) + rot)
             m['w_err'] = last['w'] - tw_; m['h_err'] = last['h'] - th_; m['H_err'] = last['H'] - g['top']
             res[node] = m
-    return res, notes
+    return res, notes, failed
 
 
 # ---- report ----------------------------------------------------------------------------------------------------------
@@ -350,7 +429,7 @@ def main():
     ap.add_argument('--room', action='append', default=[], metavar='NAME=x,y,rot', help='override a room origin')
     ap.add_argument('--scene', default=SCENE)
     a = ap.parse_args()
-    rooms = dict(ROOMS)
+    rooms = {}
     for s in a.room:
         k, v = s.split('=')
         rooms[k] = tuple(float(x) for x in v.split(','))
@@ -359,15 +438,17 @@ def main():
     print('look = fresh-mask run, gap <= %d ms; settled = from the first fresh row with range <= %.1f m' % (GAP_MS, NEAR_M))
     print('Sigma PASS = max std <= %.2f m AND >= %.0f %% of settled rows with rms/3 <= std <= 3*rms (per DOF, rms of the true error)' % (STD_MAX, 100 * FRAC_OK))
     print('drift PASS = largest step toward nearest wall / neighbour between looks <= %.2f m;  rate PASS >= %.0f Hz' % (DRIFT_MAX, RATE_MIN))
-    print('room->world: ' + '; '.join('%s origin (%.3f, %.3f) rot %.4f' % ((k,) + v) for k, v in rooms.items()) +
+    print('room->world: FITTED PER RUN from gt_error.csv GT world track vs proto_room.csv est pose x gauge (see the room lines '
+          'under each RUN); a room with < %d samples or rms > %.2f m FAILS and is not scored; --room overrides.' % (FIT_MIN_SAMPLES, FIT_MAX_RMS) +
           ('  [--pin: translation fitted to GT]' if a.pin else ''))
     print('GT: ' + '; '.join('%s (%.3f, %.3f) %.2fx%.2f top %.2f' % (g['name'], g['cx'], g['cy'], g['dx'], g['dy'], g['top']) for g in gtobjs))
-    named = []
+    named, main_failed = [], {}
     for label, d, sh in (('RUN ' + a.run, a.run, a.shift), ('OFF ' + str(a.off), a.off, False), ('REF ' + str(a.ref), a.ref, False)):
         if not d: continue
-        res, notes = score_run(d, gtobjs, walls, rooms, a.pin, sh)
+        res, notes, failed = score_run(d, gtobjs, walls, rooms, a.pin, sh)
         report(label, res, notes, sh)
         named.append((label.split()[0], res))
+        if failed and len(named) == 1: main_failed = failed
     if len(named) > 1: side_by_side(named)
     fails = sum(1 for _, res in named[:1] for m in res.values() for k in m.get('dof', {}) if not m['dof'][k]['ok'])
     print('=' * 100)
@@ -375,6 +456,9 @@ def main():
         named[0][0] if named else '-', len(named[0][1]) if named else 0, fails,
         sum(1 for m in named[0][1].values() if m['drift'] > DRIFT_MAX) if named else 0,
         sum(1 for m in named[0][1].values() if not m['rate'] >= RATE_MIN) if named else 0))
+    if main_failed:
+        print('ROOM FRAME FAIL (main run): ' + '; '.join('%s: %s' % kv for kv in main_failed.items()))
+        sys.exit(2)
 
 
 if __name__ == '__main__':
