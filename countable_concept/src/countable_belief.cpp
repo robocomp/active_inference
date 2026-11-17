@@ -765,6 +765,7 @@ void CountableBelief::sanitize_joint()
     b_.setZero();
     wall_prior_added_ = false;
     axis_prior_added_ = false;
+    first_update_done_ = false;                                       // the class prior re-enters once, at the class mean
     Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
     omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();
     size_lik_ = {};
@@ -823,9 +824,27 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         b_ = x.tail<K>();
         sig_prev_ = sn;
     }
-    const Mat20d P_bar = P_;
+    Mat20d P_bar = P_;
     VecXd x_bar; x_bar << state_.vec().cast<double>(), b_;
+    if (not first_update_done_)
+    {   // The class prior as a factor AT THE CLASS MEAN, counted once (spec 7c.1 amendment 11-17): the size has a class mean,
+        // the position has none (centred on the seed, σ = prior_pos_std), the yaw's class mean is the room axis' multiple of
+        // 90° nearest the seed (4-fold: it never decides front/back). Σ₀ = the class P, cross terms 0 as at birth. The seed
+        // stays the GN start (θ below starts at state_), so a bad first mask is a starting point, not the prior's mean.
+        x_bar(2) = double(params_.prior_height_m);
+        x_bar(3) = double(params_.prior_footprint_m);
+        x_bar(4) = double(params_.depth_mean());
+        if (f.room_axis_ok)
+        {
+            const double seed_yaw = double(state_.yaw);
+            x_bar(5) = seed_yaw - std::remainder(seed_yaw - double(f.room_axis), 0.5 * M_PI);
+        }
+        P_bar.topRows<N>().setZero();
+        P_bar.leftCols<N>().setZero();
+        P_bar.diagonal().head<N>() = prior_cov_diag().cast<double>();
+    }
     Sigma_ = P_bar.topLeftCorner<N, N>().cast<float>();                // flush_weight reads the predicted Σ, as in the engine
+    dbg_Pbar_tt_ = Sigma_;
 
     // Channel selectors: camera points measure θ + E b_chain + b_cam, rays θ + E b_chain + b_L.
     Eigen::Matrix<double, N, K> B_cam = Eigen::Matrix<double, N, K>::Zero(), B_L = B_cam;
@@ -851,7 +870,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         theta_only.g = bd_th.cast<double>();
     };
 
-    Vec6d theta = x_bar.head<N>();
+    Vec6d theta = state_.vec().cast<double>();                         // θ₀ = the current mean (at birth: the data seed)
     VecKd b_post = b_;
     for (int it = 0; it < params_.gn_iters; ++it)
     {
@@ -876,6 +895,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     b_ = b_post;
     Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
     dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
+    first_update_done_ = true;                                         // the class prior at the class mean has entered, once
     if (camera and not f.lidar_only)                                   // each relational anchor has entered, once
     {
         if (f.wall.ok)      wall_prior_added_ = true;

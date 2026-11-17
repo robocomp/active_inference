@@ -144,6 +144,7 @@ static void rho0_equals_engine(bool camera)
     p.wall_no_cross_precision = 0.0f;
     CountableBelief fx = make_belief(0.05f, -0.04f, 0.03f, p);
     fx.set_prior_added(true, true);
+    fx.set_first_update_done(true);   // the recursion (x̄ = the current mean), not the class-mean first update (Task 6c)
     CountableFrame f = camera ? camera_frame() : lidar_frame(two_face_rays());
     set_latents(f, 0.0f, 2.5e-4f);
     // the summed marginals of what the channel measures: chain (cx, cy) + the channel's own latent
@@ -445,6 +446,7 @@ static void sanitize_reseeds()
                 int(th_ok), int(lat_ok), int(cross_ok), int(b.wall_prior_added()), int(b.axis_prior_added()), int(b.latent_mean().isZero(0.0)));
     CHECK(th_ok and lat_ok and cross_ok);
     CHECK(not b.wall_prior_added() and not b.axis_prior_added());
+    CHECK(not b.first_update_done());
     CHECK(b.latent_mean().isZero(0.0));
     CHECK(b.covariance().allFinite());
 }
@@ -507,6 +509,114 @@ static void flag_off_golden()
     CHECK(rc == 0);
 }
 
+// ─── Task 6c (spec 7c.1 amendment 11-17): the class prior at the class mean, counted once; the seed is only the GN start ───
+// One-face camera frame of the TRUE flush nightstand (back face on the wall y = 0): 120 points on the front face only.
+static CountableFrame one_face_frame(bool top = true)
+{
+    CountableFrame f;
+    for (int i = 0; i < 12; ++i) for (int j = 0; j < 10; ++j)
+        f.points.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 12.0f, ty - 0.5f * tw, tH * (j + 0.5f) / 10.0f);
+    f.R.assign(f.points.size(), params().sigma_base_m * params().sigma_base_m);
+    f.z_top_obs = top ? tH : -1.0f;
+    stage_wall(f);
+    set_latents(f, 1.0f);
+    return f;
+}
+
+static void bad_seed_recovers()
+{
+    // live8's nightstand_1: born with depth h = 2.14 (a mask over the bed side), back face on the wall (birth_on_priors).
+    const float h0 = 2.14f;
+    CountableBelief b(CountableBeliefState{tx, -0.5f * h0, tH, tw, h0, 0.0f}, params());
+    b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+    const CountableFrame f = one_face_frame();
+    b.update(f);
+    const float h1 = b.state().h, cy1 = b.state().cy;
+    std::printf("  bad_seed_recovers: seed h %.3f ; after 1 update h %.4f cy %.4f (truth h %.3f cy %.3f) first_done %d\n",
+                h0, h1, cy1, tw, ty, int(b.first_update_done()));
+    for (int k = 1; k < 10; ++k) b.update(f);
+    const auto s = b.state();
+    std::printf("  bad_seed_recovers: after 10 updates h %.4f cy %.4f w %.4f H %.4f yaw %.4f ; sigma_h %.4f ; Q_h exp(omega) %.3e\n",
+                s.h, s.cy, s.w, s.H, s.yaw, std::sqrt(b.covariance()(4, 4)), std::exp(b.log_volatility()(4)));
+    CHECK(std::abs(h1 - tw) < 0.10f);
+    CHECK(std::abs(s.h - tw) < 0.05f);
+    {   // control: the same seed with the class prior centred on the seed (the recursion from the start) does not recover
+        CountableBelief c(CountableBeliefState{tx, -0.5f * h0, tH, tw, h0, 0.0f}, params());
+        c.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+        c.set_first_update_done(true);
+        for (int k = 0; k < 10; ++k) c.update(f);
+        std::printf("  bad_seed_recovers: control (prior at the seed) after 10 updates h %.4f\n", c.state().h);
+    }
+}
+
+static void good_seed_stays()
+{
+    // Without (2d): its target is the observed top + top_no_float_margin_m (2 cm), a likelihood term that lifts H by ~2 cm on
+    // this noise-free fixture whatever the prior (printed below, prior at the class mean vs at the seed: the same move).
+    const auto size_move = [](bool top, bool first_done)
+    {
+        CountableBelief b = make_belief(0.0f, 0.0f, 0.0f);
+        b.set_first_update_done(first_done);
+        const Vec6 s0 = b.state().vec();
+        b.update(one_face_frame(top));
+        const Vec6 d = b.state().vec() - s0;
+        return Eigen::Vector3f(d(2), d(3), d(4));
+    };
+    const Eigen::Vector3f d = size_move(false, false), dt = size_move(true, false), dc = size_move(true, true);
+    const float dsize = d.cwiseAbs().maxCoeff();
+    std::printf("  good_seed_stays: size move after the first update dH %+.5f dw %+.5f dh %+.5f (max %.5f) ; with (2d) top: "
+                "class-mean prior dH %+.5f dw %+.5f dh %+.5f, prior at the seed dH %+.5f dw %+.5f dh %+.5f\n",
+                d(0), d(1), d(2), dsize, dt(0), dt(1), dt(2), dc(0), dc(1), dc(2));
+    CHECK(dsize < 0.01f);
+    CHECK((dt - dc).cwiseAbs().maxCoeff() < 1e-4f);   // the class-mean first update adds nothing at a seed on the class mean
+}
+
+static void prior_counted_once()
+{
+    // depth_unobs_precision off: it is the one class-mean term still counted per camera frame (§7c.1), not the prior.
+    CountableBeliefParams p = params();
+    p.depth_unobs_precision = 0.0f;
+    CountableBelief a = make_belief(0.05f, -0.04f, 0.03f, p);
+    const CountableFrame f = one_face_frame();
+    a.update(f);
+    CountableBelief b = a;
+    CountableBeliefParams q = p;
+    q.prior_height_m = p.prior_height_m + 0.30f; q.prior_footprint_m = p.prior_footprint_m + 0.20f; q.prior_depth_m = 0.90f;
+    b.set_params(q);
+    a.update(f);
+    b.update(f);
+    const float diff = (a.state().vec() - b.state().vec()).cwiseAbs().maxCoeff();
+    const float dcov = (a.covariance() - b.covariance()).cwiseAbs().maxCoeff();
+    std::printf("  prior_counted_once: second update, class mean changed by (+0.30, +0.20, ->0.90): max|dtheta| %.3e  max|dSigma| %.3e\n",
+                diff, dcov);
+    CHECK(diff == 0.0f);
+    CHECK(dcov == 0.0f);
+}
+
+static void first_update_flag_life()
+{
+    CountableBelief b = make_belief();
+    CHECK(not b.first_update_done());
+    CountableFrame none; stage_wall(none); set_latents(none, 1.0f);   // no points, not LiDAR-only: predict-only
+    b.update(none);
+    const bool after_none = b.first_update_done();
+    CHECK(not after_none);
+    b.update(one_face_frame());
+    const bool after_cam = b.first_update_done();
+    CHECK(after_cam);
+    const CountableBelief snap = b;                                   // the fitter's step-bound snapshot is a value copy
+    CHECK(snap.first_update_done());
+    b.joint_covariance_for_test()(0, 0) = std::numeric_limits<double>::quiet_NaN();
+    b.sanitize_covariance();
+    std::printf("  first_update_flag_life: after predict-only %d ; after camera %d ; snapshot %d ; after sanitize re-seed %d\n",
+                int(after_none), int(after_cam), int(snap.first_update_done()), int(b.first_update_done()));
+    CHECK(not b.first_update_done());
+    CountableBelief l = make_belief();                                // a LiDAR-only first update counts as the first
+    CountableFrame fl = lidar_frame(two_face_rays()); set_latents(fl, 1.0f);
+    l.update(fl);
+    CHECK(l.first_update_done());
+}
+
 int main()
 {
     flag_off_golden();
@@ -522,6 +632,10 @@ int main()
     zero_chain_cov_runs();
     mode_rotation_permutes_latents();
     sanitize_reseeds();
+    bad_seed_recovers();
+    good_seed_stays();
+    prior_counted_once();
+    first_update_flag_life();
     std::printf("persistent_belief_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }

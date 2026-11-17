@@ -456,6 +456,14 @@ public:
     bool wall_prior_added() const { return wall_prior_added_; }
     bool axis_prior_added() const { return axis_prior_added_; }
     void set_prior_added(bool wall, bool axis) { wall_prior_added_ = wall; axis_prior_added_ = axis; }
+    // The CLASS prior at the class mean, counted once (spec 7c.1 amendment 11-17): the instance's FIRST measured update (camera
+    // or LiDAR-only, whichever comes first) has prior mean x̄_θ = (seed cx, seed cy, class H, class w, class depth, the room
+    // axis' multiple of 90° nearest the seed yaw when f.room_axis_ok else the seed yaw) and P̄_θθ = diag(prior_cov_diag()),
+    // cross terms 0; the data seed is only the GN start θ₀. From the second update on the recursion is unchanged (x̄ = the
+    // previous posterior). The flag is set by that update, cleared by sanitize_covariance's re-seed, and travels with every
+    // value copy (the fitter's step-bound snapshot). set_first_update_done is a test hook.
+    bool first_update_done() const { return first_update_done_; }
+    void set_first_update_done(bool v) { first_update_done_ = v; }
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
     // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the ray-sets; θ-only = (2b), (2c) and,
     // on an admissible camera update whose anchor is not yet in (per-anchor flags), wall flush/parallel (1) / the room axis. Each channel
@@ -699,6 +707,7 @@ private:
     bool   joint_init_  = false;
     bool   wall_prior_added_ = false;   // flush + parallel have entered (T6-1)
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
+    bool   first_update_done_ = false;  // the class prior at the class mean has entered (spec 7c.1 amendment 11-17)
     std::vector<Eigen::Matrix<float, 6, 1>> dbg_iterates_;
     Eigen::Matrix<float, 6, 6> dbg_Pbar_tt_ = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_th_   = Eigen::Matrix<float, 6, 6>::Zero();
