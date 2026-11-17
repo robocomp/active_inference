@@ -658,7 +658,8 @@ void SpecificWorker::step_passage_anchor()
                                        inst ? inst->aff_cross.node_id() : 0};
         for (const auto& e : G->get_edges_by_type("executing"))
             if (pa.consumer_id != 0 and e.from() == pa.consumer_id
-                and e.to() != mine[0] and e.to() != mine[1] and e.to() != mine[2])
+                and e.to() != mine[0] and e.to() != mine[1] and e.to() != mine[2]
+                and not claim_holds_.holds_affordance(e.to()))   // the crossed door's kept cross (claim_hold.h): the same crossing
             {
                 const auto n = G->get_node(e.to());
                 remove_passage_anchor(std::format("the consumer now executes '{}'", n.has_value() ? n->name() : "?"));

@@ -1371,6 +1371,7 @@ void SpecificWorker::compute()
     // write are all parented by it.
     step_room_following();
     step_door_memory();   // ltsm's door names' counter + hazard: adopted once before any door is named, then published on change
+    step_claim_holds();      // the doors held for a claim whose claim is gone (claim_hold.h) — before the reap, which then takes them
     reap_archived_rooms();   // link 5: our doors under a room ltsm has archived
     if (room_node_id_ == 0)
     {
@@ -1473,8 +1474,78 @@ void SpecificWorker::compute()
 // Retire one instance: drop its affordance node, forget it in the fitter, delete its graph node. The single
 // teardown path shared by every lifecycle exit (merge / death), keeping the affordance+fitter+graph invariant.
 // ★Named to match the other four agents, which already had it — this was the same three lines written inline.
+std::vector<std::string> SpecificWorker::executing_target_names() const
+{
+    std::vector<std::string> names;
+    for (const auto& e : G->get_edges_by_type("executing"))
+        if (const auto n = G->get_node(e.to()); n.has_value()) names.push_back(n->name());
+    return names;
+}
+
+bool SpecificWorker::door_claimed(std::uint64_t door_id) const
+{
+    const auto door = G->get_node(door_id);
+    if (not door.has_value()) return false;
+    const auto targets = executing_target_names();
+    return rc::door::claim_executes_on(door->name(), targets);
+}
+
+bool SpecificWorker::hold_for_claim(std::uint64_t id, bool delete_door, const char* why)
+{
+    const auto door = G->get_node(id);
+    if (not door.has_value() or not door_claimed(id)) return false;
+    std::uint64_t cross_aff = 0;
+    if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+    {
+        log_instance_teardown(it->second, "held for a claim");
+        cross_aff = it->second.aff_cross.node_id();
+        // every affordance but the claimed one's node: the look and the three other pragmatic ones go now (an offer from a
+        // door that is no longer ours must not stand); aff_<door>_cross stays so the consumer's `executing` edge keeps its target
+        it->second.affordance.remove();
+        it->second.aff_approach.remove();
+        it->second.aff_open.remove();
+        it->second.aff_close.remove();
+        fitter_->forget_node(id);
+    }
+    if (cross_aff == 0)
+        if (const auto a = G->get_node("aff_" + door->name() + "_cross"); a.has_value()) cross_aff = a->id();
+    held_doors_.insert(id);   // not a door of this agent's world any more: never fitted, adopted or offered (fit_targets, add_or_assign_node_slot)
+    if (claim_holds_.hold(id, door->name(), cross_aff, delete_door))
+        std::print("door_concept: [claim] {} ({}) HELD — a claim is executing on one of its affordances; {} is deferred until the "
+                   "claim ends ({})\n", door->name(), id, delete_door ? "its deletion" : "the removal of its cross affordance", why);
+    return true;
+}
+
+// The deferred half: on the first cycle the claim is gone, what was kept for it goes. Event-driven — the only condition is
+// the graph's `executing` edges; a hold whose consumer never ends its claim stays, and says so once (above).
+void SpecificWorker::step_claim_holds()
+{
+    if (claim_holds_.empty()) return;
+    const auto targets = executing_target_names();
+    for (const auto& f : claim_holds_.take_free(targets))
+    {
+        if (f.hold.cross_aff_id != 0 and G->get_node(f.hold.cross_aff_id).has_value())
+            G->delete_node(f.hold.cross_aff_id);
+        const bool door_alive = G->get_node(f.door_id).has_value();
+        if (door_alive and f.hold.delete_door)
+        {
+            held_doors_.erase(f.door_id);          // a retire, as retire_instance would have done it: no late-carry bookkeeping
+            memory_published_.erase(f.door_id);
+            G->delete_node(f.door_id);
+            std::print("door_concept: [claim] {} ({}) REAPED — the claim on it has ended (held since its retire)\n",
+                       f.hold.door_name, f.door_id);
+        }
+        else
+            std::print("door_concept: [claim] {} ({}) released from its claim hold — the kept cross affordance is removed; the door "
+                       "{}\n", f.hold.door_name, f.door_id,
+                       door_alive ? "stays HELD in the room left behind and goes with that room (reap_archived_rooms)"
+                                  : "node is already gone");
+    }
+}
+
 void SpecificWorker::retire_instance(std::uint64_t id)
 {
+    if (hold_for_claim(id, /*delete_door=*/true, "retire")) return;
     if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
     {
         log_instance_teardown(it->second, "retire");
@@ -1684,6 +1755,7 @@ void SpecificWorker::CoreWorld::remove_door(std::uint64_t id, float L)
         //  before door_2 was re-born where it had been. Published here, the graph never shows the room doorless and settled;
         //  step_candidate_looks settles it again at the end of the cycle if another door still stands.
         w_.publish_door_questions(true);
+        if (w_.hold_for_claim(id, /*delete_door=*/true, "existence remove")) return;   // claim_hold.h: not under a claim
         it->second.affordance.remove();
         it->second.aff_approach.remove();   // and the three pragmatic siblings — see retire_instance
         it->second.aff_open.remove();
@@ -3613,9 +3685,19 @@ void SpecificWorker::reap_archived_rooms()
         if (rc::exit_fact::is_door(*G, n.id()) and not rc::interaction::is_anchor(*G, n))
             if (const auto r = rc::exit_fact::room_of(*G, n.id()); r != 0 and std::ranges::contains(archived, r))
                 gone.push_back(n.id());
+    const auto targets = executing_target_names();
     for (const auto id : gone)
+    {
+        // REAP_HOLD (RoomTransitionExit.tla): a door a claim is executing on is reaped only after the claim ends. This runs
+        // every cycle, so a skipped door is simply tried again.
+        if (const auto dn = G->get_node(id); dn.has_value() and rc::door::claim_executes_on(dn->name(), targets))
+        {
+            hold_for_claim(id, /*delete_door=*/false, "its room was archived");
+            continue;
+        }
         if (G->delete_node(id))
             std::print("door_concept: [room] door {} deleted — its room was archived by ltsm (link 4)\n", id);
+    }
 }
 
 void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room)
@@ -3724,7 +3806,11 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
         }
         for (const auto id : leaving)
         {
-            if (not old_room_lives) { retire_instance(id); continue; }
+            if (not old_room_lives) { retire_instance(id); continue; }   // (a claimed door is held there: hold_for_claim)
+            // ★ THE CROSSED DOOR IS STILL CLAIMED (trace S1): the consumer's `executing` edge targets its cross affordance
+            //   until the crossing is over, which is after this switch. It is HELD like the others, but its cross affordance
+            //   stays in the graph until the claim ends (step_claim_holds).
+            if (hold_for_claim(id, /*delete_door=*/false, "release room")) continue;
             if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
             {
                 log_instance_teardown(it->second, "release room");
