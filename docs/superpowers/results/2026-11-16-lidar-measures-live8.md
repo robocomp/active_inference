@@ -1,5 +1,24 @@
 # lidar-measures live8 — flag on / off / shifted class means (2026-11-17)
 
+> **CORRECTION 11-17 (rescored, commit 1de8cb3f):** the first table below was scored with a WRONG room→world transform
+> (bedroom hard-coded at DOOR_1, rot 0; the fitted frame is 7.5/5.8 cm and 0.7° away — `.superpowers/sdd/2026-11-15-
+> lidar-measures/wall-offset-check.md`). Rescored in the per-run fitted frame (bedroom fit rms 8–29 mm; live6 50 mm,
+> scored with its fitted frame as a manual override):
+>
+> | final centre error (m) | live8 (on) | live8shift (on) | live8off (off) | live6 (old) |
+> |---|---|---|---|---|
+> | bed | 0.086 | 0.070 | 0.113 (0.845 m step) | 0.105 |
+> | nightstand → GT ns_1 | phantom 0.99 + duplicate 0.35 | 0.035 | 0.092 | 0.083 |
+> | nightstand → GT ns_0 | 0.030 | 0.017 | 0.075 | 0.184 |
+> | toilet (approx.) | 0.219 | 0.194 | 0.157 | 0.186 |
+>
+> Flag on now positions the bed and the nightstands better than flag off and live6 (except live8's phantom, from a
+> bad birth: fault 2 below, Task 6c). Fault 6 (wall ~10 cm off) is withdrawn: the polygon matches the inner wall
+> faces within 1–2 cm. Fault 1's evidence (the bed's cx "drift") was read in the wrong frame and must be re-checked.
+> Σ checks: still mostly FAIL; h fails in every run (std at the class cap vs ~1–2 cm true error). Sizes: live8shift
+> ns_7 w +18.7 cm (over-segmented birth mask), bed H +14 cm (robot-attached slice, fault 3).
+
+
 Binary countable_concept aea3cbdc (cost-removal worktree), fleet from main (hybrid controller 38375eeb). Tour:
 warm_start_tour.sh, three_rooms_door0, N_LEGS=2, LOOK_S=60 (same as objects_live6). All legs OK in all three runs.
 n = 1 per condition: every number is provisional. Scorer: `countable_concept/tools/lidar_measures_score.py`
