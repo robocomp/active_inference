@@ -927,11 +927,14 @@ float CountableBelief::update_persistent_cycle(const CountableFrame& frame)
     point_wall_ = frame.wall;
     sanitize_covariance();
     const Eigen::Matrix<float, 6, 1> before = state_.vec();
+    const bool first = not first_update_done_;                         // `before` is the birth seed, not a posterior
     const float fe = update_persistent(frame);
     sanitize_covariance();
     predict_size_likelihood(1.0f);
     if (not frame.points.empty()) update_size_likelihood(frame);
-    if (not frame.lidar_only and not frame.points.empty()) update_volatility(state_.vec() - before);
+    // ω learns from the post-minus-previous-posterior step (T6c-2): the first update has no previous posterior — its step is
+    // the class prior correcting the data seed, not object motion.
+    if (not first and not frame.lidar_only and not frame.points.empty()) update_volatility(state_.vec() - before);
     return fe;
 }
 

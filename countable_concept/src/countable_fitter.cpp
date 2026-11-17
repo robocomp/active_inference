@@ -1183,6 +1183,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     {
         const CountableBelief pre_belief = inst.ai2_belief;   // value copy (state + Σ + prior + flip_evidence)
         const auto&       ps         = pre_belief.state();
+        // T6c-1: on the persistent path an instance's FIRST update starts from the birth seed, not a posterior — its move is
+        // the class prior correcting the seed, so there is nothing for the step bound to protect (the finite checks stay).
+        const bool first_update = pre_belief.params().persistent and not pre_belief.first_update_done();
         energy = inst.ai2_belief.update(frame);
         const auto& ns = inst.ai2_belief.state();
         // Full-state jump: centre (cx,cy,H) AND EXTENT (w,h). A static bed can't grow/shrink its extent by
@@ -1194,7 +1197,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
                                    + (ns.w  - ps.w)  * (ns.w  - ps.w) + (ns.h - ps.h) * (ns.h - ps.h));
         const bool bad = not (std::isfinite(ns.cx) and std::isfinite(ns.cy) and std::isfinite(ns.H)
                               and std::isfinite(ns.w) and std::isfinite(ns.h) and std::isfinite(ns.yaw));
-        if (cfg_.max_step_m > 0.0f and (bad or step > cfg_.max_step_m))
+        if (cfg_.max_step_m > 0.0f and (bad or (not first_update and step > cfg_.max_step_m)))
         {
             std::print("[{}] AI2 step-bound REJECT: state moved {:.2f}m (>{:.2f}){} — outlier frame dropped (w={:.2f} h={:.2f})\n",
                        inst.node_name, step, cfg_.max_step_m, bad ? " [non-finite]" : "", ns.w, ns.h);

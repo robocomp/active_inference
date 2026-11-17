@@ -549,6 +549,24 @@ static void bad_seed_recovers()
     }
 }
 
+// T6c-2: the first update does not teach ω (its step is seed → posterior, not posterior → posterior); the second does.
+static void first_update_no_volatility()
+{
+    const float h0 = 2.14f;
+    CountableBelief b(CountableBeliefState{tx, -0.5f * h0, tH, tw, h0, 0.0f}, params());
+    b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+    const Vec6 w0 = b.log_volatility();
+    const CountableFrame f = one_face_frame();
+    b.update(f);
+    const Vec6 w1 = b.log_volatility();
+    b.update(f);
+    const Vec6 w2 = b.log_volatility();
+    std::printf("  first_update_no_volatility: |d omega| after the first update %.3e ; after the second %.3e\n",
+                (w1 - w0).cwiseAbs().maxCoeff(), (w2 - w1).cwiseAbs().maxCoeff());
+    CHECK((w1 - w0).cwiseAbs().maxCoeff() == 0.0f);
+    CHECK((w2 - w1).cwiseAbs().maxCoeff() > 0.0f);
+}
+
 static void good_seed_stays()
 {
     // Without (2d): its target is the observed top + top_no_float_margin_m (2 cm), a likelihood term that lifts H by ~2 cm on
@@ -633,6 +651,7 @@ int main()
     mode_rotation_permutes_latents();
     sanitize_reseeds();
     bad_seed_recovers();
+    first_update_no_volatility();
     good_seed_stays();
     prior_counted_once();
     first_update_flag_life();
