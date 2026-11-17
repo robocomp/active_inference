@@ -1239,10 +1239,15 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     }
     // Route mode still CLAIMS `cross` on the through-leg: door_concept hangs its passage anchor and records the crossing
     // only for a claimed cross (door_concept specificworker_anchor.cpp, anchor_creation_claim) — ltsm's passage history
-    // and room recognition's fresh seam depend on it. The claim ends with the leg: Satisfied unless the passage failed.
+    // and room recognition's fresh seam depend on it. The claim ends with the CROSS STEP: Satisfied unless the passage failed.
+    // ★ (2026-11-17, trace S1 / RoomTransitionExit.tla CT_Done) The through-leg outlives the crossing (it still stands while the
+    //   door is closed behind), and the claim used to end only because door_concept DELETED aff_<door>_cross at the room switch.
+    //   With door_concept holding a claimed door until its claim ends (REAP_HOLD), that left the claim re-published every cycle
+    //   for a whole leg (s1_warm1: door_1 held 1100 -> 2586). The consumer ends its own claim when the passage leaves Cross.
     {
         std::uint64_t want = 0;
-        if (door_route_leg_.has_value() and door_route_leg_->through and door_route_leg_->cross.has_value())
+        const bool crossing = door_passage_.view().step == rc::DoorPassage::Step::Cross;
+        if (crossing and door_route_leg_.has_value() and door_route_leg_->through and door_route_leg_->cross.has_value())
             if (const auto n = graph_->get_node("aff_" + door_route_leg_->door + "_cross"); n.has_value()) want = n->id();
         if (want != 0)
         {
@@ -1254,9 +1259,12 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         }
         else if (door_route_cross_claim_ != 0)
         {
-            affordance_manager.complete_claim(graph_, door_route_cross_claim_,
-                                              door_passage_.view().failed ? rc::affordance::Outcome::Unreachable
-                                                                          : rc::affordance::Outcome::Satisfied);
+            // complete_claim refuses a node whose flags no longer read Executing (a held node is frozen by its producer);
+            // the edge is ours either way, so it comes off — that, not the flags, is what ends the producer's hold.
+            if (not affordance_manager.complete_claim(graph_, door_route_cross_claim_,
+                                                      door_passage_.view().failed ? rc::affordance::Outcome::Unreachable
+                                                                                  : rc::affordance::Outcome::Satisfied))
+                affordance_manager.clear_executing(graph_, door_route_cross_claim_);
             door_route_cross_claim_ = 0;
         }
     }
