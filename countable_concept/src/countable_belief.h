@@ -462,6 +462,13 @@ public:
     // cross terms 0; the data seed is only the GN start θ₀. From the second update on the recursion is unchanged (x̄ = the
     // previous posterior). The flag is set by that update, cleared by sanitize_covariance's re-seed, and travels with every
     // value copy (the fitter's step-bound snapshot). set_first_update_done is a test hook.
+    // RECALL (ruling T6c-3): a belief re-created from a remembered POSTERIOR must be marked first_update_done = true, or the
+    // class prior is pulled in a second time. No such path exists in this agent today (verified 11-17): an LTOM recall
+    // (specificworker_lifecycle.cpp, rc::choose_recall → create_instance_from_detection) carries only the remembered number
+    // and uid; the belief is built in exactly one place, run_inference's lazy init (countable_fitter.cpp,
+    // `inst.ai2_belief = CountableBelief(s0, p)`), from THIS frame's cloud seed (or the tracker's birth defaults) — a data
+    // seed, so the first-update class prior is correct there. A future path that restores a remembered state must call
+    // set_first_update_done(true) behind params.persistent.
     bool first_update_done() const { return first_update_done_; }
     void set_first_update_done(bool v) { first_update_done_ = v; }
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the

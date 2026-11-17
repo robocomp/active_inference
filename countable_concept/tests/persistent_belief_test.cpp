@@ -546,6 +546,7 @@ static void bad_seed_recovers()
         c.set_first_update_done(true);
         for (int k = 0; k < 10; ++k) c.update(f);
         std::printf("  bad_seed_recovers: control (prior at the seed) after 10 updates h %.4f\n", c.state().h);
+        CHECK(std::abs(c.state().h - tw) > 0.05f);   // the control does NOT recover: the test can see the failure it guards
     }
 }
 
