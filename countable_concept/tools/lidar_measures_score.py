@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""Score a countable_concept live run against the Webots ground truth: spec 2026-11-15-lidar-measures-design.md §8,
+plan Task 10 Step 2.
+
+usage: lidar_measures_score.py RUN_DIR [OFF_DIR] [--ref LIVE6_DIR] [--shift]
+
+Per run dir: <cls>_ai2_log.csv for cls in nightstand, bed, toilet (one row per instance per fit cycle) and gt_pose.tsv.
+Missing files / missing columns (flag-off era runs have no lidar_only ... Itr_L) are tolerated: those lines print n/a.
+
+Conventions (printed again in the header of every report):
+  * look      = maximal run of FRESH rows (gated == 0 and lidar_only != 1) of one instance with no pkt_ts gap > 2 s.
+  * settled   = rows from the first fresh row with range <= 2.5 m onward (all rows, fresh or LiDAR-only).
+  * Sigma     = PASS iff max std <= 0.15 m over the settled rows AND at least 95 % of the settled rows have
+                rms/3 <= std <= 3*rms (rms = rms of the true error of that DOF over the settled rows).
+  * NEES      = (ex/std_cx)^2 + (ey/std_cy)^2 + (eH/std_H)^2 per settled row (diagonal Sigma; expected median ~ 2.37 for 3 DOF).
+  * drift     = per instance, the last fitted centre of each look; the step between consecutive looks projected on the
+                direction to the nearest wall and to the nearest other GT object; PASS iff the largest such step <= 0.10 m.
+  * rate      = rows / (last - first pkt_ts) per instance; PASS iff >= 8 Hz.
+  * parked    = the gt_pose interval containing the row has speed < 0.02 m/s and yaw rate < 0.02 rad/s.
+Numbers are read with float() on the CSV text (written with '.'); output uses explicit format specs; no locale module.
+"""
+import argparse, csv, math, os, statistics, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCENE = os.path.join(HERE, 'scene_threerooms.csv')
+CLASSES = ('bed', 'nightstand', 'toilet')
+NEW_COLS = ('lidar_only', 'lidar_msum', 'rho_cam', 'rho_L', 'rho_chain', 'dphi_cam', 'dz_cam', 'bchain_x', 'bchain_y',
+            'bcam_H', 'bL_H', 'sbcam_H', 'sbL_H', 'ray_n', 'Itr_cam', 'Itr_L')
+GAP_MS = 2000
+NEAR_M = 2.5
+STD_MAX = 0.15
+FRAC_OK = 0.95
+DRIFT_MAX = 0.10
+RATE_MIN = 8.0
+# Room frame -> world: the room frame's origin is the door the robot entered through (DOOR_1 for the bedroom, DOOR_2 for
+# the bathroom, threerooms-piso.wbt, see room_concept/estimation_scripts/scripts/true_room.py), rotated by the room's yaw.
+# Cross-check on objects_live6: bed / nightstands land 6 / 11 / 7 cm from GT with a rotation of 0 (carve-replay result).
+# Override with --room NAME=x,y,rot (NAME in bedroom, bathroom); --pin fits the translation to the class's own GT
+# (then the centre error of a single-object room is 0 by construction: reported as such).
+ROOMS = {'bedroom': (-4.769, 9.3796, 0.0), 'bathroom': (-1.705, 10.77, -math.pi / 2)}
+ROOM_OF = {'bed': 'bedroom', 'nightstand': 'bedroom', 'toilet': 'bathroom'}
+# True top height per class as the box fit sees it: bed = mattress top, nightstand = body top, toilet = highest part (tank).
+TOP = {'bed': 0.65, 'nightstand': 0.62, 'toilet': 0.90}   # toilet 0.90 as in the live6 results doc (tank top is 1.018)
+# Webots node centre of the toilet (the live6 comparison used it; the bbox centre of its parts is (-0.884, 12.929)).
+NODE_CENTRE = {'toilet': (-0.874478, 12.8652)}
+SHIFT_TOL = {'w': 0.03, 'h': 0.03, 'H': 0.05}   # nightstand prior shifted +0.06 / +0.10: closer to the truth than to the shifted mean
+
+
+def fnum(s):
+    try: return float(s)
+    except (TypeError, ValueError): return float('nan')
+
+
+def rms(v): return math.sqrt(sum(x * x for x in v) / len(v)) if v else float('nan')
+def med(v):
+    v = [x for x in v if x == x]
+    return statistics.median(v) if v else float('nan')
+def fmt(x, spec='.3f'): return 'n/a' if x != x else format(x, spec)
+def verdict(ok): return 'PASS' if ok else 'FAIL'
+
+
+# ---- ground truth ----------------------------------------------------------------------------------------------------
+
+def load_scene(path):
+    rows = list(csv.DictReader(open(path)))
+    box = lambda r: tuple(fnum(r[k]) for k in ('xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax'))
+    parts = [(r['label'], box(r)) for r in rows]
+    walls = [b for l, b in parts if l == 'wall']
+    objs = []
+
+    def union(bs): return (min(b[0] for b in bs), max(b[1] for b in bs), min(b[2] for b in bs), max(b[3] for b in bs),
+                           min(b[4] for b in bs), max(b[5] for b in bs))
+    bed = [b for l, b in parts if l.startswith('bed_')]
+    if bed: objs.append(('bed', 'bed', union(bed)))
+    nbodies = [b for l, b in parts if l == 'ns_body']
+    legs = [b for l, b in parts if l == 'ns_leg']
+    for i, nb in enumerate(sorted(nbodies, key=lambda b: b[0])):
+        mine = [nb] + [g for g in legs if nb[0] - 0.05 <= g[0] and g[1] <= nb[1] + 0.05 and nb[2] - 0.05 <= g[2] <= nb[3] + 0.05]
+        objs.append(('nightstand', 'nightstand_%d' % i, union(mine)))
+    toi = [b for l, b in parts if l.startswith('toilet_')]
+    if toi: objs.append(('toilet', 'toilet', union(toi)))
+    gt = []
+    for cls, name, u in objs:
+        cx, cy = NODE_CENTRE.get(cls, (0.5 * (u[0] + u[1]), 0.5 * (u[2] + u[3])))
+        gt.append(dict(cls=cls, name=name, cx=cx, cy=cy, dx=u[1] - u[0], dy=u[3] - u[2],
+                       top=TOP[cls]))
+    return gt, walls
+
+
+def room_tf(room, rooms):
+    ox, oy, rot = rooms[room]
+    c, s = math.cos(rot), math.sin(rot)
+    to_world = lambda x, y: (ox + c * x - s * y, oy + s * x + c * y)
+    to_room = lambda X, Y: (c * (X - ox) + s * (Y - oy), -s * (X - ox) + c * (Y - oy))
+    return to_world, to_room, rot
+
+
+def true_dims(g, yaw_world):
+    """true (w, h) of the GT footprint along a box whose yaw (world) is yaw_world: w along the box's x axis."""
+    swap = abs(math.sin(yaw_world)) > math.sqrt(0.5)
+    return (g['dy'], g['dx']) if swap else (g['dx'], g['dy'])
+
+
+# ---- run loading -----------------------------------------------------------------------------------------------------
+
+def load_gt_pose(path):
+    out = []
+    try:
+        for r in csv.DictReader(open(path), delimiter='\t'):
+            out.append((fnum(r['t_ms']), fnum(r['x']), fnum(r['y']), fnum(r['yaw'])))
+    except (OSError, KeyError):
+        return []
+    return out
+
+
+def parked_at(gt, t):
+    for k in range(1, len(gt)):
+        if gt[k - 1][0] <= t <= gt[k][0]:
+            dt = (gt[k][0] - gt[k - 1][0]) / 1000.0
+            if dt <= 0 or dt > 3.0: return None
+            v = math.hypot(gt[k][1] - gt[k - 1][1], gt[k][2] - gt[k - 1][2]) / dt
+            dy = ((gt[k][3] - gt[k - 1][3] + math.pi) % (2 * math.pi)) - math.pi
+            return v < 0.02 and abs(dy) / dt < 0.02
+    return None
+
+
+def load_instances(run, cls):
+    """-> (dict node -> list of row dicts with numeric fields, header columns) or ({}, [])"""
+    path = os.path.join(run, cls + '_ai2_log.csv')
+    if not os.path.exists(path): return {}, []
+    inst, cols = {}, []
+    with open(path) as f:
+        rd = csv.DictReader(f)
+        cols = rd.fieldnames or []
+        for r in rd:
+            if r.get('node') in (None, 'node'): continue
+            d = {k: fnum(v) for k, v in r.items() if k != 'node'}
+            d['node'] = r['node']
+            inst.setdefault(r['node'], []).append(d)
+    return inst, cols
+
+
+def is_fresh(r): return r.get('gated', 0) == 0 and not (r.get('lidar_only', 0) == 1)
+
+
+def looks_of(rows):
+    """index ranges (a, b) of maximal fresh runs with no pkt_ts gap > 2 s"""
+    out, a, prev = [], None, None
+    for i, r in enumerate(rows):
+        if is_fresh(r):
+            if a is not None and r['pkt_ts'] - prev > GAP_MS:
+                out.append((a, i - 1)); a = None
+            if a is None: a = i
+            prev = r['pkt_ts']
+        elif a is not None and r['pkt_ts'] - prev > GAP_MS:
+            out.append((a, i - 1)); a = None
+        # a non-fresh row inside the gap budget does not break the look (it carries no mask, not a loss of view)
+    if a is not None:
+        last = max(i for i, r in enumerate(rows) if is_fresh(r))
+        out.append((a, last))
+    return out
+
+
+# ---- scoring ---------------------------------------------------------------------------------------------------------
+
+def score_run(run, gtobjs, walls, rooms, pin, shift):
+    gtpose = load_gt_pose(os.path.join(run, 'gt_pose.tsv'))
+    res, notes = {}, []
+    rooms = dict(rooms)
+    data = {c: load_instances(run, c) for c in CLASSES}
+    if pin:   # translation from the class's own GT: the mean over the room's final fits
+        for room in rooms:
+            diffs = []
+            for c in CLASSES:
+                if ROOM_OF[c] != room: continue
+                for node, rows in data[c][0].items():
+                    if not rows: continue
+                    ox, oy, rot = rooms[room]
+                    cs, sn = math.cos(rot), math.sin(rot)
+                    x, y = rows[-1]['cx'], rows[-1]['cy']
+                    wx, wy = cs * x - sn * y, sn * x + cs * y
+                    cands = [g for g in gtobjs if g['cls'] == c]
+                    if not cands: continue
+                    g = min(cands, key=lambda g: math.hypot(g['cx'] - (ox + wx), g['cy'] - (oy + wy)))
+                    diffs.append((g['cx'] - wx, g['cy'] - wy))
+            if diffs:
+                rooms[room] = (statistics.mean(d[0] for d in diffs), statistics.mean(d[1] for d in diffs), rooms[room][2])
+                notes.append('pinned %s origin to (%.3f, %.3f)' % (room, rooms[room][0], rooms[room][1]))
+    for c in CLASSES:
+        inst, cols = data[c]
+        if not inst:
+            notes.append('%s: no %s_ai2_log.csv' % (c, c)); continue
+        missing = [k for k in NEW_COLS if k not in cols]
+        if missing: notes.append('%s: columns absent (flag-off era): %s' % (c, ','.join(missing[:3]) + ('...' if len(missing) > 3 else '')))
+        to_world, to_room, rot = room_tf(ROOM_OF[c], rooms)
+        cands = [g for g in gtobjs if g['cls'] == c]
+        for node, rows in sorted(inst.items()):
+            if not rows: continue
+            last = rows[-1]
+            wx, wy = to_world(last['cx'], last['cy'])
+            g = min(cands, key=lambda g: math.hypot(g['cx'] - wx, g['cy'] - wy))
+            d_final = math.hypot(g['cx'] - wx, g['cy'] - wy)
+            m = dict(node=node, cls=c, gt=g['name'], gtd=g, final_err=d_final, rows=len(rows))
+            m['phantom'] = d_final > 0.75
+            gx, gy = to_room(g['cx'], g['cy'])                 # GT centre in the room frame (axes of the fit)
+            m['H_err_final'] = abs(last['H'] - g['top'])
+            m['H_final'] = last['H']
+            # looks and settled window
+            looks = looks_of(rows)
+            m['n_looks'] = len(looks)
+            start = next((i for i, r in enumerate(rows) if is_fresh(r) and r.get('range', 99) <= NEAR_M), None)
+            m['settled'] = 0
+            if start is not None:
+                S = rows[start:]
+                m['settled'] = len(S)
+                tw = lambda r: true_dims(g, r.get('yaw', 0.0) + rot)
+                errs = {'cx': [r['cx'] - gx for r in S], 'cy': [r['cy'] - gy for r in S], 'H': [r['H'] - g['top'] for r in S],
+                        'h': [r['h'] - tw(r)[1] for r in S]}
+                stds = {'cx': [r['std_cx'] for r in S], 'cy': [r['std_cy'] for r in S], 'H': [r['std_H'] for r in S],
+                        'h': [r['std_h'] for r in S]}
+                dof = {}
+                for k in errs:
+                    e, s = errs[k], stds[k]
+                    rr = rms(e)
+                    inside = sum(1 for x in s if rr / 3 <= x <= 3 * rr) / len(s)
+                    below = sum(1 for x in s if x < rr / 3) / len(s)
+                    ok = max(s) <= STD_MAX and inside >= FRAC_OK
+                    dof[k] = dict(rms=rr, smin=min(s), smax=max(s), inside=inside, below=below, ok=ok)
+                m['dof'] = dof
+                nees = []
+                for i, r in enumerate(S):
+                    if r['std_cx'] > 0 and r['std_cy'] > 0 and r['std_H'] > 0:
+                        nees.append((errs['cx'][i] / r['std_cx']) ** 2 + (errs['cy'][i] / r['std_cy']) ** 2 +
+                                    (errs['H'][i] / r['std_H']) ** 2)
+                m['nees'] = med(nees)
+            # drift between consecutive looks (world frame, last fitted centre of each look)
+            cen = [to_world(rows[b]['cx'], rows[b]['cy']) for a, b in looks]
+            worst, wstep, worst_what = 0.0, 0.0, '-'
+            others = [(o['cx'], o['cy'], o['name']) for o in gtobjs if o['name'] != g['name']]
+            for k in range(1, len(cen)):
+                sx, sy = cen[k][0] - cen[k - 1][0], cen[k][1] - cen[k - 1][1]
+                wstep = max(wstep, math.hypot(sx, sy))
+                px, py = cen[k - 1]
+                tg = []
+                for b in walls:
+                    qx, qy = min(max(px, b[0]), b[1]), min(max(py, b[2]), b[3])
+                    tg.append((math.hypot(qx - px, qy - py), qx, qy, 'wall'))
+                nw = min(tg) if tg else None
+                no = min(((math.hypot(ox - px, oy - py), ox, oy, nm) for ox, oy, nm in others), default=None)
+                for t in (nw, no):
+                    if t is None or t[0] < 1e-6: continue
+                    toward = (sx * (t[1] - px) + sy * (t[2] - py)) / t[0]
+                    if toward > worst: worst, worst_what = toward, t[3]
+            m['drift'] = worst; m['drift_what'] = worst_what; m['max_step'] = wstep
+            # rate
+            dur = (rows[-1]['pkt_ts'] - rows[0]['pkt_ts']) / 1000.0
+            m['rate'] = len(rows) / dur if dur > 0 else float('nan')
+            dts = [(rows[i]['pkt_ts'] - rows[i - 1]['pkt_ts']) / 1000.0 for i in range(1, len(rows))]
+            dts = [x for x in dts if 0 < x < 2.0]
+            m['rate_med'] = 1.0 / statistics.median(dts) if dts else float('nan')
+            # LiDAR measures
+            if 'lidar_only' in rows[0]:
+                m['lidar_only_share'] = sum(1 for r in rows if r['lidar_only'] == 1) / len(rows)
+                for k in ('rho_cam', 'rho_L', 'rho_chain'):
+                    m[k] = med([r[k] for r in rows if r.get('lidar_only', 0) == 0 or k == 'rho_L'])
+                pk = [r for r in rows if gtpose and parked_at(gtpose, r['pkt_ts']) is True]
+                m['n_parked'] = len(pk)
+                m['dphi_parked'] = med([abs(r['dphi_cam']) for r in pk]) if pk and 'dphi_cam' in pk[0] else float('nan')
+                m['dz_parked'] = med([abs(r['dz_cam']) for r in pk]) if pk and 'dz_cam' in pk[0] else float('nan')
+            # shift: final size vs the truth
+            tw_, th_ = true_dims(g, last.get('yaw', 0.0) + rot)
+            m['w_err'] = last['w'] - tw_; m['h_err'] = last['h'] - th_; m['H_err'] = last['H'] - g['top']
+            res[node] = m
+    return res, notes
+
+
+# ---- report ----------------------------------------------------------------------------------------------------------
+
+def report(label, res, notes, shift):
+    P = print
+    P('=' * 100)
+    P('RUN %s' % label)
+    for n in notes: P('  note: ' + n)
+    for node, m in sorted(res.items()):
+        g = m['gtd']
+        P('-' * 100)
+        P('%s -> GT %s (%.3f, %.3f, top %.2f)  rows %d  looks %d  settled rows %d%s' % (
+            node, g['name'], g['cx'], g['cy'], g['top'], m['rows'], m['n_looks'], m['settled'],
+            '   PHANTOM (>0.75 m from every GT of its class)' if m['phantom'] else ''))
+        P('  final centre error      %s m  (live6 ref: bed 0.055, nightstands 0.02-0.06, toilet 0.23)  [info]' % fmt(m['final_err']))
+        P('  final |H - true top|    %s m  (H %s, top %.2f)  [info; compare with the live6 column]' % (fmt(m['H_err_final']), fmt(m['H_final']), g['top']))
+        if 'dof' in m:
+            for k in ('cx', 'cy', 'H', 'h'):
+                d = m['dof'][k]
+                P('  %-2s rms %s  std min %s max %s  inside[rms/3,3rms] %5.1f%% (below %5.1f%%)   %s' % (
+                    k, fmt(d['rms'], '.4f'), fmt(d['smin'], '.4f'), fmt(d['smax'], '.4f'), 100 * d['inside'], 100 * d['below'], verdict(d['ok'])))
+            P('  median NEES (3 dof: cx,cy,H; expected ~2.4)  %s  [info]' % fmt(m['nees'], '.2f'))
+        else:
+            P('  no fresh-mask row from within %.1f m: DOF checks not scored   FAIL' % NEAR_M)
+        P('  largest centre step toward %s between looks %s m (largest step %s m)   %s' % (
+            m['drift_what'], fmt(m['drift'], '.3f'), fmt(m['max_step'], '.3f'), verdict(m['drift'] <= DRIFT_MAX)))
+        P('  fit rate %s Hz (median-dt %s Hz)   %s' % (fmt(m['rate'], '.1f'), fmt(m['rate_med'], '.1f'), verdict(m['rate'] >= RATE_MIN)))
+        if 'lidar_only_share' in m:
+            P('  lidar_only share %.1f %%  medians rho_cam %s rho_L %s rho_chain %s;  parked rows %d: |dphi_cam| %s |dz_cam| %s  [info]' % (
+                100 * m['lidar_only_share'], fmt(m['rho_cam'], '.3f'), fmt(m['rho_L'], '.3f'), fmt(m['rho_chain'], '.3f'),
+                m['n_parked'], fmt(m['dphi_parked'], '.4f'), fmt(m['dz_parked'], '.4f')))
+        else:
+            P('  lidar_only / rho / dphi / dz: n/a (columns absent)  [info]')
+        if shift:
+            for k, nm in (('w_err', 'w'), ('h_err', 'h'), ('H_err', 'H')):
+                P('  shift: final %s err vs TRUE size %+.3f m (tol %.2f; the shifted prior would read +%.2f)   %s' % (
+                    nm, m[k], SHIFT_TOL[nm], 0.10 if nm == 'H' else 0.06, verdict(abs(m[k]) <= SHIFT_TOL[nm])))
+
+
+def side_by_side(named):
+    P = print
+    P('=' * 100)
+    P('SIDE BY SIDE (per GT object; instances that matched the same GT are listed separately)')
+    names = [n for n, _ in named]
+    P('%-26s' % 'GT / node / metric' + ''.join('%14s' % n for n in names))
+    gts = sorted({(m['gt'], node) for _, res in named for node, m in res.items()})
+    rows = [('final_err', 'centre err m', '.3f'), ('H_err_final', '|H-top| m', '.3f'), ('drift', 'drift m', '.3f'),
+            ('rate', 'rate Hz', '.1f'), ('nees', 'NEES med', '.2f'), ('lidar_only_share', 'lidar_only', '.3f')]
+    for gname in sorted({g for g, _ in gts}):
+        for key, lab, spec in rows:
+            line = '%-26s' % ('%s %s' % (gname, lab))
+            for _, res in named:
+                ms = [m for m in res.values() if m['gt'] == gname and not m['phantom']]
+                v = min((m.get(key, float('nan')) for m in ms), default=float('nan')) if ms else float('nan')
+                line += '%14s' % fmt(v, spec)
+            P(line)
+        for k in ('cx', 'cy', 'H', 'h'):
+            line = '%-26s' % ('%s %s std-check' % (gname, k))
+            for _, res in named:
+                ms = [m for m in res.values() if m['gt'] == gname and not m['phantom'] and 'dof' in m]
+                line += '%14s' % (verdict(ms[0]['dof'][k]['ok']) if ms else 'n/a')
+            P(line)
+    for _, res in named:
+        pass
+    P('phantoms (instances > 0.75 m from every GT): ' + '; '.join(
+        '%s: %s' % (n, ','.join(k for k, m in res.items() if m['phantom']) or 'none') for n, res in named))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('run'); ap.add_argument('off', nargs='?')
+    ap.add_argument('--ref', help='objects_live6 dir (flag-off era) for the side-by-side')
+    ap.add_argument('--shift', action='store_true', help='score final w, h, H against the TRUE size (shifted-class run)')
+    ap.add_argument('--pin', action='store_true', help="fit each room's translation to the class's own GT (placement NOT independent)")
+    ap.add_argument('--room', action='append', default=[], metavar='NAME=x,y,rot', help='override a room origin')
+    ap.add_argument('--scene', default=SCENE)
+    a = ap.parse_args()
+    rooms = dict(ROOMS)
+    for s in a.room:
+        k, v = s.split('=')
+        rooms[k] = tuple(float(x) for x in v.split(','))
+    gtobjs, walls = load_scene(a.scene)
+    print('lidar_measures_score  (spec 2026-11-15 §8)')
+    print('look = fresh-mask run, gap <= %d ms; settled = from the first fresh row with range <= %.1f m' % (GAP_MS, NEAR_M))
+    print('Sigma PASS = max std <= %.2f m AND >= %.0f %% of settled rows with rms/3 <= std <= 3*rms (per DOF, rms of the true error)' % (STD_MAX, 100 * FRAC_OK))
+    print('drift PASS = largest step toward nearest wall / neighbour between looks <= %.2f m;  rate PASS >= %.0f Hz' % (DRIFT_MAX, RATE_MIN))
+    print('room->world: ' + '; '.join('%s origin (%.3f, %.3f) rot %.4f' % ((k,) + v) for k, v in rooms.items()) +
+          ('  [--pin: translation fitted to GT]' if a.pin else ''))
+    print('GT: ' + '; '.join('%s (%.3f, %.3f) %.2fx%.2f top %.2f' % (g['name'], g['cx'], g['cy'], g['dx'], g['dy'], g['top']) for g in gtobjs))
+    named = []
+    for label, d, sh in (('RUN ' + a.run, a.run, a.shift), ('OFF ' + str(a.off), a.off, False), ('REF ' + str(a.ref), a.ref, False)):
+        if not d: continue
+        res, notes = score_run(d, gtobjs, walls, rooms, a.pin, sh)
+        report(label, res, notes, sh)
+        named.append((label.split()[0], res))
+    if len(named) > 1: side_by_side(named)
+    fails = sum(1 for _, res in named[:1] for m in res.values() for k in m.get('dof', {}) if not m['dof'][k]['ok'])
+    print('=' * 100)
+    print('SUMMARY (%s): %d object instance(s), %d DOF std-check FAIL line(s), %d drift FAIL, %d rate FAIL' % (
+        named[0][0] if named else '-', len(named[0][1]) if named else 0, fails,
+        sum(1 for m in named[0][1].values() if m['drift'] > DRIFT_MAX) if named else 0,
+        sum(1 for m in named[0][1].values() if not m['rate'] >= RATE_MIN) if named else 0))
+
+
+if __name__ == '__main__':
+    main()
