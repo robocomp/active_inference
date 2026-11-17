@@ -331,7 +331,6 @@ struct ControllerParams
     // on first sight and could not be disconfirmed by free space. Two independent obstacle representations
     // feeding one ESDF, each with its own inflation and neither able to retire the other, is what produced
     // duplicated and immortal geometry. Flip back on only if residual_concept is down.
-    bool obstacle_creation_enabled = false;
     std::string target_edge_type = "target";
     float pose_xy_std_slow_m = 0.03f;
     float pose_xy_std_stop_m = 0.12f;
@@ -351,25 +350,9 @@ struct ControllerParams
     float pose_xy_std_growth_per_mps = 0.5f;
     float pose_theta_std_growth_per_rps = 1.0f;
     float adv_rotation_coupling_exponent = 0.5f;
-    float temporary_obstacle_front_distance_m = 1.8f;
-    float temporary_obstacle_half_width_m = 0.9f;
-    float temporary_obstacle_cluster_margin_m = 0.35f;
     float temporary_obstacle_padding_m = 0.18f;
-    float temporary_obstacle_occlusion_depth_m = 0.28f;
-    RobustLossType temporary_obstacle_robust_loss = RobustLossType::Huber;
-    float temporary_obstacle_robust_loss_scale_m = 0.08f;
-    int temporary_obstacle_min_points = 12;
     int temporary_obstacle_history_scans = 5;
-    std::uint64_t temporary_obstacle_ttl_ms = 3000;
-    float temporary_obstacle_existence_init_log_odds = 1.6f;
-    float temporary_obstacle_existence_min_log_odds = -4.f;
-    float temporary_obstacle_existence_max_log_odds = 4.f;
     float temporary_obstacle_existence_remove_threshold_log_odds = -1.8f;
-    float temporary_obstacle_existence_observation_bias = 0.30f;
-    float temporary_obstacle_existence_support_gain = 0.06f;
-    float temporary_obstacle_existence_remembered_gain = 0.02f;
-    float temporary_obstacle_existence_weak_miss_penalty = 0.05f;
-    float temporary_obstacle_existence_absence_penalty = 0.75f;
     // LiDAR height band (metres, robot frame ≈ height above floor since robot_from_lidar is identity
     // and the source cloud is already floor-referenced). The min is a floor-plane reject cutoff: the
     // lowest lidar beam grazes the floor into a dense ring at ~0.11–0.18 m (confirmed with an EMPTY
@@ -429,8 +412,6 @@ struct ControllerParams
     float policy_unseen_odo_sigma_m = 0.005f;
     float policy_wheel_decel_mps2 = 0.5f;       // PROVISIONAL measured per-wheel decel (Live fix 2); <= 0 = the capability's
     // Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor).
-    float unmodelled_scan_min_z_m = 0.10f;
-    float unmodelled_scan_max_z_m = 1.50f;
     float goal_clearance_relax_dist_m = 0.6f;
     float goal_obstacle_margin_m = 0.08f;
     float goal_clearance_min_ratio = 0.85f;

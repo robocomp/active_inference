@@ -56,7 +56,6 @@ struct ControllerStatusSnapshot
     float target_straight_m = -1.f;           ///< straight-line distance robot→target (-1 = unknown)
 
     bool route_valid = false;                 ///< a route (mission route or point plan) is being driven
-    bool route_on_mission = false;
     bool route_s_known = false;
     float route_s = 0.f, route_len = 0.f;     ///< progress along the route / its length, metres
     float route_heading_err = std::numeric_limits<float>::quiet_NaN();   ///< robot yaw − route tangent, rad

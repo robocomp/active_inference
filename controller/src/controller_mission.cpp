@@ -1094,7 +1094,6 @@ TrajectoryStats MissionRunner::summary() const
 }
 
 void MissionRunner::note_replan() { if (state_ == State::Running) ++stats_.replans; }
-void MissionRunner::note_escape() { if (state_ == State::Running) ++stats_.escapes; }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // Readout

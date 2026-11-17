@@ -1507,8 +1507,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // Task 9, fix A: a STALE anchor the cross names counts too — the servo waits for it (update_cross_anchor), and the
         // room-frame checks below would otherwise hand the cross back before it could (try66 leg 2: "standpoint occupied").
         // try90 fix: …and so does a cross whose anchor is gone but which holds its measured gap (the anchor was its prior).
-        const bool anchored = is_cross and (read_cross_anchor(target->node_id, target->node_name, /*accept_stale=*/true).has_value()
-                                            or gap_carries_cross(target->node_name));
+        const bool anchored = is_cross and (read_cross_anchor(target->node_id, target->node_name, /*accept_stale=*/true).has_value());
         if (not is_cross) anchor_hoist_logged_ = false;
         else if (anchored != anchor_hoist_logged_)
         {
@@ -2827,8 +2826,7 @@ std::optional<float> ControllerSession::clearance_speed_limit(const DrivenCurve 
     const float support = path_controller.body_extent_max();
     // Where the robot is along the curve: the mission tracks it; a plan is projected FORWARD-ONLY from
     // the last known progress, for the same reason the follower and the band do.
-    const float s_now = curve.on_mission() ? route_.progress()
-                                           : sp.project(robot_pose.pos, plan_progress_s_, 3.0f);
+    const float s_now = sp.project(robot_pose.pos, plan_progress_s_, 3.0f);
     const float horizon = v_cap * v_cap / (2.f * a_dec) + support;
     const Eigen::Affine2f pose = robot_pose.as_transform();
     const Eigen::Matrix2f Rt = pose.linear().transpose();
@@ -3264,7 +3262,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 const auto dn = graph_->get_node(leg.door);
                 const float p_open = dn.has_value() ? graph_->get_attrib_by_name<door_open_prob_att>(dn.value()).value_or(-1.f) : -1.f;
                 const bool open_belief = p_open >= 0.5f;
-                const bool open_seen = gap_seen_now_ or anchor_cross_->fresh;
+                const bool open_seen = anchor_cross_->fresh;
                 const bool near_side = g.s < 0.f;
                 const bool within = std::abs(g.e) < 0.5f * anchor_cross_->width_m;
                 const bool facing = std::abs(g.heading_err) < 0.5f * static_cast<float>(M_PI);
@@ -3795,13 +3793,6 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_through_ = false;
     anchor_carried_logged_ = false;
     anchor_predicted_logged_ = false;
-    gap_line_.reset();             // Task 18: a measured gap belongs to one claim
-    gap_carry_pose_.reset();
-    gap_seen_now_ = false;
-    gap_steering_logged_ = false;
-    gap_lost_logged_ = false;
-    gap_room_yaw_fix_ = 0.f;
-    gap_room_yaw_sigma_ = -1.f;
     cross_gate_ = {};
     anchor_last_reading_.reset();
     anchor_gone_logged_ = false;
@@ -3955,21 +3946,6 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
         anchor_last_reading_ = anchor_cross_;
         anchor_gone_logged_ = false;
     }
-    else if (gap_carries_cross(step.target.node_name))
-    {
-        // try90 fix: the anchor was REMOVED (door_concept's own end-of-passage rule) while the cross holds its measured gap and
-        // has seen its near side — go on on the gap: the last reading stands in for the name and the door width only.
-        anchor_cross_ = anchor_last_reading_;
-        anchor_cross_->fresh = false;
-        if (not anchor_gone_logged_)
-        {
-            anchor_gone_logged_ = true;
-            const auto g = rc::anchor_cross_geometry(*gap_line_);
-            std::println("[gap] the anchor {} is gone — going on on the held gap until through (s {:+.2f} m, e {:+.3f} m)",
-                         anchor_cross_->name, g.s, g.e);
-        }
-        return true;
-    }
     if (not anchor_cross_.has_value())
     {
         // Final review I-1: past the room switch with nothing to carry the cross, the cross ENDS (rc::anchor_gone_action) —
@@ -4004,7 +3980,6 @@ bool ControllerSession::update_cross_anchor(const ControllerPlanningStep &step)
     anchor_latched_id_ = anchor_cross_->anchor_id;
     if (not anchor_cross_->fresh)
     {
-        if (gap_carries_cross(step.target.node_name)) return true;   // driven on the held gap: nothing is waited for
         if (anchor_mode_logged_ != 2)
         {
             anchor_mode_logged_ = 2;
@@ -4186,96 +4161,6 @@ void ControllerSession::apply_anchor_standpoint(ControllerPlanningStep &step, co
     step.target.room_pos = room2;
 }
 
-// ── Task 18: the doorway gap, one cycle (doorway_gap.h) ─────────────────────────────────────────────────────────────────
-// 1. CARRY the held line by the robot's motion since the last cycle: the room-pose delta expressed in the previous robot
-//    frame (side, adv, dθ) — only within one room frame (a room switch re-expresses the pose; that one cycle's delta is
-//    dropped). 2. MEASURE on the prior: the held line (wall line + its covariance) once there is one, else the anchor (its
-//    opening centre, wall normal, covariance); the door's full width is the anchor's. 3. A seen gap replaces the held line.
-bool ControllerSession::update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose,
-                                           ControllerObstacleTracker &obstacle_tracker, float heading_var)
-{
-    const float sigma = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
-    if (gap_line_.has_value() and gap_carry_pose_.has_value())
-        gap_line_ = rc::doorway_gap_carry_poses(*gap_line_, gap_carry_pose_->pos, gap_carry_pose_->theta, pose.pos, pose.theta,
-                                                gap_carry_room_ == current_room_name_);
-    gap_carry_pose_ = pose;
-    gap_carry_room_ = current_room_name_;
-    gap_seen_now_ = false;
-
-    rc::DoorwayGapPrior prior;
-    const rc::interaction::RelPose &pr = gap_line_.has_value() ? *gap_line_ : a.pose;
-    if (not pr.x.allFinite() or not pr.P.allFinite() or not (a.width_m > 0.f)) return gap_line_.has_value();
-    const float psi = pr.x.z();
-    prior.centre = pr.x.head<2>();
-    prior.normal = Eigen::Vector2f(-std::sin(psi), std::cos(psi));
-    prior.P = pr.P;
-    prior.width = a.width_m;
-    prior.measured = gap_line_.has_value();   // try86 fix: a held gap is a measurement — no gross jump to another opening/wall
-    // try105 leg 5: the ANCHOR's yaw (13–20° off in room_1's corridor stub, where no stretch of the door's wall is visible to
-    // refit it) is fused with the yaw of the room polygon's wall the opening lies on (doorway_gap.h). Acquisition only: a held
-    // gap already carries it.
-    if (not prior.measured and room_polygon_.size() >= 3 and heading_var >= 0.f)
-    {
-        const Eigen::Affine2f robot_from_room = pose.as_transform().inverse();
-        std::vector<Eigen::Vector2f> poly;
-        poly.reserve(room_polygon_.size());
-        for (const auto &v : room_polygon_) poly.push_back(robot_from_room * v);
-        if (const auto wall = rc::doorway_room_wall_yaw(prior, poly, heading_var); wall.has_value())
-        {
-            const float psi_before = rc::doorway_gap_yaw(prior.normal);
-            prior = rc::doorway_gap_fuse_wall_yaw(prior, *wall);
-            gap_room_yaw_fix_ = rc::interaction::wrap_pi(rc::doorway_gap_yaw(prior.normal) - psi_before);
-            gap_room_yaw_sigma_ = std::sqrt(wall->var);
-        }
-    }
-
-    // The body: its half-width (the corridor it needs) and its length (the slab it occupies crossing the wall line).
-    const auto &rb = returns_body();
-    float half_w = 0.f, front = -1e9f, back = 1e9f;
-    for (const auto &v : rb) { half_w = std::max(half_w, std::abs(v.x())); front = std::max(front, v.y()); back = std::min(back, v.y()); }
-    const float depth = front - back;
-    auto *lidar = obstacle_tracker.lidar_buffer();
-    if (lidar == nullptr or not (depth > 0.f)) return gap_line_.has_value();
-    const auto pts = rc::lidar_robot_points_from_buffer(*lidar, pose.as_transform(), rb, self_body_);
-    if (not pts.has_value()) return gap_line_.has_value();
-    const auto g = rc::measure_doorway_gap(*pts, prior, half_w, sigma, depth);
-    if (g.seen)
-    {
-        const bool first = not gap_line_.has_value() or gap_lost_logged_;
-        gap_line_ = rc::doorway_gap_pose(g, sigma);
-        gap_width_ = g.width;
-        gap_score_ = g.score;
-        gap_seen_now_ = true;
-        const float heading = rc::doorway_gap_yaw(g.normal);
-        const float e_now = rc::anchor_cross_geometry(*gap_line_).e;   // the robot-frame centre moves with the robot: compare e
-        const bool changed = std::abs(e_now - gap_logged_.x()) > 0.05f
-                          or std::abs(g.width - gap_logged_.z()) > 0.03f
-                          or std::abs(rc::interaction::wrap_pi(heading - gap_logged_heading_)) > 0.05f;   // logging only
-        if (first or changed)
-        {
-            const auto geo = rc::anchor_cross_geometry(*gap_line_);
-            std::println("[gap] seen{}: width {:.3f} m, centre ({:+.3f},{:+.3f}) e {:+.3f} m, normal heading {:+.1f} deg, score {:.3f}{}{} "
-                         "(door {:.2f} m){}", first ? "" : " (changed)", g.width, g.centre.x(), g.centre.y(), geo.e,
-                         heading * 57.29578f, g.score, g.in_doorway ? ", from inside the doorway" : "",
-                         g.wall_fitted ? ", wall refitted" : "", a.width_m,
-                         first and gap_room_yaw_sigma_ > 0.f
-                             ? std::format(" — the anchor's yaw moved {:+.1f} deg onto the room wall's (sigma {:.1f} deg)",
-                                           gap_room_yaw_fix_ * 57.29578f, gap_room_yaw_sigma_ * 57.29578f)
-                             : std::string());
-            gap_logged_ = {e_now, 0.f, g.width};
-            gap_logged_heading_ = heading;
-        }
-        gap_lost_logged_ = false;
-    }
-    else if (gap_line_.has_value() and not gap_lost_logged_)
-    {
-        gap_lost_logged_ = true;
-        const auto geo = rc::anchor_cross_geometry(*gap_line_);
-        std::println("[gap] lost — carrying the last line (s {:+.2f} m, e {:+.3f} m, σ_lat {:.3f} m)", geo.s, geo.e, geo.sigma_lat);
-    }
-    return gap_line_.has_value();
-}
-
 // ── THE CROSS'S PROTOCOL HALF (Task 8: extracted from step_anchor_cross; the servo and the local policy share it) ────────
 // One cycle of bookkeeping on this cycle's anchor: the measured gap (update_doorway_gap), whether to drive or wait (Task 9
 // fix A, Task 13/16), the near-side gate (try89), and the completion: rc::cross_progress — THROUGH (finalize, or the door
@@ -4342,30 +4227,11 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
         else
             std::println("[anchor] cross: {} carries no leaf — the jambs alone, the opening's centre line", a.name);
     }
-    // ★ Task 18: THE DOORWAY AS THE LIDAR MEASURES IT. From the first cycle the through-span of the anchor's wall is seen,
-    //   the servo, the jamb guard and `through` all run on the GAP (re-measured every cycle, carried by odometry while not
-    //   seen), with no leaf model: the measured span already ends at the leaf. The anchor stays the prior that says where to
-    //   look. Before that, the anchor law below is unchanged.
-    // ★ 2026-10-31 (user; Fable review point 3): THE SERVO DRIVES ON door_concept's ANCHOR ONLY. The measured gap is no
-    //   longer measured here: pingpong30 leg 3 it found a 0.75 m "gap" at the open leaf's TIP, 0.89 m ahead, while the door
-    //   was 1.87 m ahead and the anchor was right; the servo steered on the false opening and stalled in the corridor. A
-    //   second estimate of the door, in competition with the one its owner publishes, is the "two pictures of one door"
-    //   defect. If the anchor is off, that is door_concept's estimate to fix. on_gap is false on every path below; the
-    //   tracker's code (update_doorway_gap, gap_line_) is left for the controller clean-up to delete.
-    const bool on_gap = false;
-    if (on_gap and not gap_steering_logged_)
-    {
-        gap_steering_logged_ = true;
-        const auto g = rc::anchor_cross_geometry(*gap_line_);
-        std::println("[gap] steering on the measured gap ({:.3f} m wide, e {:+.3f} m, s {:+.2f} m) — the anchor {} is now only its prior",
-                     gap_width_, g.e, g.s, a.name);
-    }
-    if (on_gap) anchor_cross_engaged_ = true;   // driven on a measurement in this attempt (Fix E / Task 16 bookkeeping)
-    const std::span<const rc::interaction::AnchorLeaf> no_leaves;
-    const rc::interaction::RelPose drive_pose = on_gap ? *gap_line_ : a.pose;
-    const float drive_width = on_gap ? gap_width_ : a.width_m;
-    const std::span<const rc::interaction::AnchorLeaf> drive_leaves = on_gap ? no_leaves : leaves;
-    const std::string drive_name = on_gap ? std::format("the measured gap of {}", a.name) : a.name;
+    // THE CROSS IS DRIVEN ON door_concept's ANCHOR ONLY (owner 2026-10-31: a second, LiDAR-measured estimate of the doorway
+    // competed with the one its owner publishes — "two pictures of one door" — and was switched off; removed 2026-11-16).
+    const rc::interaction::RelPose drive_pose = a.pose;
+    const float drive_width = a.width_m;
+    const std::string &drive_name = a.name;
     rc::interaction::RelPose pose = drive_pose;   // the pose the guards are asked about
     // ★ Task 13 (try74 leg 1: 40 s at s +1.56 waiting for a far-side anchor that never published): past the room switch
     //   the cross is completed on the ODOMETRY-CARRIED pose door_concept keeps writing (its wait pose: the last sighting,
@@ -4375,16 +4241,16 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
     // Task 16 (try76 leg 2): also from the moment the body's centre is past the plane on the carried pose (rc::anchor_drive_on).
     // Task 16 fix (try81): …only on a pose that derives from a sighting in this attempt (anchor_cross_engaged_: the servo drove on a
     // fresh anchor since the claim began; reset with every new claim, so a retry's never-seen room initialisation waits).
-    const bool drive = on_gap or rc::anchor_drive_on(a.fresh, door_passage_.clearing(), anchor_cross_engaged_, a.pose);
-    if (drive and not on_gap and not a.fresh and not anchor_carried_logged_)
+    const bool drive = rc::anchor_drive_on(a.fresh, door_passage_.clearing(), anchor_cross_engaged_, a.pose);
+    if (drive and not a.fresh and not anchor_carried_logged_)
         std::println("[anchor] cross: {}, {} not seen for {} ms — going on, on the pose odometry carries (s {:+.2f}, σ_lat {:.3f} m)",
                      door_passage_.clearing() ? "past the room switch" : "past the door plane", a.name, a.age_ms,
                      rc::anchor_cross_geometry(a.pose).s, rc::anchor_cross_geometry(a.pose).sigma_lat);
-    anchor_carried_logged_ = drive and not on_gap and not a.fresh;
+    anchor_carried_logged_ = drive and not a.fresh;
     // try89 fix: was the robot OBSERVED on the near side of the doorway in this claim? Only a seen gap, or an anchor seen
     // this cycle (not predicted, not carried), counts — a carried pose is exactly what was wrong in try89.
     {
-        const bool observed = on_gap ? gap_seen_now_ : (a.fresh and a.unseen_ms == 0);
+        const bool observed = a.fresh and a.unseen_ms == 0;
         const float half_len = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
         if (drive_pose.x.allFinite() and cross_gate_.observe(observed, rc::anchor_cross_geometry(drive_pose).s, half_len))
         {
@@ -4395,12 +4261,6 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
     if (drive)
     {
         anchor_drawn_ = a;   // engaged AND fresh this cycle: the 2-D view shows it (update_display)
-        if (on_gap)          // Task 18: the view shows what is steered on — the measured gap
-        {
-            anchor_drawn_->pose = drive_pose;
-            anchor_drawn_->width_m = drive_width;
-            anchor_drawn_->leaves.clear();
-        }
         anchor_wait_since_ms_ = 0;
         anchor_wait_blocked_ = false;   // Task 11 fix 3: seen again — a later wait may turn again
         // ★ Task 8: the completion is rc::cross_progress on the pose driven on (s >= standoff, gated by the near side) — the
@@ -4463,10 +4323,10 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
                     std::println("[anchor] cross: {} is {:.2f} m behind along its normal — THROUGH the doorway, in the new room: "
                                  "P(body past the plane and the leaf's sweep | s, room switch) {:.3f} (Task 3f; standoff {:.2f} m not "
                                  "needed){}", drive_name,
-                                 g.s, p_through, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
+                                 g.s, p_through, standoff, "");
                 else
                 std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — THROUGH the doorway, "
-                             "in the new room{}", drive_name, g.s, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
+                             "in the new room{}", drive_name, g.s, standoff, "");
                 note_why(rc::why::Cause::PassageClearing,
                          std::format("THROUGH the doorway on {} ({:.2f} m past, standoff {:.2f} m) — the passage moves on",
                                      drive_name, g.s, standoff));
@@ -4476,7 +4336,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
                 return out;
             }
             std::println("[anchor] cross: {} is {:.2f} m behind along its normal (standoff {:.2f} m) — through{}",
-                         drive_name, g.s, standoff, on_gap and not gap_seen_now_ ? " (gap carried by odometry)" : "");
+                         drive_name, g.s, standoff, "");
             path_controller.stop();
             finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos,
                              time_source(), /*allow_dwell=*/false);
@@ -4517,16 +4377,16 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
                                             rc::interaction::wrap_pi(robot_pose.theta - anchor_wait_theta_));
     }
     out.drive = drive;
-    out.on_gap = on_gap;
+    out.on_gap = false;
     out.drive_pose = drive_pose;
     out.pose = pose;
     out.drive_width = drive_width;
     out.anchor_pose = a.pose;
     out.anchor_width = a.width_m;
     out.anchor_age_ms = a.age_ms;
-    out.gap_score = on_gap ? gap_score_ : 0.f;
+    out.gap_score = 0.f;
     out.drive_name = drive_name;
-    out.drive_leaves.assign(drive_leaves.begin(), drive_leaves.end());
+    out.drive_leaves.assign(leaves.begin(), leaves.end());
     return out;
 }
 
@@ -5605,11 +5465,7 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
 
 ControllerSession::DrivenCurve ControllerSession::driven_curve() const
 {
-    // A MISSION route lives in route_; every point target — click or affordance — lives in plan_spline_.
-    // Mission wins when it is running, which is the same precedence every consumer used to implement
-    // for itself.
-    if (route_active_ and mission_.running() and route_.valid())
-        return {DriveOwner::MissionRoute, &route_.spline(), &route_.path(), route_.control_count()};
+    // The one curve the tracker drives: the point plan (click or affordance) fitted in plan_spline_.
     if (plan_spline_valid_ and plan_spline_.valid())
         return {DriveOwner::PointPlan, &plan_spline_, &plan_spline_.samples(),
                 plan_spline_.control_points().size()};
@@ -5618,8 +5474,7 @@ ControllerSession::DrivenCurve ControllerSession::driven_curve() const
 
 void ControllerSession::step_route_band(const DrivenCurve &curve,
                                         const ControllerRobotPose &robot_pose,
-                                        rc::TrajectoryController &path_controller,
-                                        ControllerObstacleTracker *obstacle_tracker)
+                                        rc::TrajectoryController &path_controller)
 {
     // Truncate the diagnostic FIRST, before any early return. Otherwise a run with the band OFF never
     // opens the file, archive_on_stop copies the PREVIOUS run's rows under this run's stamp, and the
@@ -5632,7 +5487,6 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     // where a one-shot fit is weakest, so this is where the continuous version earns its keep, on either
     // owner's curve.
     if (not curve.valid()) return;
-    const bool on_mission = curve.on_mission();
     const rc::RouteSpline &spline = *curve.spline;
     const std::size_t M = curve.control_count;
     // optimize_route's own minimum (M >= 4; endpoints pinned, so the smallest problem is 2 points).
@@ -5682,9 +5536,8 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     // Where the robot is along the curve. A mission tracks this itself; a plan does not, so it is
     // projected here with a FORWARD-ONLY hint for the same reason the follower does — a path that
     // crosses itself would otherwise teleport progress to the wrong branch.
-    if (not on_mission)
-        plan_progress_s_ = spline.project(robot_pose.pos, plan_progress_s_, 3.0f);
-    const float progress = on_mission ? route_.progress() : plan_progress_s_;
+    plan_progress_s_ = spline.project(robot_pose.pos, plan_progress_s_, 3.0f);
+    const float progress = plan_progress_s_;
     const float frac = std::clamp(progress / len, 0.f, 1.f);
     const float h = std::max(0.05f, spline.control_spacing());
     const auto i_robot = static_cast<std::size_t>(frac * static_cast<float>(M));
@@ -5734,12 +5587,6 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     const auto band_t0 = std::chrono::steady_clock::now();
 
     rc::RouteOptimizerReport rep;
-    if (on_mission)
-    {
-        rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
-                                   params_->band_iterations, params_->band_clearance_weight);
-    }
-    else
     {
         // A plan has no authored waypoints, so it carries NO anchor likelihood — and it does not need
         // one: optimize_route always pins the endpoints, which is exactly the requirement ("still start
@@ -6193,16 +6040,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         current_plan_.reset();
         plan_spline_valid_ = false;
     }
-    if (!params_ || params_->obstacle_creation_enabled)
-        obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
-    // Proactive scene-level "model anything the concept agents don't" is now owned by the dedicated
-    // `residual_concept` agent (the residual/null concept: LiDAR residual-filter → 3D DBSCAN → box belief
-    // → "obstacle" nodes). Its obstacles arrive via the graph and are consumed by read_obstacle_polygons
-    // exactly like the reactive ones, so the planner still avoids them. HYBRID phase: the controller keeps
-    // only the fast in-loop REACTIVE blockage reflex below (create_temporary_lidar_obstacle) for
-    // collision safety with zero DDS latency; the proactive full-scene scan is DISABLED here. Re-enable
-    // by uncommenting the call if residual_concept is not running.
-    // obstacle_tracker.scan_for_unmodelled_obstacles(time_source(), robot_pose, path_controller);
+    // Unmodelled obstacles are residual_concept's: they arrive through the graph (read_obstacle_polygons). The controller
+    // creates none of its own.
 
     // ── THE PANEL MUST NAME THE AFFORDANCE IN EVERY STATE, INCLUDING THE ONES THAT RETURN EARLY ──
     // ★★★MEASURED 2026-08-24: the window's first row read "no affordance yet" for the whole of an
@@ -6287,7 +6126,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // itself against it. Runs on the ESDF built by the PREVIOUS compute — one cycle old, which is the
     // same age as everything else here and self-guarding on cycle 1, where the field is empty and every
     // query returns esdf_unknown_distance ⇒ no deficit ⇒ no force ⇒ the polygon does not move.
-    step_route_band(driven_curve(), robot_pose, path_controller, &obstacle_tracker);
+    step_route_band(driven_curve(), robot_pose, path_controller);
 
     // ── SESSION ODOMETER ────────────────────────────────────────────────────────────────────────
     // Metres actually driven since the agent started — every mission, target and affordance, not per
@@ -6391,7 +6230,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     {
         current_plan_.reset();
         plan_spline_valid_ = false;
-        route_repair_pending_ = true;
         std::println("[chain] re-plan on map + {} marks (plan-first)", chain_marks_.marks.size());
         note_mode("recover", [&]{ return std::format("plan-first: the window ahead fails on unmapped returns, re-plan on map + {} marks", chain_marks_.marks.size()); });
     }
@@ -6430,7 +6268,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // metrics describe what happened rather than what was planned. The clearance recorded is the gap between
     // the BODY and the nearest obstacle — the ESDF measures from the rotation centre, and reporting that
     // would flatter every run by one body radius.
-    if (route_active_ and not mission_.running()) route_active_ = false;
     // The L-adaptation panel's objective, on the SAME gate as the CSV below and for the same reason:
     // the deviation a click target or an affordance is driving with is the deviation L is adapted on.
     sample_live_tracking(path_controller.is_active(), robot_pose, control_output.cross_track_m,
@@ -6451,8 +6288,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // ★Same quantity the mission sampler already derives below (ref_kappa); computed here rather
         // than hoisted because that block sits inside a different guard. If these ever disagree, one of
         // them is wrong — they read the same spline at the same arc length.
-        const float kappa_here = (route_active_ and route_.valid())
-                               ? route_.spline().curvature_at(route_.progress()) : -999.f;
+        const float kappa_here = -999.f;   // a mission route's curvature; there is none on the tracker any more (column kept)
         // Localisation sigma, so "is the pose noisy right now" is a MEASUREMENT and not an inference.
         // It only lived in profile.csv, which is gated on a mission running, so during affordance
         // driving — the mode being developed — it was invisible exactly when it was being blamed.
@@ -6498,43 +6334,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             prev_cmd_rot_sign_ = rot_sign;
     }
 
-    if (route_active_ and mission_.running())
-    {
-        // Progress is a scalar that only increases. Legs are read OFF it rather than driven by it.
-        route_.advance(robot_pose.pos);
-        // ── A LAP RESTARTED: THE ARC LENGTH JUMPED BACKWARDS ON PURPOSE ─────────────────────────
-        // Laps are restarts of one curve now, so completing a lap rewinds progress_ to the lap start.
-        // The TRACKER's own projection is monotone within one traversal and knows nothing about that:
-        // left alone it would sit at the end of the route while the robot drives the start of the next
-        // lap — the same staleness that once pointed the tracker at the route's end point after a
-        // restart, with the robot driving into a wall. force_reset makes it re-acquire, which is
-        // exactly what a restart is.
-        if (route_.rewound())
-        {
-            // ★SEED, DO NOT RE-ACQUIRE. force_reset made the tracker search the WHOLE curve for its
-            // nearest point, and on this tour that landed 18 m from where the robot actually was
-            // (follower at 0.95 m, tracker at 17.90 m on a 35.6 m route): it then steered at a
-            // different part of the route and the robot drove backwards after lap 1. The curve has not
-            // changed across a rewind — only the position on it — and the follower knows exactly what
-            // that position is, so it is handed over rather than searched for.
-            path_controller.resume_route_at(route_.progress());
-            std::println("[route] lap {} of {} complete — restarting the same curve at {:.2f} m",
-                         route_.laps_done(), route_.laps_total(), route_.progress());
-        }
-        // ★TOTAL, not progress(). progress_ rewinds every lap, so it is no longer the distance the run
-        // has covered; the mission's metrics want the cumulative figure across laps.
-        mission_.note_progress(route_.total_progress(), route_.total_length(), route_.laps_done());
-        if (route_.finished(robot_pose.pos))
-        {
-            mission_.stop("completed", time_source());
-            route_active_ = false;
-            path_controller.stop();
-            note_why(rc::why::Cause::MissionDone, std::format("mission '{}' completed", mission_.selected_name()));
-            note_no_command(); motion_commander.stop_robot();
-            return;
-        }
-    }
-
     if (mission_.running())
     {
         const float esdf_here = path_controller.clearance_at(0.f, 0.f);
@@ -6555,27 +6354,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // reference (a click target has no route), and the stats skip it rather than inventing a zero.
         float cross_track = std::numeric_limits<float>::quiet_NaN();
         float heading_err = 0.f, ref_kappa = 0.f;
-        // ★SCORE THE RUN ON THE PROJECTION THAT STEERED IT. PlainTracker publishes the Frenet pair it
-        // actually used (out.cross_track_m, out.carrot_bearing_rad at its own s_hint_); recomputing it
-        // here at route_.progress() scored the run on the OTHER projection — the one measured jumping
-        // 2.98 m against the tracker's 0.73 m. cross_track_rms is the objective tools/adapt_L.py
-        // minimises, so it must be the tracker's error, not a bystander's.
-        if (route_tracker_active_ and route_active_ and std::isfinite(control_output.cross_track_m))
-        {
-            cross_track = control_output.cross_track_m;
-            heading_err = control_output.carrot_bearing_rad;
-            ref_kappa = route_.valid() ? route_.spline().curvature_at(route_.progress()) : 0.f;
-        }
-        else if (route_active_)
-        {
-            const float s_now = route_.progress();
-            const Eigen::Vector2f ref = route_.spline().position_at(s_now);
-            const float ref_h = route_.spline().heading_at(s_now);
-            const Eigen::Vector2f d = robot_pose.pos - ref;
-            cross_track = -std::sin(ref_h) * d.x() + std::cos(ref_h) * d.y();   // signed, left positive
-            heading_err = std::atan2(std::sin(robot_pose.theta - ref_h), std::cos(robot_pose.theta - ref_h));
-            ref_kappa = route_.spline().curvature_at(s_now);
-        }
         mission_.sample(robot_pose.pos, control_output.rot, std::abs(control_output.adv),
                         body_clearance, control_output.safety_guard_triggered,
                         cross_track, heading_err, ref_kappa, time_source());
@@ -8091,8 +7869,6 @@ void ControllerSession::abort(rc::TrajectoryController &path_controller,
     affordance_dwell_deadline_ms_ = 0;
     dwell_mask_hits_ = 0;
     dwell_logged_ = false;
-    route_active_ = false;
-    route_repair_pending_ = false;
     current_plan_.reset();
     plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
     active_target_id_ = 0;

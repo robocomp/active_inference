@@ -19,7 +19,6 @@
 #include "motion_verdict.h"
 #include "controller_anchor_servo.h"
 #include "lidar_guard_buffer.h"
-#include "doorway_gap.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "../../common/robot_capability/robot_capability.h"
@@ -262,8 +261,6 @@ public:
     // ROUTE mode: the tracker supplies its own turn rate from route curvature, so the curvature speed
     // limit must leave it headroom (see the note in route_speed_limit). Inert in PD/MPPI mode, which
     // have no feedforward to saturate.
-    void set_route_tracker(bool active, float rot_headroom)
-    { route_tracker_active_ = active; rot_headroom_ = std::clamp(rot_headroom, 0.1f, 1.0f); }
 
     void set_route_reverse(bool reverse) { route_reverse_ = reverse; }
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
@@ -560,8 +557,6 @@ private:
     // Base speed (room frame) for the contract stillness gate, plus the previous pose it differences.
     float base_speed_lin_ = 0.0f;                  // m/s   (EMA-smoothed)
     float base_speed_ang_ = 0.0f;                  // rad/s (EMA-smoothed)
-    bool  route_tracker_active_ = false;   // see set_route_tracker
-    float rot_headroom_ = 0.70f;
     ControllerRoomVelocity room_vel_;              // room-frame base velocity (EMA), for overlay dead-reckoning
     std::uint64_t overlay_now_ms_ = 0;             // current compute time (overlay extrapolation target)
     std::optional<std::uint64_t> overlay_lidar_ts_ms_;  // last lidar stamp (overlay extrapolation base time)
@@ -899,7 +894,7 @@ private:
     rc::chain::ProgressMonitor chain_progress_;
     float chain_s_prog_ = 0.f, chain_last_t_s_ = 0.f;
     bool chain_have_s_ = false;
-    std::uint64_t chain_last_gen_ = 0; int chain_last_owner_ = -1;
+    std::uint64_t chain_last_gen_ = 0; 
     Eigen::Vector2f chain_last_mark_at_{1e9f, 1e9f};
     double chain_xt_w2_ = 0.0, chain_yaw_w2_ = 0.0, chain_xt_m_ = 0.0;   ///< sum x^2 ds, sum dyaw^2 ds, sum ds (driven along the route)
     // the marks' relocalisation carry: odometry integrated from odo_v_/odo_w_, and last cycle's (believed, odometry) poses
@@ -1304,17 +1299,6 @@ private:
     std::optional<AnchorCrossReading> anchor_drawn_;
     std::uint64_t door_views_last_ms_ = 0;   // throttle of the canvas's believed-door drawing (door_leaf_geometry.h)
     std::uint64_t approach_view_last_ms_ = 0;   // throttle of the canvas's approach-options drawing (controller_approach_view.h)
-    // ── Task 18: THE DOORWAY AS THE LIDAR MEASURES IT (doorway_gap.h) ──────────────────────────────────────────────────
-    // From the first cycle the through-span of the anchor's wall is SEEN, the cross steers on it (re-measured every cycle;
-    // carried by the robot's own motion — room-frame pose deltas within one room — while it is not seen). The anchor stays
-    // the prior until then and says where along which wall to look. Reset with every claim (reset_anchor_cross_state).
-    std::optional<rc::interaction::RelPose> gap_line_;          // the gap's line, robot frame (anchor convention), seen or carried
-    float gap_width_ = 0.f;                                     // its clear width as last MEASURED
-    float gap_score_ = 0.f;                                     // ...and that measurement's score (doorway_gap.h, in [0, 1])
-    bool gap_seen_now_ = false;                                 // this cycle measured it (else carried)
-    std::optional<ControllerRobotPose> gap_carry_pose_;         // the pose gap_line_ is expressed at
-    std::string gap_carry_room_;                                // ...and its room frame
-    bool gap_steering_logged_ = false, gap_lost_logged_ = false;
     // try89 fix: `through` needs the robot OBSERVED on the near side (s < −body half-length, on a seen gap or a seen anchor)
     // earlier in this claim; a claim that never was cannot complete as through.
     rc::CrossThroughGate cross_gate_;
@@ -1322,21 +1306,7 @@ private:
     // near side goes on with it (rc::cross_continues_without_anchor): the reading is kept only for its name and door width.
     std::optional<AnchorCrossReading> anchor_last_reading_;
     bool anchor_gone_logged_ = false;
-    [[nodiscard]] bool gap_carries_cross(const std::string &cross_name) const
-    {
-        return anchor_latched_for_ == cross_name and anchor_last_reading_.has_value()
-           and rc::cross_continues_without_anchor(gap_line_.has_value(), cross_gate_);
-    }
-    Eigen::Vector3f gap_logged_{0.f, 0.f, 0.f};                 // e, (unused), width at the last "[gap] seen" line
-    float gap_logged_heading_ = 0.f;
     std::string current_room_name_;                             // the room frame robot poses are read in (this cycle)
-    // try105 leg 5: the yaw the room polygon's wall gave the anchor's prior at acquisition (doorway_gap.h
-    // doorway_gap_fuse_wall_yaw): the correction applied (rad) and the wall's yaw σ, for the "[gap] seen" line.
-    float gap_room_yaw_fix_ = 0.f, gap_room_yaw_sigma_ = -1.f;
-    // One gap cycle: carry, measure on the prior (the carried gap, else the anchor — its yaw fused with the room wall's), log.
-    // `heading_var`: the localiser's heading variance (rad²; < 0 = unknown ⇒ no room yaw). True = steer on gap_line_.
-    bool update_doorway_gap(const AnchorCrossReading &a, const ControllerRobotPose &pose, ControllerObstacleTracker &obstacle_tracker,
-                            float heading_var);
     bool anchor_hoist_logged_ = false;                              // build_planning_step's bypass: log on change
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
@@ -1347,7 +1317,6 @@ private:
     bool  plan_spline_valid_ = false;
     std::uint64_t plan_spline_gen_ = 0;   // bumped on every new fit of plan_spline_ (the object is reused in place)
     float plan_progress_s_ = 0.f;      // robot's arc length along plan_spline_, forward-only
-    rc::RouteFollower route_;
 public:
     [[nodiscard]] float session_distance_m() const { return session_distance_m_; }
     [[nodiscard]] float session_elapsed_s() const
@@ -1370,7 +1339,7 @@ private:
     // cycle. A mission route and a point-target plan are the SAME TYPE reached by different paths, so
     // nothing in the type system was ever going to catch that. This seam is what catches it: no consumer
     // may pick a curve, so no consumer can pick a different one.
-    enum class DriveOwner { None, MissionRoute, PointPlan };
+    enum class DriveOwner { None, PointPlan };
     struct DrivenCurve
     {
         DriveOwner owner = DriveOwner::None;
@@ -1378,13 +1347,10 @@ private:
         const std::vector<Eigen::Vector2f> *samples = nullptr;   // deformed in place; stays current
         std::size_t control_count = 0;
         [[nodiscard]] bool valid() const { return owner != DriveOwner::None and spline != nullptr; }
-        [[nodiscard]] bool on_mission() const { return owner == DriveOwner::MissionRoute; }
     };
     [[nodiscard]] DrivenCurve driven_curve() const;
 
-    // obstacle_tracker: unused since the near-field arm was removed (kept so the call sites are unchanged).
-    void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
-                         ControllerObstacleTracker *obstacle_tracker = nullptr);
+    void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller);
     // Truncate band_diag.csv for THIS run, whether or not the band is enabled. Called before any early
     // return in step_route_band: a disabled run that never opens the file leaves the previous run's
     // rows at the fixed path for archive_on_stop to copy under this run's stamp.
@@ -1396,7 +1362,6 @@ private:
     long long band_cycle_ = 0;
     // ── Task 6: the near field and [Route] BandDrivesCross ──
     float band_solve_ms_ = 0.f;              // this cycle's band wall time (band_diag.csv solve_ms)
-    bool route_active_ = false;
     // ── Live tracking accumulator (see live_tracking) ──────────────────────────────────────────────
     // Deliberately NOT hosted in MissionRunner. Sampling that outside a run would fold idle affordance
     // driving into the stats the run is graded on, and its clearance vector — copied and SORTED by
@@ -1440,7 +1405,6 @@ private:
     // disc) and consumed in the continuous-route branch of ensure_current_plan. Without it those
     // reflexes are inert in route mode: they create the obstacle and reset current_plan_, but the route
     // branch re-installs the SAME curve, so the robot backs off and drives at the blocker again.
-    bool          route_repair_pending_ = false;
     std::uint64_t last_route_repair_ms_ = 0;
     // Fit the C2 curve to ANY planned polyline — a click target and an affordance target deserve the
     // same smooth path a mission gets. Returns the polyline unchanged if smoothing is off or fails.

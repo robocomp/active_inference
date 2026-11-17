@@ -180,21 +180,10 @@ class ControllerObstacleTracker
                                  std::vector<std::uint8_t> plane_ids = {},
                                  std::vector<std::int64_t> plane_stamps = {});
         void update_active_obstacle_polygons(std::uint64_t timestamp_ms, rc::TrajectoryController &path_controller);
-        void refresh_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
-                                            const ControllerRobotPose &robot_pose,
-                                            rc::TrajectoryController &path_controller);
-        bool create_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
-                                            const ControllerRobotPose &robot_pose,
-                                            const Eigen::Vector2f &blockage_center_room,
-                                            float blockage_radius_m,
-                                            rc::TrajectoryController &path_controller);
         // Proactive "everything unmodelled is an obstacle" sweep (throttled internally): cluster the
         // recent LiDAR returns that no concept-agent object explains and aren't the floor/walls/robot,
         // and create/refresh one temporary obstacle per cluster. The existing existence-filter / prune
         // / retire-when-modelled machinery then manages their lifecycle (multi-instance).
-        void scan_for_unmodelled_obstacles(std::uint64_t timestamp_ms,
-                                           const ControllerRobotPose &robot_pose,
-                                           rc::TrajectoryController &path_controller);
 
     private:
         std::unordered_set<std::string> exempt_names_;   // set_exempt_names
@@ -260,42 +249,8 @@ class ControllerObstacleTracker
         // Health monitor for the twist the correction relies on — see the definition.
         void update_twist_prediction_error(std::uint64_t scan_ts);
 
-        std::vector<Eigen::Vector2f> read_temporary_obstacle_points(std::uint64_t timestamp_ms,
-                                                                    const ControllerRobotPose &robot_pose,
-                                                                    const Eigen::Vector2f &region_center_room,
-                                                                    float region_radius_m,
-                                                                    bool forward_only);
-        std::optional<ControllerObstacleObservation> build_temporary_obstacle_observation(std::uint64_t timestamp_ms,
-                                                                                        const ControllerRobotPose &robot_pose,
-                                                                                        const Eigen::Vector2f &region_center_room,
-                                                                                        float region_radius_m,
-                                                                                        bool forward_only);
-        ControllerObstacleModelParams make_model_params() const;
-        ControllerObstacleObservation augment_with_remembered_points(const ControllerObstacleObservation &observation,
-                                                                    const TemporaryObstacleInstance &instance) const;
-        static std::array<Eigen::Vector2f, kRememberedEdgeCount> make_local_obstacle_corners(const ControllerObstacleState &state);
-        static std::optional<RememberedEdgeSlot> classify_remembered_edge_slot(const ControllerObstacleState &state,
-                                                                            const Eigen::Vector2f &local_point);
-        static int remembered_slot_index(const RememberedEdgeSlot &slot);
-        static Eigen::Vector2f estimate_obstacle_center(const ControllerObstacleObservation &observation,
-                                                        float width_m,
-                                                        float depth_m);
-        static Eigen::Vector2f estimate_initial_obstacle_center(const ControllerObstacleObservation &observation);
         static std::string published_obstacle_name(std::uint64_t obstacle_id);
         // Single-letter viewer tag prefix per modelled object type: table→t, chair→c, cylinder/bottle→b.
-        static std::string object_label_prefix(const std::string &object_type);
-        static float distance_visibility_scale(const ControllerParams *params,
-                                            const ControllerRobotPose &robot_pose,
-                                            const ControllerObstacleState &state);
-        static void recompute_observation_summary(ControllerObstacleObservation &observation,
-                                                float padding_m,
-                                                float occlusion_depth_m);
-        void update_remembered_points(TemporaryObstacleInstance &instance,
-                                    const ControllerObstacleObservation &observation);
-        float size_hardening_evidence(const TemporaryObstacleInstance &instance) const;
-        bool has_compelling_absence_evidence(std::uint64_t timestamp_ms,
-                                            const ControllerRobotPose &robot_pose,
-                                            const TemporaryObstacleInstance &instance);
         static float obstacle_sdf(const ControllerObstacleState &state, const Eigen::Vector2f &point);
         static bool point_explained_by_obstacle(const ControllerObstacleState &state,
                             const Eigen::Vector2f &point,
@@ -312,15 +267,11 @@ class ControllerObstacleTracker
         void delete_published_obstacle_node(const TemporaryObstacleInstance &instance);
         void prune_expired_temporary_obstacles(std::uint64_t timestamp_ms);
         void retire_temporary_obstacles_explained_by_graph();
-        std::optional<std::size_t> match_temporary_obstacle(const ControllerObstacleObservation &observation) const;
         // Match-or-create a temporary obstacle from an observation + bump its existence filter. Shared
         // by the reactive blockage path and the proactive scan.
-        void ingest_obstacle_observation(const ControllerObstacleObservation &observation, std::uint64_t timestamp_ms);
         // Room delimiting polygon in room frame (for the proactive scan's wall/outside filtering).
-        std::vector<Eigen::Vector2f> read_room_polygon_room_frame() const;
 
         ControllerPolygons read_obstacle_polygons(std::uint64_t timestamp_ms);
-        std::vector<Eigen::Vector3f> read_recent_lidar_points_in_room(std::uint64_t timestamp_ms, int max_scans);
         ControllerPolygon make_obstacle_polygon(const Eigen::Vector2f &center,
                                                 float yaw,
                                                 float width_m,
@@ -374,7 +325,6 @@ class ControllerObstacleTracker
             std::uint64_t expires_at_ms = 0;
         };
         std::vector<VirtualObstacle> virtual_obstacles_;
-        std::uint64_t last_scan_ms_ = 0;   // throttle for scan_for_unmodelled_obstacles
         std::uint64_t last_probe_ts_ = 0;                                 // last scan stamp the 1 Hz diagnostic probes ran at
         mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;   // stamp of the scan actually buffered
         std::optional<std::uint64_t> newest_raw_lidar_ts_;               // newest RAW stamp (dedup + period)

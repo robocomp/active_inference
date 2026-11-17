@@ -1160,66 +1160,16 @@ void SpecificWorker::load_params()
          "");
 	cfgr.opt_cast<double>("Controller.AdvRotationCouplingExponent", params.adv_rotation_coupling_exponent,
          "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleFrontDistance", params.temporary_obstacle_front_distance_m,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleHalfWidth", params.temporary_obstacle_half_width_m,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleClusterMargin", params.temporary_obstacle_cluster_margin_m,
-         "");
 	cfgr.opt_cast<double>("Controller.TemporaryObstaclePadding", params.temporary_obstacle_padding_m,
          "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleOcclusionDepth", params.temporary_obstacle_occlusion_depth_m,
-         "");
-	// Empty default = "the config is silent, keep the built-in loss", which is what the exists()
-	// guard meant; the difference is that the key now appears in the startup table either way.
-	if (const auto loss_name = cfgr.s("Controller.TemporaryObstacleRobustLoss", "",
-	        "robust loss for temporary-obstacle residuals (huber | cauchy | ...); empty = keep the built-in");
-	    not loss_name.empty())
-	{
-		if (const auto loss_type = robust_loss_type_from_string(loss_name); loss_type.has_value())
-			params.temporary_obstacle_robust_loss = loss_type.value();
-		else
-			qWarning() << "controller: unknown temporary obstacle robust loss" << loss_name.c_str() << "- using huber";
-	}
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleRobustLossScale", params.temporary_obstacle_robust_loss_scale_m,
-         "");
-	cfgr.opt("Controller.TemporaryObstacleMinPoints", params.temporary_obstacle_min_points,
-         "earlier; the tracker's existence log-odds filter prunes transient false positives");
 	cfgr.opt("Controller.TemporaryObstacleHistoryScans", params.temporary_obstacle_history_scans,
          "");
-	int temporary_obstacle_ttl_ms = static_cast<int>(params.temporary_obstacle_ttl_ms);
-	cfgr.opt("Controller.TemporaryObstacleTTLms", temporary_obstacle_ttl_ms,
-         "");
-	params.temporary_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, temporary_obstacle_ttl_ms));
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceInitLogOdds", params.temporary_obstacle_existence_init_log_odds,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceMinLogOdds", params.temporary_obstacle_existence_min_log_odds,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceMaxLogOdds", params.temporary_obstacle_existence_max_log_odds,
-         "");
 	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceRemoveThresholdLogOdds", params.temporary_obstacle_existence_remove_threshold_log_odds,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceObservationBias", params.temporary_obstacle_existence_observation_bias,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceSupportGain", params.temporary_obstacle_existence_support_gain,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceRememberedGain", params.temporary_obstacle_existence_remembered_gain,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceWeakMissPenalty", params.temporary_obstacle_existence_weak_miss_penalty,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceAbsencePenalty", params.temporary_obstacle_existence_absence_penalty,
          "");
 	cfgr.opt_cast<double>("Controller.TemporaryObstacleMinHeight", params.temporary_obstacle_min_height_m,
          "LiDAR height band (metres, robot frame ≈ height above floor since robot_from_lidar is identity and the source cloud is already floor-referenced)");
 	cfgr.opt_cast<double>("Controller.TemporaryObstacleMaxHeight", params.temporary_obstacle_max_height_m,
          "");
-	cfgr.opt_cast<double>("Controller.UnmodelledScanMinZ", params.unmodelled_scan_min_z_m,
-         "Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor)");
-	cfgr.opt_cast<double>("Controller.UnmodelledScanMaxZ", params.unmodelled_scan_max_z_m,
-         "");
-	// Controller-side LiDAR obstacle creation (false ⇒ residual_concept is the sole obstacle source).
-	cfgr.opt("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled,
-         "Controller-side LiDAR obstacle CREATION (reactive blockage/stall temp obstacles + refresh)");
 
 	// Rotate in place at the goal to face an affordance's commanded yaw (false ⇒ arrive on position
 	// only, never orient). See ControllerParams::goal_facing_yaw_enabled.
@@ -1427,7 +1377,6 @@ void SpecificWorker::load_params()
 			             "'mppi' was removed 2026-09-09.", mode);
 		path_controller_.set_control_mode(plain ? rc::TrajectoryController::ControlMode::PLAIN
 		                                        : rc::TrajectoryController::ControlMode::PD);
-		session_.set_route_tracker(plain, path_controller_.params.plain_rot_headroom);
 		if (plain)
 			std::println("[control] mode = PLAIN tracker (curvature FF + Frenet feedback; NO avoidance — "
 			             "the band and the planner own that)   (L={:.2f} m, T_lag={:.2f} s, g_dc={:.3f}, "
