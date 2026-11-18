@@ -999,7 +999,10 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     const auto wrapped = [](VecXd d) { d(5) = std::remainder(d(5), 2.0 * M_PI); return d; };   // yaw as the wrapped difference
     const auto below_tol = [&](const Vec6d& d)
     { return d.head<5>().cwiseAbs().maxCoeff() < params_.gn_tol_m and std::abs(d(5)) < params_.gn_tol_rad; };
-    // The θ step of a solve from x̃ after apply_constraints (NaN if the solve is not finite).
+    // The θ step of a solve from x̃ after apply_constraints (NaN if the solve is not finite). apply_constraints wraps yaw to
+    // (−π, π]; the iterate's yaw is then put back on x̄'s branch (the multiple of 2π that brings it nearest x̄'s yaw), so the
+    // next solve's prior pull P̄G − (x̃ − x̄) and the acceptance's prior energy see the same, unwrapped yaw difference even
+    // when an iterate crosses ±π (final review I1). θ is wrapped once, after the loop. Off the wrap the shift is exactly 0.
     const auto theta_step = [&](const VecXd& x_tilde, VecXd& xn, const pu::DampedStep<N, K>& st) -> Vec6d
     {
         xn = x_tilde + st.delta;
@@ -1007,6 +1010,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         CountableBeliefState sn = CountableBeliefState::from_vec(xn.head<N>().cast<float>());
         apply_constraints(sn);
         xn.head<N>() = sn.vec().cast<double>();
+        xn(5) -= 2.0 * M_PI * std::round((xn(5) - x_bar(5)) / (2.0 * M_PI));
         return wrapped(xn - x_tilde).head<N>();
     };
     Vec6d theta = state_.vec().cast<double>();                         // θ₀ = the current mean (at birth: the data seed)

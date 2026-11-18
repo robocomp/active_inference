@@ -1221,6 +1221,56 @@ static void cycle_cost()
     }
 }
 
+// Final review I1: an object whose yaw sits at ±π. The golden box is square (w = h) and, with no wall staged, its energy is
+// symmetric under yaw → yaw + π, so the SAME data labelled at yaw ε and at π + ε is one problem up to the label. Data box at
+// yaw +10 mrad (camera points on two faces, rotated about the centre); room axis 0, so the class-mean yaw is the multiple
+// of 90° nearest the seed. Run A seeds at −5 mrad (no wrap anywhere); run B seeds at π − 5 mrad, so x̄'s yaw is π and the
+// iterates cross ±π on their way to π + 10 mrad. 4 parked frames with the full Σ_pose. θ (yaw compared wrapped, minus π),
+// b and P must be the same in both runs: a 2π artefact in the prior pull would land in b_cam's yaw and stay there.
+// (db, b's relative difference, is printed only: b is mm-scale, so its float floor reads ~1e-5 relative.)
+static void wrap_invariance_near_pi()
+{
+    const float yd = 0.010f;
+    CountableFrame f;
+    {
+        const CountableFrame g = camera_frame();
+        const float c = std::cos(yd), s = std::sin(yd);
+        for (const auto& p : g.points)
+        {
+            const float dx = p.x() - tx, dy = p.y() - ty;
+            f.points.emplace_back(tx + c * dx - s * dy, ty + s * dx + c * dy, p.z());
+        }
+        f.R = g.R;
+        f.z_top_obs = g.z_top_obs;
+    }
+    f.room_axis_ok = true; f.room_axis = 0.0f;                     // no wall: the wall-flush factor is not π-symmetric
+    set_latents(f, 1.0f);
+    f.sigma_pose = full_sigma_pose();
+    const auto run = [&](float seed_yaw)
+    {
+        CountableBelief b(CountableBeliefState{tx, ty, tH, tw, tw, seed_yaw}, params());
+        b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+        for (int k = 0; k < 4; ++k) b.update(f);
+        return b;
+    };
+    const CountableBelief a = run(-0.005f), c = run(static_cast<float>(M_PI) - 0.005f);
+    const Vec6 ta = a.state().vec(), tc = c.state().vec();
+    const double dpos = (ta.head<5>() - tc.head<5>()).cwiseAbs().maxCoeff();
+    const double dyaw = std::abs(std::remainder(double(tc(5)) - double(ta(5)) - M_PI, 2.0 * M_PI));
+    const double db = rel(c.latent_mean(), a.latent_mean());
+    const double db_abs = (c.latent_mean() - a.latent_mean()).cwiseAbs().maxCoeff();
+    const double dP = rel(c.joint_covariance(), a.joint_covariance());
+    std::printf("  wrap_invariance_near_pi: A yaw %+.6f, B yaw %+.6f ; max|d pos| %.3e m ; |d yaw| (mod pi) %.3e rad ; "
+                "b rel %.3e max|d b| %.3e (b_cam yaw A %+.3e B %+.3e) ; P rel %.3e\n", ta(5), tc(5), dpos, dyaw, db, db_abs,
+                a.latent_mean()(3 + 5), c.latent_mean()(3 + 5), dP);
+    // Tolerances at the float floor: θ is stored in float, whose resolution at yaw ≈ π is 2.4e-7 rad (at 7 mrad, 5e-10), so the
+    // B run's sdf and Jacobians differ from A's by float rounding; b is mm-scale, so it is compared absolutely. Before the fix
+    // (unwrapped prior pull): |d pos| 5.3e-3 m, |d yaw| 1.5e-2 rad, b_cam yaw −8.1e-3 vs +2.2e-3, P rel 4.2e-3.
+    CHECK(dpos <= 1e-6 and dyaw <= 1e-6);
+    CHECK(db_abs <= 1e-6);
+    CHECK(dP <= 1e-5);
+}
+
 int main()
 {
     flag_off_golden();
@@ -1250,6 +1300,7 @@ int main()
     first_update_converges();
     parked_updates_contract();
     all_steps_rejected_is_finite();
+    wrap_invariance_near_pi();
     cycle_cost();
     std::printf("persistent_belief_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
