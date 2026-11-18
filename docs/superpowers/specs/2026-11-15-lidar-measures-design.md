@@ -10,6 +10,7 @@ rev 3.2 review (NOT READY; all 3 Critical, 7 Important, 7 Minor written in as R4
 §7c.8 rev 3.3 11-18 (owner: "Go" on the smooth-ray follow-up): a miss is evidence — the persistent ray likelihood is a
 smooth beam model. Rev 3.3.1 11-18 folds Fable's rev 3.3 review (NOT READY; 4 C, 8 I, 9 M); owner C3 = A (returns
 staged by ray geometry, mask ownership as a mixture; reverses 7c.3's "first-hit physics stays out").
+Rev 3.3.2 folds the rev 3.3.1 re-review (READY WITH CHANGES; 2 C, 5 I, 9 M).
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
@@ -607,16 +608,18 @@ this governs.
   yaw difference; θ is wrapped once after the loop. Pass: `wrap_invariance_near_pi` — the same π-symmetric fixture
   seeded at −5 mrad and at π − 5 mrad gives the same θ (mod π), b and P, to the float floor of a float state at yaw ≈ π.
 
-### 7c.8 A miss is evidence: the persistent ray likelihood is a smooth beam model (rev 3.3.1, 11-18, owner: "Go"; C3 = A)
+### 7c.8 A miss is evidence: the persistent ray likelihood is a smooth beam model (rev 3.3.2, 11-18, owner: "Go"; C3 = A)
 
 Supersedes 7c.6 (A)'s "a near miss is a miss (no term)" and its stated limit ("cx and w stay unobserved by front rays";
 "a beam model in which a miss is evidence is later work"), and the Amendment 11-18 deferrals of 7c.7 (T14-5, T14-7).
 **Owner ruling 11-18 (C3 = A): this also reverses 7c.3's parked "First-hit physics stays out"** — on the persistent
 path a return beyond the model's predicted hit now carries a term (it refutes the model), returns are staged by ray
-geometry, and the camera's ownership m enters as a mixture, not as a weight. Rev 3.3.1 folds Fable's rev 3.3 review
-(`.superpowers/sdd/2026-11-15-lidar-measures/fable-7c8-review.md`, NOT READY; findings cited as R5-*).
+geometry, and the camera's ownership m enters as a mixture, not as a weight. Rev 3.3.1 folded Fable's rev 3.3 review
+(`.superpowers/sdd/2026-11-15-lidar-measures/fable-7c8-review.md`, NOT READY; findings cited as R5-*); rev 3.3.2 folds
+the re-review (`fable-7c8-rereview.md`, READY WITH CHANGES; cited as R6-*).
 Persistent path only: the flag-off path and every other caller of `lidar_ray_factor.h` and `lidar_select.h` (hood,
-cabinet, table, door, bottle) stay bit-identical; the new code is new functions, the old ones are not edited.
+cabinet, table, door, bottle) stay bit-identical; the new code is new functions and new types, the old ones are not
+edited.
 
 **What was measured.** live10 on (`docs/superpowers/results/2026-11-18-lidar-measures-live10.md`): on updates with rays
 5–20 % stop at `gn_iters_max` with `gn_conv` = 0, and the ray fixtures cannot converge in the GN sense at all: the
@@ -626,24 +629,52 @@ are printed, not checked, because of it (T14-5, T14-7). The same jump hides the 
 the model misses carries no term, so a box can shrink away from a ray that DID stop on the object at no cost, and the
 silhouette edges — the only thing a front-facing sweep says about cx and w — are not used.
 
-**(a0) The data: rays are staged by ray geometry (R5-C3; owner: A).** Today `select_into_weighted` stages a return only
-when its ENDPOINT lies in the select box and m > 0, so a ray that flew past the object is absent or has weight ≈ 0, and
-only on-object rays would act: every silhouette edge would be pulled outward by about 1–2 σ_s with nothing to balance
-it. New staging function (in `common/lidar_select`, the old ones untouched):
-- staged: every return of the sweep whose ray, from the sensor through the return and on to ρ_max, passes through the
-  select box (the same box as today: mask-centroid anchored, birth-sized, θ-independent), whatever its range and
-  whatever its m, m = 0 included. A return short of the box is staged too (it costs nothing unless the camera claims it,
-  see (a));
-- m_i = the camera's membership of the return's endpoint, as today (7c.3: m = π_mask·Φ(s_i/σ_px); 0 outside the image
-  or behind the camera). Input contract: m_i < 1. π_mask is a detector confidence, below 1 by construction; the
-  membership builder asserts it. This is the one place the model needs it: 1 − m_i is the probability that the camera's
-  attribution is wrong, and it is what a miss of a claimed return costs;
-- the two sweep down-weights (ray-count coverage on Σm, angular coverage ca) are computed as today on the returns
-  whose endpoint is inside the box, and handed over as one number κ = coverage·ca ∈ [0, 1]. They do NOT enter the
-  staged precision any more (R5-C4, see (a));
-- membership unavailable this cycle (no camera pose at the mask stamp): the ray-set is not staged on the persistent
-  path and the cycle logs it. A missing input, not a threshold; without m the mixture below has no prior. (Today such
-  a cycle runs unweighted; the plan measures how often it happens in live10's logs before building.)
+**(a0) The data: rays are staged by ray geometry (R5-C3; owner: A), each with a camera label that is never certain.**
+Today `select_into_weighted` stages a return only when its ENDPOINT lies in the select box and m > 0, so a ray that
+flew past the object is absent or has weight ≈ 0, and only on-object rays would act: every silhouette edge would be
+pulled outward by about 1–2 σ_s with nothing to balance it. New staging function and ray-set type (in
+`common/lidar_select` and `common/ai_belief`; `LidarRays` and the old functions untouched):
+- **Staged:** every return of the sweep whose ray, from the sensor through the return and on to ρ_max, passes through
+  the select box (the same box as today: mask-centroid anchored, birth-sized, θ-independent), whatever its range,
+  PROVIDED the camera has information on it (next bullet). A return short of the box is staged too (it costs nothing
+  unless the camera claims it, see (a)). A return with ρ_i > ρ_max is staged as ρ_i = ρ_max ("no return in range";
+  R6-M4).
+- **No camera information ⇒ not staged (R6-C1).** A return whose endpoint projects outside the image or behind the
+  camera has no label. Under the mixture m = 0 would say "certainly foreign", the strongest possible statement, and a
+  return on the object's real surface outside the image would then push the face back by 4–5 cm. So the ray is left
+  out: the same missing-input rule as the cycle without membership below, applied per ray. Stated limit: the part of
+  an object outside the image gets no LiDAR term (at close range the LiDAR covers only what the camera sees).
+- **The label is never certain (R6-C1).** m_i = ε_px + (1 − 2ε_px)·π_mask·Φ(s_i/σ_px), so m_i ∈ [ε_px, 1 − ε_px]. ε_px is
+  the probability that a pixel's mask label is wrong for the surface behind it, either way: the camera's label read
+  through a symmetric binary channel. Choice made here (the re-review offered an off-mask floor or a stated limit):
+  the floor, because the alternative is known to be wrong in the direction that matters — with m → 0 off the mask,
+  returns on the object's real surface in the band a mask erodes (the legs and rim the select band spans on purpose)
+  refute the model, and the LiDAR silhouette settles on the mask boundary, enforcing the erosion it was meant to
+  correct. With m = ε_px such a return SUPPORTS the model once ε_px > 0.5 % (it is neutral where
+  m/(1 − m)·St(0)/p_pass + G(0) = 1). The same bound removes the division by zero at `sl.confidence` = 1.
+  **ε_px is a new constant, flagged:** a measured property of the detector, not a tuned gain. `Model.MaskPixelErrorRate`,
+  per class; the plan measures it from the Webots ground-truth masks on live10's frames (the larger of: the fraction
+  of object pixels more than 3σ_px outside the mask, the fraction of mask pixels more than 3σ_px outside the object)
+  and the value and its measurement are reported to the owner before live. Load check 0 < ε_px < ½ (a config
+  validation). It is the one place the model needs it: 1 − m_i is the probability that the camera's attribution is
+  wrong, and it is what a miss of a claimed return costs.
+- **Sweep weight.** The two sweep down-weights (ray-count coverage on Σm, angular coverage ca) are computed as today
+  on the returns whose endpoint is inside the box, and handed over as one number κ = coverage·ca ∈ [0, 1] in the new
+  ray-set type. They do NOT enter a staged precision (R5-C4, see (a)); `precision` stays the flag-off path's.
+- **"The LiDAR channel measured" (R6-I4)** ⇔ κ > 0 and the staged set is not empty: today's rule (precision > 0 was
+  Σm > 0) on the new field. `frame_has_lidar`, `rays_usable`, the b_L prediction, `record_channels` and the
+  `lidar_only` cycle read that on the persistent path. A sweep with κ = 0 is not a measurement: §8's "a LiDAR-only
+  frame whose memberships all vanish leaves the belief at the prediction" holds through this line. The instruments
+  (`probe`: resid_m, meanz, topz, floorz; `dbg_lidar_rays`; the coverage inputs) keep reading the endpoint-in-box
+  subset, so they mean what they meant; the staged-ray count is a new ai2_log column. The bpearl extra set is not
+  staged on this path (it is off for these classes, §9).
+- **A cycle without membership** (no RGB frame staged, camera not bound, no focal length, empty slice): the ray-set
+  is not staged on the persistent path, the camera update of that cycle runs as usual, and the cycle is logged. The
+  reason (R6 §4): the camera is what separates this object from its neighbours; without it the rays would either lock
+  the box onto whatever stands within 10 cm (a flat label) or erode it (label 0). Nothing is asserted about the world
+  and P is not touched by rays. (Today such a cycle runs unweighted.) Before building, the plan counts in live10's
+  logs how often it happens and the longest run of consecutive such cycles per instance: a systematic cause (a pose
+  lookup failing while the robot turns) would remove the LiDAR exactly while moving.
 
 **(a) The beam model: marginalise the surface offset instead of linearising it.** 7c.6 already says the model surface
 is uncertain by σ_s = `model_sigma_m`, and turned that into a range variance σ_s²/(n̂·u)² — a linearisation that is
@@ -653,23 +684,31 @@ position and size floors cap what repeated sweeps can accumulate). For ray i (or
 ρ_i, ownership m_i), s_i(t) = SDF(o + t·u; θ) on t ∈ [0, ρ_max], ρ_max = `max_range_m` (6 m). The model dilated by δ has
 SDF − δ.
 
-- **Closest approach.** d_i(θ) = min_t s_i(t): positive for a miss, negative for a crossing (how deep the ray goes).
-  There is no ρ_i + 5c window any more (R5-I2): with the window, a model face 5c behind a return put a 5-nat ridge in
-  the energy that pushed the model away from the return.
-- **First crossing of a level.** t_i(δ) = inf{t ≥ 0 : s_i(t) ≤ δ}, defined for δ > d_i (0 when the sensor is inside the
-  dilated model: no special case, the formula then refutes the model by itself). e_i(δ) = t_i(δ) − ρ_i.
+- **Convex parts (R6-I1).** The beam path asks the model for its convex parts: the box alone, or the box and the
+  headboard panel for the bed (two new hooks on the model, the part SDF and its ANALYTIC Jacobian; the compound stays
+  one primitive for everything else). The model SDF is the minimum over parts, s_i(t) = min_p s_ip(t), each s_ip convex
+  in t. No finite-difference Jacobian remains on this path, so `fd_eps` and `jac_slope_clamp` do not act here.
+- **Closest approach.** d_ip(θ) = min_t s_ip(t) per part, d_i = min_p d_ip: positive for a miss, negative for a
+  crossing (how deep the ray goes). There is no ρ_i + 5c window any more (R5-I2): with the window, a model face 5c
+  behind a return put a 5-nat ridge in the energy that pushed the model away from the return.
+- **First crossing of a level.** t_ip(δ) = inf{t ≥ 0 : s_ip(t) ≤ δ} for δ > d_ip (0 when the sensor is inside the dilated
+  part: no special case, the formula then refutes the model by itself), continuous and decreasing in δ;
+  t_i(δ) = min_p t_ip(δ) over the parts with d_ip < δ. e_i(δ) = t_i(δ) − ρ_i.
 - **Range densities, at the SENSOR's precision (R5-C4).** St(e) = the Student-t whose −log is ½p₀c²·log(1 + e²/c²),
   normalised: ν = p₀c² − 1, scale² = c²/ν, with p₀ = `Model.LidarPrecision` (the base value, 2500; with σ_sensor from the
   SensorModel, 1/p₀ = 1/`LidarPrecision` + σ_sensor²) and c = `robust_c_m`. ν = 5.25, peak 17.5 m⁻¹ at the configured
-  values. G(e) = its CDF (ν is fixed at load, so the builder may tabulate it; C¹, error < 1e-6). The staged, per-sweep
-  precision `base·coverage·ca` is not used: as a density parameter it changes the peak with the ray count and gives
-  ν ≤ 0 below coverage·ca = 0.16. Load-time check: p₀c² > 1, else the agent refuses to start with the message (a config
-  validation: the density does not exist otherwise).
+  values. G(e) = its CDF. ν is fixed at load, so the builder may tabulate G; the gradient then uses the table's own
+  derivative, or the table error is below 1e-6 so that St = G′ holds to the gradient check (R6-M9). The staged,
+  per-sweep precision `base·coverage·ca` is not used: as a density parameter it changes the peak with the ray count
+  and gives ν ≤ 0 below coverage·ca = 0.16. Load-time check: p₀c² > 1, else the agent refuses to start with the
+  message (a config validation: the density does not exist otherwise).
 - **Foreign density.** p_pass = 1/ρ_max: a return that is not this object's comes from somewhere the model does not
   predict, anywhere along the ray. Under ray staging the ray is not selected on its range, so the uniform over
   [0, ρ_max] is the right one (R5-I3; with endpoint staging it would have been 7c.3's 1/L_i). 7c.3's rest surfaces
   (room polygon, neighbour boxes) are not used here: a neighbour's return is a foreign ray, and it costs nothing
-  unless the model blocks it.
+  unless the model blocks it. What that withdraws (R6-M7): a low-m return within about one c of the model's surface
+  rewards the model for covering it (a wall 2 cm behind a face, m = 0.05: E ≈ −1.3 nats per ray) — 7c.3's "a surface
+  within σ of the predicted face cannot be told apart by range", still a stated limit.
 - **The likelihood: geometry (hit with probability π_i over δ) × ownership (member with probability m_i).** A member
   return is on the model's surface: density St(e), and impossible if the ray misses. A foreign return is uniform, and
   must lie in front of the model's surface if the ray crosses it (first of two returns, R5-I2): density p_pass·G(e)
@@ -678,87 +717,114 @@ SDF − δ.
     p(ρ_i | θ) = (1 − π_i)(1 − m_i) p_pass + π_i · E_{δ | δ > d_i}[ m_i St(e_i(δ)) + (1 − m_i) p_pass G(e_i(δ)) ]
     π_i = Φ(−d_i/σ_s)            (computed with erfc)
 
-  This corrects the review's own C3-A formula, which left the miss branch at p_pass for any m: a claimed return
-  (m = 0.9) 30 cm in front of the model then cost 2.3 nats on a crossing and 0 on a miss, so the model was paid to
-  dodge the rays the camera attributes to it. With (1 − m_i) on the miss branch both cost the same and only moving
-  the surface to the return gains.
+  This corrects the first review's C3-A formula, which left the miss branch at p_pass for any m (a claimed return
+  30 cm in front of the model then cost 2.3 nats on a crossing and 0 on a miss, so the model was paid to dodge the
+  rays the camera attributes to it); the re-review confirms the (1 − m_i). The first-of-two density also puts a factor
+  (1 − ρ_i/ρ_max) on the member term; it does not depend on θ, acts as a slightly smaller m, and is dropped (R6-M2).
 - **Energy.** E_i = −log[ p(ρ_i | θ) / ((1 − m_i) p_pass) ], zero for a ray far from the model (π_i → 0), so the sum
   stays comparable across cycles. The ray-set's energy is κ·Σ_i E_i: the sweep down-weights temper the energy, the
   gradient and the curvature alike (inherited informativeness weights, not new). Persistent J (7c.7 d) uses it in
   place of `lidar_rays_first_crossing_energy`.
-- **Quadrature (R5-I5), in double.** Convex model: nodes at conditional quantiles in the upper tail,
-  δ_k = −σ_s Φ⁻¹(π_i u_k), u_k and weights ω_k the K Gauss–Legendre nodes on (0, 1); E_δ[f] = Σ_k ω_k f(δ_k). This form
-  has no cancellation in either tail (the rev 3.3 form Φ(d/σ_s) + (1 − Φ(d/σ_s))u_k loses the nodes for d > 0); as
-  d_i → −∞ the nodes are fixed. Φ⁻¹ accurate to 1e-15 (AS241 or equal), so its piecewise joins are below the gradient
-  check. K is chosen by the accuracy test in Pass, not by the fit rate; K = 8 is the starting point.
-- **Non-convex models (bed + headboard, `convex_model` false; R5-I1).** One offset δ moves the whole model, so the
-  crossings are nested events, not independent ones (rev 3.3's π_k ∏(1 − π_j) is withdrawn; it also jumped when a local
-  minimum appeared). t_i(δ) as defined above jumps in δ only at the RECORDS of the running minimum of s_i: the values
-  r_1 > r_2 > … > r_n = d_i at which s_i reaches a new lowest local minimum. The δ integral is split there. With upper-tail
-  probabilities b_j = Φ(−r_j/σ_s), b_0 = 0: segment j has nodes δ_jk = −σ_s Φ⁻¹(b_{j−1} + (b_j − b_{j−1}) u_k) and
-  weight (b_j − b_{j−1}) ω_k; Σ_j (b_j − b_{j−1}) = π_i. A convex model has one segment and this is the line above. A
-  record that disappears takes its segment's weight to 0 with it, so the sum is continuous in θ.
+- **Quadrature (R5-I5, R6-I1), in double.** With one part, nodes at conditional quantiles in the upper tail:
+  δ_k = −σ_s Φ⁻¹(π_i u_k), u_k and weights ω_k the K Gauss–Legendre nodes on (0, 1); E_δ[f] = Σ_k ω_k f(δ_k). No
+  cancellation in either tail; as d_i → −∞ the nodes are fixed. Φ⁻¹ accurate to 1e-15 (AS241 or equal). K is chosen by
+  the accuracy test in Pass, not by the fit rate; K = 8 is the starting point.
+  With several parts the δ integral is split into panels at every level where the first-hit part changes, so the
+  integrand is smooth inside each panel: at each part's own minimum d_ip > d_i (the level at which part p starts to be
+  hit; t_i may jump there), and at each level where the first-hit part switches (t_ip = t_iq; one root-find in δ per
+  switch, found from the sign of t_ip − t_iq at the panel ends and nodes). With upper-tail probabilities
+  b_0 = 0 < b_1 < … < b_n = π_i at those levels, panel j has nodes δ_jk = −σ_s Φ⁻¹(b_{j−1} + (b_j − b_{j−1}) u_k) and weight
+  (b_j − b_{j−1}) ω_k. Rev 3.3's π_k ∏(1 − π_j) and rev 3.3.1's records are withdrawn: one offset moves the whole model,
+  so the crossings are nested events, and a record that appears together with a local maximum (a ring at elevation
+  ≈ 0 running over the mattress to the headboard) left a near-step inside one panel. What is true of continuity: the
+  panel limits move continuously with θ and a panel's weight goes to 0 when its two limits meet, so the sum is
+  continuous in θ; it is C¹ except where two parts tie at the minimum (d_ip = d_iq) and at the kinks listed below. A
+  double switch between two neighbouring nodes is not found; the accuracy test bounds what that costs.
 
-Numbers at the configured values: a claimed return (m = 0.9) on the surface has E = −6.85 nats, and 0 if the model
-misses it; at the mask boundary (m = 0.5) −4.66. A foreign return (m = 0.05) 40 cm behind a model that fully blocks
-its ray costs ≈ +11 nats, growing as 3.1·log(1 + e²/c²) (not "the same" as a miss, as rev 3.3 said). A return in front
-of the model costs at most −log(1 − m) and nothing if the camera does not claim it. Deep inside a face, m → 1, E_i is
-7c.7's range energy convolved with the offset.
+Numbers at the configured values, approximate (the unconvolved peak; the δ integral makes them about 0.07 nats
+smaller in magnitude face-on, so a fixture is compared with the computed value, not with these; R6-M6): a claimed
+return on the surface has E ≈ −6.85 nats at m = 0.9 and −4.66 at m = 0.5, and 0 if the model misses it. A foreign
+return (m = 0.05) 40 cm behind a model that fully blocks its ray costs ≈ +11 nats, growing as 3.1·log(1 + e²/c²). A
+return in front of the model costs at most −log(1 − m) and nothing if the camera does not claim it.
+
+**The depth basin is finite (R6-I2).** With the model BEHIND claimed returns the member term is masked by the foreign
+one once m·St(e) < (1 − m)·p_pass: beyond e ≈ 14 cm at m = 0.9, 9 cm at m = 0.5. At 30 cm and m = 0.9, E ≈ −0.012 nats
+and the gradient is 0.24 nats/m per ray, against about 20 nats/m per ray today. That is what the mixture says ("foreign,
+in front of me" costs the same as a miss), and it is a behaviour change: a seed more than ~10–14 cm behind the returns
+gets almost no ray pull and no ray curvature, and is brought in by the camera points. Pass checks that it converges.
 
 Continuity and its limits (R5-C1, M5). E is continuous in θ everywhere. It is C¹ except: (i) at d_i = 0 on an edge or
 corner, where the slope of d_i changes by a factor in [0.71, 1] (outside, d is the distance q to the edge; inside a
 chord cutting the corner with legs a, b, d = −q·√(a² + b²)/(a + b)) — both sides have the same sign, so no minimum is
-held on the kink; (ii) for a ray parallel to a face (non-unique minimiser), a kink in yaw. The silhouette-distance
-definition of d (support function, linear through tangency) would remove (i); not taken here, noted for the plan if
-`gn_conv` suffers.
+held on the kink; (ii) for a ray parallel to a face (non-unique minimiser), a kink in yaw; (iii) where two parts tie.
+The silhouette-distance definition of d (support function, linear through tangency) would remove (i); not taken here,
+noted for the plan if `gn_conv` suffers.
 
-Stated limits. (1) A solid, floor-anchored box is refuted by rays that pass through a real gap (under furniture on
-legs) and return from behind: logged per cycle as the count of rays with π_i > 0.99 and e < −5c, so a live run shows
-it. (2) The beam width is not modelled (see (d)).
+Stated limits. (1) **Gaps under furniture (R6-I3).** A solid, floor-anchored box is refuted by rays that pass through a
+real gap (under furniture on legs) and return from behind, and ray staging stages every such ray wherever it lands:
+e = −1…−3 m costs 19–26 nats per ray. Choice made here: NO transmission term now. A solid that transmits with
+probability τ (foreign density p_pass·[τ + (1 − τ)·G(e)], refutation bounded at −log τ) is the model-level answer, but τ
+would be a per-class constant with no measurement behind it — a tuned constant by another name. Instead the limit
+gets a number before live (the legged fixture in Pass, with a bound), and a per-cycle log (the count of rays with
+π_i > 0.99 and e < −5c). If the fixture fails its bound the result goes to the owner with τ, or a model whose box
+stands off the floor, as the proposals; the fixture is not tuned. (2) The beam width is not modelled (see (d)).
+(3) The part of an object outside the image gets no LiDAR term ((a0)).
 
 **(b) The step.**
-- **d_i and ∇d_i from two one-sided tangents (R5-C1).** Inside a box s_i(t) is a maximum of linear functions, so its
-  minimum is always on a crease where two faces tie; `sdf_jacobian` there (a 1 mm central difference) returns the mean
-  of the two faces or one of them, which would put half of a side edge's gradient on the front face's DOFs. Instead:
-  bracket the minimum as the march does, take the slopes s₋ = −∂s_i/∂t at t* − ε and s₊ = +∂s_i/∂t at t* + ε and the
-  Jacobians J₋, J₊ at those two points; d_i = the intersection of the two tangent lines (exact for a V, second order
-  for a smooth minimum, no 1e-4 m staircase); ∇d_i = (s₊ J₋ + s₋ J₊)/(s₋ + s₊). Where the SDF is smooth at the
-  minimum this is the envelope formula. The records r_j of a non-convex model the same way.
-- **Gradient:** the exact gradient of the discretised κ·Σ E_i, through d_i (π_i and the node levels), the records, and
-  the crossings: ∂t/∂θ = −(∂s/∂θ)/(∂s/∂t) and ∂t/∂δ = 1/(∂s/∂t) at each node's crossing, as today's implicit
+- **d and ∇d (R5-C1, R6-M1).** For d_ip > 0 (a miss of a box-shaped part): the closed-form distance from the ray to the
+  part and its analytic gradient. Two tangents are not used there: outside a corner s(t) = √(q² + x²), and a
+  two-tangent estimate is ≈ q²/ε for q below the tangent offset ε, with half the right gradient. For d_ip < 0 the
+  part's SDF along the ray is a maximum of linear functions, so its minimum is on a crease where two faces tie, and
+  the Jacobian at that point is not the derivative of d: take the slopes s₋ = −∂s/∂t at t* − ε and s₊ = +∂s/∂t at t* + ε
+  and the Jacobians J₋, J₊ there; d = the intersection of the two tangent lines (exact for a V, no 1e-4 m staircase);
+  ∇d = (s₊ J₋ + s₋ J₊)/(s₋ + s₊). A minimum at t = 0 or t = ρ_max has one side only: d = s there, ∇d its Jacobian
+  (R6-M4). ∇d_i is that of the part with the smallest d_ip.
+- **Gradient:** the exact gradient of the discretised κ·Σ E_i, through d_i (π_i and the node levels), the panel
+  limits, and the crossings: ∂t/∂θ = −(∂s/∂θ)/(∂s/∂t) and ∂t/∂δ = 1/(∂s/∂t) at each node's crossing, as today's implicit
   differentiation.
 - **Curvature, PSD, two parts per ray, each × κ.**
   - Range part, total variance (R5-C2): r_i · J̄ J̄ᵀ / V_i, with t̄, J̄ and Var(t) the mean of t_i(δ_k), the mean of
-    ∂t_i(δ_k)/∂θ and the variance of t_i(δ_k) under the quadrature weights ω_k (the prior over δ given a hit),
+    ∂t_i(δ_k)/∂θ and the variance of t_i(δ_k) under the quadrature weights (the prior over δ given a hit),
     V_i = (1 + ē²/c²)/p₀ + Var(t), ē = t̄ − ρ_i, and r_i = the posterior probability that the return is a member hit
     (its term's share of p(ρ_i | θ); complete-data information, as 7c.3). On a face Var(t) = σ_s²/(n̂·u)² and this is
     7c.6's a aᵀ/((n̂·u)²·R_range + σ_s²) exactly, bounded by 1/σ_s² at grazing incidence. Rev 3.3 averaged the per-node
     information instead, which drops the σ_s term from W: 1.2× too much face-on, 7× at n̂·u = 0.2, unbounded beyond.
-  - Edge part, expected information (R5-I4): I_d,i · ∇d_i ∇d_iᵀ,
+    Not bounded by 1/σ_s² off a face (R6-M3): for a claimed ray the model misses by 1.5–3σ_s outside a corner, J̄·∇d
+    grows as (d/σ_s)·√(π/2) while r_i stays ≈ 1, so the range part reaches about 2/σ_s² along ∇d. Transient (P is
+    taken at the final θ); the largest per-ray curvature is printed on the silhouette fixtures.
+  - Edge part, expected information of what this ray could answer (R5-I4, R6-C2): (1 − o_i)·I_d,i · ∇d_i ∇d_iᵀ,
     I_d,i = (φ(d_i/σ_s)/σ_s)² · [ m_i/π_i + (1 − m_i)(1 − t̄_i/ρ_max)/(1 − π_i) ]
-    (the Fisher information of the hit/miss outcome on d: a member return can only come from a hit; a foreign return
-    beyond the surface only from a miss; a foreign return in front of it says nothing; exact when the peak-to-pass
-    ratio is large, 105 here, an upper bound otherwise). Evaluated with the Mills ratio in the tails; bounded by
-    0.64/σ_s²; it does not depend on the observed range. Rev 3.3's realised score g_i² equals it at π = ½ but reaches
-    2.8/σ_s² on a surprising ray, where the true second derivative is negative — most information exactly when the fit
-    is worst.
+    o_i = (1 − m_i)·p_pass·Ḡ_i / ( m_i·S̄_i + (1 − m_i)·p_pass ),   S̄_i = E_δ[St(e)], Ḡ_i = E_δ[G(e)]
+    I_d is the Fisher information of the hit/miss outcome on d (a member return can only come from a hit; a foreign
+    return beyond the surface only from a miss; exact when the peak-to-pass ratio is large, 105 here). o_i is the
+    posterior probability that the return is foreign and in front of the surface: such a return never reached the
+    surface and says nothing about hit or miss. Without the factor, twenty rays stopped by a person in front of one
+    silhouette claimed σ_d ≈ 5 mm on an edge nothing observed, and "occlusion HOLDS" was broken. o_i uses only whether
+    the return reached the surface, not whether the ray was a hit or a miss, so it does not bring back rev 3.3's
+    realised score (most information when the fit is worst). Evaluated with the Mills ratio in the tails; bounded by
+    0.64/σ_s². Known side (R6-C2): for an unoccluded ray with far background the outcome is fully observed and its
+    information is φ²/(σ_s²·π(1 − π)); the bracket gives about half of that at m = 0.9, the under-confident side. The
+    Calibration item decides between the two forms on a number.
   - The cross term between a ray's range score and its edge score is dropped (R5-M8).
 - 7c.7(d)'s damped step and acceptance on J are unchanged. P is `joint_cov` at the final θ with this curvature in W.
   Within a sweep both parts enter I_L and are saturated by b_L and e like every ray term.
 
 **(c) Cost (R5-I7), stated before building.** Today a crossing ray costs ≈ 37 SDF evaluations per build (march ~10,
-bisection ~13, slope 2, one finite-difference Jacobian 12). Here a ray near the model costs ≈ 220 per build (closest
-approach and two tangents ~40, K = 8 crossings × ~10, 8 Jacobians × 12) and ≈ 110 per energy evaluation; ray staging
-also brings in the rays that pass the object (estimate 2–3× the count), most of which are far misses. Estimate at 256
-near rays and ~30 ns per SDF: 1.7 ms per build, 0.8 ms per trial energy, ≈ 10 ms for a 4-step update and ≈ 30 ms at
-`gn_iters_max`. live10's slowest class runs at 8.4 Hz (119 ms); 8 Hz is 125 ms, so the headroom is 6 ms and the
-estimate does not fit without the savings below. They are part of the task, not optional:
-- one monotone march collects all K levels of a convex model (they are ordered along t);
-- cos/sin of the yaw computed once per build, not per SDF sample; the box Jacobian analytic on this path;
-- rays with d_i > 8σ_s stop after the closest approach: π_i < 7e-16 there, the term is below the rounding of the
-  double sum. Flagged as a numerical floor at machine precision, not a model gate (rev 3.3's 5σ_s left a 3e-5-nat step).
-Other constants of the section, all solver or numerical, none a model threshold: K (set by the accuracy test), ε of
-the one-sided tangents and the 1e-4 m bracket (as 7c.6's bisection). Data-side and inherited: the select box, κ.
+bisection ~13, slope 2, one finite-difference Jacobian 12). Here a ray near the model costs ≈ 220 SDF-equivalents per
+build (closest approach and tangents ~40, K = 8 crossings × ~10, 8 Jacobians) and ≈ 110 per energy evaluation, per
+part (the bed has two); ray staging also brings in the rays that pass the object (estimate 2–3× the count), most of
+which are far misses. Estimate at 256 near rays and ~30 ns per SDF: 1.7 ms per build, 0.8 ms per trial energy, ≈ 10 ms
+for a 4-step update and ≈ 30 ms at `gn_iters_max`; twice that for the bed. live10's slowest class runs at 8.4 Hz
+(119 ms); 8 Hz is 125 ms, so the headroom is 6 ms and the estimate does not fit without the savings below. They are
+part of the task, not optional:
+- one monotone march per part collects all K levels (they are ordered along t for a convex part);
+- cos/sin of the yaw computed once per build, not per SDF sample; the analytic part Jacobians of (a);
+- rays with d_i > 8σ_s stop after the closest approach: π_i < 7e-16 there and, with m_i ≤ 1 − ε_px, the term is below
+  the rounding of the double sum (R6-M5). Flagged as a numerical floor at machine precision, not a model gate.
+Constants of the section. Solver or numerical, none a model threshold: K (set by the accuracy test), ε of the
+one-sided tangents and the 1e-4 m bracket (as 7c.6's bisection), the 8σ_s floor. Data-side and inherited: the select
+box, κ. **New model constant, flagged: ε_px** ((a0); measured, reported to the owner). Config validations: p₀c² > 1,
+0 < ε_px < ½.
 
 **(d) Not in scope.**
 - The LiDAR beam width (R5-I8). The footprint ρ·θ_div (≈ 6 mm at 2 m, 12 mm at 4 m for 3 mrad) is the size of σ_s,
@@ -767,36 +833,60 @@ the one-sided tangents and the 1e-4 m bracket (as 7c.6's bisection). Data-side a
   model carries it. Webots has no beam width, so live11 cannot show its absence; with independent per-ray offsets a few
   tens of edge rays claim mm-level σ on w and cx, bounded only by b_L's floors (3 cm position, 2 cm size). The
   real-robot validation must re-check σ_w and σ_cx against the surveyed truth before this is trusted there.
+- The transmission term τ and a box that stands off the floor (stated limit 1).
 - The flag-off path's sphere-trace defect (7c.6) stays an owner decision. The bed camera-only non-convergence (live10:
   61 %, 91 % of updates run 12 steps) has no rays and is a separate investigation.
+- For the plan, not the model (R6-M8): `lidar_ray_factor.h`'s header note "a ray that misses the model carries no
+  term at all" names the persistent exception; consumers of this path are told that the published Σ on w and cx
+  shrinks.
 
-**Pass (rev 3.3.1).** Every fixture ray-casts a true scene, first hit only; "live staging" means the rays go through
-the new staging function with a membership built from a rendered mask (σ_px as live), not weights set by hand.
+**Pass (rev 3.3.2).** Every fixture ray-casts a true scene, first hit only; "live staging" means the rays go through
+the new staging function with a membership built from a rendered mask (σ_px and ε_px as live), not labels set by
+hand. "The tolerance" is 7c.7's 1 mm / 1 mrad.
 - Continuity: along a 2 cm sweep of cx across a ray edge in 0.05 mm steps, the second difference
   |E(x + h) − 2E(x) + E(x − h)| of the total ray energy is < 0.01 nats at every step (a jump shows whatever the slope;
-  today ≈ 9.4). Same sweep on the bed with the headboard across a record's appearance (`convex_model` false).
-- Gradient: analytic against central differences (h = 0.1 mm) to 1 % or 1e-3 nats/m at every step; at a step where
-  some ray's d_i changes sign inside the stencil, against the one-sided difference on each side (the stated kink).
-  One fixture with rays cutting a corner at n̂·u far from 45° checks ∇d_i's weights (R5-C1).
-- Quadrature: |E_K − E_64| < 0.01 nats per ray over n̂·u ∈ [0.1, 1], e ∈ [−0.3, 0.3] m, d ∈ [−4σ_s, 4σ_s], and E_K monotone
-  in |e| on a face. The smallest K that passes is the K used.
-- Reduction: rays deep inside a face (π > 1 − 1e-6), m = 1 − 1e-6, at n̂·u = 1 and at n̂·u = 0.25: the curvature equals
-  7c.6's a aᵀ/((n̂·u)²·R_range + σ_s²) within 1 %; θ equals 7c.7's update within 0.1σ per component and √diag P within
-  3 % (the difference is the convolution against its linearisation, printed).
-- Density: with Σm = 5 rays (κ ≈ 0.08) the update is finite and the hit/miss energy difference per ray is the same as
-  at κ = 1, scaled by κ. A config with p₀c² ≤ 1 is refused at load.
-- Ownership: rays with π_i = 0 contribute exactly 0. An occluder 30 cm in front with m = 0.05: θ moves less than the
-  tolerance. A seed 30 cm behind the surface with m = 0.9: no ray pushes the model away from the returns (the
-  ray gradient along the view axis is ≤ 0 toward the sensor at every iterate). An over-segmented mask on a wall 2 cm
-  behind the face (7c.3 row E): printed, with the depth it produces.
-- Silhouette, both directions, hand weights: a front-only sweep of a box whose seed is 3 cm too narrow, and one 3 cm
+  today ≈ 9.4). Same on the bed with the headboard, across a level where the first-hit part switches and across the
+  appearance of the headboard's own minimum, with rings at elevations −1°…+1° relative to the mattress top.
+- Gradient: analytic against central differences (h = 0.1 mm) to 1 % or 1e-3 nats/m at every step, on the box and on
+  the headboard fixture; at a step where some ray's d_i changes sign inside the stencil, against the one-sided
+  difference on each side (the stated kink). One fixture with rays cutting a corner at n̂·u far from 45° checks ∇d's
+  weights (R5-C1); one with rays passing 0.05–1 mm outside a corner checks the closed-form d (R6-M1).
+- Quadrature: |E_K − E_64| < 0.01 nats per ray over n̂·u ∈ [0.1, 1], e ∈ [−0.3, 0.3] m, d ∈ [−4σ_s, 4σ_s], at m = 0.9 and
+  m = 0.05, on the box and on the headboard fixture (elevations as above); on a face, E_K decreasing toward its
+  minimum from each side (the minimum sits at e > 0: 7 µm at m = 0.9, 1.3 mm at m = 0.05). The smallest K that passes
+  is the K used.
+- Reduction: rays deep inside a face (π > 1 − 1e-6), m = 1 − 1e-6 set by hand, at n̂·u = 1 and at n̂·u = 0.25: the
+  curvature equals 7c.6's a aᵀ/((n̂·u)²·R_range + σ_s²) within 1 %; θ equals 7c.7's update within 0.1σ per component and
+  √diag P within 3 % (the difference is the convolution against its linearisation, printed).
+- Density and inputs: with Σm = 5 rays (κ ≈ 0.08) the update is finite and the hit/miss energy difference per ray is
+  the same as at κ = 1, scaled by κ. A config with p₀c² ≤ 1, or ε_px outside (0, ½), is refused at load.
+  π_mask = 1.0f gives a finite energy. A sweep with κ = 0 leaves state, Σ and ω at the prediction and does not
+  restart the channel's odometry path (R6-I4).
+- Ownership: rays with d_i > 8σ_s contribute exactly 0. An occluder 30 cm in front with m = 0.05: θ moves less than
+  the tolerance AND every component of √diag P is within 1 % of the prediction's (R6-C2). An occluder covering ONE
+  silhouette of an otherwise visible box: σ_w and σ_cx are not below the run in which the occluded rays are not
+  staged. An over-segmented mask on a wall 2 cm behind the face (7c.3 row E), at m = 0.9 and at m = 0.05: printed, with
+  the depth each produces (R6-M7).
+- Depth basin (R6-I2): camera + ray fixture, seed 30 cm behind the surface, m = 0.9: the depth is within its own σ
+  of truth in ≤ 10 frames, and the summed ray gradient along the view axis never points away from the returns. The
+  rays-only run of the same seed is PRINTED (expected: almost no motion).
+- Silhouette, both directions, hand labels: a front-only sweep of a box whose seed is 3 cm too narrow, and one 3 cm
   too wide, each with the background 5 cm behind and 1 m behind: w moves to within σ_w of truth and σ_w falls below
-  the prior's. Today w stays at the seed.
+  the prior's. Today w stays at the seed. The largest per-ray curvature along ∇d is printed (R6-M3).
 - Silhouette, live staging (R5-C3): the same four cases and a correctly sized seed, through the new staging and a
   rendered mask: the correctly sized seed keeps |Δw| and |Δcx| below σ_s/2 = 5 mm over 10 frames; the ±3 cm seeds end
   within σ_w of truth.
-- Calibration: the silhouette fixture over 200 noise draws (range noise and a per-ray offset of σ_s): the mean NEES of
-  (cx, w) divided by 2 lies in [0.5, 2]. The curvature is an approximation, so this is measured, not assumed.
+- Camera coverage, live staging (R6-C1): (i) a box half outside the rendered image, correctly sized seed: |Δw|, |Δcx|,
+  |Δcy| below σ_s/2 over 10 frames, and no ray outside the image is staged; (ii) a mask eroded by 3 cm on one side:
+  the bias of w and of cx is below the camera-only run's (the LiDAR must not make erosion worse), both printed.
+- Gap under furniture, live staging (R6-I3): the box raised on a 15 cm gap, background 1 m behind, sensor at the
+  Helios height: against the same run without the gap rays staged, cy, h and H each move by less than 1 cm (live11's
+  centre tolerance); the count of gap rays and their energy are printed. A failure is reported to the owner
+  (stated limit 1), not tuned.
+- Calibration: the silhouette fixture through live staging and a rendered mask (m enters both curvature parts), over
+  200 noise draws (range noise and a per-ray offset of σ_s): the mean NEES of (cx, w) divided by 2 lies in [0.5, 2];
+  cx and w also reported each alone, and all three separately for the 5 cm and the 1 m background (the number that
+  decides between the bracket and φ²/(σ_s²π(1 − π)) in (b)). The curvature is an approximation, so this is measured.
 - Parked: 1000 identical sweeps: σ_w and σ_cx do not fall below b_L's floors and w moves less than 1 mm after
   frame 10.
 - The two deferred items come back as CHECKs: the camera + ray fixture's first update returns `gn_conv` = 1; in
@@ -809,12 +899,13 @@ the new staging function with a membership built from a rendered mask (σ_px as 
   its expectation rewritten by the plan from that number.
 - Creep: the 16-case set of 7c.6 stays 0/16; golden (`lidar_golden_test`) bit-exact; the door and hood tests that
   include `lidar_ray_factor.h` pass unchanged.
-- Cost: the ray work of one update on the ray fixture at 256 near rays, first update and parked, measured and
-  reported in ms; median ≤ 5 ms (the 6 ms headroom of the 8.4 Hz class).
+- Cost: the ray work of one update on the ray fixture at 256 near rays, first update and parked, box and bed,
+  measured and reported in ms; median ≤ 5 ms (the 6 ms headroom of the 8.4 Hz class).
 - Live11 (on, off, shift as live10, ai2_log cleared before each run): fit rate ≥ 8 Hz; `gn_conv` = 0 share on updates
   with rays below live10's (5 / 12 / 3 / 20 %); final centre errors not worse than live10's by more than 1 cm; no DOF
-  over-confident (two-sided §8 rule), w and cx reported separately; the staged ray count, the cycles without
-  membership and the gap-ray count of the stated limit reported.
+  over-confident (two-sided §8 rule), w and cx reported separately; reported per instance: the staged ray count, the
+  rays left out for lack of camera information, the cycles without membership and their longest run, and the
+  gap-ray count of stated limit 1.
 
 ## 8. Pass
 
