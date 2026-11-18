@@ -34,6 +34,7 @@
 #include <atomic>
 #include <fstream>
 #include <string_view>
+#include "claim_hold.h"
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
 #include <limits>
 #include <memory>
@@ -146,6 +147,15 @@ private:
     // graph half is CoreWorld::begin_fit / after_fit.
     void run_tracker_slice();
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
+    // ── A DOOR IS NOT DELETED UNDER A CLAIM (claim_hold.h; trace finding S1, TLA REAP_HOLD) ──
+    [[nodiscard]] std::vector<std::string> executing_target_names() const;   ///< names of the nodes the graph's `executing` edges target
+    [[nodiscard]] bool door_claimed(std::uint64_t door_id) const;            ///< a claim executes on one of this door's affordances
+    /// If a claim executes on `id`: stop treating it as a door of ours (instance forgotten, every affordance but the claimed
+    /// cross removed, HELD), keep the node and its cross affordance, and return true. Else false: the caller deletes as before.
+    /// `delete_door`: delete the node too when the claim ends (a retire); false = only the kept affordance (a release).
+    bool hold_for_claim(std::uint64_t id, bool delete_door, const char* why);
+    void step_claim_holds();   ///< every cycle: the holds whose claim is gone are finished (the deferred deletion)
+    rc::door::ClaimHolds claim_holds_;
 
     // The DoorCore's TrackerWorld over THIS worker's state: the instances (fitter), identities, the room, and
     // the graph writes a birth / merge makes. Nested so it reaches the private members it reads and acts on.

@@ -52,6 +52,7 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 CONSTANTS SCENARIO,
           FIX_HOLD,                 \* code (d57997dc): no verdict on the face the controller is executing
+          REAP_HOLD,                \* design (11-16, S1): an owner deletes a door only once no claim is executing on it
           FACT_HOLD,                \* design: no verdict overturns a face backed by an exit fact
           CLOSE_ON_ARCHIVE,         \* design: a leg completes only once ltsm has archived the left room (`current`
                                     \*   = room_concept's room): the transition is closed before the next one opens
@@ -345,9 +346,12 @@ DC_PhantomGone(d) ==
 
 \* =================================================================================== owners delete (link 5)
 \* door_concept: a door of a room ltsm has archived is deleted by its owner (OLD_FACE with it: links 1, 2 die).
+\* REAP_HOLD (11-16, trace S1): a door the controller is still executing a cross on is reaped only after the claim ends.
+Claimed(d) == ctl.step = "cross" /\ ctl.door = d
+Reapable(x) == doors[x].room \in DOMAIN rooms /\ rooms[doors[x].room].arch /\ (REAP_HOLD => ~Claimed(x))
 DC_Reap ==
-  /\ \E d \in DOMAIN doors : doors[d].room \in DOMAIN rooms /\ rooms[doors[d].room].arch
-  /\ LET d == CHOOSE x \in DOMAIN doors : doors[x].room \in DOMAIN rooms /\ rooms[doors[x].room].arch
+  /\ \E d \in DOMAIN doors : Reapable(d)
+  /\ LET d == CHOOSE x \in DOMAIN doors : Reapable(x)
      IN DelDoor(d)
   /\ UNCHANGED << envVars, rooms, rcRT, current, passages, proposal, rcVars, ltVars,
                   dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
@@ -444,6 +448,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 \* =================================================================================== properties
 ExecCrossDoorLiveBeforeExit == (ctl.step = "cross" /\ ~ctl.passed) => ctl.door \in DOMAIN doors
+\* S1 (trace_check.py) as an invariant: while the controller's cross claim is live, its door is alive -- passed or not.
+ExecCrossDoorLive == ctl.step = "cross" => ctl.door \in DOMAIN doors
 PassageJoinsTwoRooms ==
   \A p \in PassAlive : \A a, b \in p : a # b =>
      (doors[a].room # doors[b].room /\ doors[a].hole = doors[b].hole /\ doors[a].hole \in RealHoles)
