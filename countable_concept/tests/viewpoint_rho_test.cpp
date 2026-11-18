@@ -3,7 +3,10 @@
 #include <cmath>
 #include <cstdio>
 #include <Eigen/Dense>
+#include <algorithm>
+#include <span>
 #include "countable_viewpoint.h"
+#include "place_memory/place_map.h"
 
 using namespace rc;
 using V2 = Eigen::Vector2f;
@@ -33,7 +36,6 @@ static void parked_is_one()
     CHECK(rho_camera(p, 2.f, 0.5f) == 1.f);
     CHECK(rho_lidar_lateral(p, 0.0392f) == 1.f);
     CHECK(rho_lidar_height(p, 2.f, 0.3f, 0.0392f) == 1.f);
-    CHECK(rho_chain(V2::Zero(), 1e-4f, 1e-4f) == 1.f);
 }
 
 static void stale_odometry_is_parked()
@@ -114,14 +116,6 @@ static void absent_ring_gap_is_one()
     CHECK(rho_lidar_height(p, 2.f, 0.3f, 0.f) == 1.f);
 }
 
-static void rho_chain_zero_correction_is_one()
-{
-    CHECK(rho_chain(V2::Zero(), 0.f, 0.f) == 1.f);
-    CHECK(rho_chain(V2(0.f, 0.1f), 0.f, 1e-2f) > 0.f);   // zero variance, zero correction: that term contributes 0
-    CHECK(rho_chain(V2(0.1f, 0.f), 0.f, 1e-2f) == 0.f);  // zero variance, non-zero correction: rho = 0
-    CHECK(std::abs(rho_chain(V2(0.1f, 0.f), 1e-2f, 1e-2f) - std::exp(-0.5f)) < 1e-6f);
-}
-
 static void degenerate_geometry_unchanged()
 {
     ViewpointPath p;
@@ -129,39 +123,117 @@ static void degenerate_geometry_unchanged()
     CHECK(p.dphi_rad == 0.f and p.dz_m == 0.f);
 }
 
-// ρ_chain fails CLOSED when odometry cannot be integrated (final review I1).
+using V3 = Eigen::Vector3f;
+using M3 = Eigen::Matrix3f;
+
+static void rho_chain_zero_correction_is_one_se2()
+{
+    CHECK(rho_chain(V3::Zero(), M3::Zero()) == 1.f);
+}
+
+// ρ_chain fails CLOSED when odometry cannot be integrated (final review I1), now on SE(2).
 static void chain_fails_closed()
 {
-    const V2 p0(1.f, 2.f), moved = p0 + V2(0.2f, 0.f);
-    const float var = 0.02f * 0.02f;
-    {   // pose moves 0.2 m, no odometry for the stretch ⇒ not a correction
-        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, std::nullopt);
-        CHECK(rho_chain(chain_correction(t), var, var) == 1.f);
-    }
-    {   // pose moves 0.2 m with matching odometry
-        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V2(0.2f, 0.f));
-        CHECK(rho_chain(chain_correction(t), var, var) == 1.f);
-    }
-    {   // pose moves 0.2 m, odometry VALID and zero ⇒ a real localiser correction
-        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V2::Zero());
-        CHECK(rho_chain(chain_correction(t), var, var) < 1.f);
-        CHECK((chain_correction(t) - V2(0.2f, 0.f)).norm() < 1e-6f);
-    }
-    {   // an unknown stretch after a known correction keeps the earlier correction; rebase restarts it
-        ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V2::Zero());
-        chain_observe(t, moved + V2(0.f, 0.5f), std::nullopt);
-        CHECK((chain_correction(t) - V2(0.2f, 0.f)).norm() < 1e-6f);
+    const V3 p0(1.f, 2.f, 0.3f), moved = p0 + V3(0.2f, 0.f, 0.f);
+    const M3 S = V3(0.02f * 0.02f, 0.02f * 0.02f, 0.02f * 0.02f).asDiagonal();
+    {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, std::nullopt);
+        CHECK(rho_chain(chain_correction(t), S) == 1.f); }
+    {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V3(0.2f, 0.f, 0.f));
+        CHECK(rho_chain(chain_correction(t), S) == 1.f); }
+    {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V3::Zero());
+        CHECK(rho_chain(chain_correction(t), S) < 1.f);
+        CHECK((chain_correction(t) - V3(0.2f, 0.f, 0.f)).norm() < 1e-6f); }
+    {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V3::Zero());
+        chain_observe(t, moved + V3(0.f, 0.5f, 0.f), std::nullopt);
+        CHECK((chain_correction(t) - V3(0.2f, 0.f, 0.f)).norm() < 1e-6f);
         chain_rebase(t);
-        CHECK(chain_correction(t).norm() == 0.f);
-    }
-    CHECK(chain_correction(ChainTracker{}).norm() == 0.f);   // before the first sample
+        CHECK(chain_correction(t).norm() == 0.f); }
+    CHECK(chain_correction(ChainTracker{}).norm() == 0.f);
+}
+
+static void pose_cov_round_trip()
+{
+    M3 S = V3(0.034f * 0.034f, 0.0435f * 0.0435f, 0.024f * 0.024f).asDiagonal();
+    S(0, 2) = S(2, 0) = 0.3f * std::sqrt(S(0, 0) * S(2, 2));
+    const V3 robot(0.83f, 2.24f, 0.42f);
+    const float c = std::cos(robot.z()), s = std::sin(robot.z());
+    const V3 edge(-(c * robot.x() + s * robot.y()), -(-s * robot.x() + c * robot.y()), -robot.z());
+    const M3 Se = place::invert_se2_cov(S, robot);
+    float blk[36] = {};
+    const int idx[3] = {0, 1, 5};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) blk[idx[i] * 6 + idx[j]] = Se(i, j);
+    const M3 R = pose_cov_in_room(std::span<const float>(blk, 36), edge);
+    CHECK((R - S).norm() <= 1e-6f * S.norm());   // matrix-relative: float round-off leaves ~3e-7 on zero entries
+}
+
+static void pose_cov_absent_is_zero()
+{
+    CHECK(pose_cov_in_room({}, V3(1.f, 2.f, 0.3f)).norm() == 0.f);
+}
+
+static void chain_correction_se2()
+{
+    ChainTracker t;
+    V3 pose(1.f, 2.f, 0.1f);
+    chain_observe(t, pose, std::nullopt);
+    const V3 od(0.1f, 0.f, 0.05f), drift(0.01f, -0.02f, 0.003f);
+    for (int i = 0; i < 10; ++i) { pose += od + drift; chain_observe(t, pose, od); }
+    CHECK((chain_correction(t) - 10.f * drift).norm() < 1e-4f);   // 10 samples x drift
+    // brief: poses drift by (0.01,-0.02,0.003) beyond odometry in total
+    ChainTracker u; V3 q(1.f, 2.f, 0.1f); chain_observe(u, q, std::nullopt);
+    for (int i = 0; i < 10; ++i) { q += od; if (i == 9) q += drift; chain_observe(u, q, od); }
+    CHECK((chain_correction(u) - drift).norm() < 1e-6f);
+    // a nullopt stretch is absorbed on all three components
+    chain_observe(u, q + V3(0.3f, -0.4f, 0.2f), std::nullopt);
+    CHECK((chain_correction(u) - drift).norm() < 1e-6f);
+}
+
+static void chain_correction_wraps_psi()
+{
+    ChainTracker t;
+    chain_observe(t, V3(0.f, 0.f, 3.10f), std::nullopt);
+    chain_observe(t, V3(0.f, 0.f, -3.10f), V3::Zero());
+    CHECK(std::abs(chain_correction(t).z() - (2.f * static_cast<float>(M_PI) - 6.20f)) < 1e-6f);
+}
+
+static void rho_chain_se2()
+{
+    const M3 S = V3(0.034f * 0.034f, 0.0435f * 0.0435f, 0.024f * 0.024f).asDiagonal();
+    CHECK(std::abs(rho_chain(V3(0.f, 0.f, 0.024f), S) - std::exp(-0.5f)) < 1e-6f);
+    M3 Z = S; Z(2, 2) = 0.f;
+    CHECK(rho_chain(V3(0.f, 0.f, 0.01f), Z) == 0.f);
+    CHECK(rho_chain(V3(0.01f, 0.f, 0.f), Z) > 0.f);
+}
+
+static void lever_transport_invariance()
+{
+    const Eigen::Vector2f l0(0.09f, 1.65f), dr(0.3f, -0.2f);
+    Eigen::Vector2f l1 = l0;
+    ChainLever L; L.l = l0; L.set = true;
+    lever_step(L, dr, 1.f, Eigen::Vector2f::Zero(), Eigen::Vector2f::Zero());
+    l1 = L.l;
+    const Eigen::Matrix<double, 6, 3> lhs = chain_B(l1) * chain_transport(dr), rhs = chain_B(l0);
+    CHECK((lhs - rhs).cwiseAbs().maxCoeff() < 1e-6);   // float lever
+}
+
+static void lever_relaxes_with_rho()
+{
+    const Eigen::Vector2f c(2.f, 3.f), r(0.5f, 1.f), dr(0.1f, 0.1f);
+    ChainLever L; lever_start(L, Eigen::Vector2f(9.f, 9.f), Eigen::Vector2f(0.f, 0.f));
+    CHECK(L.set);
+    lever_step(L, dr, 0.f, c, r);
+    CHECK((L.l - (c - r)).norm() == 0.f);
+    ChainLever M; M.l = Eigen::Vector2f(1.f, 1.f); M.set = true;
+    lever_step(M, dr, 0.5f, c, r);
+    CHECK((M.l - 0.5f * (Eigen::Vector2f(1.f, 1.f) - dr + (c - r))).norm() < 1e-6f);
 }
 
 int main()
 {
-    chain_fails_closed();
+    chain_fails_closed(); rho_chain_zero_correction_is_one_se2(); pose_cov_round_trip(); pose_cov_absent_is_zero();
+    chain_correction_se2(); chain_correction_wraps_psi(); rho_chain_se2(); lever_transport_invariance(); lever_relaxes_with_rho();
     parked_is_one(); stale_odometry_is_parked(); odometry_axes(); camera_efold_is_half_width(); lidar_efold();
-    composes(); rotation_in_place_is_one(); absent_ring_gap_is_one(); rho_chain_zero_correction_is_one();
+    composes(); rotation_in_place_is_one(); absent_ring_gap_is_one();
     degenerate_geometry_unchanged();
     std::printf(bad == 0 ? "viewpoint_rho_test: PASS\n" : "viewpoint_rho_test: %d FAILED\n", bad);
     return bad == 0 ? 0 : 1;

@@ -136,7 +136,7 @@ add_test(NAME mask_membership_test COMMAND mask_membership_test)
 
 # Viewpoint rho from the odometry path relative to the object (spec 2026-11-15 lidar-measures §7c.2). Pure Eigen.
 add_executable(viewpoint_rho_test viewpoint_rho_test.cpp ../src/countable_viewpoint.cpp)
-target_include_directories(viewpoint_rho_test PRIVATE ../src)
+target_include_directories(viewpoint_rho_test PRIVATE ../src ../../common)
 target_compile_options(viewpoint_rho_test PRIVATE -O2)
 target_link_libraries(viewpoint_rho_test PRIVATE Eigen3::Eigen)
 add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)

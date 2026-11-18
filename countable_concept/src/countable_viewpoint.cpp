@@ -1,6 +1,9 @@
 #include "countable_viewpoint.h"
 
 #include <cmath>
+#include <algorithm>
+
+#include "place_memory/place_map.h"
 
 namespace rc {
 
@@ -43,23 +46,41 @@ float rho_lidar_height(const ViewpointPath& p, float z_m, float eps_rad, float g
     return std::exp(-std::abs(p.dz_m) * std::abs(std::tan(eps_rad)) / (g * z_m));
 }
 
-void chain_observe(ChainTracker& t, const Eigen::Vector2f& pose_xy, std::optional<Eigen::Vector2f> odo_step)
+namespace {
+float wrap_pi(float a)
+{
+    a = std::fmod(a + static_cast<float>(M_PI), 2.f * static_cast<float>(M_PI));
+    if (a <= 0.f) a += 2.f * static_cast<float>(M_PI);
+    return a - static_cast<float>(M_PI);
+}
+}  // namespace
+
+Eigen::Vector3f odometry_step_room_se2(float v_adv, float v_side, float omega, float yaw_room, float dt_s)
+{
+    const Eigen::Vector2f d = odometry_step_room(v_adv, v_side, yaw_room, dt_s);
+    return {d.x(), d.y(), omega * dt_s};
+}
+
+void chain_observe(ChainTracker& t, const Eigen::Vector3f& pose, std::optional<Eigen::Vector3f> odo_step)
 {
     if (not t.have)
     {
-        t.ref = t.prev = pose_xy;
+        t.ref = t.prev = pose;
         t.odo.setZero();
         t.have = true;
         return;
     }
     if (odo_step.has_value()) t.odo += *odo_step;
-    else                      t.ref += pose_xy - t.prev;   // unknown odometry: not a correction (fail closed)
-    t.prev = pose_xy;
+    else                      t.ref += pose - t.prev;   // unknown odometry: not a correction (fail closed)
+    t.prev = pose;
 }
 
-Eigen::Vector2f chain_correction(const ChainTracker& t)
+Eigen::Vector3f chain_correction(const ChainTracker& t)
 {
-    return t.have ? Eigen::Vector2f((t.prev - t.ref) - t.odo) : Eigen::Vector2f::Zero();
+    if (not t.have) return Eigen::Vector3f::Zero();
+    Eigen::Vector3f c = (t.prev - t.ref) - t.odo;
+    c.z() = wrap_pi(c.z());
+    return c;
 }
 
 void chain_rebase(ChainTracker& t)
@@ -68,20 +89,55 @@ void chain_rebase(ChainTracker& t)
     t.odo.setZero();
 }
 
-float rho_chain(const Eigen::Vector2f& c, float var_xx, float var_yy)
+float rho_chain(const Eigen::Vector3f& c, const Eigen::Matrix3f& S)
 {
-    float e = 0.f;
-    const float cs[2] = {c.x(), c.y()}, vs[2] = {var_xx, var_yy};
-    for (int i = 0; i < 2; ++i)
-    {
-        if (vs[i] == 0.f)
-        {
-            if (cs[i] != 0.f) return 0.f;
-            continue;
-        }
-        e += cs[i] * cs[i] / vs[i];
-    }
-    return std::exp(-0.5f * e);
+    // Pseudo-inverse: directions of zero variance are the model's "no uncertainty there", handled exactly.
+    const Eigen::Matrix3d Sd = S.cast<double>();
+    const Eigen::Vector3d cd = c.cast<double>();
+    const Eigen::Matrix3d Sinv = Eigen::CompleteOrthogonalDecomposition<Eigen::Matrix3d>(Sd).pseudoInverse();
+    // The part of c outside the range of Σ cannot be explained by it at all ⇒ rho = 0.
+    const Eigen::Vector3d resid = cd - Sd * Sinv * cd;
+    if (resid.norm() > 1e-9 * std::max(1.0, cd.norm())) return 0.f;   // numerical zero of the rank test, not a model threshold
+    return static_cast<float>(std::exp(-0.5 * cd.dot(Sinv * cd)));
+}
+
+Eigen::Matrix3f pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose)
+{
+    if (rt_cov36.size() < 36) return Eigen::Matrix3f::Zero();
+    constexpr int idx[3] = {0, 1, 5};
+    Eigen::Matrix3f S;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            S(i, j) = rt_cov36[static_cast<std::size_t>(idx[i] * 6 + idx[j])];
+    return place::invert_se2_cov(S, edge_pose);
+}
+
+Eigen::Matrix3d chain_transport(const Eigen::Vector2f& dr)
+{
+    Eigen::Matrix3d F = Eigen::Matrix3d::Identity();
+    F(0, 2) = -dr.y();
+    F(1, 2) =  dr.x();
+    return F;
+}
+
+void lever_start(ChainLever& L, const Eigen::Vector2f& seed_c, const Eigen::Vector2f& robot_r)
+{
+    L.l = seed_c - robot_r;
+    L.set = true;
+}
+
+void lever_step(ChainLever& L, const Eigen::Vector2f& dr, float rho, const Eigen::Vector2f& c, const Eigen::Vector2f& r)
+{
+    L.l = rho * (L.l - dr) + (1.f - rho) * (c - r);
+}
+
+Eigen::Matrix<double, 6, 3> chain_B(const Eigen::Vector2f& l)
+{
+    Eigen::Matrix<double, 6, 3> B = Eigen::Matrix<double, 6, 3>::Zero();
+    B(0, 0) = 1.0; B(0, 2) = -l.y();
+    B(1, 1) = 1.0; B(1, 2) =  l.x();
+    B(5, 2) = 1.0;
+    return B;
 }
 
 }  // namespace rc

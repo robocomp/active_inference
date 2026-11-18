@@ -11,6 +11,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 
 #include <Eigen/Dense>
 
@@ -44,20 +45,40 @@ float rho_lidar_height(const ViewpointPath& p, float z_m, float eps_rad, float r
 // accumulated before it are kept. ref and odo restart at the last consistent sample when the chain latent is updated.
 struct ChainTracker
 {
-    Eigen::Vector2f ref  = Eigen::Vector2f::Zero();   // pose the correction is measured from
-    Eigen::Vector2f prev = Eigen::Vector2f::Zero();   // pose at the last observed (odometry-consistent) sample
-    Eigen::Vector2f odo  = Eigen::Vector2f::Zero();   // odometry displacement integrated since ref
+    Eigen::Vector3f ref  = Eigen::Vector3f::Zero();   // (x, y, psi) the correction is measured from
+    Eigen::Vector3f prev = Eigen::Vector3f::Zero();   // pose at the last observed (odometry-consistent) sample
+    Eigen::Vector3f odo  = Eigen::Vector3f::Zero();   // odometry (dx, dy, dpsi) integrated since ref
     bool have = false;
 };
-// One sample: pose now, and the odometry step over the interval since the previous sample (nullopt ⇔ it cannot be
-// integrated ⇒ the stretch is absorbed into ref). The first sample initialises the tracker.
-void chain_observe(ChainTracker& t, const Eigen::Vector2f& pose_xy, std::optional<Eigen::Vector2f> odo_step);
-// c, the localiser's correction since ref (zero before the first sample).
-Eigen::Vector2f chain_correction(const ChainTracker& t);
+// SE(2) odometry step: (x, y) as odometry_step_room, psi = omega·dt.
+Eigen::Vector3f odometry_step_room_se2(float v_adv, float v_side, float omega, float yaw_room, float dt_s);
+// One sample: pose (x, y, psi) now, and the odometry step over the interval since the previous sample (nullopt ⇔ it
+// cannot be integrated ⇒ the stretch is absorbed into ref). The first sample initialises the tracker.
+void chain_observe(ChainTracker& t, const Eigen::Vector3f& pose, std::optional<Eigen::Vector3f> odo_step);
+// c, the localiser's correction since ref (zero before the first sample); psi wrapped to (−pi, pi].
+Eigen::Vector3f chain_correction(const ChainTracker& t);
 // After the chain latent's update: measure from the last consistent sample.
 void chain_rebase(ChainTracker& t);
 
-// exp(−½(cx²/var_xx + cy²/var_yy)). A zero variance contributes 0 when its correction is 0, else rho = 0.
-float rho_chain(const Eigen::Vector2f& correction_xy, float var_xx, float var_yy);
+// exp(−½ cᵀΣ⁻¹c) on the non-zero subspace of Σ (pseudo-inverse). A zero-variance direction with c ≠ 0 ⇒ 0; c = 0 ⇒ 1.
+float rho_chain(const Eigen::Vector3f& c, const Eigen::Matrix3f& Sigma_pose);
+
+// ── The robot's pose error in the room frame (spec 7c.7 b) ──────────────────────────────────────────────────────────
+// Σ_pose (x, y, psi) in the room frame from the robot→room edge's 6×6 row-major rt_covariance block (one 36-slot block,
+// ordered [x y z rx ry rz], in the edge's parent frame): slots {0, 1, 5}, pushed through rc::se2_inverse_jacobian
+// evaluated at the pose of the edge (the pose being inverted). Empty span ⇒ zero.
+Eigen::Matrix3f pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose);
+
+// F_t = [[1,0,−Δr_y],[0,1,Δr_x],[0,0,1]]: how the pose error e = (δx, δy, δψ) is carried by a robot translation Δr.
+Eigen::Matrix3d chain_transport(const Eigen::Vector2f& dr);
+
+// The lever ℓ (object centre − robot position, room frame) through which a robot yaw error moves the object.
+struct ChainLever { Eigen::Vector2f l = Eigen::Vector2f::Zero(); bool set = false; };
+void lever_start(ChainLever& L, const Eigen::Vector2f& seed_c, const Eigen::Vector2f& robot_r);
+// ℓ ← ρ(ℓ − Δr) + (1 − ρ)(c − r).
+void lever_step(ChainLever& L, const Eigen::Vector2f& dr, float rho_chain, const Eigen::Vector2f& belief_c,
+                const Eigen::Vector2f& robot_r);
+// Θ = (cx, cy, H, w, h, yaw): rows cx = [1,0,−ℓy], cy = [0,1,ℓx], yaw = [0,0,1]; H, w, h zero.
+Eigen::Matrix<double, 6, 3> chain_B(const Eigen::Vector2f& l);
 
 }  // namespace rc

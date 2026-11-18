@@ -242,7 +242,7 @@ private:
     // the current robot pose in the room (from the same room_T_zed the fit uses; the body centre follows from the ZED mount
     // of ROBOT_GEOMETRY.md) and the Helios position (the LiDAR channel's staged sweep origin).
     std::uint64_t   robot_node_id_ = 0;              // cached id of the "robot" node (Shadow)
-    float           odo_adv_ = 0.0f, odo_side_ = 0.0f;   // m/s (per PRODUCER second), robot frame, via rc::rt::robot_body_twist
+    float           odo_adv_ = 0.0f, odo_side_ = 0.0f, odo_omega_ = 0.0f;   // m/s (per PRODUCER second), robot frame, via rc::rt::robot_body_twist
     std::uint64_t   odo_ts_  = 0;                    // robot_current_speed_timestamp (wall epoch ms); 0 ⇒ no odometry
     rc::rt::SimClockRate sim_clock_;                 // wall → producer (sim) clock; identity on real hardware
     bool            have_helios_ = false;            // helios_now_ holds a staged sweep origin (this or an earlier cycle)

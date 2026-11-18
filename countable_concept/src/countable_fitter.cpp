@@ -131,7 +131,7 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
     {
         // The shared reader (one place for the advance/side axis convention): linear = [side (x), advance (y), 0].
         if (const auto tw = rc::rt::robot_body_twist(*G_, robot.value()); tw.has_value() and tw->stamp_ms != 0)
-        { odo_adv_ = tw->linear.y(); odo_side_ = tw->linear.x(); odo_ts_ = tw->stamp_ms; }
+        { odo_adv_ = tw->linear.y(); odo_side_ = tw->linear.x(); odo_omega_ = tw->angular.z(); odo_ts_ = tw->stamp_ms; }
         // The twist is per SIMULATION second on a simulator: feed the wall→sim clock (identity on real hardware).
         if (const auto st = rc::rt::robot_twist_sim_stamps(*G_, robot.value()); st.has_value())
             sim_clock_.observe(st->first, st->second);
@@ -162,7 +162,7 @@ void CountableFitter::integrate_odometry(CountableInstance& inst)
     //  - pending (stamp not advanced yet, < 1 s old): nothing is consumed, so the next sample's interval covers it.
     // "1 s ⇒ unknown" is the producer's convention (robot_concept specificworker.cpp ~2288:
     // `period_ms = … own_ms - prev < 1000 ? … : 0`, "0 (unknown) on the first or after a gap"), not a new constant.
-    std::optional<Eigen::Vector2f> step;
+    std::optional<Eigen::Vector3f> step3;   // (dx, dy, dpsi) room frame
     bool pending = false;
     if (odo_ts_ != 0 and inst.last_odo_ts != 0)
     {
@@ -173,7 +173,7 @@ void CountableFitter::integrate_odometry(CountableInstance& inst)
             const double dt = sim_clock_.interval_s(static_cast<std::int64_t>(inst.last_odo_ts),
                                                     static_cast<std::int64_t>(odo_ts_));
             if (dt < 1.0)
-                step = rc::odometry_step_room(odo_adv_, odo_side_, robot_yaw_now_, static_cast<float>(dt));
+                step3 = rc::odometry_step_room_se2(odo_adv_, odo_side_, odo_omega_, robot_yaw_now_, static_cast<float>(dt));
         }
         else
         {
@@ -183,14 +183,15 @@ void CountableFitter::integrate_odometry(CountableInstance& inst)
         }
     }
     if (pending) return;
-    if (step.has_value())
+    if (step3.has_value())
     {
+        const Eigen::Vector2f step = step3->head<2>();
         const auto& s = inst.ai2_belief.state();
         const Eigen::Vector2f centre(s.cx, s.cy);
-        rc::accumulate_path(inst.path_cam, zed_xy_now_, *step, centre);
-        if (have_helios_) rc::accumulate_path(inst.path_L, helios_now_.head<2>(), *step, centre);
+        rc::accumulate_path(inst.path_cam, zed_xy_now_, step, centre);
+        if (have_helios_) rc::accumulate_path(inst.path_L, helios_now_.head<2>(), step, centre);
     }
-    rc::chain_observe(inst.chain, robot_xy_now_, step);
+    rc::chain_observe(inst.chain, Eigen::Vector3f(robot_xy_now_.x(), robot_xy_now_.y(), robot_yaw_now_), step3);
     if (odo_ts_ > inst.last_odo_ts) inst.last_odo_ts = odo_ts_;
 }
 
@@ -232,7 +233,12 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
     // latent's last update (a relocalisation jump gives ρ ≈ 0 by the formula itself).
     float rho_ch = 1.0f;
     if (inst.chain.have)
-        rho_ch = rc::rho_chain(rc::chain_correction(inst.chain), inst.chain_cov_xx, inst.chain_cov_yy);
+    {
+        // psi is not yet in the chain latent (Task 13): keep the x,y-only behaviour by leaving psi out of c.
+        Eigen::Vector3f c = rc::chain_correction(inst.chain);
+        c.z() = 0.f;
+        rho_ch = rc::rho_chain(c, Eigen::Vector3f(inst.chain_cov_xx, inst.chain_cov_yy, 0.f).asDiagonal());
+    }
     frame.rho_cam.fill(rho_cam);
     frame.rho_L   = {rho_lat, rho_lat, rho_H, rho_lat, rho_lat, rho_lat};
     frame.rho_chain = {rho_ch, rho_ch};
