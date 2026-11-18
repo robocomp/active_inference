@@ -571,6 +571,39 @@ c (3), `gn_it`, `gn_conv`, the final λ.
 - Live: rerun on, off, shift; no instance's |e| exceeds 3σ of Σ_pose; √diag Σ_pose,t while parked reported; §8 as
   before.
 
+**Amendment 11-18 (rulings T14-1…T14-7, T13-1; final review I2).** Where this conflicts with (d) or the Pass list above,
+this governs.
+- **Convergence (T14-4, supersedes T14-1's definition).** `gn_conv` = 1 when an ACCEPTED θ step is below the tolerance
+  (1 mm on cx, cy, H, w, h; 1 mrad on yaw), OR when a damped proposal is rejected below it and the UNDAMPED (λ = 0)
+  proposal from the same θ is below it too (one extra solve per linearisation; a growing λ cannot fake it). Otherwise
+  the update stops at `gn_iters_max` with `gn_conv` = 0, logged, no gate.
+- **δ_last (T14-1, kept by T14-4).** P_θθ += δ_last δ_lastᵀ with δ_last = the last ACCEPTED θ step, zero if none was
+  accepted. Not the remaining (rejected) step: on a ray edge that is the cm-scale undamped kink step, and adding it on
+  every parked frame would be process noise by another name.
+- **Why the ray fixtures do not converge in the GN sense.** The first-crossing ray energy (§7c.6) is piecewise: a ray
+  that stops crossing the model drops its term, ≈ 9 nats per ray edge (Task 6b). The minimum sits on a ray edge, where
+  every step into the edge is rejected and the undamped step still points ~1 cm into it, so `gn_conv` = 0 is the true
+  report there (T14-7). Read live `gn_conv` = 0 with `gn_it` = 12 while parked as "θ on a ray edge", not "diverged".
+- **Pass items deferred to the smooth-ray follow-up** (a smooth ray likelihood removes the kink; until then these are
+  printed, not checked):
+  - "the fixture's first update returns `gn_conv` = 1": CHECKed on the camera-only fixture (smooth energy, converges in
+    4); on the camera + ray fixture it reports `gn_conv` = 0, while θ equals the 200-step run (1 mm, 1 mrad) and √diag P
+    equals it within 5 % — both CHECKed (T14-7).
+  - `lever_arm_sensitivity`, "θ equals the truth-seeded control within σ_ψ·|seed − truth|" (T13-1: the FULL control,
+    seed and lever): e is CHECKed per component (|e| ≤ 0.1σ, measured ~1 mm) and yaw within σ_ψ; θ's position is
+    PRINTED, measured cx +4.41 mm against a bound of 3.87 mm — both runs stop ~0.2 mm from a ray edge, so the
+    difference is the resolution of the piecewise ray energy, not the update (T14-5).
+- **"Second update, parked: θ moves less than the tolerance" is replaced (T14-2, T14-5).** Repeated frames carry
+  independent per-frame noise, so θ legitimately moves away from the class-prior pull after the first frame. Camera
+  only: over 10 identical parked frames the θ step sizes are non-increasing (1e-9 slack) and the step at frame 10 is
+  below the tolerance. With rays: the step is exactly 0 from some frame ≤ 10 on, and the total θ drift after frame 1
+  is < 1 cm per position component.
+- **ρ = 0 regression (T14-3).** Damping changes the iterates by design; the CONVERGED results are compared (1e-6).
+- **Yaw near ±π (final review I1).** Inside the loop each iterate's yaw is kept on x̄'s branch (the multiple of 2π
+  nearest x̄'s yaw, after `apply_constraints`), so the prior pull and the acceptance's prior energy see one unwrapped
+  yaw difference; θ is wrapped once after the loop. Pass: `wrap_invariance_near_pi` — the same π-symmetric fixture
+  seeded at −5 mrad and at π − 5 mrad gives the same θ (mod π), b and P, to the float floor of a float state at yaw ≈ π.
+
 ## 8. Pass
 
 - **Unit:** a LiDAR-only frame whose memberships all vanish leaves the belief at the prediction (state, Σ and ω);
