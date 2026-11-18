@@ -293,9 +293,9 @@ CountableFitter::PoseAtStamp CountableFitter::pose_at_stamp(std::uint64_t ts_ms)
 {
     PoseAtStamp out;
     if (not G_ or robot_node_id_ == 0) return out;
-    const auto room = G_->get_node(rc::room::current_room_frame(*G_));
-    if (not room.has_value()) return out;
-    const auto e = G_->get_edge(robot_node_id_, room->id(), "RT");
+    const auto room_id = rc::room::current_room(*G_);                 // the id only: no copy of the room node
+    if (not room_id.has_value()) return out;
+    const auto e = G_->get_edge(robot_node_id_, *room_id, "RT");
     if (not e.has_value()) return out;
     const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
     const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
