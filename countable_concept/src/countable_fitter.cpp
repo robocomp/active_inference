@@ -1640,7 +1640,8 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << "sbcam_H,sbL_H,ray_n,Itr_cam,Itr_L,"
                  << "e_x,e_y,e_psi,se_x,se_y,se_psi,lever_x,lever_y,spose_x,spose_y,spose_psi,c_x,c_y,c_psi,"
                  // §7c.7 d: the damped GN of the belief's last persistent update — steps taken (accepted + rejected; 0 = no
-                 // measured update), whether the proposed θ step (accepted or rejected) met the tolerance (1) or the cap ended it (0), the final λ (T14-1).
+                 // measured update), converged (1: an accepted θ step below the tolerance, or a rejected one whose undamped
+                 // proposal is below it, ruling T14-4) or the cap ended it (0; with rays usually θ on a ray edge), the final λ.
                  << "gn_it,gn_conv,gn_lambda\n";
     }
     const auto& s = inst.ai2_belief.state();

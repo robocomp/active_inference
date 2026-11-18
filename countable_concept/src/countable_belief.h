@@ -256,8 +256,10 @@ struct CountableBeliefParams
 
     // Optimiser
     int   gn_iters = 4;              // Gauss-Newton iterations per frame (the flag-off engine path)
-    // Persistent path only (spec 7c.7 d; solver constants, no config key): damped GN stops when the proposed θ step (accepted OR rejected, ruling T14-1) is below
-    // gn_tol_m on cx, cy, H, w, h and gn_tol_rad on yaw, or after gn_iters_max accepted-or-rejected steps. A solver tolerance,
+    // Persistent path only (spec 7c.7 d; solver constants, no config key): damped GN stops converged (ruling T14-4) when an
+    // ACCEPTED θ step is below gn_tol_m on cx, cy, H, w, h and gn_tol_rad on yaw, or when a damped proposal is rejected below
+    // that tolerance and the UNDAMPED (λ = 0) proposal from the same θ is below it too; else after gn_iters_max
+    // accepted-or-rejected steps (gn_conv = 0: with LiDAR rays this is usually θ on a ray edge, not divergence). A solver tolerance,
     // not a modelling threshold. gn_reject_all_for_test is a TEST HOOK only (every step rejected, as if J never fell).
     int    gn_iters_max = 12;
     double gn_tol_m     = 1e-3;
@@ -510,12 +512,13 @@ public:
     const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return dbg_iterates_; }   // ACCEPTED θ iterates
     // J = persistent_data_energy + prior_energy at θ₀ and after every accepted step of the last persistent update (spec 7c.7 d).
     const std::vector<double>& dbg_gn_energy() const { return dbg_gn_energy_; }
-    // The last persistent update's damped GN (spec 7c.7 d): steps taken (accepted + rejected), whether the proposed θ step (accepted or rejected) fell
-    // below the tolerance, and the final λ. Logged (gn_it, gn_conv, gn_lambda); no gate reads them.
+    // The last persistent update's damped GN (spec 7c.7 d): steps taken (accepted + rejected), whether it converged (ruling
+    // T14-4: an accepted θ step below the tolerance, or a rejected one whose undamped proposal is below it), and the final λ.
+    // Logged (gn_it, gn_conv, gn_lambda); no gate reads them.
     int    last_gn_iters()     const { return last_gn_iters_; }
     bool   last_gn_converged() const { return last_gn_converged_; }
     double last_lambda()       const { return last_lambda_; }
-    // δ_last, the last ACCEPTED θ step (zero if none; ruling T14-1): P_θθ carries δ_last δ_lastᵀ on top of the joint posterior.
+    // δ_last, the last ACCEPTED θ step (zero if none; ruling T14-1, kept by T14-4): P_θθ carries δ_last δ_lastᵀ on top of the joint posterior.
     const Eigen::Matrix<double, 6, 1>& last_gn_step() const { return last_gn_step_; }
     // The data energy whose gradients accumulate_channels builds: camera (the points' mixture −log likelihood, (2d) top, the
     // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the first-crossing rays,

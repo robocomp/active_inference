@@ -1077,9 +1077,9 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     canonicalize(s);
     state_ = s;
 
-    // Step 4 at the returned θ (b̄ restart), plus the last step's outer product on θθ: an unconverged frame carries its own
-    // remaining step as uncertainty (below the tolerance it adds < 1 mm²). d_last = the last ACCEPTED step (zero if none;
-    // ruling T14-1). No gate reads gn_conv.
+    // Step 4 at the returned θ (b̄ restart), plus the last ACCEPTED step's outer product on θθ (zero if none; ruling T14-1,
+    // kept by T14-4): a frame that stopped while still moving carries its last move as uncertainty (below the tolerance it adds
+    // < 1 mm²); a rejected undamped kink step is not added (it would be process noise every parked frame). No gate reads gn_conv.
     build(state_.vec().cast<double>());
     P_ = pu::joint_cov<N, K>(P_bar, std::span<const pu::Channel<N, K>>(channels), theta_only);
     P_.topLeftCorner<N, N>() += d_last * d_last.transpose();
