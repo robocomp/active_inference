@@ -343,3 +343,140 @@ Live; the controller runs it. Webots is shared: claim it from the chat and room 
 - [ ] **Step 2:** Score with `countable_concept/tools/lidar_measures_score.py RUN_DIR [OFF_DIR]` (classic locale; `ai2_log.csv` per class + `gt_pose.tsv`, GT `scene_threerooms.csv`). A *look* = a maximal run of rows with a fresh mask and no gap > 2 s. Per real object (bed, both nightstands, toilet), against live6 and the off run: final centre error (live6: 5.5 cm; 2–6 cm; 23 cm); |H − true top| (smaller than live6); per DOF (cx, cy, H, h) after the first look within 2.5 m: rms true error, min/max std, PASS iff max std ≤ 0.15 m AND rms/3 ≤ std ≤ 3·rms, median NEES; the largest centre step toward a wall or neighbour between looks (≤ 10 cm); fit rate (≈ 10 Hz); share of `lidar_only`; medians of ρ_cam, ρ_L, ρ_chain and of the measured Δ while parked. For the shift run: final w, h, H against the TRUE size (the belief must not sit at the shifted class mean). Each line ends PASS or FAIL.
 - [ ] **Step 3:** Write `docs/superpowers/results/2026-11-16-lidar-measures-live8.md` and commit. A depth FAIL of the two-sided check on one-face views is the expected boost outcome (spec 7c.1) — reported as such. Any other FAIL is reported with its numbers, not tuned; a std below rms/3 goes to the owner as a model question.
 - [ ] **Step 4:** Push `feat/cost-removal`. If the run passes, the removal plan resumes: re-apply `wip/task-4c-rev2` and run its G0b replay on objects_live8 (real objects ≥ 0, phantoms < 0).
+
+---
+
+## Revision 4 (11-18): spec §7c.7 rev 3.2.1 — persistent errors never rescale; e = the robot's pose error
+
+**Why:** live9 nightstand_9 ended 0.374 m off: the D = σ_t/σ_{t−1} transition made a change of our own σ an observation
+(root cause `.superpowers/sdd/2026-11-15-lidar-measures/bchain-jump-report.md`; failing test on `wip/bchain-jump`
+f5b5496f). Spec §7c.7 rev 3.2.1 (owner "Go" 11-18) folds Fable's review `fable-7c-rev3.2-review.md` (R4-*).
+
+**Execution order:** 11 → 12 → 13 → 14 → 10 (as `objects_live10`, `…off`, `…shift`).
+
+**Global Constraints, rev 4 (replace the "Latents" and "Dynamics" parts of the Latents line above; all others stand):**
+- Latents: e = (δx, δy, δψ) ∈ ℝ³ (robot pose error, room frame, e = estimated − true) shared by both channels;
+  b_cam ∈ ℝ⁶, b_L ∈ ℝ⁶ as before. K = 15; offsets kChain = 0 (3), kCam = 3, kL = 9; the joint state is 21.
+- Dynamics: b_t = R F_t b_{t−1} + w, R = diag(ρ), Var w = S Σ_t S, S = diag(√(1 − ρ²)); NO D, NO Q. F = I for b_cam,
+  b_L; F_t = [[1, 0, −Δr_y], [0, 1, Δr_x], [0, 0, 1]] for e. New source (never predicted, or previous Σ zero) ⇒ ρ = 0.
+- B_chain (6×3): row cx [1, 0, −ℓ_y], row cy [0, 1, ℓ_x], row yaw [0, 0, 1]; ℓ is instance state (set at a new source
+  to seed centre − robot position, then ℓ ← ρ_chain(ℓ − Δr) + (1 − ρ_chain)(c − r_t)), constant over GN iterates.
+- Σ_pose,t = J Σ_edge Jᵀ, Σ_edge = slots {0, 1, 5} of the robot→room edge's `rt_covariance` at the capture stamp,
+  J = `se2_inverse_jacobian` (common/place_memory/place_map.h) at the stored edge pose.
+- GN: Levenberg on θ only, (𝟙 + P̄(W + λM))δ = P̄G − (x̃ − x̄), M = blockdiag(diag W_θθ, 0); accept iff J falls
+  (λ ← λ/4) else λ ← 4λ, first λ = 10⁻³; stop at θ step < 1 mm (cx, cy, H, w, h) and 1 mrad (yaw, wrapped, after
+  `apply_constraints`) or `gn_iters_max` = 12 steps; P at the returned θ plus δ_last δ_lastᵀ on θθ; `gn_conv` logged,
+  no gate. Flag-off path keeps `gn_iters` = 4 and is bit-identical.
+- Everything else in the Global Constraints above stands (flag, no thresholds, locale, -j8, commits on feat/cost-removal,
+  no symptom patches).
+
+**Review Focus, rev 4:**
+1. **No robot edge covariance** (empty or not a multiple of 36, or no entry at the stamp): Σ_pose = 0 ⇒ a zero-variance
+   e that runs, logged once (Task 12 `pose_cov_absent_is_zero`, Task 13 `zero_pose_cov_runs`).
+2. **A relocalisation while an instance is parked** (c large ⇒ ρ_chain ≈ 0): ℓ re-takes c − r_t and e is a fresh draw at
+   Σ_pose; no step in θ (Task 13 `relocalisation_redraws_e`).
+3. **Robot yaw near ±π** in the SE(2) correction and the transport: the ψ difference is wrapped (Task 12
+   `chain_correction_wraps_psi`).
+4. **A frame where every GN step is rejected** (λ grows to the cap): θ returns at θ₀, P is still taken, `gn_conv` = 0, no
+   NaN (Task 14 `all_steps_rejected_is_finite`).
+5. **Flag off**: bit-identical (`lidar_golden_test` after Tasks 13 and 14).
+
+### Task 11: Block predict and the damped joint step (shared, pure)
+
+**Files:** Modify `common/ai_belief/persistent_update.h`; Test `countable_concept/tests/persistent_update_test.cpp`.
+
+**Interfaces:**
+- Produces, in `rc::ai::persistent`:
+  - `template <int N, int K> void predict_block(Eigen::Matrix<double, N + K, N + K>& P, Eigen::Matrix<double, N + K, 1>& x, int off, int n, const Eigen::MatrixXd& F, const Eigen::VectorXd& rho, const Eigen::MatrixXd& Sigma_now, bool new_source)` — latent block at x offset N + off, size n: x_b ← R F x_b; P's rows and columns of the block (cross blocks included) by R F; P_bb += S Σ S. `new_source` ⇒ R = 0.
+  - `template <int N, int K> struct DampedStep { Eigen::Matrix<double, N + K, 1> delta, y; };`
+  - `template <int N, int K> DampedStep<N, K> joint_step_damped(const Vec& x_tilde, const Vec& x_bar, const Mat& P_bar, std::span<const Channel<N, K>> channels, const FreshInfo<N>& theta_only, double lambda)` — solves (𝟙 + P̄(W + λM))δ = P̄G − (x̃ − x̄), M = blockdiag(diag W_θθ, 0); y = G − (W + λM)δ.
+  - `template <int N, int K> double prior_energy(const DampedStep<N, K>& s, const Vec& x_new, const Vec& x_bar)` = ½ yᵀ(x_new − x̄).
+  - `predict_latents` is REMOVED; `joint_step` stays (= `joint_step_damped` at λ = 0 plus x̃).
+
+- [ ] **Step 1: Write the failing tests** in `persistent_update_test.cpp`; delete the four D-contract checks (l.211–215) and add:
+  - `block_predict_no_rescale`: n = 1, ρ = 1, Σ_now 2× Σ_prev, x_b = 0.3 ⇒ x_b stays 0.3 and P_bb unchanged (1e-12).
+  - `block_predict_marginal_mix`: ρ = 0.6, F = I ⇒ P_bb = 0.36·P_bb,prev + 0.64·Σ_now (1e-12); cross block θ–b scaled by 0.6.
+  - `block_predict_transport`: n = 3, F = [[1,0,−0.2],[0,1,0.5],[0,0,1]], ρ = 1 ⇒ x_b = F x_b, P_bb = F P_bb Fᵀ, P stays symmetric PSD (min eig ≥ −1e-12).
+  - `block_predict_new_source`: new_source = true ⇒ x_b = 0, cross blocks 0, P_bb = Σ_now.
+  - `damped_lambda_zero_is_joint_step`: x̃ + δ at λ = 0 equals `joint_step` (1e-12) on the existing 2-channel fixture.
+  - `damped_zero_variance_latent`: a latent with P̄ row/column 0 has δ = 0 for λ ∈ {0, 1e-3, 10}.
+  - `damped_large_lambda_freezes_theta`: λ = 1e8 ⇒ |δ_θ| < 1e-6 while δ_b equals the b-only solve at fixed θ (1e-6).
+  - `prior_energy_identity`: on an invertible P̄, ½yᵀ(x_new − x̄) = ½(x_new − x̄)ᵀP̄⁻¹(x_new − x̄) (1e-9), λ ∈ {0, 0.1}.
+- [ ] **Step 2:** `cmake -B build && make -C build -j8 persistent_update_test` in `countable_concept/tests`; run it. Expected: FAIL (undefined `predict_block`).
+- [ ] **Step 3:** Implement the three functions; remove `predict_latents` (its only caller is `CountableBelief::update_persistent`, which Task 13 rewires — until then call `predict_block` there with F = I per block so the build stays green; that interim drops D, which is the intended behaviour).
+- [ ] **Step 4:** Run `persistent_update_test`, `persistent_belief_test`, `lidar_golden_test`. Expected: PASS (persistent_belief_test checks that encoded D, if any, are rewritten to the no-rescale expectation and named in the report).
+- [ ] **Step 5:** Commit `persistent update: block predict without rescale, damped joint step (spec 7c.7 a, d)`.
+
+### Task 12: Pose covariance in the room, the SE(2) chain correction and the lever (countable, pure)
+
+**Files:** Modify `countable_concept/src/countable_viewpoint.h/.cpp`; Test `countable_concept/tests/viewpoint_rho_test.cpp`.
+
+**Interfaces:**
+- Consumes: `rc::se2_inverse_jacobian` / `invert_se2_cov` (common/place_memory/place_map.h).
+- Produces, in `rc`:
+  - `Eigen::Matrix3f pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose)` — Σ_edge from slots {0, 1, 5} (rows/cols of the 6×6 row-major block), returns J Σ_edge Jᵀ; an empty span ⇒ zero matrix.
+  - `ChainTracker` on SE(2): `ref`, `prev`, `odo` become `Eigen::Vector3f` (x, y, ψ); `void chain_observe(ChainTracker&, const Eigen::Vector3f& pose, std::optional<Eigen::Vector3f> odo_step)`; `Eigen::Vector3f chain_correction(const ChainTracker&)` (ψ wrapped to (−π, π]); `chain_rebase` unchanged in meaning.
+  - `Eigen::Vector3f odometry_step_room_se2(float v_adv, float v_side, float omega, float yaw_room, float dt_s)` — (x, y) as `odometry_step_room`, ψ = ω·dt.
+  - `float rho_chain(const Eigen::Vector3f& c, const Eigen::Matrix3f& Sigma_pose)` = exp(−½ cᵀ Σ⁻¹ c) on the non-zero subspace (pseudo-inverse via `Eigen::CompleteOrthogonalDecomposition`); a component with zero variance and non-zero c ⇒ 0; c = 0 ⇒ 1. The 2-D overload is removed.
+  - `Eigen::Matrix3d chain_transport(const Eigen::Vector2f& dr)` = F_t.
+  - `struct ChainLever { Eigen::Vector2f l = Eigen::Vector2f::Zero(); bool set = false; };` `void lever_start(ChainLever&, const Eigen::Vector2f& seed_c, const Eigen::Vector2f& robot_r)`; `void lever_step(ChainLever&, const Eigen::Vector2f& dr, float rho_chain, const Eigen::Vector2f& belief_c, const Eigen::Vector2f& robot_r)` = ρ(ℓ − Δr) + (1 − ρ)(c − r).
+  - `Eigen::Matrix<double, 6, 3> chain_B(const Eigen::Vector2f& l)`.
+
+- [ ] **Step 1: Write the failing tests** in `viewpoint_rho_test.cpp`:
+  - `pose_cov_round_trip`: Σ_pose = diag(0.034², 0.0435², 0.024²) with a 0.3 cross term on (x, ψ), robot pose in room (0.83, 2.24, 0.42); the edge pose = its SE(2) inverse; Σ_edge = J(robot pose) Σ_pose Jᵀ written into a 36-slot block (slots 0, 1, 5); `pose_cov_in_room` returns Σ_pose (1e-6 relative).
+  - `pose_cov_absent_is_zero`: empty span ⇒ zero.
+  - `chain_correction_se2`: odometry (0.1, 0, 0.05) per sample ×10, poses that drift by (0.01, −0.02, 0.003) beyond it ⇒ c = (0.01, −0.02, 0.003) (1e-6); a nullopt stretch is absorbed on all three components.
+  - `chain_correction_wraps_psi`: ref ψ = 3.10, pose ψ = −3.10, odometry 0 ⇒ c_ψ = 2π − 6.20 (1e-6).
+  - `rho_chain_se2`: c = (0, 0, 0.024), Σ = diag(0.034², 0.0435², 0.024²) ⇒ exp(−0.5) (1e-6); zero Σ_ψψ with c_ψ ≠ 0 ⇒ 0.
+  - `lever_transport_invariance`: ℓ₀ = (0.09, 1.65), Δr = (0.3, −0.2), ρ = 1: chain_B(ℓ₁)·F(Δr) restricted to the cx, cy, yaw rows equals chain_B(ℓ₀) (1e-9).
+  - `lever_relaxes_with_rho`: ρ = 0 ⇒ ℓ = c − r exactly; ρ = 0.5 ⇒ the midpoint.
+- [ ] **Step 2:** Build and run `viewpoint_rho_test`. Expected: FAIL (undefined symbols).
+- [ ] **Step 3:** Implement; update the existing 2-D callers in `countable_fitter.cpp` (`integrate_odometry`, the ρ_chain line ~235) to the SE(2) forms using `robot_yaw_now_` and the robot node's `robot_current_angular_speed` already read by `read_odometry_and_pose`, and keep `inst.chain_cov_xx/yy` as the Σ until Task 13 replaces it.
+- [ ] **Step 4:** Run `viewpoint_rho_test`, `persistent_belief_test`, `lidar_golden_test`. Expected: PASS.
+- [ ] **Step 5:** Commit `countable viewpoint: pose covariance in the room, SE(2) chain correction, fixed lever (spec 7c.7 b)`.
+
+### Task 13: e in the belief and the fitter (countable, flag on)
+
+**Files:** Modify `countable_concept/src/countable_belief.h/.cpp`, `countable_fitter.cpp/.h`, `countable_instance.h`; Test `countable_concept/tests/persistent_belief_test.cpp`, new `countable_concept/tests/bchain_jump_test.cpp` (cherry-pick f5b5496f from `wip/bchain-jump`, then restate), `tests/CMakeLists.txt`.
+
+**Interfaces:**
+- Consumes: Task 11's `predict_block`; Task 12's `pose_cov_in_room`, `chain_transport`, `ChainLever`, `lever_start`, `lever_step`, `chain_B`, SE(2) `rho_chain`.
+- Produces:
+  - `CountableBelief`: K = 15, `kChain = 0` (3), `kCam = 3`, `kL = 9`; alias `MatJd` (21×21) replaces `Mat20d` (update every user, tests included); `VecKd` 15.
+  - `CountableFrame` replaces `rho_chain` (array 2) and `sig2_chain` with `float rho_chain`, `Eigen::Matrix3f sigma_pose`, `Eigen::Vector2f chain_dr` (room displacement since this instance's last update), `Eigen::Vector2f robot_xy` (at the capture stamp).
+  - The belief stores `ChainLever lever_` and `Eigen::Matrix3f last_sigma_pose_`; `const ChainLever& chain_lever() const`.
+  - ai2_log columns, appended after `Itr_L`: `e_x,e_y,e_psi,se_x,se_y,se_psi,lever_x,lever_y,spose_x,spose_y,spose_psi,c_x,c_y,c_psi` (the `bchain_x,bchain_y` columns are removed; update `countable_concept/tools/lidar_measures_score.py` to read `e_x,e_y` where it read them, tolerating both).
+
+- [ ] **Step 1: Write the failing tests.**
+  - `bchain_jump_test.cpp` (restated per spec 7c.7 Pass): `linear_scale_coupling` — live inputs (belief centre (0.92, 3.75) on update 1, (0.89, 3.90) on update 2, robot (0.83, 2.24), Σ_pose diag(0.034², 0.0435², 0.024²)): result equals the run whose belief centre does not move (1e-9), cx = 0.9385 (1 mm), |e| ≤ 0.1σ per component; `lever_arm_sensitivity` (ray-cast): e and θ equal the control seeded at the truth within σ_ψ·|seed − truth|.
+  - `persistent_belief_test`: `parked_range_jitter_equality` (1000 identical frames, ρ = 1, mask range ±10⁻⁴ relative vs no jitter: θ, b, P equal at float tolerance); `transport_invariance_arc` (ray-cast nightstand, robot dead-reckoned with true δψ = 0.02 rad, 90° arc at 1.5 m, ρ_chain = 1: B_t F_t = B_{t−1} to 1e-9 every update; √diag Σ_e never below its value after update 1 (0.1 %); NEES of e in [0.1, 10]; θ error within its own 2σ); `rho0_regression_zero_pose_cov` (Σ_pose = 0: the persistent path equals the flag-off path without chain covariance at every iterate on camera-only and LiDAR-only frames, fixtures with no rejected step); `chain_once_for_both_3x3` (parked camera + LiDAR: data information on (cx, cy, yaw) = (B Σ_pose Bᵀ + (Σ_cam⁻¹ + Σ_L⁻¹)⁻¹)⁻¹, 1e-6 relative); `zero_pose_cov_runs`; `relocalisation_redraws_e` (ρ_chain = 0 ⇒ e mean 0, Σ_e = Σ_pose, ℓ = c − r, θ unmoved by the predict); `sanitize_reseeds_e`; `mode_rotation_leaves_e`.
+- [ ] **Step 2:** Build `bchain_jump_test persistent_belief_test` (-j8); run. Expected: FAIL.
+- [ ] **Step 3:** Implement. In `update_persistent`: predict e with `predict_block(F = chain_transport(f.chain_dr), ρ = f.rho_chain, Σ = f.sigma_pose, new_source = not lever_.set)`; on a new source `lever_start(seed centre = state_ (cx, cy), f.robot_xy)`, else `lever_step(f.chain_dr, f.rho_chain, state_ centre, f.robot_xy)` before the predict; B_cam, B_L get `chain_B(lever_.l)` in their e columns. In the fitter: Σ_pose from the robot→room edge's `rt_covariance` entry at the mask capture stamp (the history index matching the edge's `rt_time_stamps`; edge pose = the RT translation/rotation at that index) via `pose_cov_in_room`; `chain_dr` from the odometry `integrate_odometry` walks; `robot_xy` at the capture stamp; ρ_chain from Task 12 with Σ_pose. Remove the D-era `sig2_chain` / `chain_cov_xx` use on the flag-on path (flag-off keeps `compute_chain_cov`). Spec §7c.7 b bookkeeping: sanitize re-seeds e at `last_sigma_pose_`, canonicalize / mode rotation leave e and ℓ, LTSM restore stores neither.
+- [ ] **Step 4:** Run every countable test (`ctest` in the tests build) and `lidar_golden_test`. Expected: PASS; flag-off golden bit-exact.
+- [ ] **Step 5:** Commit `countable belief: e = robot pose error with a fixed lever (spec 7c.7 b, c)`.
+
+### Task 14: The update converges before P is taken (countable, flag on)
+
+**Files:** Modify `countable_concept/src/countable_belief.h/.cpp`, `countable_fitter.cpp` (log); Test `countable_concept/tests/persistent_belief_test.cpp`.
+
+**Interfaces:**
+- Consumes: Task 11's `joint_step_damped`, `prior_energy`.
+- Produces: `CountableBeliefParams::gn_iters_max = 12` (persistent path only; no config key); `double CountableBelief::persistent_data_energy(const CountableBeliefState& s_cam, const CountableBeliefState& s_L, const CountableBeliefState& s_th, const CountableFrame& f) const` — the sum of the energies whose gradients `accumulate_channels` builds (camera, LiDAR, θ-only), each term's own energy at its own linearisation point; fresh-covariance marginalisation is NOT in the energy (stated in the header: Σf is ego-motion, zero parked). Belief accessors `int last_gn_iters() const`, `bool last_gn_converged() const`, `double last_lambda() const`; ai2_log columns `gn_it,gn_conv,gn_lambda` appended after Task 13's.
+
+- [ ] **Step 1: Write the failing tests** in `persistent_belief_test.cpp`:
+  - `energy_gradient_consistent`: on the nightstand fixture, the central finite difference of `persistent_data_energy` in each θ DOF equals −(bd_cam + bd_L + bd_th) within 1 % (or 1e-6 absolute).
+  - `first_update_converges`: seed = birth on priors with the class mean 6 cm off: `last_gn_converged()` = true within 12; J non-increasing over accepted steps; θ equals the same solver run for 200 steps (1 mm, 1 mrad) and √diag P within 5 % per component.
+  - `parked_second_update_still`: the next identical frame moves θ less than 1 mm / 1 mrad.
+  - `all_steps_rejected_is_finite`: an energy made non-decreasing (test hook that rejects every step) ⇒ θ = θ₀, P finite and PSD, `last_gn_converged()` = false.
+  - `cycle_cost`: time 100 updates of the nightstand fixture; print the mean ms and implied Hz (no assertion; the number goes into the report).
+- [ ] **Step 2:** Build and run. Expected: FAIL.
+- [ ] **Step 3:** Replace the fixed `gn_iters` loop in `update_persistent` with the spec 7c.7 d loop: build at θ_k (b restarted at b̄), `joint_step_damped(λ)`, constraints, J = `persistent_data_energy` at the candidate + `prior_energy`; accept ⇒ λ/4, else 4λ and re-solve without re-building; stop at the tolerance or 12 steps; P from `joint_cov` at the returned θ plus δ_last δ_lastᵀ on θθ. If J stalls above the tolerance on the fixture, switch to the consistent variant (x̃_k = (θ_k, b_k) linearised at θ_k + B b_k) and say so in the report.
+- [ ] **Step 4:** Run every countable test and `lidar_golden_test`. Expected: PASS; report the `cycle_cost` Hz.
+- [ ] **Step 5:** Commit `countable belief: damped GN converges before P is taken (spec 7c.7 d)`.
+
+### Task 10 again (controller, live): objects_live10, objects_live10off, objects_live10shift
+
+As Task 10 Steps 1–4 (claim Webots from room and chat; rebuild nightstand/bed/toilet; the fleet from main), plus: no
+instance's |e| exceeds 3σ of Σ_pose; √diag Σ_pose,t while parked against `proto_room.csv`'s pose σ at the same stamps
+(the C3 live check, 1 %); median `gn_it` and the share of `gn_conv` = 0; fit rate ≥ 8 Hz. Results in
+`docs/superpowers/results/2026-11-18-lidar-measures-live10.md`.
