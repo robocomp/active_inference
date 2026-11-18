@@ -25,7 +25,7 @@ Safety (each violation printed with its timestamp):
   S5 passage        a live passage_N whose two `match`ed doors hang from the SAME room.
   S6 recall-live    recall_<room> inserted while a live room carries that name (room_recall.cpp:162 says never).
   S7 false-switch  (gt) a room_concept switch that no true door crossing explains (crossings matched one-to-one).
-  S8 leg-without-crossing (gt) a controller_mission leg went in_progress -> completed with no true crossing between.
+  S8 leg-without-crossing (gt) a controller_mission that crosses a door went in_progress -> completed with no true crossing between.
   C1 recall-churn   the same recall_<room> node inserted >= 3 times (ltsm re-posting it: RoomSwap staging, proto15).
   C2 proposal-churn the same recognition proposal rejected >= 3 times.
 Liveness (bounded):
@@ -112,11 +112,13 @@ def check_trace(path, bound_ms):
     stopping = {}                         # agent -> t its agent node was deleted (graceful stop)
     info = []
     exec_lost = {}                        # door name -> (t, deleter, executor) when its aff_<door>_cross went executing
-    extra = {'mission': [], 'recall_ins': [], 'proposal': []}
+    extra = {'mission': [], 'mission_kind': [], 'recall_ins': [], 'proposal': []}
     for r in read_trace(path):
         ev, t, w, a, b, et = r['event'], r['t'], r['agent'], r['a'], r['b'], r['edge_type']
         if ev in ('attr', 'attr_birth') and r['attr'] == 'state':
             if r['a_name'] == 'controller_mission': extra['mission'].append((t, r['value']))
+        if ev == 'attr' and r['attr'] == 'mission' and r['a_name'] == 'controller_mission':
+            extra['mission_kind'].append((t, r['value']))   # "<title>|cross" or "<title>|-" (graph_recorder, 11-18)
             if r['a_name'].startswith('proposal_'): extra['proposal'].append((t, r['a_name'], r['value'], w))
         if ev == 'node_insert' and r['a_name'].startswith('recall_'): extra['recall_ins'].append((t, r['a_name']))
         if ev == 'snap_node':
@@ -314,11 +316,18 @@ def main():
                 viol['S7 false-switch'].append(f"t={t} room_concept moved the robot into {nm}; no true door crossing is left "
                                                f"to explain it (each crossing explains one switch)")
         # S8: a mission leg reported `completed` with no true crossing since it went in_progress
+        # Only a mission that CROSSES a door is a leg: a look-round or a calibration turn stays in its room by design
+        # (objects_live9/10: every S8 was a 60 s lookround). Traces recorded before the recorder logged the mission
+        # kind (11-18) have no 'mission' rows: every mission is judged, as before.
+        kinds = extra['mission_kind']
+        def crosses(t):
+            k = [v for tk, v in kinds if tk <= t]
+            return (not kinds) or (bool(k) and k[-1].endswith('|cross'))
         start = None
         for t, st in extra['mission']:
             if st == 'in_progress': start = t
             elif st == 'completed' and start is not None:
-                if not any(start <= tx <= t for tx, _, _ in xs):
+                if crosses(start) and not any(start <= tx <= t for tx, _, _ in xs):
                     viol['S8 leg-without-crossing'].append(f"leg in_progress t={start} -> completed t={t}: the robot crossed "
                                                            f"no door in between (ground truth)")
                 start = None

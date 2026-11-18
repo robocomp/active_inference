@@ -14,6 +14,8 @@
 #include <dsr/api/dsr_api.h>
 
 #include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTimer>
 
 #include <charconv>
@@ -94,6 +96,16 @@ struct Recorder
         else if (a == "parent") { if (auto x = G->get_attrib_by_name<parent_att>(n.value()); x) { v = std::to_string(x.value()); has = true; } }
         else if (a == "recall_late") { if (auto x = G->get_attrib_by_name<recall_late_att>(n.value()); x) { v = x.value() ? "1" : "0"; has = true; } }
         if (has or not at_birth) row(at_birth ? "attr_birth" : "attr", info.agent_id, id, 0, {}, a, v);
+        // The controller's mission: WHICH mission changed state, so a checker can tell a crossing leg from a
+        // look-round (trace_check S8, 11-18). value = "<title>|cross" when any step crosses a door, else "<title>|-".
+        if (has and a == "state" and n->name() == "controller_mission")
+            if (const auto ir = G->get_attrib_by_name<current_intention_att>(n.value()); ir.has_value())
+            {
+                const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(ir.value().get()));
+                const std::string title = doc.object().value("title").toString().toStdString();
+                const bool crosses = doc.toJson(QJsonDocument::Compact).contains("\"op\":\"cross\"");
+                row("attr", info.agent_id, id, 0, {}, "mission", title + (crosses ? "|cross" : "|-"));
+            }
     }
 
     void on_edge(std::uint64_t from, std::uint64_t to, const std::string& type, DSR::SignalInfo info)
