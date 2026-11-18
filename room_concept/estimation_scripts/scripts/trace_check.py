@@ -299,7 +299,11 @@ def main():
         # S7: room_concept switched the robot into a NEW room node with no true crossing near it (inside the gt span)
         # ONE crossing justifies ONE switch: each true crossing is matched to the first unmatched RT switch in
         # [tx - 2 s, tx + bound]; a switch left unmatched is false (proto15: room_3 5 s after room_2, the robot in the doorway).
-        rts = [(t, nm) for t, kind, room, nm, w in changes if kind == 'RT' and gt[0][0] <= t <= gt[-1][0]]
+        # The robot's FIRST room RT is its initial placement, not a switch: no room was left, so no crossing can
+        # explain it (11-18: every warm tour's lone S7 was the recalled room_1 hung 1.3 s after gt began).
+        first_rt = next((t for t, kind, room, nm, w in changes if kind == 'RT'), None)
+        rts = [(t, nm) for t, kind, room, nm, w in changes
+               if kind == 'RT' and t != first_rt and gt[0][0] <= t <= gt[-1][0]]
         used = set()
         for tx, door, _ in xs:
             for i, (t, nm) in enumerate(rts):
