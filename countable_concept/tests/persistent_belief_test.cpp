@@ -3,10 +3,12 @@
 // belief (lidar_golden_test.cpp); every LiDAR fixture ray-casts the TRUE scene (test_scene.h, first hit only).
 // Run: ./persistent_belief_test
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <span>
 #include <vector>
 #include <Eigen/Eigenvalues>
@@ -142,10 +144,12 @@ template <class A, class B>
 static double rel(const A& a, const B& b) { return double((a - b).norm()) / std::max(double(b.norm()), 1e-30); }
 
 // spec 7c.7 Pass: the ρ = 0 regression runs with Σ_pose = 0 (a zero-variance e; b_cam, b_L as before) and pins the persistent
-// path against the flag-off engine WITHOUT chain covariance, at every iterate. No step is rejected on these fixtures (the
-// undamped GN of this path takes every step).
+// path against the flag-off engine WITHOUT chain covariance. Ruling T14-3: the damped GN (λ ≥ 10⁻³·4⁻ᵏ on diag W_θθ) does not
+// follow the undamped engine iterate by iterate, but both converge to the same stationary point (δ = 0 solves the damped
+// system for every λ): the CONVERGED results are compared (1e-6), the engine run for kEngineIters undamped iterates.
 static void rho0_regression_zero_pose_cov(bool camera)
 {
+    constexpr int kEngineIters = 50;
     CountableBeliefParams p = params();
     p.depth_unobs_precision = 0.0f;
     // The θ-only channel off as well: the truth box is flush (back face on the wall), so the one-sided (2c) no-cross term is
@@ -163,37 +167,28 @@ static void rho0_regression_zero_pose_cov(bool camera)
 
     CountableBelief a = fx;
     a.update(f);
-    const auto& its = a.dbg_iterates();
     const char* nm = camera ? "rho0_zero_pose_cov_camera_only" : "rho0_zero_pose_cov_lidar_only";
-    CHECK(int(its.size()) == p.gn_iters);
-    double worst = 0.0;
-    for (int k = 1; k <= int(its.size()); ++k)
-    {
-        CountableBelief e = fx;
-        e.set_frame_wall_for_test(f.wall);
-        EngineAdapter ad{e, k, scinv, camera};
-        CountableBeliefState st = fx.state();
-        Mat6 S = a.dbg_Pbar_tt();
-        Vec6 pm = Vec6::Zero();
-        rc::ai::update<6>(ad, st, S, pm, f);
-        const double r_th = rel(its[k - 1], st.vec());
-        const double r_step = rel(its[k - 1] - fx.state().vec(), st.vec() - fx.state().vec());
-        worst = std::max(worst, r_th);
-        std::printf("  %s  iterate %d: theta rel %.3e (step rel %.3e)  theta-only |I|+|g| %.1e\n", nm, k, r_th, r_step, ad.th_norm);
-        CHECK(r_th < 1e-4);
-        CHECK(ad.th_norm == 0.0f);
-        if (k == int(its.size()))
-        {
-            const double r_S = rel(a.covariance(), S);
-            std::printf("  %s  Sigma_tt rel %.3e  (diag persistent %.4e %.4e %.4e %.4e %.4e %.4e)\n", nm, r_S,
-                        a.covariance()(0, 0), a.covariance()(1, 1), a.covariance()(2, 2), a.covariance()(3, 3),
-                        a.covariance()(4, 4), a.covariance()(5, 5));
-            std::printf("  %s                     (diag engine     %.4e %.4e %.4e %.4e %.4e %.4e)\n", nm,
-                        S(0, 0), S(1, 1), S(2, 2), S(3, 3), S(4, 4), S(5, 5));
-            CHECK(r_S < 1e-4);
-            CHECK(rel(a.state().vec(), st.vec()) < 1e-4);
-        }
-    }
+    CountableBelief e = fx;
+    e.set_frame_wall_for_test(f.wall);
+    EngineAdapter ad{e, kEngineIters, scinv, camera};
+    CountableBeliefState st = fx.state();
+    Mat6 S = a.dbg_Pbar_tt();
+    Vec6 pm = Vec6::Zero();
+    rc::ai::update<6>(ad, st, S, pm, f);
+    const double r_th = rel(a.state().vec(), st.vec());
+    // Σ without the solver's δ_last δ_lastᵀ (spec 7c.7 d); the engine's Σ is float, hence the 1e-4 bound kept from Task 13.
+    const Mat6 Sp = (a.joint_covariance().topLeftCorner<6, 6>() - a.last_gn_step() * a.last_gn_step().transpose()).cast<float>();
+    const double r_S  = rel(Sp, S);
+    std::printf("  %s: persistent gn_it %d conv %d (accepted %zu) vs engine %d iterates: theta rel %.3e ; Sigma_tt rel %.3e ; "
+                "theta-only |I|+|g| %.1e\n", nm, a.last_gn_iters(), int(a.last_gn_converged()), a.dbg_iterates().size(), kEngineIters,
+                r_th, r_S, ad.th_norm);
+    std::printf("  %s  (diag persistent %.4e %.4e %.4e %.4e %.4e %.4e)\n", nm, a.covariance()(0, 0), a.covariance()(1, 1),
+                a.covariance()(2, 2), a.covariance()(3, 3), a.covariance()(4, 4), a.covariance()(5, 5));
+    std::printf("  %s  (diag engine     %.4e %.4e %.4e %.4e %.4e %.4e)\n", nm, S(0, 0), S(1, 1), S(2, 2), S(3, 3), S(4, 4), S(5, 5));
+    CHECK(a.last_gn_converged());
+    CHECK(ad.th_norm == 0.0f);
+    CHECK(r_th <= 1e-6);
+    CHECK(r_S <= 1e-4);
 }
 
 static void prior_added_once()
@@ -594,7 +589,9 @@ static void chain_once_for_both_3x3()
     b.update(f);
     CHECK(b.dbg_Id_th().norm() == 0.0f);
     const M6d Pbar = b.dbg_Pbar_tt().cast<double>();
-    const M6d Ppost = b.joint_covariance().topLeftCorner<6, 6>();
+    // The joint posterior's θθ block WITHOUT the solver's remaining-step term δ_last δ_lastᵀ (spec 7c.7 d): the identity is
+    // about the model's covariance, the outer product is the solver's own uncertainty added on top.
+    const M6d Ppost = b.joint_covariance().topLeftCorner<6, 6>() - b.last_gn_step() * b.last_gn_step().transpose();
     const M6d I_data = Ppost.inverse() - Pbar.inverse();
     Mat6 Sbc = Mat6::Zero(), SbL = Mat6::Zero();
     for (int i = 0; i < 6; ++i) { Sbc(i, i) = f.sig2_cam[i]; SbL(i, i) = f.sig2_L[i]; }
@@ -923,6 +920,307 @@ static void published_cov_no_chain_double_count()
     CHECK(extra_off(0) == chain_xx and extra_off(1) == chain_yy);
 }
 
+// ─── Task 14 (spec 7c.7 d): the update converges before P is taken ────────────────────────────────────────────────────
+// Fixture: the golden nightstand (flush on the wall y = 0), camera on the front and left faces + Helios rays from the front,
+// the wall and the room axis staged, parked (ρ = 1), the full Σ_pose (x, y, ψ). Class mean 6 cm off: the footprint class
+// mean is tw + 6 cm (live8's shifted class, 0.57 against a true 0.51). Birth on priors: size at the class mean, back face on
+// the wall, centre on the cloud (cx = tx), yaw 0.
+static CountableBeliefParams shifted_params()
+{
+    CountableBeliefParams p = params();
+    p.prior_footprint_m = tw + 0.06f;
+    return p;
+}
+static CountableFrame converge_frame()
+{
+    CountableFrame f = camera_frame();
+    set_latents(f, 1.0f);
+    f.sigma_pose = full_sigma_pose();
+    f.lidar = front_rays();
+    return f;
+}
+static CountableBelief born_on_priors(const CountableBeliefParams& p)
+{
+    const float h = p.depth_mean();
+    CountableBelief b(CountableBeliefState{tx, -0.5f * h, p.prior_height_m, p.prior_footprint_m, h, 0.0f}, p);
+    b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+    return b;
+}
+static double max_theta_step(const Vec6& a, const Vec6& b, double& dyaw)
+{
+    double dm = 0.0;
+    for (int i = 0; i < 5; ++i) dm = std::max(dm, double(std::abs(a(i) - b(i))));
+    dyaw = std::abs(std::remainder(double(a(5)) - double(b(5)), 2.0 * M_PI));
+    return dm;
+}
+
+// The rays that CROSS the model at the LiDAR channel's state (the active set of the piecewise ray energy).
+static std::vector<std::size_t> active_rays(const CountableBelief& b, const Vec6& sL, const CountableFrame& f)
+{
+    const CountableBeliefParams p = params();
+    std::vector<std::size_t> idx;
+    rc::ai::detail::for_each_first_crossing(b, CountableBeliefState::from_vec(sL), f.lidar, p.model_sigma_m, not (p.headboard_h_m > 0.0f),
+        [&](std::size_t i, float, const Eigen::Vector3f&, int, float, float, float) { idx.push_back(i); });
+    return idx;
+}
+
+// The smallest distance, over the crossing rays, from the crossing point to the nearest box SEAM (the second-nearest face
+// plane; the nearest is the face it lies on). The factor's Jacobian is a central difference of the SDF at ±fd_eps
+// (sdf_jacobian), which mixes two faces' normals within ~fd_eps of a seam: there its bd is not the derivative of the range
+// residual, whatever the energy. (Box only: the fixture has no headboard.)
+static float min_seam_distance(const CountableBelief& b, const Vec6& sL, const CountableFrame& f)
+{
+    const CountableBeliefState st = CountableBeliefState::from_vec(sL);
+    float m = std::numeric_limits<float>::infinity();
+    rc::ai::detail::for_each_first_crossing(b, st, f.lidar, b.params().model_sigma_m, true,
+        [&](std::size_t, float, const Eigen::Vector3f& q, int, float, float, float)
+        {
+            const float c = std::cos(st.yaw), sn = std::sin(st.yaw);
+            const float lx = c * (q.x() - st.cx) + sn * (q.y() - st.cy), ly = -sn * (q.x() - st.cx) + c * (q.y() - st.cy);
+            std::array<float, 3> d{std::abs(0.5f * st.w - std::abs(lx)), std::abs(0.5f * st.h - std::abs(ly)),
+                                   std::min(std::abs(q.z()), std::abs(st.H - q.z()))};
+            std::ranges::sort(d);
+            m = std::min(m, d[1]);
+        });
+    return m;
+}
+
+// The central difference of persistent_data_energy in each θ DOF equals −(bd_cam + bd_L + bd_th), within 1 % (or 1e-6
+// absolute). Three linearisation points: off the truth inside the room, the back face 2 cm INTO the wall (the (2c) hinge
+// active), and short (H below plaus_height_min: the (2b) hinge active); each channel at its own state (θ, θ + b̄_cam, θ + b̄_L).
+// The ray energy is PIECEWISE (a ray carries energy only once it crosses the model; ruling T14-1 parks that as a model
+// change), so the stencil must not straddle a ray boundary: the FD step is the first of a fixed ladder whose ±h states have
+// the SAME active ray set as θ, and that identity is asserted.
+// σ_s (the rays' surface std, = model_sigma_m) is 0 in the CHECKED pass. With σ_s > 0 the ray variance carries σ_s²/(n̂·u)²
+// and the factor holds n̂·u fixed in it (as its Jacobian does), so its bd is not the exact gradient of ANY energy: the omitted
+// term is ∂E/∂A·∂A/∂θ, A = 1 + p σ_s²/(n̂·u)², and grows with the residual². That pass is printed, not checked (measured on
+// this fixture: worst |diff|/tol 3.1 on the sum; the rays alone up to 27 % on cx). Points (f.R given) do not read model_sigma_m.
+// The evaluation point also keeps every crossing more than 2·fd_eps from a box seam (min_seam_distance): within the central
+// difference sdf_jacobian takes, the factor's Jacobian mixes two faces (measured: one top-face ray 0.9 mm from a side edge
+// gave bd_cx −13.2 against a true derivative ≈ 0, 4 % of the LiDAR cx gradient).
+static double energy_gradient_pass(float sigma_s, bool check)
+{
+    const CountableFrame f = converge_frame();
+    const std::array<Vec6, 3> thetas{(Vec6() << tx + 0.03f, ty - 0.02f, tH + 0.02f, tw + 0.03f, tw - 0.02f, 0.02f).finished(),
+                                     (Vec6() << tx - 0.01f, ty + 0.02f, tH - 0.01f, tw, tw + 0.01f, -0.015f).finished(),
+                                     (Vec6() << tx + 0.01f, ty - 0.01f, 0.35f, tw, tw, 0.01f).finished()};
+    const Vec6 ocam = (Vec6() << 0.004f, -0.003f, 0.002f, 0.001f, -0.002f, 0.003f).finished();
+    const Vec6 oL   = (Vec6() << -0.002f, 0.003f, -0.001f, 0.002f, 0.001f, -0.002f).finished();
+    constexpr std::array<float, 6> ladder{1e-4f, 5e-5f, 2e-4f, 3e-5f, 2e-5f, 1e-5f};
+    CountableBeliefParams p = params();
+    p.model_sigma_m = sigma_s;
+    double worst = 0.0;
+    for (const auto& th0 : thetas)
+    {
+        CountableBelief b = make_belief(0.0f, 0.0f, 0.0f, p);
+        b.set_frame_wall_for_test(f.wall);
+        const auto S = [](const Vec6& v) { return CountableBeliefState::from_vec(v); };
+        // The evaluation point: the listed θ, or the first of a fixed ladder of 0.7 mm shifts along (cx, cy) whose crossing
+        // points all sit more than 2·fd_eps from a seam (the factor's Jacobian stencil does not straddle a face boundary).
+        Vec6 th = th0;
+        float seam = 0.0f;
+        for (int k = 0; k < 16; ++k)
+        {
+            th = th0; th(0) += 7e-4f * float(k % 4); th(1) += 7e-4f * float(k / 4);
+            seam = min_seam_distance(b, th + oL, f);
+            if (seam > 2.0f * p.fd_eps) break;
+        }
+        if (check) CHECK(seam > 2.0f * p.fd_eps);
+        Mat6 Ic, Il, It; Vec6 bc, bl, bt;
+        b.accumulate_channels(S(th), S(th + ocam), S(th + oL), f, Ic, bc, Il, bl, It, bt);
+        const Vec6 g = -(bc + bl + bt);
+        const auto act0 = active_rays(b, th + oL, f);
+        std::printf("  energy_gradient sigma_s %.3f theta (%.3f %.3f %.3f %.3f %.3f %+.3f): E %.6e ; %zu of %zu rays cross ; nearest seam %.4f m\n", sigma_s,
+                    th(0), th(1), th(2), th(3), th(4), th(5), b.persistent_data_energy(S(th + ocam), S(th + oL), S(th), f), act0.size(),
+                    f.lidar.endpoints.size(), seam);
+        for (int i = 0; i < 6; ++i)
+        {
+            float h = 0.0f;
+            Vec6 tp = th, tm = th;
+            bool same = false;
+            for (const float hc : ladder)
+            {
+                tp = th; tm = th; tp(i) += hc; tm(i) -= hc;
+                same = active_rays(b, tp + oL, f) == act0 and active_rays(b, tm + oL, f) == act0;
+                if (same) { h = hc; break; }
+            }
+            const double dh = double(tp(i)) - double(tm(i));   // the float step actually taken
+            const double fd = (b.persistent_data_energy(S(tp + ocam), S(tp + oL), S(tp), f)
+                             - b.persistent_data_energy(S(tm + ocam), S(tm + oL), S(tm), f)) / dh;
+            const double err = std::abs(fd - double(g(i))), tol = std::max(0.01 * std::abs(double(g(i))), 1e-6);
+            worst = std::max(worst, err / tol);
+            std::printf("    DOF %d (h %.0e, same active set %d): dE/dtheta (central diff) %+.6e   -(bd_cam+bd_L+bd_th) %+.6e   |diff| %.3e "
+                        "(tol %.3e)\n", i, double(h), int(same), fd, double(g(i)), err, tol);
+            if (check) { CHECK(same); CHECK(err <= tol); }
+        }
+    }
+    return worst;
+}
+static void energy_gradient_consistent()
+{
+    const double w0 = energy_gradient_pass(0.0f, true);
+    const double w1 = energy_gradient_pass(params().model_sigma_m, false);
+    std::printf("  energy_gradient_consistent: worst |diff|/tol %.3f (sigma_s = 0, checked) ; %.3f (sigma_s = %.3f, n.u held fixed in the "
+                "ray variance, not checked)\n", w0, w1, params().model_sigma_m);
+}
+
+// The first update from the birth on priors: J is non-increasing over accepted steps, and θ and √diag P equal the same solver
+// run for 200 steps (tolerance 0: it never stops early). Two fixtures (ruling T14-7): camera only, where the update must
+// report gn_conv = 1 within gn_iters_max; camera + rays, where θ stops on a ray edge of the piecewise ray energy and the
+// undamped step still points into it, so gn_conv = 0 is the true report there (logged, never a gate) — printed, not checked.
+static void first_update_converges_on(const char* nm, const CountableFrame& f, bool rays)
+{
+    CountableBelief b = born_on_priors(shifted_params());
+    const Vec6 th0 = b.state().vec();
+    b.update(f);
+    const auto& J = b.dbg_gn_energy();
+    bool mono = not J.empty();
+    for (std::size_t k = 1; k < J.size(); ++k) mono = mono and J[k] <= J[k - 1];
+    std::printf("  first_update_converges (%s): gn_it %d conv %d lambda %.3e ; accepted %zu ; J:", nm, b.last_gn_iters(),
+                int(b.last_gn_converged()), b.last_lambda(), b.dbg_iterates().size());
+    for (const double j : J) std::printf(" %.6f", j);
+    std::printf("\n");
+    for (const auto& v : b.dbg_iterates())
+        std::printf("    iterate cx %.5f cy %.5f H %.5f w %.5f h %.5f yaw %+.5f\n", v(0), v(1), v(2), v(3), v(4), v(5));
+    CountableBeliefParams q = shifted_params();
+    q.gn_iters_max = 200; q.gn_tol_m = 0.0; q.gn_tol_rad = 0.0;
+    CountableBelief r = born_on_priors(q);
+    r.update(f);
+    double dyaw = 0.0;
+    const double dpos = max_theta_step(b.state().vec(), r.state().vec(), dyaw);
+    double worst_sd = 0.0;
+    std::printf("    sqrt diag P (12 / 200):");
+    for (int i = 0; i < 6; ++i)
+    {
+        const double a = std::sqrt(double(b.covariance()(i, i))), c = std::sqrt(double(r.covariance()(i, i)));
+        worst_sd = std::max(worst_sd, std::abs(a - c) / c);
+        std::printf(" %.5f/%.5f", a, c);
+    }
+    std::printf("\n  first_update_converges (%s): theta (12-cap) vs 200 steps: max|d pos| %.3e m, |d yaw| %.3e rad ; worst sd rel %.3e ; "
+                "200-step run: gn_it %d conv %d ; theta0 -> theta moved %.4f\n", nm, dpos, dyaw, worst_sd, r.last_gn_iters(),
+                int(r.last_gn_converged()), (b.state().vec() - th0).norm());
+    if (rays)
+    {
+        // piecewise ray energy: a kink is not GN convergence; see smooth-ray follow-up (ruling T14-7)
+        std::printf("    gn_conv on the ray fixture: %d (printed, not checked)\n", int(b.last_gn_converged()));
+    }
+    else
+        CHECK(b.last_gn_converged());
+    CHECK(b.last_gn_iters() <= 12);
+    CHECK(mono);
+    CHECK(dpos <= 1e-3 and dyaw <= 1e-3);
+    CHECK(worst_sd <= 0.05);
+}
+static void first_update_converges()
+{
+    CountableFrame cam = converge_frame();
+    cam.lidar = {};
+    first_update_converges_on("camera only", cam, false);
+    first_update_converges_on("camera + rays", converge_frame(), true);
+}
+
+// Rulings T14-2, T14-5: repeated parked frames carry independent per-frame noise, so θ legitimately moves away from the
+// class-prior pull on the frames after the first (the posterior with 2× the data is not the posterior with 1×).
+// Camera only: over 10 identical parked frames the θ step sizes are non-increasing (1e-9 slack) and the step at frame 10 is
+// below the tolerance. With the rays: the piecewise ray energy stops θ on a ray edge, so the CHECK is that the step is
+// exactly 0 from some frame ≤ 10 on and the total θ drift after frame 1 is < 1 cm per position component.
+static void parked_updates_contract()
+{
+    const auto run = [](const char* nm, const CountableFrame& f, std::vector<double>& pos, std::vector<double>& yaw, Vec6& drift)
+    {
+        CountableBelief b = born_on_priors(shifted_params());
+        b.update(f);
+        const Vec6 t1 = b.state().vec();
+        std::printf("  parked_updates_contract (%s): frame steps (max |d pos| mm / |d yaw| mrad, gn_it, conv):", nm);
+        for (int k = 2; k <= 10; ++k)
+        {
+            const Vec6 tp = b.state().vec();
+            b.update(f);
+            double dy = 0.0;
+            pos.push_back(max_theta_step(b.state().vec(), tp, dy));
+            yaw.push_back(dy);
+            std::printf(" [%d] %.4f/%.4f %d %d", k, 1e3 * pos.back(), 1e3 * dy, b.last_gn_iters(), int(b.last_gn_converged()));
+        }
+        drift = (b.state().vec() - t1).cwiseAbs();
+        std::printf("\n    drift after frame 1 (mm): %.3f %.3f %.3f %.3f %.3f ; yaw %.3f mrad\n", 1e3 * drift(0), 1e3 * drift(1),
+                    1e3 * drift(2), 1e3 * drift(3), 1e3 * drift(4), 1e3 * drift(5));
+    };
+    {
+        CountableFrame f = converge_frame();
+        f.lidar = {};
+        std::vector<double> pos, yaw; Vec6 drift;
+        run("camera only", f, pos, yaw, drift);
+        bool mono = true;
+        for (std::size_t k = 1; k < pos.size(); ++k) mono = mono and pos[k] <= pos[k - 1] + 1e-9 and yaw[k] <= yaw[k - 1] + 1e-9;
+        CHECK(mono);
+        CHECK(pos.back() < 1e-3 and yaw.back() < 1e-3);
+    }
+    {
+        std::vector<double> pos, yaw; Vec6 drift;
+        run("camera + rays", converge_frame(), pos, yaw, drift);
+        std::size_t k0 = pos.size();                                   // first frame index from which every step is exactly 0
+        while (k0 > 0 and pos[k0 - 1] == 0.0 and yaw[k0 - 1] == 0.0) --k0;
+        CHECK(k0 < pos.size());                                        // the step is exactly 0 from some frame ≤ 10 on
+        CHECK(drift.head<5>().maxCoeff() < 0.01f);
+    }
+}
+
+// Every step rejected (test hook): θ returns at θ₀, P is still taken (finite, PSD), gn_conv = 0, no NaN.
+static void all_steps_rejected_is_finite()
+{
+    const CountableFrame f = converge_frame();
+    CountableBeliefParams p = shifted_params();
+    p.gn_reject_all_for_test = true;
+    CountableBelief b = born_on_priors(p);
+    const Vec6 th0 = b.state().vec();
+    b.update(f);
+    const auto& P = b.joint_covariance();
+    const Eigen::SelfAdjointEigenSolver<CountableBelief::MatJd> es(P);
+    const double min_eig = es.eigenvalues().minCoeff(), max_eig = es.eigenvalues().maxCoeff();
+    const double asym = (P - P.transpose()).cwiseAbs().maxCoeff();
+    std::printf("  all_steps_rejected_is_finite: |theta - theta0| %.3e ; gn_it %d conv %d lambda %.3e ; P finite %d ; eig [%.3e, %.3e] ; "
+                "asym %.1e ; accepted %zu\n", (b.state().vec() - th0).cwiseAbs().maxCoeff(), b.last_gn_iters(),
+                int(b.last_gn_converged()), b.last_lambda(), int(P.allFinite()), min_eig, max_eig, asym, b.dbg_iterates().size());
+    CHECK(b.state().vec() == th0);
+    CHECK(P.allFinite() and b.latent_mean().allFinite());
+    CHECK(min_eig >= -1e-12 * max_eig);
+    CHECK(b.dbg_iterates().empty());                       // nothing accepted
+    // Ruling T14-4: a growing λ cannot fake convergence — the undamped proposal from θ₀ is the seed's cm-scale correction.
+    CHECK(not b.last_gn_converged());
+    CHECK(b.last_gn_iters() == p.gn_iters_max);
+}
+
+// The cycle cost on the nightstand fixture (no assertion; the number goes into the report).
+static void cycle_cost()
+{
+    const CountableFrame f = converge_frame();
+    const CountableBelief born = born_on_priors(shifted_params());
+    {
+        CountableBelief b = born;
+        int its = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int k = 0; k < 100; ++k) { b.update(f); its += b.last_gn_iters(); }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 100.0;
+        std::printf("  cycle_cost: 100 sequential (parked) updates: mean %.3f ms (%.1f Hz) ; mean gn_it %.2f\n", ms, 1000.0 / ms,
+                    its / 100.0);
+    }
+    {
+        int its = 0;
+        double ms = 0.0;
+        for (int k = 0; k < 100; ++k)
+        {
+            CountableBelief b = born;
+            const auto t0 = std::chrono::steady_clock::now();
+            b.update(f);
+            ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            its += b.last_gn_iters();
+        }
+        ms /= 100.0;
+        std::printf("  cycle_cost: 100 first updates (birth on priors): mean %.3f ms (%.1f Hz) ; mean gn_it %.2f\n", ms, 1000.0 / ms,
+                    its / 100.0);
+    }
+}
+
 int main()
 {
     flag_off_golden();
@@ -948,6 +1246,11 @@ int main()
     good_seed_stays();
     prior_counted_once();
     first_update_flag_life();
+    energy_gradient_consistent();
+    first_update_converges();
+    parked_updates_contract();
+    all_steps_rejected_is_finite();
+    cycle_cost();
     std::printf("persistent_belief_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }

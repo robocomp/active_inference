@@ -411,7 +411,7 @@ float CountableBelief::flush_weight(const CountableBeliefState& s, const Countab
 // feels ~nothing. Finite-difference Jacobians (slope-clamped), mirroring cabinet_concept::accumulate_wall.
 void CountableBelief::accumulate_wall(const CountableBeliefState& s, const CountableFrame& f,
                                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
-                                         bool base, bool boost, bool parallel) const
+                                         bool base, bool boost, bool parallel, double* E) const
 {
     dbg_wall_gap_ = 0.0f; dbg_wall_lambda_ = 0.0f;
     if (not f.wall.ok or params_.wall_precision <= 0.0f) return;
@@ -452,6 +452,7 @@ void CountableBelief::accumulate_wall(const CountableBeliefState& s, const Count
     }
     Id.noalias() += lam_flush * (Jg * Jg.transpose());
     bd.noalias() += -lam_flush * Jg * gap;
+    if (E) *E += 0.5 * double(lam_flush) * double(gap) * double(gap);
 
     if (parallel and params_.wall_parallel_precision > 0.0f)
     {
@@ -475,6 +476,7 @@ void CountableBelief::accumulate_wall(const CountableBeliefState& s, const Count
         const float rp = par_of(s);
         Id.noalias() += lam_par * (Jp * Jp.transpose());
         bd.noalias() += -lam_par * Jp * rp;
+        if (E) *E += 0.5 * double(lam_par) * double(rp) * double(rp);
     }
 }
 
@@ -511,7 +513,7 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
 // a wall. ¼·sin(4Δ) vanishes at every multiple of 90°, so the four yaws a box can take on the room grid are
 // equally good and the front/back (and width/depth) decision stays with the data and the clearance prior.
 void CountableBelief::accumulate_room_axis(const CountableBeliefState& s, const CountableFrame& f,
-                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, double* E) const
 {
     if (f.room_axis_ok and params_.room_axis_std > 0.0f)
     {
@@ -521,6 +523,7 @@ void CountableBelief::accumulate_room_axis(const CountableBeliefState& s, const 
         const float lam = 1.0f / (params_.room_axis_std * params_.room_axis_std);
         Id(5, 5) += lam * dr * dr;
         bd(5)    += -lam * dr * r;
+        if (E) *E += 0.5 * double(lam) * double(r) * double(r);
     }
 }
 
@@ -529,7 +532,8 @@ void CountableBelief::accumulate_room_axis(const CountableBeliefState& s, const 
 //     H (index 2) is anchored separately (2a) — the top-of-box float needs a static anchor too.
 //     anchor = false keeps only the depth_unobs_precision boost (the persistent path: the class Gaussian is Σ₀, counted once).
 void CountableBelief::accumulate_footprint(const CountableBeliefState& s, const CountableFrame& f,
-                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool anchor) const
+                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool anchor,
+                                           double* E) const
 {
     if (params_.prior_footprint_std > 0.0f and not size_prior_off_)
     {
@@ -559,6 +563,11 @@ void CountableBelief::accumulate_footprint(const CountableBeliefState& s, const 
         const float lam_h = lam_wd + params_.depth_unobs_precision * depth_unobs * (1.0f - w_flush);
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
         Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.depth_mean() - s.h);   // h≡depth(index 4)
+        if (E)
+        {
+            const double rw = double(params_.prior_footprint_m - s.w), rh = double(params_.depth_mean() - s.h);
+            *E += 0.5 * (double(lam_w) * rw * rw + double(lam_h) * rh * rh);
+        }
     }
 }
 
@@ -587,13 +596,14 @@ void CountableBelief::accumulate_height(const CountableBeliefState& s, Eigen::Ma
 //      directly with the tail. The data lower-bound (front points force H ≥ real top) keeps it from under-fitting.
 //      z_top_obs is data-derived (the observed top), so a firm precision is honest, not a magic height number.
 void CountableBelief::accumulate_top(const CountableBeliefState& s, const CountableFrame& f,
-                                     Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+                                     Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, double* E) const
 {
     if (f.z_top_obs > 0.0f and params_.top_no_float_precision > 0.0f)
     {
         const float lam_tf = params_.top_no_float_precision;
         const float target = f.z_top_obs + params_.top_no_float_margin_m;
         Id(2, 2) += lam_tf;  bd(2) += lam_tf * (target - s.H);   // pull H → observed robust top (both directions)
+        if (E) *E += 0.5 * double(lam_tf) * double(target - s.H) * double(target - s.H);
     }
 }
 
@@ -607,7 +617,7 @@ void CountableBelief::accumulate_top(const CountableBeliefState& s, const Counta
 //      growing λ above carries only half its energy's Hessian, and re-entered every GN iterate on the unsaturated θ-only
 //      channel it overshoots (measured: H 0.345 → 0.303 → 0.325 → 0.315 → 0.320); the fixed precision's GN step is exact.
 void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id,
-                                              Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision) const
+                                              Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision, double* E) const
 {
     if (params_.plaus_height_prior_gain > 0.0f and params_.plaus_height_soft > 1e-4f and not size_prior_off_)
     {
@@ -617,6 +627,7 @@ void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eig
             const float lam_h = fixed_precision ? params_.plaus_height_prior_gain
                                                 : params_.plaus_height_prior_gain * (deficit / params_.plaus_height_soft);
             Id(2, 2) += lam_h;  bd(2) += lam_h * deficit;   // residual = (height_min − H) = deficit ⇒ pull H up (idx 2)
+            if (E) *E += 0.5 * double(lam_h) * double(deficit) * double(deficit);
         }
     }
 }
@@ -637,7 +648,7 @@ void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eig
 //      term is inert (a wall of unknown position std states no precision).
 void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
-                                          bool fixed_precision) const
+                                          bool fixed_precision, double* E) const
 {
     if (f.wall.ok and params_.wall_no_cross_precision > 0.0f and (not fixed_precision or f.wall.sigma_m > 0.0f))
     {
@@ -663,6 +674,7 @@ void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const C
             }
             Id.noalias() += lam_nc * (Jg * Jg.transpose());
             bd.noalias() += -lam_nc * Jg * residual;   // residual<0 ⇒ push the gap UP (back out of the wall)
+            if (E) *E += 0.5 * double(lam_nc) * double(residual) * double(residual);
         }
     }
 }
@@ -738,6 +750,55 @@ void CountableBelief::accumulate_channels(const CountableBeliefState& s_th, cons
         accumulate_room_axis(s_th, f, Id_th, bd_th);
     accumulate_short_height(s_th, Id_th, bd_th, /*fixed_precision*/ true);
     accumulate_no_cross(s_th, f, Id_th, bd_th, /*fixed_precision*/ true);
+}
+
+// The energies whose gradients accumulate_channels builds, block by block, with the same per-frame gates (spec 7c.7 d). The
+// points: the mixture's −log p (box + clutter + wall), whose gradient is Σ r_box·(d/R)·∇d — the EM identity, so the
+// responsibilities need not be held fixed; in double from the float SDF. The small blocks add their own ½λr² through their
+// energy output. The rays: rc::ai::lidar_rays_first_crossing_energy (the same crossing search as the factor).
+double CountableBelief::persistent_data_energy(const CountableBeliefState& s_cam, const CountableBeliefState& s_L,
+                                              const CountableBeliefState& s_th, const CountableFrame& f) const
+{
+    Eigen::Matrix<float, 6, 6> Id = Eigen::Matrix<float, 6, 6>::Zero();   // the blocks' information is not wanted here
+    Eigen::Matrix<float, 6, 1> bd = Eigen::Matrix<float, 6, 1>::Zero();
+    double E = 0.0;
+    const bool camera     = not f.points.empty();
+    const bool admissible = camera and not f.lidar_only;
+    if (camera)
+    {
+        const float  sig2  = sigma2();
+        const double eps   = double(std::clamp(params_.clutter_frac, 0.0f, 0.99f));
+        const double pw    = double(wall_component_frac());
+        const double cs2   = double(params_.clutter_scale_m) * double(params_.clutter_scale_m);
+        for (std::size_t i = 0; i < f.points.size(); ++i)
+        {
+            const float  R   = (i < f.R.size() and f.R[i] > 0.0f) ? f.R[i] : sig2;
+            const double Rd  = double(std::max(1e-9f, R));
+            const double d   = double(sdf_prim(f.points[i], s_cam, 0));
+            const double sum = (1.0 - eps - pw) * std::exp(-0.5 * d * d / Rd) + eps * std::exp(-0.5 * cs2 / Rd)
+                             + double(wall_component(f.points[i], R, float(pw)));
+            E += -std::log(std::max(1e-300, sum));
+        }
+        accumulate_top(s_cam, f, Id, bd, &E);
+        if (not size_prior_off_)
+        {
+            accumulate_wall(s_cam, f, Id, bd, /*base*/ false, /*boost*/ true, /*parallel*/ false, &E);
+            accumulate_footprint(s_cam, f, Id, bd, /*anchor*/ false, &E);
+        }
+    }
+    {   // LIDAR, as accumulate_rays(first_crossing = true)
+        const bool convex = not (params_.headboard_h_m > 0.0f);
+        E += rc::ai::lidar_rays_first_crossing_energy(*this, s_L, f.lidar, params_.model_sigma_m, convex);
+        for (const auto& lr : f.lidar_extra)
+            E += rc::ai::lidar_rays_first_crossing_energy(*this, s_L, lr, params_.model_sigma_m, convex);
+    }
+    if (admissible and not size_prior_off_ and f.wall.ok and not wall_prior_added_)
+        accumulate_wall(s_th, f, Id, bd, /*base*/ true, /*boost*/ false, /*parallel*/ true, &E);
+    if (admissible and not size_prior_off_ and f.room_axis_ok and not axis_prior_added_)
+        accumulate_room_axis(s_th, f, Id, bd, &E);
+    accumulate_short_height(s_th, Id, bd, /*fixed_precision*/ true, &E);
+    accumulate_no_cross(s_th, f, Id, bd, /*fixed_precision*/ true, &E);
+    return E;
 }
 
 // The params may be set after construction (the fitter does), so the joint state is seeded from Sigma_ on first use.
@@ -865,6 +926,9 @@ float CountableBelief::update_persistent(const CountableFrame& f)
 
     predict_theta_joint(1.0f);                                         // step 1, θ
     dbg_iterates_.clear();
+    dbg_gn_energy_.clear();
+    last_gn_iters_ = 0; last_gn_converged_ = false; last_lambda_ = 0.0;   // gn_it = 0 ⇒ no measured update this cycle
+    last_gn_step_.setZero();
     dbg_Pbar_tt_ = Sigma_;
     const bool camera = not f.points.empty();
     const bool lidar  = frame_has_lidar(f);                            // has_extra_data's test
@@ -917,28 +981,104 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         theta_only.g = bd_th.cast<double>();
     };
 
+    // Step 3, damped GN (spec 7c.7 d). Each step: x̃_k = (θ_k, b̄), (𝟙 + P̄(W + λM))δ = P̄G − (x̃_k − x̄), M = blockdiag(diag W_θθ,
+    // 0); the candidate's θ after apply_constraints. J = persistent_data_energy at the candidate (each channel at θ + B b) +
+    // ½ yᵀ(x − x̄) (the prior energy, without P̄⁻¹). J falls ⇒ accept, λ/4, rebuild at the new θ; else 4λ and re-solve on the
+    // same linearisation. Converged (ruling T14-4) ⇔ an ACCEPTED θ step is below gn_tol_m (cx, cy, H, w, h) and gn_tol_rad
+    // (yaw, wrapped), after apply_constraints, OR — when a damped proposal is rejected below that tolerance — the UNDAMPED
+    // (λ = 0) proposal from the same θ is below it too: θ is then determined to the tolerance (the minimum may sit on a ray
+    // edge of the piecewise LiDAR energy, where every step into the edge is rejected), and a growing λ cannot fake it. Stop at
+    // that or after gn_iters_max steps. λ, its factors and the tolerances are solver constants.
+    const auto S = [](const Vec6d& v) { return CountableBeliefState::from_vec(v.cast<float>()); };
+    const auto data_energy = [&](const VecXd& x)
+    {
+        const Vec6d th = x.head<N>();
+        const VecKd bb = x.tail<K>();
+        return persistent_data_energy(S(th + B_cam * bb), S(th + B_L * bb), S(th), f);
+    };
+    const auto wrapped = [](VecXd d) { d(5) = std::remainder(d(5), 2.0 * M_PI); return d; };   // yaw as the wrapped difference
+    const auto below_tol = [&](const Vec6d& d)
+    { return d.head<5>().cwiseAbs().maxCoeff() < params_.gn_tol_m and std::abs(d(5)) < params_.gn_tol_rad; };
+    // The θ step of a solve from x̃ after apply_constraints (NaN if the solve is not finite).
+    const auto theta_step = [&](const VecXd& x_tilde, VecXd& xn, const pu::DampedStep<N, K>& st) -> Vec6d
+    {
+        xn = x_tilde + st.delta;
+        if (not (xn.allFinite() and st.y.allFinite())) return Vec6d::Constant(std::numeric_limits<double>::quiet_NaN());
+        CountableBeliefState sn = CountableBeliefState::from_vec(xn.head<N>().cast<float>());
+        apply_constraints(sn);
+        xn.head<N>() = sn.vec().cast<double>();
+        return wrapped(xn - x_tilde).head<N>();
+    };
     Vec6d theta = state_.vec().cast<double>();                         // θ₀ = the current mean (at birth: the data seed)
     VecKd b_post = b_;
-    for (int it = 0; it < params_.gn_iters; ++it)
-    {
-        build(theta);                                                  // step 2: x̃_k = (θ_k, b̄)
-        VecXd x_tilde; x_tilde << theta, b_;
-        const VecXd xn = pu::joint_step<N, K>(x_tilde, x_bar, P_bar,
-                                              std::span<const pu::Channel<N, K>>(channels), theta_only);   // step 3
-        if (not xn.allFinite()) break;
-        CountableBeliefState s = CountableBeliefState::from_vec(xn.head<N>().cast<float>());
-        apply_constraints(s);
-        theta  = s.vec().cast<double>();                               // keep θ_{k+1}
-        b_post = xn.tail<K>();                                         // the last iterate's b is the posterior b
-        dbg_iterates_.push_back(s.vec());
+    double J_cur;
+    {   // J at x₀ = (θ₀, b̄): x₀ − x̄ is zero on b, and on θ unless this is the first update (class mean ≠ seed), where P̄'s θ
+        // block is diagonal with zero cross terms; the pseudo-inverse is then exact (and 0 when x₀ = x̄).
+        VecXd x0; x0 << theta, b_;
+        const VecXd dx = wrapped(x0 - x_bar);
+        const double Ep = dx.isZero(0.0) ? 0.0 : 0.5 * dx.dot(P_bar.completeOrthogonalDecomposition().solve(dx));
+        J_cur = data_energy(x0) + Ep;
     }
+    dbg_gn_energy_.push_back(J_cur);
+    double lambda = 1e-3;
+    Vec6d d_last = Vec6d::Zero();                                      // the last ACCEPTED θ step (zero if none)
+    bool converged = false;
+    int steps = 0;
+    bool undamped_checked = false;                                     // the λ = 0 proposal at this linearisation was tested
+    build(theta);                                                      // step 2: x̃_0 = (θ_0, b̄)
+    while (steps < params_.gn_iters_max)
+    {
+        ++steps;
+        VecXd x_tilde; x_tilde << theta, b_;
+        const auto st = pu::joint_step_damped<N, K>(x_tilde, x_bar, P_bar, std::span<const pu::Channel<N, K>>(channels),
+                                                    theta_only, lambda);
+        VecXd xn;
+        const Vec6d d = theta_step(x_tilde, xn, st);
+        bool accept = false;
+        if (d.allFinite())
+        {
+            const double J_new = data_energy(xn) + pu::prior_energy<N, K>(st, x_bar + wrapped(xn - x_bar), x_bar);
+            accept = J_new < J_cur and not params_.gn_reject_all_for_test;
+            if (accept) { J_cur = J_new; d_last = d; }
+        }
+        if (not accept)
+        {
+            if (d.allFinite() and below_tol(d) and not undamped_checked)
+            {   // a rejected sub-tolerance step: converged only if the UNDAMPED proposal from this θ is below the tolerance
+                // (one extra solve per linearisation: the λ = 0 proposal does not change until θ does)
+                undamped_checked = true;
+                VecXd x0n;
+                const auto st0 = pu::joint_step_damped<N, K>(x_tilde, x_bar, P_bar, std::span<const pu::Channel<N, K>>(channels),
+                                                             theta_only, 0.0);
+                const Vec6d d0 = theta_step(x_tilde, x0n, st0);
+                converged = d0.allFinite() and below_tol(d0);
+                if (converged) break;
+            }
+            lambda *= 4.0;                                             // re-solve on the same linearisation
+            continue;
+        }
+        converged = below_tol(d);
+        lambda /= 4.0;
+        theta  = xn.head<N>();
+        b_post = xn.tail<K>();                                         // the accepted iterate's b is the posterior b
+        dbg_iterates_.push_back(theta.cast<float>());
+        dbg_gn_energy_.push_back(J_cur);
+        if (converged) break;
+        build(theta);                                                  // step 2 at θ_{k+1}
+        undamped_checked = false;
+    }
+    last_gn_iters_ = steps; last_gn_converged_ = converged; last_lambda_ = lambda; last_gn_step_ = d_last;
     CountableBeliefState s = CountableBeliefState::from_vec(theta.cast<float>());
     apply_constraints(s);
     canonicalize(s);
     state_ = s;
 
-    build(state_.vec().cast<double>());                                // step 4 at the converged θ (b̄ restart)
+    // Step 4 at the returned θ (b̄ restart), plus the last step's outer product on θθ: an unconverged frame carries its own
+    // remaining step as uncertainty (below the tolerance it adds < 1 mm²). d_last = the last ACCEPTED step (zero if none;
+    // ruling T14-1). No gate reads gn_conv.
+    build(state_.vec().cast<double>());
     P_ = pu::joint_cov<N, K>(P_bar, std::span<const pu::Channel<N, K>>(channels), theta_only);
+    P_.topLeftCorner<N, N>() += d_last * d_last.transpose();
     b_ = b_post;
     Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
     dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;

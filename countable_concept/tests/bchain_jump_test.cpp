@@ -138,10 +138,11 @@ static SeqOut live9_sequence(const Eigen::Vector2f& seed_c, const Eigen::Vector2
 }
 
 // The lever is set from the seed centre, which is off the truth; the model error that buys is σ_ψ·|Δℓ| = σ_ψ·|seed − truth|
-// (spec 7c.7 b, stated limit). e and θ must equal the control whose lever is seeded at the truth within that. The control
-// keeps the same GN start and class-prior centre, so the comparison isolates the lever (the bound is the lever's). A
-// diagnostic run that ALSO moves the GN start / prior centre to the truth is printed, not checked: it measures the seed's
-// effect through the unconverged 4-iterate GN and the seed-centred class prior, not the lever (spec 7c.7 d / Task 14).
+// (spec 7c.7 b, stated limit). e and θ must equal the control whose lever is seeded at the truth within that. Two controls:
+// (i) the lever alone from the truth (same GN start and class-prior centre); (ii) ruling T13-1, now that the update
+// converges (spec 7c.7 d): the full truth-seeded control (seed AND lever at the truth): |e| ≤ 0.1σ per component and yaw
+// within σ_ψ (rad) are checked; the position components are printed (ruling T14-5: the piecewise ray energy resolves them
+// only to ~mm).
 static void lever_arm_sensitivity()
 {
     const float cam_dx = 0.12f;
@@ -151,20 +152,29 @@ static void lever_arm_sensitivity()
     const SeqOut lev = live9_sequence(seed, seed, cam_dx, true);
     std::printf("  control (same seed, lever from the truth (%.2f, %.2f)):\n", truth.x(), truth.y());
     const SeqOut ctl = live9_sequence(seed, truth, cam_dx, true);
-    {   // Task 14: CHECK full truth-seeded control once GN converges (ruling T13-1)
-        const SeqOut all = live9_sequence(truth, truth, cam_dx, false);
-        std::printf("  diagnostic (seed AND lever at the truth): max|dtheta| %.5f  max|de| %.5f  (not checked)\n",
-                    (lev.th - all.th).cast<double>().cwiseAbs().maxCoeff(), (lev.e - all.e).cwiseAbs().maxCoeff());
-    }
+    std::printf("  full control (seed AND lever at the truth):\n");
+    const SeqOut all = live9_sequence(truth, truth, cam_dx, true);
     const double dth = (lev.th - ctl.th).cast<double>().cwiseAbs().maxCoeff(), de = (lev.e - ctl.e).cwiseAbs().maxCoeff();
     std::printf("  lever_arm_sensitivity: max|dtheta| %.5f  max|de| %.5f  (bound sigma_psi*|seed-truth| = %.5f) ; "
-                "worst |e|/sigma %.3f / %.3f\n", dth, de, tol, lev.worst_z, ctl.worst_z);
+                "worst |e|/sigma %.3f / %.3f / %.3f\n", dth, de, tol, lev.worst_z, ctl.worst_z, all.worst_z);
     std::printf("    per component dtheta:");
     for (int i = 0; i < 6; ++i) std::printf(" %+.5f", lev.th(i) - ctl.th(i));
     std::printf("  de: %+.5f %+.5f %+.5f\n", lev.e(0) - ctl.e(0), lev.e(1) - ctl.e(1), lev.e(2) - ctl.e(2));
     CHECK(dth <= tol);
     CHECK(de <= tol);
     CHECK(lev.worst_z < 3.0 and ctl.worst_z < 3.0);
+    // (ii) T13-1 / T14-5: the full truth-seeded control. CHECKED: |e| ≤ 0.1σ per component on both runs and the yaw within
+    // σ_ψ of the control. The position components are printed only:
+    // piecewise ray energy resolution (~mm); CHECK after the smooth-ray follow-up (ruling T14-5)
+    std::printf("    full control, per component dtheta (cx cy H w h in m, printed; yaw in rad, bound %.5f):", kSigPose(2));
+    for (int i = 0; i < 6; ++i) std::printf(" %+.5f", lev.th(i) - all.th(i));
+    std::printf("  (sigma_psi*|seed-truth| = %.5f m for reference)\n", tol);
+    std::printf("    full control, de: %+.5f %+.5f %+.5f ; |e|/sigma seed run (%.3f %.3f %.3f) truth run (%.3f %.3f %.3f)\n",
+                lev.e(0) - all.e(0), lev.e(1) - all.e(1), lev.e(2) - all.e(2),
+                std::abs(lev.e(0)) / kSigPose(0), std::abs(lev.e(1)) / kSigPose(1), std::abs(lev.e(2)) / kSigPose(2),
+                std::abs(all.e(0)) / kSigPose(0), std::abs(all.e(1)) / kSigPose(1), std::abs(all.e(2)) / kSigPose(2));
+    for (int i = 0; i < 3; ++i) CHECK(std::abs(lev.e(i)) <= 0.1 * kSigPose(i) and std::abs(all.e(i)) <= 0.1 * kSigPose(i));
+    CHECK(std::abs(std::remainder(double(lev.th(5)) - double(all.th(5)), 2.0 * M_PI)) <= kSigPose(2));
 }
 
 // (2) The mechanism alone, in common/ai_belief/persistent_update.h with the live9 numbers: one DOF θ = cx, latents

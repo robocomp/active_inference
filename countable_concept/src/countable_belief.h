@@ -255,7 +255,14 @@ struct CountableBeliefParams
     bool  persistent = false;
 
     // Optimiser
-    int   gn_iters = 4;              // Gauss-Newton iterations per frame
+    int   gn_iters = 4;              // Gauss-Newton iterations per frame (the flag-off engine path)
+    // Persistent path only (spec 7c.7 d; solver constants, no config key): damped GN stops when the proposed θ step (accepted OR rejected, ruling T14-1) is below
+    // gn_tol_m on cx, cy, H, w, h and gn_tol_rad on yaw, or after gn_iters_max accepted-or-rejected steps. A solver tolerance,
+    // not a modelling threshold. gn_reject_all_for_test is a TEST HOOK only (every step rejected, as if J never fell).
+    int    gn_iters_max = 12;
+    double gn_tol_m     = 1e-3;
+    double gn_tol_rad   = 1e-3;
+    bool   gn_reject_all_for_test = false;
     float fd_eps   = 1e-3f;          // finite-difference step for SDF Jacobians (m / rad)
     float jac_slope_clamp = 5.0f;    // clamp per-DOF SDF slope (guards a seam-point info spike; recipe §2)
 
@@ -500,7 +507,25 @@ public:
                              Eigen::Matrix<float, 6, 6>& Id_th,  Eigen::Matrix<float, 6, 1>& bd_th) const;
     // Test/diagnostic record of the last persistent update: θ after each GN iterate, the predicted θθ block, and the
     // channel information at the converged state.
-    const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return dbg_iterates_; }
+    const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return dbg_iterates_; }   // ACCEPTED θ iterates
+    // J = persistent_data_energy + prior_energy at θ₀ and after every accepted step of the last persistent update (spec 7c.7 d).
+    const std::vector<double>& dbg_gn_energy() const { return dbg_gn_energy_; }
+    // The last persistent update's damped GN (spec 7c.7 d): steps taken (accepted + rejected), whether the proposed θ step (accepted or rejected) fell
+    // below the tolerance, and the final λ. Logged (gn_it, gn_conv, gn_lambda); no gate reads them.
+    int    last_gn_iters()     const { return last_gn_iters_; }
+    bool   last_gn_converged() const { return last_gn_converged_; }
+    double last_lambda()       const { return last_lambda_; }
+    // δ_last, the last ACCEPTED θ step (zero if none; ruling T14-1): P_θθ carries δ_last δ_lastᵀ on top of the joint posterior.
+    const Eigen::Matrix<double, 6, 1>& last_gn_step() const { return last_gn_step_; }
+    // The data energy whose gradients accumulate_channels builds: camera (the points' mixture −log likelihood, (2d) top, the
+    // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the first-crossing rays,
+    // rc::ai::lidar_rays_first_crossing_energy) at s_L, θ-only ((1) flush/parallel and the room axis when they enter, (2b),
+    // (2c)) at s_th — each term's own energy at its own linearisation point, with the per-frame gates of accumulate_channels.
+    // ∇E = −(bd_cam + bd_L + bd_th) up to the state dependence of the blocks' mixture weights (flush posterior, two-sidedness,
+    // the rays' n̂·u), which the GN information also holds fixed. The channels' FRESH-covariance marginalisation is NOT in
+    // the energy: Σf is the ego-motion share, zero while parked, and enters the step only.
+    double persistent_data_energy(const CountableBeliefState& s_cam, const CountableBeliefState& s_L,
+                                  const CountableBeliefState& s_th, const CountableFrame& f) const;
     const Eigen::Matrix<float, 6, 6>& dbg_Pbar_tt() const { return dbg_Pbar_tt_; }
     const Eigen::Matrix<float, 6, 6>& dbg_Id_th()   const { return dbg_Id_th_; }
     const Eigen::Matrix<float, 6, 6>& dbg_Id_cam()  const { return dbg_Id_cam_; }
@@ -627,23 +652,27 @@ private:
     // depth-unobservability share, `parallel` the wall-parallel term (all true = the flag-off factor, bit for bit).
     void accumulate_wall(const CountableBeliefState& s, const CountableFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
-                         bool base = true, bool boost = true, bool parallel = true) const;
+                         bool base = true, bool boost = true, bool parallel = true, double* E = nullptr) const;
     // The blocks of accumulate_extra, each adding its term into (Id, bd); accumulate_extra calls them in its historic order
     // (bit-identical), the persistent path routes them to channels.
+    // E (persistent path, spec 7c.7 d): when non-null each block ALSO adds its own energy ½λr² (λ, r as it builds them) — the
+    // GN acceptance objective; nothing in (Id, bd) changes.
     void accumulate_room_axis(const CountableBeliefState& s, const CountableFrame& f,
-                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, double* E = nullptr) const;
     // (2) footprint: anchor = the class Gaussian (λ = 1/prior_footprint_std²); the depth_unobs_precision boost always.
     void accumulate_footprint(const CountableBeliefState& s, const CountableFrame& f,
-                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool anchor) const;
+                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool anchor,
+                              double* E = nullptr) const;
     void accumulate_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     void accumulate_top(const CountableBeliefState& s, const CountableFrame& f,
-                        Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+                        Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, double* E = nullptr) const;
     // fixed_precision (the persistent θ-only channel, spec §7c.6): ½λr² on violation with a CONSTANT λ (exact Hessian);
     // false: the historic λ ∝ violation (the flag-off path, bit-identical).
     void accumulate_short_height(const CountableBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
-                                 bool fixed_precision = false) const;
+                                 bool fixed_precision = false, double* E = nullptr) const;
     void accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
-                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision = false) const;
+                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision = false,
+                             double* E = nullptr) const;
     // first_crossing (the persistent LiDAR channel, spec §7c.6): every ray-set with LidarRays::first_crossing = true and
     // surface_sigma_m = model_sigma_m; false: the ray-sets as staged (the historic sphere-trace).
     void accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
@@ -746,6 +775,11 @@ private:
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
     bool   first_update_done_ = false;  // the class prior at the class mean has entered (spec 7c.1 amendment 11-17)
     std::vector<Eigen::Matrix<float, 6, 1>> dbg_iterates_;
+    std::vector<double> dbg_gn_energy_;
+    int    last_gn_iters_     = 0;
+    bool   last_gn_converged_ = false;
+    double last_lambda_       = 0.0;
+    Eigen::Matrix<double, 6, 1> last_gn_step_ = Eigen::Matrix<double, 6, 1>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Pbar_tt_ = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_th_   = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_cam_  = Eigen::Matrix<float, 6, 6>::Zero();

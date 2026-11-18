@@ -169,10 +169,14 @@ template <int N, class Model, class State>
 // caller knows this (a box ∪ panel compound is ONE primitive and not convex), so it is an argument, default false.
 // surface_sigma_m is passed explicitly so a caller can run this without copying its LidarRays (accumulate_lidar_rays
 // passes rays.surface_sigma_m when rays.first_crossing is set).
-template <int N, class Model, class State>
-void accumulate_lidar_rays_first_crossing(const Model& m, const State& s, const LidarRays& rays,
-                                          Eigen::Matrix<float, N, N>& Id, Eigen::Matrix<float, N, 1>& bd,
-                                          float surface_sigma_m, bool convex_model = false)
+namespace detail
+{
+// The first-crossing search of one ray-set, shared by the factor and its energy: for every ray that CROSSES the model, calls
+// visit(i, wi, p, best, cinc, e, den) with the ray index, the membership weight, the crossing point, its arg-primitive, n̂·u there, the range
+// residual e = t_c − ρ_obs and den = (n̂·u)²·R_range(e) + σ_s². The float operations are the historic factor's, in order.
+template <class Model, class State, class Visit>
+void for_each_first_crossing(const Model& m, const State& s, const LidarRays& rays, float surface_sigma_m, bool convex_model,
+                             Visit&& visit)
 {
     if (rays.precision <= 0.0f or rays.endpoints.empty())
         return;
@@ -239,10 +243,45 @@ void accumulate_lidar_rays_first_crossing(const Model& m, const State& s, const 
         const float Rr  = (1.0f + (e * e) / c2) / rays.precision;
         const float den = cinc * cinc * Rr + ss2;          // (n̂·u)²·var(range along J's scale)
         if (not (den > 0.0f)) continue;                   // n̂·u = 0 exactly with σ_s = 0: the range says nothing
-        const Eigen::Matrix<float, N, 1> a = -m.sdf_jacobian(p, s, best);   // J = a / (n̂·u)
-        Id.noalias() += (wi / den) * (a * a.transpose());
-        bd.noalias() += -(wi * cinc * e / den) * a;
+        visit(i, wi, p, best, cinc, e, den);
     }
+}
+}  // namespace detail
+
+template <int N, class Model, class State>
+void accumulate_lidar_rays_first_crossing(const Model& m, const State& s, const LidarRays& rays,
+                                          Eigen::Matrix<float, N, N>& Id, Eigen::Matrix<float, N, 1>& bd,
+                                          float surface_sigma_m, bool convex_model = false)
+{
+    detail::for_each_first_crossing(m, s, rays, surface_sigma_m, convex_model,
+        [&](std::size_t, float wi, const Eigen::Vector3f& p, int best, float cinc, float e, float den)
+        {
+            const Eigen::Matrix<float, N, 1> a = -m.sdf_jacobian(p, s, best);   // J = a / (n̂·u)
+            Id.noalias() += (wi / den) * (a * a.transpose());
+            bd.noalias() += -(wi * cinc * e / den) * a;
+        });
+}
+
+// The energy whose gradient the first-crossing factor's bd is (spec lidar-measures 7c.7 d, the GN acceptance objective).
+// Per crossing ray the factor is an IRLS step on e with variance V(e) = R_range(e) + σ_s²/(n̂·u)², R_range = (1 + e²/c²)/p:
+// ∂E/∂e = w·e/V = w·p·e/(A + e²/c²), A = 1 + p·σ_s²/(n̂·u)², integrated: E = w·(p c²/2)·log(1 + e²/(c² A)) (zero at e = 0).
+// n̂·u is held at its value at the crossing (as the factor's Jacobian does); a ray that does not cross carries no energy,
+// as it carries no information. Double accumulation.
+template <class Model, class State>
+double lidar_rays_first_crossing_energy(const Model& m, const State& s, const LidarRays& rays,
+                                        float surface_sigma_m, bool convex_model = false)
+{
+    const double p  = double(rays.precision);
+    const double c2 = double(rays.robust_c_m) * double(rays.robust_c_m);
+    const double ss2 = double(surface_sigma_m) * double(surface_sigma_m);
+    double E = 0.0;
+    detail::for_each_first_crossing(m, s, rays, surface_sigma_m, convex_model,
+        [&](std::size_t, float wi, const Eigen::Vector3f&, int, float cinc, float e, float)
+        {
+            const double A = 1.0 + p * ss2 / (double(cinc) * double(cinc));
+            E += double(wi) * 0.5 * p * c2 * std::log1p(double(e) * double(e) / (c2 * A));
+        });
+    return E;
 }
 
 // Generic first-hit range factor. Templated on the belief model so it reuses the model's own SDF; N is the

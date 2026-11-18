@@ -1638,7 +1638,10 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  // All zero / ρ = 1 with the flag off.
                  << "lidar_only,lidar_msum,rho_cam,rho_L,rho_chain,dphi_cam,dz_cam,bcam_H,bL_H,"
                  << "sbcam_H,sbL_H,ray_n,Itr_cam,Itr_L,"
-                 << "e_x,e_y,e_psi,se_x,se_y,se_psi,lever_x,lever_y,spose_x,spose_y,spose_psi,c_x,c_y,c_psi\n";
+                 << "e_x,e_y,e_psi,se_x,se_y,se_psi,lever_x,lever_y,spose_x,spose_y,spose_psi,c_x,c_y,c_psi,"
+                 // §7c.7 d: the damped GN of the belief's last persistent update — steps taken (accepted + rejected; 0 = no
+                 // measured update), whether the proposed θ step (accepted or rejected) met the tolerance (1) or the cap ended it (0), the final λ (T14-1).
+                 << "gn_it,gn_conv,gn_lambda\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1712,7 +1715,9 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << ',' << sb(B::kChain) << ',' << sb(B::kChain + 1) << ',' << sb(B::kChain + 2)
                  << ',' << inst.ai2_belief.chain_lever().l.x() << ',' << inst.ai2_belief.chain_lever().l.y()
                  << ',' << inst.dbg_spose_sd(0) << ',' << inst.dbg_spose_sd(1) << ',' << inst.dbg_spose_sd(2)
-                 << ',' << inst.dbg_chain_c(0) << ',' << inst.dbg_chain_c(1) << ',' << inst.dbg_chain_c(2) << '\n';
+                 << ',' << inst.dbg_chain_c(0) << ',' << inst.dbg_chain_c(1) << ',' << inst.dbg_chain_c(2)
+                 << ',' << inst.ai2_belief.last_gn_iters() << ',' << (inst.ai2_belief.last_gn_converged() ? 1 : 0)
+                 << ',' << inst.ai2_belief.last_lambda() << '\n';
     }
     ai2_csv_.flush();
 }
