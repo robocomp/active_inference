@@ -169,8 +169,8 @@ static void zero_variance_latent_runs()
     using V2 = Eigen::Matrix<double, 2, 1>;
     M4 P = M4::Zero(); P(0, 0) = 1e-3; P(1, 1) = 1e-3; P(3, 3) = 4e-4;   // latent 0 (row 2): zero variance
     V4 x = V4::Zero();
-    const V2 rho(0.5, 0.5), s_prev(0.0, 0.02), s_now(0.0, 0.02);
-    pu::predict_latents<2, 2>(P, x, rho, s_prev, s_now);
+    const Eigen::VectorXd rho2 = (Eigen::VectorXd(2) << 0.0, 0.5).finished();   // latent 0 is a new source: ρ = 0
+    pu::predict_block<2, 2>(P, x, 0, 2, Eigen::MatrixXd::Identity(2, 2), rho2, Eigen::Vector2d(0.0, 4e-4).asDiagonal().toDenseMatrix(), false);
     CHECK(x.allFinite() and P.allFinite());
     CHECK(P(2, 2) == 0.0 and P.row(2).isZero(0.0) and P.col(2).isZero(0.0));
 
@@ -189,44 +189,128 @@ static void zero_variance_latent_runs()
     // the zero-variance latent is dropped, with no 0/0.
     V4 x2 = V4::Zero(); x2(2) = 0.3;
     M4 P2 = P;
-    pu::predict_latents<2, 2>(P2, x2, V2(1.0, 1.0), s_prev, s_now);
+    pu::predict_block<2, 2>(P2, x2, 0, 2, Eigen::MatrixXd::Identity(2, 2), (Eigen::VectorXd(2) << 0.0, 1.0).finished(),
+                            Eigen::Vector2d(0.0, 4e-4).asDiagonal().toDenseMatrix(), false);
     CHECK(x2(2) == 0.0 and x2.allFinite() and P2.allFinite());
 }
 
-// ─── dynamics with D ≠ 1 (ruling T4-1b): σ 0.02 → 0.03 at ρ = 0.6 ⇒ marginal σ_now², cross entries f·old ──────────────
-static void dynamics_rescale()
-{
-    using V3 = Eigen::Vector3d;
-    using M3 = Eigen::Matrix3d;
-    using V1 = Eigen::Matrix<double, 1, 1>;
-    M3 P; P << 1e-3, 2e-4, -3e-4,
-               2e-4, 5e-4,  1e-4,
-              -3e-4, 1e-4,  4e-4;                  // latent (row 2) at σ_prev² = 0.02², correlated with θ (rows 0, 1)
-    const M3 old = P;
-    V3 x(0.1, -0.2, 0.015);
-    const double rho = 0.6, sp = 0.02, sn = 0.03, f = rho * sn / sp;   // f = 0.9
-    pu::predict_latents<2, 1>(P, x, V1(rho), V1(sp), V1(sn));
-    std::printf("dynamics_rescale  P(2,2) %.6e (sigma_now^2 %.6e)  P(0,2) %.6e (f*old %.6e)  P(1,2) %.6e (f*old %.6e)  x(2) %.6e\n",
-                P(2, 2), sn * sn, P(0, 2), f * old(0, 2), P(1, 2), f * old(1, 2), x(2));
-    CHECK(std::abs(P(2, 2) - sn * sn) < 1e-15);
-    CHECK(std::abs(P(0, 2) - f * old(0, 2)) < 1e-15 and std::abs(P(2, 0) - f * old(2, 0)) < 1e-15);
-    CHECK(std::abs(P(1, 2) - f * old(1, 2)) < 1e-15 and std::abs(P(2, 1) - f * old(2, 1)) < 1e-15);
-    CHECK((P.topLeftCorner<2, 2>() == old.topLeftCorner<2, 2>()));
-    CHECK(std::abs(x(2) - f * 0.015) < 1e-15 and x(0) == 0.1 and x(1) == -0.2);
+// ─── block predict (spec 7c.7 a): latents never rescale; b' = R F b + w, Var w = S Σ_now S ──────────────────────────
+using MatXd = Eigen::MatrixXd;
+using VecXdd = Eigen::VectorXd;
+
+static void block_predict_no_rescale()
+{   // our own σ doubling is not an observation: ρ = 1 keeps the mean and the variance
+    Eigen::Matrix3d P; P << 1e-3, 2e-4, -3e-4, 2e-4, 5e-4, 1e-4, -3e-4, 1e-4, 4e-4;
+    const Eigen::Matrix3d old = P;
+    Eigen::Vector3d x(0.1, -0.2, 0.3);
+    pu::predict_block<2, 1>(P, x, 0, 1, MatXd::Identity(1, 1), VecXdd::Ones(1), MatXd::Constant(1, 1, 2.0 * 4e-4), false);
+    CHECK(std::abs(x(2) - 0.3) < 1e-12);
+    CHECK((P - old).norm() < 1e-12);
 }
 
-// ─── a new error source (ruling T4-1c): σ_prev = 0 → σ_now = 0.03 at ρ = 1 ⇒ variance 0.03², not 0 ─────────────────
-static void new_source_gets_full_variance()
+static void block_predict_marginal_mix()
 {
-    using V1 = Eigen::Matrix<double, 1, 1>;
-    using M2 = Eigen::Matrix2d;
-    using V2 = Eigen::Vector2d;
-    M2 P = M2::Zero(); P(0, 0) = 1e-3;
-    V2 x(0.1, 0.0);
-    pu::predict_latents<1, 1>(P, x, V1(1.0), V1(0.0), V1(0.03));
-    std::printf("new_source_gets_full_variance  P(1,1) %.6e (0.03^2 = %.6e)\n", P(1, 1), 0.03 * 0.03);
-    CHECK(std::abs(P(1, 1) - 0.03 * 0.03) < 1e-15);
-    CHECK(P(0, 1) == 0.0 and P(1, 0) == 0.0 and x(1) == 0.0 and x(0) == 0.1);
+    Eigen::Matrix3d P; P << 1e-3, 2e-4, -3e-4, 2e-4, 5e-4, 1e-4, -3e-4, 1e-4, 4e-4;
+    const Eigen::Matrix3d old = P;
+    Eigen::Vector3d x(0.1, -0.2, 0.3);
+    const double Sn = 9e-4, rho = 0.6;
+    pu::predict_block<2, 1>(P, x, 0, 1, MatXd::Identity(1, 1), VecXdd::Constant(1, rho), MatXd::Constant(1, 1, Sn), false);
+    CHECK(std::abs(P(2, 2) - (0.36 * old(2, 2) + 0.64 * Sn)) < 1e-12);
+    CHECK(std::abs(P(0, 2) - 0.6 * old(0, 2)) < 1e-12 and std::abs(P(2, 0) - 0.6 * old(2, 0)) < 1e-12);
+    CHECK(std::abs(P(1, 2) - 0.6 * old(1, 2)) < 1e-12);
+    CHECK(std::abs(x(2) - 0.6 * 0.3) < 1e-12);
+}
+
+static void block_predict_transport()
+{
+    using M5 = Eigen::Matrix<double, 5, 5>;
+    M5 A = M5::Random(); M5 P = A * A.transpose() * 1e-3;
+    Eigen::Matrix<double, 5, 1> x = Eigen::Matrix<double, 5, 1>::Random();
+    const M5 old = P; const auto xo = x;
+    Eigen::Matrix3d F; F << 1, 0, -0.2, 0, 1, 0.5, 0, 0, 1;
+    pu::predict_block<2, 3>(P, x, 0, 3, F, VecXdd::Ones(3), Eigen::Matrix3d::Identity() * 1e-3, false);
+    CHECK((x.tail<3>() - F * xo.tail<3>()).norm() < 1e-12);
+    CHECK((P.bottomRightCorner<3, 3>() - F * old.bottomRightCorner<3, 3>() * F.transpose()).norm() < 1e-12);
+    CHECK((P.topRightCorner<2, 3>() - old.topRightCorner<2, 3>() * F.transpose()).norm() < 1e-12);
+    CHECK((P - P.transpose()).norm() < 1e-12);
+    const double mineig = Eigen::SelfAdjointEigenSolver<M5>(P).eigenvalues().minCoeff();
+    CHECK(mineig >= -1e-12);
+}
+
+static void block_predict_new_source()
+{
+    Eigen::Matrix3d P; P << 1e-3, 2e-4, -3e-4, 2e-4, 5e-4, 1e-4, -3e-4, 1e-4, 4e-4;
+    Eigen::Vector3d x(0.1, -0.2, 0.3);
+    pu::predict_block<2, 1>(P, x, 0, 1, MatXd::Identity(1, 1), VecXdd::Ones(1), MatXd::Constant(1, 1, 9e-4), true);
+    CHECK(x(2) == 0.0 and P(0, 2) == 0.0 and P(2, 0) == 0.0 and P(1, 2) == 0.0 and P(2, 1) == 0.0);
+    CHECK(std::abs(P(2, 2) - 9e-4) < 1e-15);
+}
+
+// A 2-channel fixture for the damped step.
+struct Damped2
+{
+    Eigen::Matrix<double, 4, 4> Pbar = Eigen::Matrix<double, 4, 4>::Zero();
+    Eigen::Matrix<double, 4, 1> xt, xb;
+    std::array<pu::Channel<2, 2>, 2> ch;
+    pu::FreshInfo<2> none;
+    Damped2()
+    {
+        Pbar(0, 0) = 4e-3; Pbar(1, 1) = 2e-3; Pbar(2, 2) = 4e-4; Pbar(3, 3) = 9e-4; Pbar(0, 2) = Pbar(2, 0) = 1e-4;
+        xb << 0.0, 0.1, 0.0, 0.0; xt << 0.02, 0.05, 0.01, -0.01;
+        ch[0].info.I = 3e3 * Eigen::Matrix2d::Identity(); ch[0].info.g = Eigen::Vector2d(30, -12);
+        ch[0].B << 1, 0, 0, 0;
+        ch[1].info.I = 2e3 * Eigen::Matrix2d::Identity(); ch[1].info.g = Eigen::Vector2d(-5, 20);
+        ch[1].B << 0, 0, 0, 1;
+        none.I.setZero(); none.g.setZero();
+    }
+};
+
+static void damped_lambda_zero_is_joint_step()
+{
+    Damped2 f;
+    const auto sp = std::span<const pu::Channel<2, 2>>(f.ch);
+    const auto js = pu::joint_step<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none);
+    const auto ds = pu::joint_step_damped<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none, 0.0);
+    CHECK((f.xt + ds.delta - js).norm() < 1e-12);
+}
+
+static void damped_zero_variance_latent()
+{
+    Damped2 f;
+    f.Pbar.row(3).setZero(); f.Pbar.col(3).setZero();
+    f.xt(3) = f.xb(3);                       // a zero-variance latent sits at its prior mean (as the engine guarantees)
+    const auto sp = std::span<const pu::Channel<2, 2>>(f.ch);
+    for (double l : {0.0, 1e-3, 10.0})
+        { const double d3 = pu::joint_step_damped<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none, l).delta(3); CHECK(d3 == 0.0); }
+}
+
+static void damped_large_lambda_freezes_theta()
+{
+    Damped2 f;
+    f.Pbar(0, 2) = f.Pbar(2, 0) = 0.0;       // with P_θb ≠ 0 the λ→∞ limit also carries P_bθ(λM δ_θ) (finite): not a pure b-only solve
+    const auto sp = std::span<const pu::Channel<2, 2>>(f.ch);
+    const auto d = pu::joint_step_damped<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none, 1e8);
+    CHECK(d.delta.head<2>().norm() < 1e-6);
+    // b-only solve at fixed θ: (1 + P_bb W_bb) δ_b = P_bb G_b − P_bθ-free terms − (b̃ − b̄), with θ frozen the θ rows drop out.
+    Eigen::Matrix<double, 4, 4> W; Eigen::Matrix<double, 4, 1> G;
+    pu::detail::information<2, 2>(sp, f.none, W, G);
+    const Eigen::Matrix2d Pbb = f.Pbar.bottomRightCorner<2, 2>(), Wbb = W.bottomRightCorner<2, 2>();
+    const Eigen::Vector2d rhs = Pbb * G.tail<2>() - (f.xt.tail<2>() - f.xb.tail<2>());
+    const Eigen::Vector2d db = (Eigen::Matrix2d::Identity() + Pbb * Wbb).inverse() * rhs;
+    CHECK((d.delta.tail<2>() - db).norm() < 1e-6);
+}
+
+static void prior_energy_identity()
+{
+    Damped2 f;
+    const auto sp = std::span<const pu::Channel<2, 2>>(f.ch);
+    for (double l : {0.0, 0.1})
+    {
+        const auto d = pu::joint_step_damped<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none, l);
+        const Eigen::Matrix<double, 4, 1> xn = f.xt + d.delta, e = xn - f.xb;
+        const double lhs = pu::prior_energy<2, 2>(d, xn, f.xb), rhs = 0.5 * e.dot(f.Pbar.inverse() * e);
+        CHECK(std::abs(lhs - rhs) < 1e-9 * std::max(1.0, std::abs(rhs)));
+    }
 }
 
 // ─── ρ = 1, D = 1: n identical updates of one look = one update with n·Id ─────────────────────────
@@ -258,7 +342,8 @@ static void rho1_n_sweeps_equal_one_with_n_id()
     V9 x = xbar; M9 P = Pbar;
     for (int k = 0; k < 10; ++k)
     {
-        pu::predict_latents<6, 3>(P, x, rho, sig, sig);
+        (void)rho; (void)sig;   // ρ = 1, σ unchanged: the block predict is the identity
+        pu::predict_block<6, 3>(P, x, 0, 3, MatXd::Identity(3, 3), VecXdd::Ones(3), MatXd::Zero(3, 3), false);
         const std::array<pu::Channel<6, 3>, 1> ch{channel_at(x, 1.0)};
         const V9 xn = pu::joint_step<6, 3>(x, x, P, std::span<const pu::Channel<6, 3>>(ch), none);
         P = pu::joint_cov<6, 3>(P, std::span<const pu::Channel<6, 3>>(ch), none);
@@ -313,8 +398,14 @@ int main()
     rho0_equals_saturate();
     fresh_zero_is_identity();
     zero_variance_latent_runs();
-    dynamics_rescale();
-    new_source_gets_full_variance();
+    block_predict_no_rescale();
+    block_predict_marginal_mix();
+    block_predict_transport();
+    block_predict_new_source();
+    damped_lambda_zero_is_joint_step();
+    damped_zero_variance_latent();
+    damped_large_lambda_freezes_theta();
+    prior_energy_identity();
     rho1_n_sweeps_equal_one_with_n_id();
     shared_latent_position_information();
     cov_symmetric_psd();

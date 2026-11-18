@@ -820,7 +820,20 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         if (camera) take(kCam, 6, f.rho_cam.data(), f.sig2_cam.data());
         if (lidar)  take(kL,   6, f.rho_L.data(),   f.sig2_L.data());
         VecXd x; x << state_.vec().cast<double>(), b_;
-        pu::predict_latents<N, K>(P_, x, rho, sig_prev_, sn);
+        const auto block = [&](int off, int n)
+        {   // F = I; σ_prev = 0 ⇒ a new source (ρ = 0 for that latent); Σ_now = diag(σ_now²)
+            Eigen::VectorXd r = Eigen::VectorXd::Ones(n), s2 = Eigen::VectorXd::Zero(n);
+            bool all_new = true;
+            for (int j = 0; j < n; ++j)
+            {
+                const bool nw = (sig_prev_(off + j) == 0.0f);
+                r(j)  = nw ? 0.0 : double(rho(off + j));
+                s2(j) = double(sn(off + j)) * double(sn(off + j));
+                all_new = all_new and nw;
+            }
+            pu::predict_block<N, K>(P_, x, off, n, Eigen::MatrixXd::Identity(n, n), r, s2.asDiagonal().toDenseMatrix(), all_new);
+        };
+        block(kChain, 2); block(kCam, 6); block(kL, 6);
         b_ = x.tail<K>();
         sig_prev_ = sn;
     }

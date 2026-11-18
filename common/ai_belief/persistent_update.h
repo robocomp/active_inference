@@ -68,28 +68,27 @@ struct Channel
     Eigen::Matrix<double, N, K> B = Eigen::Matrix<double, N, K>::Zero();
 };
 
-// Predict the latents: F = blockdiag(𝟙_N, diag(ρ_j D_j)) applied to x and as F P Fᵀ (θ–b and b–b cross blocks included),
-// then P_bb += diag((1 − ρ²) σ_now²). θ's own prediction (and its clamp) is the caller's, on the θθ block.
-// σ_prev = 0 ⇒ a NEW error source: ρ = 0 for this transition (mean and cross terms dropped, variance σ_now²).
+// Predict one latent block (x offset N + off, size n; spec 7c.7 a). The latent evolves b' = R F b + w, R = diag(ρ),
+// Var w = S Σ_now S, S = diag(√(1 − ρ²)): a transport F, a correlation ρ with the past, and fresh variance that tops the
+// marginal up to Σ_now. NO rescale: a change of our own σ is not an observation. Rows and columns of the block (θ–b and
+// b–b cross blocks included) go by R F. new_source ⇒ R = 0: x_b = 0, cross blocks 0, P_bb = Σ_now.
 template <int N, int K>
-void predict_latents(Eigen::Matrix<double, N + K, N + K>& P,
-                     Eigen::Matrix<double, N + K, 1>& x,
-                     const Eigen::Matrix<double, K, 1>& rho,
-                     const Eigen::Matrix<double, K, 1>& sigma_prev,
-                     const Eigen::Matrix<double, K, 1>& sigma_now)
+void predict_block(Eigen::Matrix<double, N + K, N + K>& P,
+                   Eigen::Matrix<double, N + K, 1>& x,
+                   int off, int n,
+                   const Eigen::MatrixXd& F,
+                   const Eigen::VectorXd& rho,
+                   const Eigen::MatrixXd& Sigma_now,
+                   bool new_source)
 {
-    for (int j = 0; j < K; ++j)
-    {
-        const bool   new_source = (sigma_prev(j) == 0.0);                 // nothing to correlate with: ρ = 0
-        const double rj = new_source ? 0.0 : rho(j);
-        const double D  = new_source ? 1.0 : sigma_now(j) / sigma_prev(j);
-        const double f  = rj * D;
-        const int    r  = N + j;
-        x(r) *= f;
-        P.row(r) *= f;
-        P.col(r) *= f;
-        P(r, r) += (1.0 - rj * rj) * sigma_now(j) * sigma_now(j);
-    }
+    const int r = N + off;
+    const Eigen::VectorXd rv = new_source ? Eigen::VectorXd::Zero(n) : Eigen::VectorXd(rho);
+    const Eigen::MatrixXd T = rv.asDiagonal() * F;                       // R F
+    const Eigen::VectorXd S = (1.0 - rv.array().square()).sqrt().matrix();
+    x.segment(r, n) = T * x.segment(r, n).eval();
+    P.middleRows(r, n) = (T * P.middleRows(r, n)).eval();
+    P.middleCols(r, n) = (P.middleCols(r, n) * T.transpose()).eval();
+    P.block(r, r, n, n) += S.asDiagonal() * Sigma_now * S.asDiagonal();
 }
 
 namespace detail
@@ -115,7 +114,39 @@ void information(std::span<const Channel<N, K>> channels, const FreshInfo<N>& th
 }
 }  // namespace detail
 
-// One inverse-free Gauss-Newton step on the joint state: x̃ + (𝟙 + P̄W)⁻¹[P̄G − (x̃ − x̄)].
+// One damped inverse-free Gauss-Newton step (spec 7c.7 d): (𝟙 + P̄(W + λM)) δ = P̄G − (x̃ − x̄), M = blockdiag(diag W_θθ, 0).
+// y = G − (W + λM)δ is the prior's pull in information form (P̄⁻¹(x_new − x̄) when P̄ is invertible).
+template <int N, int K>
+struct DampedStep { Eigen::Matrix<double, N + K, 1> delta, y; };
+
+template <int N, int K>
+DampedStep<N, K> joint_step_damped(const Eigen::Matrix<double, N + K, 1>& x_tilde,
+                                   const Eigen::Matrix<double, N + K, 1>& x_bar,
+                                   const Eigen::Matrix<double, N + K, N + K>& P_bar,
+                                   std::span<const Channel<N, K>> channels,
+                                   const FreshInfo<N>& theta_only, double lambda)
+{
+    using MatD = Eigen::Matrix<double, N + K, N + K>;
+    using VecD = Eigen::Matrix<double, N + K, 1>;
+    MatD W; VecD G;
+    detail::information<N, K>(channels, theta_only, W, G);
+    MatD Wl = W;
+    for (int i = 0; i < N; ++i) Wl(i, i) += lambda * W(i, i);
+    const MatD A = MatD::Identity() + P_bar * Wl;
+    DampedStep<N, K> s;
+    s.delta = A.partialPivLu().solve(P_bar * G - (x_tilde - x_bar));
+    s.y     = G - Wl * s.delta;
+    return s;
+}
+
+template <int N, int K>
+double prior_energy(const DampedStep<N, K>& s, const Eigen::Matrix<double, N + K, 1>& x_new,
+                    const Eigen::Matrix<double, N + K, 1>& x_bar)
+{
+    return 0.5 * s.y.dot(x_new - x_bar);
+}
+
+// x̃ + the undamped step.
 template <int N, int K>
 Eigen::Matrix<double, N + K, 1> joint_step(const Eigen::Matrix<double, N + K, 1>& x_tilde,
                                            const Eigen::Matrix<double, N + K, 1>& x_bar,
@@ -123,12 +154,7 @@ Eigen::Matrix<double, N + K, 1> joint_step(const Eigen::Matrix<double, N + K, 1>
                                            std::span<const Channel<N, K>> channels,
                                            const FreshInfo<N>& theta_only)
 {
-    using MatD = Eigen::Matrix<double, N + K, N + K>;
-    using VecD = Eigen::Matrix<double, N + K, 1>;
-    MatD W; VecD G;
-    detail::information<N, K>(channels, theta_only, W, G);
-    const MatD A = MatD::Identity() + P_bar * W;
-    return x_tilde + A.partialPivLu().solve(P_bar * G - (x_tilde - x_bar));
+    return x_tilde + joint_step_damped<N, K>(x_tilde, x_bar, P_bar, channels, theta_only, 0.0).delta;
 }
 
 // The joint posterior covariance (𝟙 + P̄W)⁻¹ P̄, symmetrised. Published Σ = its θθ block.
