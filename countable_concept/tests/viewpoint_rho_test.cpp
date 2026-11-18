@@ -228,10 +228,39 @@ static void lever_relaxes_with_rho()
     CHECK((M.l - 0.5f * (Eigen::Vector2f(1.f, 1.f) - dr + (c - r))).norm() < 1e-6f);
 }
 
+static void rho_chain_rank_deficient_float()
+{
+    M3 S = M3::Zero();
+    S(0, 0) = 0.034f * 0.034f; S(1, 1) = 0.0435f * 0.0435f;
+    S(0, 1) = S(1, 0) = 0.5f * 0.034f * 0.0435f;   // x-y cross term, psi variance exactly 0
+    const V3 robot(0.83f, 2.24f, 0.42f);
+    const float cy = std::cos(robot.z()), sy = std::sin(robot.z());
+    const V3 edge(-(cy * robot.x() + sy * robot.y()), -(-sy * robot.x() + cy * robot.y()), -robot.z());
+    const M3 Se = place::invert_se2_cov(S, robot);   // float, as an rt_covariance would be
+    float blk[36] = {};
+    const int idx[3] = {0, 1, 5};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) blk[idx[i] * 6 + idx[j]] = Se(i, j);
+    const M3 R = pose_cov_in_room(std::span<const float>(blk, 36), edge);
+    const V3 c(0.02f, -0.01f, 0.f);
+    const Eigen::Matrix2f S2 = S.topLeftCorner<2, 2>();
+    const float want = std::exp(-0.5f * c.head<2>().dot(S2.inverse() * c.head<2>()));
+    CHECK(std::abs(rho_chain(c, R) - want) < 1e-5f);
+    CHECK(rho_chain(V3(0.f, 0.f, 0.01f), R) == 0.f);
+}
+
+static void rho_chain_never_above_one()
+{
+    M3 S = V3(1e-4f, 1e-4f, 1e-4f).asDiagonal();
+    S(2, 2) = -1e-12f;
+    const float r = rho_chain(V3(0.01f, 0.f, 0.f), S);
+    CHECK(r >= 0.f and r <= 1.f);
+}
+
 int main()
 {
     chain_fails_closed(); rho_chain_zero_correction_is_one_se2(); pose_cov_round_trip(); pose_cov_absent_is_zero();
     chain_correction_se2(); chain_correction_wraps_psi(); rho_chain_se2(); lever_transport_invariance(); lever_relaxes_with_rho();
+    rho_chain_rank_deficient_float(); rho_chain_never_above_one();
     parked_is_one(); stale_odometry_is_parked(); odometry_axes(); camera_efold_is_half_width(); lidar_efold();
     composes(); rotation_in_place_is_one(); absent_ring_gap_is_one();
     degenerate_geometry_unchanged();

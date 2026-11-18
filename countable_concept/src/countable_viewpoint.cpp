@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 #include "place_memory/place_map.h"
 
@@ -91,25 +92,38 @@ void chain_rebase(ChainTracker& t)
 
 float rho_chain(const Eigen::Vector3f& c, const Eigen::Matrix3f& S)
 {
-    // Pseudo-inverse: directions of zero variance are the model's "no uncertainty there", handled exactly.
-    const Eigen::Matrix3d Sd = S.cast<double>();
+    // Double arithmetic, symmetrised Σ, eigen-decomposition. Eigenvalues ≤ n·ε_double·λ_max (negative ones included: the
+    // PSD projection) are the numerical null space — the standard numerical-rank rule, not a model threshold. Σ⁻¹ acts
+    // on the range only; a component of c in the null space cannot be explained by Σ at all ⇒ ρ = 0.
     const Eigen::Vector3d cd = c.cast<double>();
-    const Eigen::Matrix3d Sinv = Eigen::CompleteOrthogonalDecomposition<Eigen::Matrix3d>(Sd).pseudoInverse();
-    // The part of c outside the range of Σ cannot be explained by it at all ⇒ rho = 0.
-    const Eigen::Vector3d resid = cd - Sd * Sinv * cd;
-    if (resid.norm() > 1e-9 * std::max(1.0, cd.norm())) return 0.f;   // numerical zero of the rank test, not a model threshold
-    return static_cast<float>(std::exp(-0.5 * cd.dot(Sinv * cd)));
+    Eigen::Matrix3d Sd = S.cast<double>();
+    Sd = 0.5 * (Sd + Sd.transpose());
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(Sd);
+    const Eigen::Vector3d lam = es.eigenvalues();
+    const double tol = 3.0 * std::numeric_limits<double>::epsilon() * std::max(lam.maxCoeff(), 0.0);
+    double maha = 0.0, null_comp2 = 0.0;
+    for (int i = 0; i < 3; ++i)
+    {
+        const double p = es.eigenvectors().col(i).dot(cd);
+        if (lam(i) > tol) maha += p * p / lam(i);
+        else              null_comp2 += p * p;
+    }
+    if (std::sqrt(null_comp2) > 3.0 * std::numeric_limits<double>::epsilon() * cd.norm()) return 0.f;
+    return static_cast<float>(std::exp(-0.5 * maha));
 }
 
 Eigen::Matrix3f pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose)
 {
     if (rt_cov36.size() < 36) return Eigen::Matrix3f::Zero();
     constexpr int idx[3] = {0, 1, 5};
-    Eigen::Matrix3f S;
+    Eigen::Matrix3d S;
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
             S(i, j) = rt_cov36[static_cast<std::size_t>(idx[i] * 6 + idx[j])];
-    return place::invert_se2_cov(S, edge_pose);
+    const Eigen::Matrix3d J = place::se2_inverse_jacobian(edge_pose).cast<double>();
+    Eigen::Matrix3d R = J * S * J.transpose();   // double: float J Σ Jᵀ would put ~1e-7 noise on a null direction
+    R = 0.5 * (R + R.transpose());
+    return R.cast<float>();
 }
 
 Eigen::Matrix3d chain_transport(const Eigen::Vector2f& dr)
