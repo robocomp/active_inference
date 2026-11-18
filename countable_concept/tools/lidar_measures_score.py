@@ -17,6 +17,20 @@ Conventions (printed again in the header of every report):
                 direction to the nearest wall and to the nearest other GT object; PASS iff the largest such step <= 0.10 m.
   * rate      = rows / (last - first pkt_ts) per instance; PASS iff >= 8 Hz.
   * parked    = the gt_pose interval containing the row has speed < 0.02 m/s and yaw rate < 0.02 rad/s.
+  * updated   = rows whose e / spose_* / c_* / gn_* belong to THIS cycle: Itr_cam > 0 or Itr_L > 0. Those columns hold
+                their last value on every other row (final review Task 13 M8); Itr_* is reset to 0 every cycle and set only
+                after an ACCEPTED flag-on update, which is also the only cycle that staged spose_* / c_* AND ran the GN. Rows
+                that staged but whose update was rejected (step bound) or had no usable rays are therefore not counted.
+  * live10 (spec 7c.7 Pass "Live", plan "Task 10 again"; n/a on logs before e_* / spose_* / gn_*):
+      |e| <= 3 sigma   = per component |e_x|, |e_y|, |e_psi| <= 3 spose_* on every updated row (PASS iff all);
+                         the same against the posterior's own se_* is printed [info].
+      Sigma_pose       = parked updated rows vs proto_room.csv's pose sigma at the nearest ts_ms (<= 100 ms):
+                         sqrt(spose_x^2 + spose_y^2) vs sqrt(sig_x^2 + sig_y^2) (rotation-invariant: proto_room is in the
+                         room's internal frame, the edge in the published one; their gauge rotation mixes x and y) and
+                         spose_psi vs sig_theta; PASS iff >= 95 % of rows are within 1 % on both.
+      gn               = over updated rows, the gn_it distribution and the share of gn_conv = 0, split camera-only
+                         (Itr_L == 0) vs with rays (Itr_L > 0) [info; with rays gn_conv = 0 is usually theta on a ray edge,
+                         ruling T14-7; on camera-only rows it should be ~0, final review M6].
 Numbers are read with float() on the CSV text (written with '.'); output uses explicit format specs; no locale module.
 """
 import argparse, bisect, csv, math, os, statistics, sys
@@ -34,6 +48,9 @@ STD_MAX = 0.15
 FRAC_OK = 0.95
 DRIFT_MAX = 0.10
 RATE_MIN = 8.0
+E_NSIG = 3.0
+SPOSE_REL = 0.01
+PROTO_MATCH_MS = 100
 # Room frame -> world: the room frame's origin is the door the robot entered through (DOOR_1 for the bedroom, DOOR_2 for
 # the bathroom, threerooms-piso.wbt, see room_concept/estimation_scripts/scripts/true_room.py), rotated by the room's yaw.
 # Cross-check on objects_live6: bed / nightstands land 6 / 11 / 7 cm from GT with a rotation of 0 (carve-replay result).
@@ -204,6 +221,81 @@ def load_instances(run, cls):
     return inst, cols
 
 
+def load_proto_sigma(run):
+    """proto_room.csv -> sorted list of (ts_ms, sig_x, sig_y, sig_theta), finite rows only ([] if absent)."""
+    out = []
+    try:
+        for r in csv.DictReader(open(os.path.join(run, 'proto_room.csv'))):
+            v = (fnum(r.get('ts_ms')), fnum(r.get('sig_x')), fnum(r.get('sig_y')), fnum(r.get('sig_theta')))
+            if all(x == x for x in v): out.append(v)
+    except OSError:
+        return []
+    out.sort()
+    return out
+
+
+def nearest(seq, keys, t, tol):
+    i = bisect.bisect_left(keys, t)
+    cand = [j for j in (i - 1, i) if 0 <= j < len(seq)]
+    if not cand: return None
+    j = min(cand, key=lambda j: abs(keys[j] - t))
+    return seq[j] if abs(keys[j] - t) <= tol else None
+
+
+def pctl(v, q):
+    v = sorted(x for x in v if x == x)
+    if not v: return float('nan')
+    return v[min(len(v) - 1, max(0, int(round(q * (len(v) - 1)))))]
+
+
+def is_updated(r): return r.get('Itr_cam', 0) > 0 or r.get('Itr_L', 0) > 0
+
+
+def live10_checks(rows, gtpose, proto, proto_ts):
+    """The live10 additions on one instance's rows (see the module docstring). {} when the log predates them."""
+    m = {}
+    if not rows or not all(k in rows[0] for k in ('e_x', 'spose_x', 'gn_it', 'Itr_cam')): return m
+    U = [r for r in rows if is_updated(r)]
+    m['n_updated'] = len(U)
+    # |e| <= 3 sigma of Sigma_pose (PASS) and of e's own posterior sigma (info)
+    worst_p, worst_e, bad = 0.0, 0.0, 0
+    for r in U:
+        rp = [abs(r['e_' + k]) / r['spose_' + k] if r['spose_' + k] > 0 else (0.0 if r['e_' + k] == 0 else float('inf'))
+              for k in ('x', 'y', 'psi')]
+        re_ = [abs(r['e_' + k]) / r['se_' + k] for k in ('x', 'y', 'psi') if r['se_' + k] > 0]
+        worst_p = max(worst_p, max(rp))
+        if re_: worst_e = max(worst_e, max(re_))
+        bad += any(x > E_NSIG for x in rp)
+    m['e_worst_pose'] = worst_p if U else float('nan')
+    m['e_worst_post'] = worst_e if U else float('nan')
+    m['e_bad'] = bad
+    m['e_ok'] = bool(U) and bad == 0
+    # parked Sigma_pose vs proto_room's pose sigma at the same stamp
+    rel_xy, rel_psi = [], []
+    if proto:
+        for r in U:
+            if not (gtpose and parked_at(gtpose, r['pkt_ts']) is True): continue
+            q = nearest(proto, proto_ts, r['pkt_ts'], PROTO_MATCH_MS)
+            if q is None: continue
+            a, b = math.hypot(r['spose_x'], r['spose_y']), math.hypot(q[1], q[2])
+            if b > 0: rel_xy.append(abs(a - b) / b)
+            if q[3] > 0: rel_psi.append(abs(r['spose_psi'] - q[3]) / q[3])
+    m['sp_n'] = min(len(rel_xy), len(rel_psi))
+    m['sp_xy_med'], m['sp_xy_p95'] = med(rel_xy), pctl(rel_xy, 0.95)
+    m['sp_psi_med'], m['sp_psi_p95'] = med(rel_psi), pctl(rel_psi, 0.95)
+    both = [x <= SPOSE_REL and y <= SPOSE_REL for x, y in zip(rel_xy, rel_psi)]
+    m['sp_frac'] = sum(both) / len(both) if both else float('nan')
+    m['sp_ok'] = bool(both) and m['sp_frac'] >= FRAC_OK
+    # GN: iterations and the share of unconverged updates, camera-only vs with rays
+    for tag, sel in (('cam', lambda r: r.get('Itr_L', 0) == 0), ('ray', lambda r: r.get('Itr_L', 0) > 0)):
+        V = [r for r in U if sel(r)]
+        it = [r['gn_it'] for r in V]
+        m['gn_%s_n' % tag] = len(V)
+        m['gn_%s_q' % tag] = tuple(pctl(it, q) for q in (0.0, 0.25, 0.5, 0.75, 1.0))
+        m['gn_%s_unconv' % tag] = sum(1 for r in V if r['gn_conv'] == 0) / len(V) if V else float('nan')
+    return m
+
+
 def is_fresh(r): return r.get('gated', 0) == 0 and not (r.get('lidar_only', 0) == 1)
 
 
@@ -229,6 +321,8 @@ def looks_of(rows):
 
 def score_run(run, gtobjs, walls, overrides, pin, shift):
     gtpose = load_gt_pose(os.path.join(run, 'gt_pose.tsv'))
+    proto = load_proto_sigma(run)
+    proto_ts = [q[0] for q in proto]
     res, notes = {}, []
     fits = fit_room_frames(run)
     rooms, failed = {}, {}
@@ -349,6 +443,8 @@ def score_run(run, gtobjs, walls, overrides, pin, shift):
                 m['n_parked'] = len(pk)
                 m['dphi_parked'] = med([abs(r['dphi_cam']) for r in pk]) if pk and 'dphi_cam' in pk[0] else float('nan')
                 m['dz_parked'] = med([abs(r['dz_cam']) for r in pk]) if pk and 'dz_cam' in pk[0] else float('nan')
+            m['live10'] = live10_checks(rows, gtpose, proto, proto_ts)
+            if m['live10'] and not proto: notes.append('%s: no proto_room.csv sigma: Sigma_pose check n/a' % node)
             # shift: final size vs the truth
             tw_, th_ = true_dims(g, last.get('yaw', 0.0) + rot)
             m['w_err'] = last['w'] - tw_; m['h_err'] = last['h'] - th_; m['H_err'] = last['H'] - g['top']
@@ -388,6 +484,22 @@ def report(label, res, notes, shift):
                 m['n_parked'], fmt(m['dphi_parked'], '.4f'), fmt(m['dz_parked'], '.4f')))
         else:
             P('  lidar_only / rho / dphi / dz: n/a (columns absent)  [info]')
+        L = m.get('live10') or {}
+        if L:
+            P('  live10: updated rows (Itr_cam > 0 or Itr_L > 0) %d of %d' % (L['n_updated'], m['rows']))
+            P('  |e| <= %.0f sigma of Sigma_pose: worst |e|/spose %s, rows over %d   %s ;  worst |e|/se (posterior) %s [info]' % (
+                E_NSIG, fmt(L['e_worst_pose'], '.2f'), L['e_bad'], verdict(L['e_ok']) if L['n_updated'] else 'n/a',
+                fmt(L['e_worst_post'], '.2f')))
+            P('  parked Sigma_pose vs proto_room sigma (%d rows): xy rel med %s p95 %s ; psi rel med %s p95 %s ; within %.0f %% %s   %s' % (
+                L['sp_n'], fmt(L['sp_xy_med'], '.4f'), fmt(L['sp_xy_p95'], '.4f'), fmt(L['sp_psi_med'], '.4f'),
+                fmt(L['sp_psi_p95'], '.4f'), 100 * SPOSE_REL, fmt(100 * L['sp_frac'], '.1f') + '%' if L['sp_n'] else 'n/a',
+                verdict(L['sp_ok']) if L['sp_n'] else 'n/a'))
+            for tag, nm in (('cam', 'camera-only'), ('ray', 'with rays')):
+                q = L['gn_%s_q' % tag]
+                P('  gn %-11s n %d: gn_it min/p25/med/p75/max %s ; gn_conv = 0 share %s  [info]' % (
+                    nm, L['gn_%s_n' % tag], '/'.join(fmt(x, '.0f') for x in q), fmt(L['gn_%s_unconv' % tag], '.3f')))
+        else:
+            P('  live10 (|e| <= 3 sigma, Sigma_pose vs proto_room, gn_it / gn_conv): n/a (columns absent)  [info]')
         if shift:
             for k, nm in (('w_err', 'w'), ('h_err', 'h'), ('H_err', 'H')):
                 P('  shift: final %s err vs TRUE size %+.3f m (tol %.2f; the shifted prior would read +%.2f)   %s' % (
@@ -459,6 +571,13 @@ def main():
         named[0][0] if named else '-', len(named[0][1]) if named else 0, fails,
         sum(1 for m in named[0][1].values() if m['drift'] > DRIFT_MAX) if named else 0,
         sum(1 for m in named[0][1].values() if not m['rate'] >= RATE_MIN) if named else 0))
+    L = [m['live10'] for m in named[0][1].values() if m.get('live10')] if named else []
+    if L:
+        print('SUMMARY live10: %d |e| > 3 sigma FAIL, %d Sigma_pose-vs-proto_room FAIL (of %d with parked rows)' % (
+            sum(1 for x in L if x['n_updated'] and not x['e_ok']), sum(1 for x in L if x['sp_n'] and not x['sp_ok']),
+            sum(1 for x in L if x['sp_n'])))
+    else:
+        print('SUMMARY live10: n/a (log predates e_* / spose_* / gn_*)')
     if main_failed:
         print('ROOM FRAME FAIL (main run): ' + '; '.join('%s: %s' % kv for kv in main_failed.items()))
         sys.exit(2)
