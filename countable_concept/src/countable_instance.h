@@ -75,6 +75,9 @@ struct CountableInstance
     // The localiser's correction since the chain latent's last update (robot body centre, room frame): ρ_chain =
     // exp(−½cᵀΣ⁻¹c), c = rc::chain_correction(chain). Fails closed on a stretch whose odometry cannot be integrated.
     rc::ChainTracker chain;
+    // The robot's room-frame displacement since this instance's last persistent update (spec 7c.7 b): odometry steps, plus
+    // the pose increment over a stretch the odometry cannot integrate. It moves e's lever and transports e (F = I + …Δr).
+    Eigen::Vector2f chain_dr = Eigen::Vector2f::Zero();
     std::uint64_t   last_odo_ts = 0;           // robot_current_speed_timestamp of the last integrated odometry sample
     int   dbg_lidar_only  = 0;                 // 1 ⇔ this cycle's update was a LiDAR-only frame (a gated camera cycle)
     float dbg_lidar_msum  = 0.0f;              // Σ membership of the staged helios rays (0 = no membership this cycle)
@@ -85,6 +88,11 @@ struct CountableInstance
     int   dbg_ray_n = 0;                       // rays in the frame the belief was updated with this cycle
     float dbg_itr_cam = 0.0f, dbg_itr_L = 0.0f;   // trace of each channel's information I_ch at the last accepted update
     bool  dbg_rhoL_absent_logged = false;      // "no Helios SensorModel ⇒ ρ_L = 1" printed once per instance
+    // e's inputs at the last staged frame (logged every cycle, also while parked): the correction c (x, y, ψ) ρ_chain used,
+    // √diag Σ_pose (x, y, ψ) at the capture stamp; "no pose covariance ⇒ Σ_pose = 0" printed once per instance.
+    Eigen::Vector3f dbg_chain_c   = Eigen::Vector3f::Zero();
+    Eigen::Vector3d dbg_spose_sd  = Eigen::Vector3d::Zero();
+    bool  dbg_pose_cov_absent_logged = false;
 
     // ── Divergence safety net (mirrors bottle) ────────────────────────────────────────────────────
     // Consecutive frames whose centre GN step was rejected as an outlier (exceeded cfg.max_step_m). Non-zero

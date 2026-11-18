@@ -24,8 +24,10 @@ import argparse, bisect, csv, math, os, statistics, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCENE = os.path.join(HERE, 'scene_threerooms.csv')
 CLASSES = ('bed', 'nightstand', 'toilet')
-NEW_COLS = ('lidar_only', 'lidar_msum', 'rho_cam', 'rho_L', 'rho_chain', 'dphi_cam', 'dz_cam', 'bchain_x', 'bchain_y',
+NEW_COLS = ('lidar_only', 'lidar_msum', 'rho_cam', 'rho_L', 'rho_chain', 'dphi_cam', 'dz_cam',
             'bcam_H', 'bL_H', 'sbcam_H', 'sbL_H', 'ray_n', 'Itr_cam', 'Itr_L')
+# The localisation latent on (x, y): e_x, e_y (spec 7c.7, the robot's pose error) or, in logs before it, bchain_x, bchain_y.
+CHAIN_COLS = (('e_x', 'e_y'), ('bchain_x', 'bchain_y'))
 GAP_MS = 2000
 NEAR_M = 2.5
 STD_MAX = 0.15
@@ -270,6 +272,7 @@ def score_run(run, gtobjs, walls, overrides, pin, shift):
         if not inst:
             notes.append('%s: no %s_ai2_log.csv' % (c, c)); continue
         missing = [k for k in NEW_COLS if k not in cols]
+        if not any(all(k in cols for k in pair) for pair in CHAIN_COLS): missing += list(CHAIN_COLS[0])
         if missing: notes.append('%s: columns absent (flag-off era): %s' % (c, ','.join(missing[:3]) + ('...' if len(missing) > 3 else '')))
         to_world, to_room, rot = room_tf(ROOM_OF[c], rooms)
         cands = [g for g in gtobjs if g['cls'] == c]

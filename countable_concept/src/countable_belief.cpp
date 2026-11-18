@@ -747,11 +747,14 @@ void CountableBelief::ensure_joint()
     P_.setZero();
     P_.topLeftCorner<N, N>() = Sigma_.cast<double>();
     b_.setZero(); sig_prev_.setZero();
+    lever_ = {};
+    last_sigma_pose_.setZero();
     joint_init_ = true;
 }
 
-// sanitize_covariance under persistent: the same self-sealing hazard, on P_. Re-seed θθ to the class P, each latent to its
-// last marginal (σ_prev²), cross terms 0, b = 0, and clear both anchor flags so the relational prior re-enters once.
+// sanitize_covariance under persistent: the same self-sealing hazard, on P_. Re-seed θθ to the class P, b_cam / b_L to their
+// last marginal (σ_prev²), e to the last Σ_pose (its own 3×3; spec 7c.7 b, R4-M7), cross terms 0, b = 0 (ℓ kept), and clear
+// both anchor flags so the relational prior re-enters once.
 void CountableBelief::sanitize_joint()
 {
     ensure_joint();
@@ -762,6 +765,7 @@ void CountableBelief::sanitize_joint()
     P_.setZero();
     P_.diagonal().head<N>() = prior_cov_diag().cast<double>();
     P_.diagonal().tail<K>() = sig_prev_.cwiseProduct(sig_prev_);
+    P_.block<3, 3>(N + kChain, N + kChain) = last_sigma_pose_;
     b_.setZero();
     wall_prior_added_ = false;
     axis_prior_added_ = false;
@@ -792,6 +796,62 @@ void CountableBelief::predict_theta_joint(float q_scale)
     prior_mean_ = state_.vec();
 }
 
+bool CountableBelief::frame_has_lidar(const CountableFrame& f)
+{
+    const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
+    return usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);
+}
+
+// [B_chain(ℓ) | 𝟙 on the channel's own latent | 0]: the camera measures θ + B_chain e + b_cam, the rays θ + B_chain e + b_L.
+Eigen::Matrix<double, CountableBelief::N, CountableBelief::K> CountableBelief::chain_selector(bool camera) const
+{
+    Eigen::Matrix<double, N, K> B = Eigen::Matrix<double, N, K>::Zero();
+    B.block<N, 3>(0, kChain) = chain_B(lever_.l);
+    B.block<N, 6>(0, camera ? kCam : kL) = Eigen::Matrix<double, 6, 6>::Identity();
+    return B;
+}
+
+// Step 1 on the latents (spec 7c.7 a, b). e is predicted whenever either channel measures: it is a NEW SOURCE when it has no
+// lever yet or its previous Σ_pose was zero (ruling T4-1c: ρ = 0 for that transition, so a source that appears is drawn at
+// Σ_pose and not left at variance 0 for ever) — then the lever is taken at (θ's centre − robot); otherwise the lever moves
+// with the robot, ℓ ← ρ(ℓ − Δr) + (1 − ρ)(c − r), BEFORE the predict, and e is carried by F = chain_transport(Δr) with
+// correlation ρ_chain and fresh variance (1 − ρ²) Σ_pose. b_cam / b_L: F = I, per-DOF ρ, Σ_now = diag(σ_now²), new source
+// where σ_prev = 0, predicted only when their channel measures.
+void CountableBelief::predict_latents_persistent(const CountableFrame& f, bool camera, bool lidar)
+{
+    namespace pu = rc::ai::persistent;
+    using VecXd = Eigen::Matrix<double, N + K, 1>;
+    if (not camera and not lidar) return;
+    VecXd x; x << state_.vec().cast<double>(), b_;
+    {
+        const bool new_source = not lever_.set or last_sigma_pose_.isZero(0.0);
+        const Eigen::Vector2f centre(state_.cx, state_.cy);
+        if (new_source) lever_start(lever_, centre, f.robot_xy);
+        else            lever_step(lever_, f.chain_dr, f.rho_chain, centre, f.robot_xy);
+        pu::predict_block<N, K>(P_, x, kChain, 3, chain_transport(f.chain_dr),
+                                Eigen::VectorXd::Constant(3, double(f.rho_chain)), f.sigma_pose, new_source);
+        last_sigma_pose_ = f.sigma_pose;
+    }
+    const auto block = [&](int off, const float* r, const float* s2)
+    {   // F = I; σ_prev = 0 ⇒ a new source (ρ = 0 for that latent); Σ_now = diag(σ_now²)
+        constexpr int n = 6;
+        Eigen::VectorXd rv(n), sv(n);
+        bool all_new = true;
+        for (int j = 0; j < n; ++j)
+        {
+            const bool nw = (sig_prev_(off + j) == 0.0);
+            rv(j) = nw ? 0.0 : double(r[j]);
+            sv(j) = std::max(0.0, double(s2[j]));
+            all_new = all_new and nw;
+        }
+        pu::predict_block<N, K>(P_, x, off, n, Eigen::MatrixXd::Identity(n, n), rv, sv.asDiagonal().toDenseMatrix(), all_new);
+        for (int j = 0; j < n; ++j) sig_prev_(off + j) = std::sqrt(sv(j));
+    };
+    if (camera) block(kCam, f.rho_cam.data(), f.sig2_cam.data());
+    if (lidar)  block(kL,   f.rho_L.data(),   f.sig2_L.data());
+    b_ = x.tail<K>();
+}
+
 // One persistent update (§7c.2 steps 1–4): predict; per GN iterate restart the biases at b̄, linearise each channel at its
 // own measured quantity, marginalise the channel's fresh (ego-motion) covariance, joint step; joint covariance at the
 // converged θ (b̄ restart, as the engine re-accumulates at its converged state).
@@ -807,37 +867,12 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     dbg_iterates_.clear();
     dbg_Pbar_tt_ = Sigma_;
     const bool camera = not f.points.empty();
-    const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
-    const bool lidar  = usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);   // has_extra_data's test
+    const bool lidar  = frame_has_lidar(f);                            // has_extra_data's test
     if (not camera and not (f.lidar_only and lidar))
         return 0.0f;                                                   // predict-only, as the engine
 
-    {   // step 1, latents: those whose channel measures this frame (the chain whenever either does)
-        VecKd rho = VecKd::Ones(), sn = sig_prev_;
-        const auto take = [&](int off, int n, const float* r, const float* s2)
-        { for (int j = 0; j < n; ++j) { rho(off + j) = r[j]; sn(off + j) = std::sqrt(std::max(0.0, double(s2[j]))); } };
-        take(kChain, 2, f.rho_chain.data(), f.sig2_chain.data());
-        if (camera) take(kCam, 6, f.rho_cam.data(), f.sig2_cam.data());
-        if (lidar)  take(kL,   6, f.rho_L.data(),   f.sig2_L.data());
-        VecXd x; x << state_.vec().cast<double>(), b_;
-        const auto block = [&](int off, int n)
-        {   // F = I; σ_prev = 0 ⇒ a new source (ρ = 0 for that latent); Σ_now = diag(σ_now²)
-            Eigen::VectorXd r = Eigen::VectorXd::Ones(n), s2 = Eigen::VectorXd::Zero(n);
-            bool all_new = true;
-            for (int j = 0; j < n; ++j)
-            {
-                const bool nw = (sig_prev_(off + j) == 0.0f);
-                r(j)  = nw ? 0.0 : double(rho(off + j));
-                s2(j) = double(sn(off + j)) * double(sn(off + j));
-                all_new = all_new and nw;
-            }
-            pu::predict_block<N, K>(P_, x, off, n, Eigen::MatrixXd::Identity(n, n), r, s2.asDiagonal().toDenseMatrix(), all_new);
-        };
-        block(kChain, 2); block(kCam, 6); block(kL, 6);
-        b_ = x.tail<K>();
-        sig_prev_ = sn;
-    }
-    Mat20d P_bar = P_;
+    predict_latents_persistent(f, camera, lidar);                     // step 1, latents
+    MatJd P_bar = P_;
     VecXd x_bar; x_bar << state_.vec().cast<double>(), b_;
     if (not first_update_done_)
     {   // The class prior as a factor AT THE CLASS MEAN, counted once (spec 7c.1 amendment 11-17): the size has a class mean,
@@ -859,10 +894,9 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     Sigma_ = P_bar.topLeftCorner<N, N>().cast<float>();                // flush_weight reads the predicted Σ, as in the engine
     dbg_Pbar_tt_ = Sigma_;
 
-    // Channel selectors: camera points measure θ + E b_chain + b_cam, rays θ + E b_chain + b_L.
-    Eigen::Matrix<double, N, K> B_cam = Eigen::Matrix<double, N, K>::Zero(), B_L = B_cam;
-    B_cam(0, kChain) = 1.0; B_cam(1, kChain + 1) = 1.0; B_cam.block<N, 6>(0, kCam) = Eigen::Matrix<double, 6, 6>::Identity();
-    B_L(0, kChain)   = 1.0; B_L(1, kChain + 1)   = 1.0; B_L.block<N, 6>(0, kL)     = Eigen::Matrix<double, 6, 6>::Identity();
+    // Channel selectors: camera points measure θ + B_chain e + b_cam, rays θ + B_chain e + b_L; B_chain = chain_B(ℓ) is fixed
+    // over the GN iterates (the lever is instance state, never the belief's centre: spec 7c.7 b).
+    const Eigen::Matrix<double, N, K> B_cam = chain_selector(true), B_L = chain_selector(false);
     Mat6 Sf_cam = Mat6::Zero(), Sf_L = Mat6::Zero();
     for (int i = 0; i < 6; ++i) { Sf_cam(i, i) = std::max(0.0f, f.fresh_cam[i]); Sf_L(i, i) = std::max(0.0f, f.fresh_L[i]); }
     const Vec6d bbar_cam = B_cam * b_, bbar_L = B_L * b_;
@@ -916,7 +950,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     }
 
     if (not camera) return 0.0f;
-    // Per-point energy evaluated at what the camera MEASURES, θ + E b_chain + b_cam (posterior b), not at the state θ — the
+    // Per-point energy evaluated at what the camera MEASURES, θ + B_chain e + b_cam (posterior b), not at the state θ — the
     // engine's surface energy, on the biased quantity. Diagnostic only: the fitter overwrites the returned value with
     // mean_energy() at the state.
     const auto s_cam = CountableBeliefState::from_vec((state_.vec().cast<double>() + B_cam * b_).cast<float>());
@@ -1067,7 +1101,7 @@ void CountableBelief::apply_mode_rotation(int k)
         Sigma_.col(3).swap(Sigma_.col(4));
         std::swap(prior_mean_(3), prior_mean_(4));
         if (joint_init_)
-        {   // the persistent joint state relabels with θ: w, h of θ, b_cam and b_L (b_chain is a room-frame error, untouched)
+        {   // the persistent joint state relabels with θ: w, h of θ, b_cam and b_L (e and ℓ are room-frame, untouched)
             for (const int off : {0, N + kCam, N + kL})
             {
                 P_.row(off + 3).swap(P_.row(off + 4));

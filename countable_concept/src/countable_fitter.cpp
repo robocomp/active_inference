@@ -20,6 +20,7 @@
 #include "../../common/media_transport/media_transport.h"   // rc::media::sensor_model_from_graph, max_ring_gap_rad
 #include "countable_mask_membership.h"   // rc::MaskMembership, make_membership (lidar-measures G2)
 #include "countable_viewpoint.h"         // ρ from odometry (lidar-measures §7c.2)
+#include "../../common/place_memory/place_map.h"   // rc::place::inv_se2 (the robot in the room from T(robot←room))
 
 #include <algorithm>
 #include <chrono>
@@ -29,6 +30,7 @@
 #include <locale>
 #include <print>
 #include <random>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -183,6 +185,10 @@ void CountableFitter::integrate_odometry(CountableInstance& inst)
         }
     }
     if (pending) return;
+    // e's displacement (spec 7c.7 b): the odometry step; over a stretch the odometry cannot integrate, the pose increment
+    // (the robot did move; the localiser's share of it is what ρ_chain already reads as a correction).
+    if (step3.has_value())         inst.chain_dr += step3->head<2>();
+    else if (inst.chain.have)      inst.chain_dr += robot_xy_now_ - inst.chain.prev.head<2>();
     if (step3.has_value())
     {
         const Eigen::Vector2f step = step3->head<2>();
@@ -229,23 +235,29 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
         std::print("[{}] [lidar-measures] no Helios SensorModel on the graph ⇒ ρ_L = 1\n", inst.node_name);
         inst.dbg_rhoL_absent_logged = true;
     }
-    // Chain: ρ_chain = exp(−½cᵀΣ⁻¹c), c = the localiser's correction = pose increment ⊖ odometry increment since the chain
-    // latent's last update (a relocalisation jump gives ρ ≈ 0 by the formula itself).
-    float rho_ch = 1.0f;
-    if (inst.chain.have)
+    // e, the robot's pose error (spec 7c.7 b): Σ_pose and the robot's room position at the mask's capture stamp, from the
+    // robot→room edge; ρ_chain = exp(−½cᵀΣ_pose⁻¹c), c = the localiser's SE(2) correction (pose increment ⊖ odometry
+    // increment, ψ included) since e's last update — a relocalisation jump gives ρ ≈ 0 by the formula itself. No pose
+    // covariance on the edge ⇒ Σ_pose = 0 (e a zero-variance latent), logged once per instance.
+    const PoseAtStamp ps = pose_at_stamp(inst.last_mask_timestamp_ms);
+    if (not ps.ok and not inst.dbg_pose_cov_absent_logged)
     {
-        // psi is not yet in the chain latent (Task 13): keep the x,y-only behaviour by leaving psi out of c.
-        Eigen::Vector3f c = rc::chain_correction(inst.chain);
-        c.z() = 0.f;
-        rho_ch = static_cast<float>(rc::rho_chain(c.cast<double>(),
-            Eigen::Vector3d(inst.chain_cov_xx, inst.chain_cov_yy, 0.0).asDiagonal().toDenseMatrix()));
+        std::print("[{}] [lidar-measures] no robot pose covariance on the robot→room edge at the capture stamp ⇒ Σ_pose = 0 "
+                   "(e is a zero-variance latent)\n", inst.node_name);
+        inst.dbg_pose_cov_absent_logged = true;
     }
+    const Eigen::Vector3f cc = inst.chain.have ? rc::chain_correction(inst.chain) : Eigen::Vector3f::Zero();
+    const float rho_ch = static_cast<float>(rc::rho_chain(cc.cast<double>(), ps.sigma));
+    inst.dbg_chain_c  = cc;
+    inst.dbg_spose_sd = ps.sigma.diagonal().cwiseMax(0.0).cwiseSqrt();
     frame.rho_cam.fill(rho_cam);
     frame.rho_L   = {rho_lat, rho_lat, rho_H, rho_lat, rho_lat, rho_lat};
-    frame.rho_chain = {rho_ch, rho_ch};
+    frame.rho_chain  = rho_ch;
+    frame.sigma_pose = ps.sigma;
+    frame.chain_dr   = inst.chain_dr;
+    frame.robot_xy   = ps.ok ? ps.robot_xy : robot_xy_now_;
     frame.sig2_cam   = li.sig2_cam;
     frame.sig2_L     = li.sig2_L;
-    frame.sig2_chain = li.sig2_chain;
     frame.fresh_cam  = li.fresh;
     frame.fresh_L    = li.fresh;
 }
@@ -267,9 +279,59 @@ void CountableFitter::consume_paths(CountableInstance& inst, const CountableFram
     }
     if (camera or lidar)
     {
-        inst.dbg_rho_chain = frame.rho_chain[0];
+        inst.dbg_rho_chain = frame.rho_chain;
         rc::chain_rebase(inst.chain);
+        inst.chain_dr.setZero();                   // e's lever and transport have consumed this displacement
     }
+}
+
+// The robot's pose in the room at a capture stamp (spec 7c.7 b, R4-C3), from the robot→room RT edge's history ring: the slot
+// whose stamp is nearest ts (an untimestamped edge has one block), T(robot←room) at that slot inverted for the robot's room
+// position, and that slot's rt_covariance block carried into the room frame (pose_cov_in_room, double). The covariance is
+// one 36-block per slot, or a single block that belongs to the newest slot (room_concept proposal_adoption convention).
+CountableFitter::PoseAtStamp CountableFitter::pose_at_stamp(std::uint64_t ts_ms) const
+{
+    PoseAtStamp out;
+    if (not G_ or robot_node_id_ == 0) return out;
+    const auto room = G_->get_node(rc::room::current_room_frame(*G_));
+    if (not room.has_value()) return out;
+    const auto e = G_->get_edge(robot_node_id_, room->id(), "RT");
+    if (not e.has_value()) return out;
+    const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
+    const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+    const auto cv  = G_->get_attrib_by_name<rt_covariance_att>(e.value());
+    if (not tr.has_value() or not rot.has_value() or not cv.has_value()) return out;
+    const std::vector<float>& t = tr->get();
+    const std::vector<float>& r = rot->get();
+    const std::vector<float>& c = cv->get();
+    if (t.empty() or t.size() % 3 != 0 or r.size() != t.size() or c.empty() or c.size() % 36 != 0) return out;
+    const std::size_t nb = t.size() / 3;
+    std::size_t idx = nb - 1, newest = nb - 1;
+    if (const auto st = G_->get_attrib_by_name<rt_timestamps_att>(e.value()); st.has_value() and st->get().size() == nb)
+    {
+        const std::vector<std::uint64_t>& stamps = st->get();
+        bool any = false;
+        std::uint64_t best_d = 0, best_t = 0;
+        for (std::size_t b = 0; b < nb; ++b)
+        {
+            if (stamps[b] == 0) continue;                                  // a slot never written carries no pose
+            const std::uint64_t d = stamps[b] > ts_ms ? stamps[b] - ts_ms : ts_ms - stamps[b];
+            if (not any or d < best_d) { best_d = d; idx = b; }
+            if (not any or stamps[b] >= best_t) { best_t = stamps[b]; newest = b; }
+            any = true;
+        }
+        if (not any) return out;
+    }
+    std::span<const float> block;
+    if (c.size() == 36 * nb)                   block = std::span<const float>(c).subspan(36 * idx, 36);
+    else if (c.size() == 36 and idx == newest) block = std::span<const float>(c).first(36);
+    else return out;                                                         // no covariance block for that slot
+    const Eigen::Vector3f edge_pose(t[3 * idx], t[3 * idx + 1], r[3 * idx + 2]);    // T(robot←room): (x, y, ψ)
+    const Eigen::Vector3f room_robot = rc::place::inv_se2(edge_pose);              // the robot in the room
+    out.sigma    = rc::pose_cov_in_room(block, edge_pose);
+    out.robot_xy = room_robot.head<2>();
+    out.ok       = true;
+    return out;
 }
 
 // The camera's membership m(p) for this cycle's assigned ZED slice (spec G2, §7b): the slice's pixels (delivered image),
@@ -1125,8 +1187,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     // Only with a staged sweep: the membership is consumed by the ray selection alone (final review M4; result-preserving).
     if (cfg_.lidar_measures_on_gated and lidar_channel_.has_sweep())
         membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var);
-    // The latents' marginals (§7c.2): b_chain = the localisation part of the chain cov; b_cam = the config floors + range
-    // lateral/size + the obliquity yaw cap (today's camera fill WITHOUT chain and ego-motion); b_L = the config floors.
+    // The latents' marginals (§7c.2): b_cam = the config floors + range lateral/size + the obliquity yaw cap (today's camera
+    // fill WITHOUT chain and ego-motion); b_L = the config floors. e's marginal is Σ_pose, staged by stage_persistent (§7c.7).
     // The ego-motion terms are FRESH every frame (ρ = 0), marginalised inside each channel.
     const auto latent_inputs = [&](float obliquity_yaw_var)
     {
@@ -1137,7 +1199,6 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         li.sig2_cam = {p2 + range_lat_var, p2 + range_lat_var, s2 + range_size_var, s2 + range_size_var,
                        s2 + range_size_var, y2 + range_yaw_var + obliquity_yaw_var};
         li.sig2_L   = {p2, p2, s2, s2, s2, y2};
-        li.sig2_chain = {std::max(0.0f, inst.chain_cov_xx), std::max(0.0f, inst.chain_cov_yy)};
         li.fresh    = {mot_pos_var, mot_pos_var, mot_size_var, mot_size_var, mot_size_var, mot_yaw_var};
         return li;
     };
@@ -1559,11 +1620,14 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  // lidar_only = this cycle's update was a LiDAR-only frame; lidar_msum = Σ membership of the staged rays
                  // (0 = no membership); rho_* = the lag-1 correlation THIS cycle's accepted update used, per channel that measured (cx
                  // component; 1 when none was applied: no update, a rejected one, or the channel did not measure); dphi_cam/dz_cam = the camera path
-                 // that ρ_cam consumed; b* / sb* = latent means / stds (chain on cx,cy; cam and LiDAR on H); ray_n = rays in
+                 // that ρ_cam consumed; b* / sb* = latent means / stds (cam and LiDAR on H); ray_n = rays in
                  // the updating frame; Itr_* = trace of each channel's information after its fresh marginalisation.
+                 // §7c.7 (e = the robot's pose error): e_* / se_* = its mean / √diag Σ_e, lever_* = ℓ, spose_* = √diag Σ_pose
+                 // at the capture stamp (also reported while parked), c_* = the localiser correction ρ_chain used.
                  // All zero / ρ = 1 with the flag off.
-                 << "lidar_only,lidar_msum,rho_cam,rho_L,rho_chain,dphi_cam,dz_cam,bchain_x,bchain_y,bcam_H,bL_H,"
-                 << "sbcam_H,sbL_H,ray_n,Itr_cam,Itr_L\n";
+                 << "lidar_only,lidar_msum,rho_cam,rho_L,rho_chain,dphi_cam,dz_cam,bcam_H,bL_H,"
+                 << "sbcam_H,sbL_H,ray_n,Itr_cam,Itr_L,"
+                 << "e_x,e_y,e_psi,se_x,se_y,se_psi,lever_x,lever_y,spose_x,spose_y,spose_psi,c_x,c_y,c_psi\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1630,9 +1694,14 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
         ai2_csv_ << ',' << inst.dbg_lidar_only << ',' << inst.dbg_lidar_msum
                  << ',' << inst.dbg_rho_cam << ',' << inst.dbg_rho_L << ',' << inst.dbg_rho_chain
                  << ',' << inst.dbg_dphi_cam << ',' << inst.dbg_dz_cam
-                 << ',' << b(B::kChain) << ',' << b(B::kChain + 1) << ',' << b(B::kCam + 2) << ',' << b(B::kL + 2)
+                 << ',' << b(B::kCam + 2) << ',' << b(B::kL + 2)
                  << ',' << sb(B::kCam + 2) << ',' << sb(B::kL + 2)
-                 << ',' << inst.dbg_ray_n << ',' << inst.dbg_itr_cam << ',' << inst.dbg_itr_L << '\n';
+                 << ',' << inst.dbg_ray_n << ',' << inst.dbg_itr_cam << ',' << inst.dbg_itr_L
+                 << ',' << b(B::kChain) << ',' << b(B::kChain + 1) << ',' << b(B::kChain + 2)
+                 << ',' << sb(B::kChain) << ',' << sb(B::kChain + 1) << ',' << sb(B::kChain + 2)
+                 << ',' << inst.ai2_belief.chain_lever().l.x() << ',' << inst.ai2_belief.chain_lever().l.y()
+                 << ',' << inst.dbg_spose_sd(0) << ',' << inst.dbg_spose_sd(1) << ',' << inst.dbg_spose_sd(2)
+                 << ',' << inst.dbg_chain_c(0) << ',' << inst.dbg_chain_c(1) << ',' << inst.dbg_chain_c(2) << '\n';
     }
     ai2_csv_.flush();
 }

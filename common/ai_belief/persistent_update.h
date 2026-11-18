@@ -158,6 +158,11 @@ Eigen::Matrix<double, N + K, 1> joint_step(const Eigen::Matrix<double, N + K, 1>
 }
 
 // The joint posterior covariance (𝟙 + P̄W)⁻¹ P̄, symmetrised. Published Σ = its θθ block.
+// Evaluated as P̄ − P̄ (𝟙 + W P̄)⁻¹ W P̄ (the same matrix, push-through identity) so that a ZERO-VARIANCE latent (its row and
+// column of P̄ exactly zero: Σ_pose = 0, a null ψ) keeps an exactly zero row and column: both terms are products with that
+// zero row / column. The direct solve gave the column exactly zero but the row only to roundoff, and the symmetrisation
+// carried that roundoff into the next prediction, where it surfaced as a −1e-35 variance (spec 7c.7 b, a Σ_pose with a
+// null coordinate).
 template <int N, int K>
 Eigen::Matrix<double, N + K, N + K> joint_cov(const Eigen::Matrix<double, N + K, N + K>& P_bar,
                                               std::span<const Channel<N, K>> channels,
@@ -167,8 +172,9 @@ Eigen::Matrix<double, N + K, N + K> joint_cov(const Eigen::Matrix<double, N + K,
     using VecD = Eigen::Matrix<double, N + K, 1>;
     MatD W; VecD G;
     detail::information<N, K>(channels, theta_only, W, G);
-    const MatD A = MatD::Identity() + P_bar * W;
-    MatD P = A.partialPivLu().solve(P_bar);
+    const MatD WP = W * P_bar;
+    const MatD X  = (MatD::Identity() + WP).partialPivLu().solve(WP);
+    const MatD P  = P_bar - P_bar * X;
     return 0.5 * (P + P.transpose());
 }
 

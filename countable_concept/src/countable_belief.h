@@ -27,6 +27,7 @@
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
 #include "../../common/ai_belief/persistent_update.h"    // persistent shared-error latents (lidar-measures §7c.2)
+#include "countable_viewpoint.h"                          // ChainLever, chain_B, chain_transport (lidar-measures §7c.7 b)
 
 namespace rc
 {
@@ -246,8 +247,9 @@ struct CountableBeliefParams
 
     // ── PERSISTENT SHARED ERRORS + THE CLASS PRIOR COUNTED ONCE (spec 2026-11-15 lidar-measures §7c.1–7c.2) ──────────
     // false ⇒ today's per-frame Woodbury path, bit-identical (lidar_golden_test). true ⇒ the belief carries latents
-    // b = (b_chain (cx,cy), b_cam (6), b_L (6)) beside θ in a 20×20 double covariance; the camera points measure
-    // θ + E b_chain + b_cam, the rays θ + E b_chain + b_L; the relational anchors (wall flush/parallel, room axis) enter once,
+    // b = (e (δx, δy, δψ), b_cam (6), b_L (6)) beside θ in a 21×21 double covariance (§7c.7); e is the robot's pose error in
+    // the room, measured through B_chain = chain_B(ℓ) with a lever ℓ held as instance state; the camera points measure
+    // θ + B_chain e + b_cam, the rays θ + B_chain e + b_L; the relational anchors (wall flush/parallel, room axis) enter once,
     // at the first admissible camera update; the footprint (2) and height (2a) anchors never (Σ₀ = the class P carries them);
     // predict clamps Σθθ to the class P (the engine's clamp_to_prior congruence). Set from Model.LidarMeasuresOnGated (Task 9).
     bool  persistent = false;
@@ -316,12 +318,19 @@ struct CountableFrame
     // Lag-1 correlation of each latent since ITS channel's previous update of this instance (1 = parked, 0 = a new view).
     std::array<float, 6> rho_cam{};      // camera points' sensor-specific shared error b_cam
     std::array<float, 6> rho_L{};        // LiDAR rays' sensor-specific shared error b_L
-    std::array<float, 2> rho_chain{};    // localisation (pose-chain) error b_chain on (cx, cy)
+    // The robot's pose error e (spec 7c.7 b): ρ_chain = exp(−½cᵀΣ_pose⁻¹c), c the localiser's SE(2) correction since e's
+    // last update; Σ_pose = the robot's pose covariance in the ROOM on (x, y, ψ) at the capture stamp (double end to end,
+    // ruling T12-4); chain_dr = the robot's room-frame displacement since this instance's last update (odometry; it moves
+    // the lever and transports e by F = chain_transport(chain_dr)); robot_xy = the robot's room position at the capture
+    // stamp (where the lever is taken when e is a new source).
+    float           rho_chain  = 0.0f;
+    Eigen::Matrix3d sigma_pose = Eigen::Matrix3d::Zero();
+    Eigen::Vector2f chain_dr   = Eigen::Vector2f::Zero();
+    Eigen::Vector2f robot_xy   = Eigen::Vector2f::Zero();
     // The latents' marginal variances at THIS frame (σ_now²): b_cam = floors + range + obliquity + moments (no chain, no
-    // ego-motion); b_L = the config floors; b_chain = the localisation part of the chain cov. 0 = a zero-variance latent.
+    // ego-motion); b_L = the config floors. 0 = a zero-variance latent.
     std::array<float, 6> sig2_cam{};
     std::array<float, 6> sig2_L{};
-    std::array<float, 2> sig2_chain{};
     // Per-frame FRESH (ego-motion) variances of each channel, marginalised inside the channel (ρ = 0 by construction).
     std::array<float, 6> fresh_cam{};
     std::array<float, 6> fresh_L{};
@@ -439,14 +448,17 @@ public:
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 
     // ── Persistent shared errors (params.persistent; spec lidar-measures §7c.1–7c.2) ─────────────────────────────────
-    // Joint state x = (θ, b) ∈ ℝ²⁰, b = (b_chain (cx, cy), b_cam (6), b_L (6)); covariance() is P's θθ block in float.
-    static constexpr int K = 14;                          // latent DOFs
-    static constexpr int kChain = 0, kCam = 2, kL = 8;    // offsets of each latent inside b
-    using Mat20d = Eigen::Matrix<double, N + K, N + K>;
-    using VecKd  = Eigen::Matrix<double, K, 1>;
+    // Joint state x = (θ, b) ∈ ℝ²¹, b = (e (δx, δy, δψ), b_cam (6), b_L (6)); covariance() is P's θθ block in float (§7c.7).
+    static constexpr int K = 15;                          // latent DOFs
+    static constexpr int kChain = 0, kCam = 3, kL = 9;    // offsets of each latent inside b (e = kChain..kChain+2)
+    using MatJd = Eigen::Matrix<double, N + K, N + K>;
+    using VecKd = Eigen::Matrix<double, K, 1>;
     const VecKd&  latent_mean() const { return b_; }
     VecKd         latent_std()  const { return P_.diagonal().tail<K>().cwiseMax(0.0).cwiseSqrt(); }
-    const Mat20d& joint_covariance() const { return P_; }
+    const MatJd&  joint_covariance() const { return P_; }
+    // e's lever ℓ (object − robot, room frame): set when e is a new source, then moved only by the odometry (spec 7c.7 b).
+    const ChainLever&      chain_lever()      const { return lever_; }
+    const Eigen::Matrix3d& last_sigma_pose()  const { return last_sigma_pose_; }
     // The relational class anchors, ONE FLAG PER ANCHOR (ruling T6-1): wall flush/parallel and room axis each enter once, on
     // the first admissible camera update whose frame stages their context (f.wall.ok / f.room_axis_ok); the flag is set only
     // then, so an object first seen without a wall still gets the wall prior when the wall becomes known. No recall path
@@ -474,7 +486,7 @@ public:
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
     // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the ray-sets; θ-only = (2b), (2c) and,
     // on an admissible camera update whose anchor is not yet in (per-anchor flags), wall flush/parallel (1) / the room axis. Each channel
-    // is linearised at its own state: s_th = θ_k, s_cam = θ_k + E b̄_chain + b̄_cam, s_L = θ_k + E b̄_chain + b̄_L.
+    // is linearised at its own state: s_th = θ_k, s_cam = θ_k + B_chain ē + b̄_cam, s_L = θ_k + B_chain ē + b̄_L.
     void accumulate_channels(const CountableBeliefState& s_th, const CountableBeliefState& s_cam,
                              const CountableBeliefState& s_L, const CountableFrame& f,
                              Eigen::Matrix<float, 6, 6>& Id_cam, Eigen::Matrix<float, 6, 1>& bd_cam,
@@ -488,8 +500,10 @@ public:
     const Eigen::Matrix<float, 6, 6>& dbg_Id_cam()  const { return dbg_Id_cam_; }
     const Eigen::Matrix<float, 6, 6>& dbg_Id_L()    const { return dbg_Id_L_; }
     // Test hooks.
-    Mat20d& joint_covariance_for_test() { ensure_joint(); return P_; }
+    MatJd&  joint_covariance_for_test() { ensure_joint(); return P_; }
     void    set_latent_mean_for_test(const VecKd& b) { ensure_joint(); b_ = b; }
+    // The latent predict of one persistent update alone (e with its lever, and the latents of the channels f measures).
+    void    predict_latents_for_test(const CountableFrame& f) { ensure_joint(); predict_latents_persistent(f, frame_has_camera(f), frame_has_lidar(f)); }
     void    apply_mode_rotation_for_test(int k) { apply_mode_rotation(k); }
 
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
@@ -637,6 +651,12 @@ private:
     void  sanitize_joint();                               // sanitize_covariance under persistent
     void  predict_theta_joint(float q_scale);             // θθ: +Q, then the clamp_to_prior congruence on θ's rows/cols of P_
     float update_persistent(const CountableFrame& frame); // predict + GN with the latent restart + joint covariance
+    // Step 1 on the latents: e (lever first, then F = chain_transport(chain_dr), ρ_chain, Σ_pose) whenever a channel measures;
+    // b_cam / b_L when their channel measures (F = I, diagonal Σ_now, σ_prev = 0 ⇒ new source).
+    void  predict_latents_persistent(const CountableFrame& f, bool camera, bool lidar);
+    static bool frame_has_camera(const CountableFrame& f) { return not f.points.empty(); }
+    static bool frame_has_lidar(const CountableFrame& f);
+    Eigen::Matrix<double, N, K> chain_selector(bool camera) const;   // [B_chain(ℓ) | 𝟙 on the channel's own latent]
     float update_persistent_cycle(const CountableFrame& frame);   // update() under persistent (size summary, ω as today)
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
     float two_sided_along(const CountableBeliefState& s, const CountableFrame& f, bool along_x) const;
@@ -705,12 +725,16 @@ private:
     mutable float   dbg_wall_lambda_ = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
 
-    // Persistent joint state (params.persistent): P_ over x = (θ, b), b_ the latent mean, sig_prev_ the σ each latent was
-    // last predicted at (0 ⇒ never measured: the next predict draws it as a new source), wall_/axis_prior_added_ = the relational
-    // anchors have entered. Sigma_ mirrors P_'s θθ block in float for every reader of covariance().
-    Mat20d P_ = Mat20d::Zero();
+    // Persistent joint state (params.persistent): P_ over x = (θ, b), b_ the latent mean, sig_prev_ the σ b_cam / b_L were
+    // last predicted at (0 ⇒ never measured: the next predict draws it as a new source; its e entries are unused),
+    // lever_ / last_sigma_pose_ = e's lever and the Σ_pose e was last predicted at (zero ⇒ e is a new source next time),
+    // wall_/axis_prior_added_ = the relational anchors have entered. Sigma_ mirrors P_'s θθ block in float for every reader of
+    // covariance(). Neither e nor ℓ is stored by any recall (a pose error is not an object property).
+    MatJd  P_ = MatJd::Zero();
     VecKd  b_ = VecKd::Zero();
     VecKd  sig_prev_ = VecKd::Zero();
+    ChainLever      lever_;
+    Eigen::Matrix3d last_sigma_pose_ = Eigen::Matrix3d::Zero();
     bool   joint_init_  = false;
     bool   wall_prior_added_ = false;   // flush + parallel have entered (T6-1)
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)

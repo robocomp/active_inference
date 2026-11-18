@@ -11,6 +11,7 @@
 #include <vector>
 #include <Eigen/Eigenvalues>
 #include "countable_belief.h"
+#include "countable_viewpoint.h"
 #include "test_scene.h"
 
 using namespace rc;
@@ -39,7 +40,10 @@ static CountableBelief make_belief(float dcx = 0.05f, float dcy = -0.04f, float 
     b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
     return b;
 }
-// The latents' marginals at the config floors (common_mode_*_std), the chain at 1 cm; ρ as given; no fresh covariance.
+// The robot, parked 1.5 m in front of the golden box (the lever of e when Σ_pose has a ψ part).
+static const Eigen::Vector2f kRobot(tx, ty - 1.5f);
+// The latents' marginals at the config floors (common_mode_*_std), the robot pose error e at 1 cm on (x, y) and none on ψ
+// (the old (cx, cy) chain at 1 cm); ρ as given (all latents); no fresh covariance; the robot parked at kRobot.
 static void set_latents(CountableFrame& f, float rho, float chain2 = 1e-4f)
 {
     const CountableBeliefParams p = params();
@@ -47,8 +51,10 @@ static void set_latents(CountableFrame& f, float rho, float chain2 = 1e-4f)
                 yy = p.common_mode_yaw_std * p.common_mode_yaw_std;
     f.sig2_cam = {pp, pp, ss, ss, ss, yy};
     f.sig2_L   = {pp, pp, ss, ss, ss, yy};
-    f.sig2_chain = {chain2, chain2};
-    f.rho_cam.fill(rho); f.rho_L.fill(rho); f.rho_chain.fill(rho);
+    f.sigma_pose = Eigen::Vector3d(chain2, chain2, 0.0).asDiagonal();
+    f.rho_cam.fill(rho); f.rho_L.fill(rho); f.rho_chain = rho;
+    f.chain_dr = Eigen::Vector2f::Zero();
+    f.robot_xy = kRobot;
 }
 static void stage_wall(CountableFrame& f)
 {
@@ -135,7 +141,10 @@ struct EngineAdapter
 template <class A, class B>
 static double rel(const A& a, const B& b) { return double((a - b).norm()) / std::max(double(b.norm()), 1e-30); }
 
-static void rho0_equals_engine(bool camera)
+// spec 7c.7 Pass: the ρ = 0 regression runs with Σ_pose = 0 (a zero-variance e; b_cam, b_L as before) and pins the persistent
+// path against the flag-off engine WITHOUT chain covariance, at every iterate. No step is rejected on these fixtures (the
+// undamped GN of this path takes every step).
+static void rho0_regression_zero_pose_cov(bool camera)
 {
     CountableBeliefParams p = params();
     p.depth_unobs_precision = 0.0f;
@@ -146,16 +155,16 @@ static void rho0_equals_engine(bool camera)
     fx.set_prior_added(true, true);
     fx.set_first_update_done(true);   // the recursion (x̄ = the current mean), not the class-mean first update (Task 6c)
     CountableFrame f = camera ? camera_frame() : lidar_frame(two_face_rays());
-    set_latents(f, 0.0f, 2.5e-4f);
-    // the summed marginals of what the channel measures: chain (cx, cy) + the channel's own latent
+    set_latents(f, 0.0f, 0.0f);
+    // the marginal of what the channel measures: the channel's own latent only (e has zero variance)
     Vec6 sc;
-    for (int i = 0; i < 6; ++i) sc(i) = (camera ? f.sig2_cam[i] : f.sig2_L[i]) + (i < 2 ? f.sig2_chain[i] : 0.0f);
+    for (int i = 0; i < 6; ++i) sc(i) = camera ? f.sig2_cam[i] : f.sig2_L[i];
     const Vec6 scinv = sc.cwiseInverse();
 
     CountableBelief a = fx;
     a.update(f);
     const auto& its = a.dbg_iterates();
-    const char* nm = camera ? "rho0_camera_only_equals_engine" : "rho0_lidar_only_equals_engine";
+    const char* nm = camera ? "rho0_zero_pose_cov_camera_only" : "rho0_zero_pose_cov_lidar_only";
     CHECK(int(its.size()) == p.gn_iters);
     double worst = 0.0;
     for (int k = 1; k <= int(its.size()); ++k)
@@ -382,73 +391,321 @@ static void parked_camera_is_one_look()
     CHECK(r < 0.01);
 }
 
-static void zero_chain_cov_runs()
+// A full Σ_pose with cross terms (x, y, ψ): the robot pose error the published edge carries.
+static Eigen::Matrix3d full_sigma_pose()
+{
+    Eigen::Matrix3d S;
+    S << 9.0e-4, 2.0e-4, 1.0e-4,
+         2.0e-4, 1.2e-3, -5.0e-5,
+         1.0e-4, -5.0e-5, 4.0e-4;
+    return S;
+}
+
+static void zero_pose_cov_runs()
 {
     CountableBelief b = make_belief();
     const Vec6 s0 = b.state().vec();
     CountableFrame f = camera_frame(); set_latents(f, 1.0f, 0.0f); f.lidar = two_face_rays();
     for (int k = 0; k < 10; ++k) b.update(f);
     const auto sd = b.latent_std();
-    std::printf("  zero chain: state moved %.4f ; latent std chain %.2e %.2e ; P finite %d\n", (b.state().vec() - s0).norm(),
-                sd(0), sd(1), int(b.joint_covariance().allFinite()));
+    std::printf("  zero pose cov: state moved %.4f ; e std %.2e %.2e %.2e ; e mean %.2e ; P finite %d\n",
+                (b.state().vec() - s0).norm(), sd(0), sd(1), sd(2), b.latent_mean().head<3>().norm(),
+                int(b.joint_covariance().allFinite()));
     CHECK(b.state().vec().allFinite() and b.covariance().allFinite() and b.joint_covariance().allFinite());
     CHECK(b.latent_mean().allFinite());
     CHECK((b.state().vec() - s0).norm() > 1e-3f);
-    CHECK(sd(0) == 0.0 and sd(1) == 0.0);
+    CHECK(sd(0) == 0.0 and sd(1) == 0.0 and sd(2) == 0.0);
+    CHECK(b.latent_mean().head<3>().isZero(0.0));
 }
 
-static void mode_rotation_permutes_latents()
+// spec 7c.7 b: canonicalize / mode rotation leave e and ℓ untouched (a pose error is a room-frame quantity); b_cam and b_L
+// relabel w ↔ h with θ.
+static void mode_rotation_leaves_e()
 {
     CountableBelief b = make_belief();
     CountableFrame f = camera_frame(); set_latents(f, 1.0f); f.lidar = two_face_rays();
+    f.sigma_pose = full_sigma_pose();
     b.update(f);
     CountableBelief::VecKd v;
-    v << 0.011, 0.012, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036;
+    v << 0.011, 0.012, 0.013, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036;
     b.set_latent_mean_for_test(v);
-    const CountableBelief::Mat20d P0 = b.joint_covariance();
+    const CountableBelief::MatJd P0 = b.joint_covariance();
+    const ChainLever L0 = b.chain_lever();
     b.apply_mode_rotation_for_test(1);
     const auto& m = b.latent_mean();
     const auto& P = b.joint_covariance();
-    std::printf("  mode rotation: b_cam w,h %.3f %.3f (was %.3f %.3f) ; b_L w,h %.3f %.3f ; b_chain %.3f %.3f\n",
-                m(5), m(6), v(5), v(6), m(11), m(12), m(0), m(1));
-    CHECK(m(5) == v(6) and m(6) == v(5));                 // b_cam w ↔ h
-    CHECK(m(11) == v(12) and m(12) == v(11));             // b_L w ↔ h
-    CHECK(m(0) == v(0) and m(1) == v(1));                 // b_chain untouched
-    CHECK(m(2) == v(2) and m(7) == v(7) and m(13) == v(13));
+    constexpr int c = CountableBelief::kCam, l = CountableBelief::kL, N = 6;
+    std::printf("  mode rotation: b_cam w,h %.3f %.3f (was %.3f %.3f) ; b_L w,h %.3f %.3f ; e %.3f %.3f %.3f ; lever (%.4f %.4f) was (%.4f %.4f)\n",
+                m(c + 3), m(c + 4), v(c + 3), v(c + 4), m(l + 3), m(l + 4), m(0), m(1), m(2),
+                b.chain_lever().l.x(), b.chain_lever().l.y(), L0.l.x(), L0.l.y());
+    CHECK(m(c + 3) == v(c + 4) and m(c + 4) == v(c + 3));         // b_cam w ↔ h
+    CHECK(m(l + 3) == v(l + 4) and m(l + 4) == v(l + 3));         // b_L w ↔ h
+    CHECK(m(0) == v(0) and m(1) == v(1) and m(2) == v(2));        // e untouched
+    CHECK(b.chain_lever().l == L0.l and b.chain_lever().set == L0.set);
+    CHECK(m(c) == v(c) and m(c + 5) == v(c + 5) and m(l + 5) == v(l + 5));
     CHECK(P(3, 3) == P0(4, 4) and P(4, 4) == P0(3, 3));
-    CHECK(P(6 + 5, 6 + 5) == P0(6 + 6, 6 + 6) and P(6 + 11, 6 + 11) == P0(6 + 12, 6 + 12));
-    CHECK(P(3, 6 + 5) == P0(4, 6 + 6));                   // θ_w–b_cam,w cross term follows both relabels
+    CHECK(P(N + c + 3, N + c + 3) == P0(N + c + 4, N + c + 4) and P(N + l + 3, N + l + 3) == P0(N + l + 4, N + l + 4));
+    CHECK(P(3, N + c + 3) == P0(4, N + c + 4));                   // θ_w–b_cam,w cross term follows both relabels
+    CHECK((P.block<3, 3>(N, N) == P0.block<3, 3>(N, N)));           // e's own block untouched
+    CHECK(P(0, N) == P0(0, N) and P(5, N + 2) == P0(5, N + 2));   // θ–e cross terms of the unrelabelled DOFs untouched
     CHECK(b.covariance()(3, 3) == float(P(3, 3)));
     const double asym = (P - P.transpose()).cwiseAbs().maxCoeff();
-    const double mine = Eigen::SelfAdjointEigenSolver<CountableBelief::Mat20d>(P).eigenvalues().minCoeff();
+    const double mine = Eigen::SelfAdjointEigenSolver<CountableBelief::MatJd>(P).eigenvalues().minCoeff();
     std::printf("  mode rotation: max|P-P^T| %.3e  min eig %.3e\n", asym, mine);
     CHECK(asym == 0.0);
     CHECK(mine >= -1e-12);
 }
 
-static void sanitize_reseeds()
+// spec 7c.7 b (R4-M7): sanitize re-seeds e at the last Σ_pose (its own 3×3, zero cross terms to everything else), b_cam and
+// b_L at their last marginals, θθ at the class P; ℓ is kept.
+static void sanitize_reseeds_e()
 {
     CountableBelief b = make_belief();
     CountableFrame f = camera_frame(); set_latents(f, 1.0f); f.lidar = two_face_rays();
+    f.sigma_pose = full_sigma_pose();
     b.update(f);
     CHECK(b.wall_prior_added() and b.axis_prior_added());
+    const ChainLever L0 = b.chain_lever();
     b.joint_covariance_for_test()(0, 0) = std::numeric_limits<double>::quiet_NaN();
     b.sanitize_covariance();
     const auto& P = b.joint_covariance();
+    constexpr int N = 6, K = CountableBelief::K;
     const Vec6 p0 = b.prior_cov_diag();
     bool th_ok = true, lat_ok = true, cross_ok = true;
-    for (int i = 0; i < 6; ++i) th_ok = th_ok and P(i, i) == double(p0(i));
-    const std::array<float, 14> m2 = {f.sig2_chain[0], f.sig2_chain[1], f.sig2_cam[0], f.sig2_cam[1], f.sig2_cam[2], f.sig2_cam[3],
-                                      f.sig2_cam[4], f.sig2_cam[5], f.sig2_L[0], f.sig2_L[1], f.sig2_L[2], f.sig2_L[3], f.sig2_L[4], f.sig2_L[5]};
-    for (int j = 0; j < 14; ++j) lat_ok = lat_ok and std::abs(P(6 + j, 6 + j) / double(m2[j]) - 1.0) < 1e-6;
-    for (int r = 0; r < 20; ++r) for (int c = 0; c < 20; ++c) if (r != c) cross_ok = cross_ok and P(r, c) == 0.0;
-    std::printf("  sanitize: thetatheta = P %d ; latents = marginals %d ; cross 0 %d ; wall/axis added %d/%d ; b = 0 %d\n",
-                int(th_ok), int(lat_ok), int(cross_ok), int(b.wall_prior_added()), int(b.axis_prior_added()), int(b.latent_mean().isZero(0.0)));
-    CHECK(th_ok and lat_ok and cross_ok);
+    for (int i = 0; i < N; ++i) th_ok = th_ok and P(i, i) == double(p0(i));
+    const bool e_ok = (P.block<3, 3>(N, N) - f.sigma_pose).cwiseAbs().maxCoeff() == 0.0;
+    const std::array<float, 12> m2 = {f.sig2_cam[0], f.sig2_cam[1], f.sig2_cam[2], f.sig2_cam[3], f.sig2_cam[4], f.sig2_cam[5],
+                                      f.sig2_L[0], f.sig2_L[1], f.sig2_L[2], f.sig2_L[3], f.sig2_L[4], f.sig2_L[5]};
+    for (int j = 0; j < 12; ++j) lat_ok = lat_ok and std::abs(P(N + 3 + j, N + 3 + j) / double(m2[j]) - 1.0) < 1e-6;
+    for (int r = 0; r < N + K; ++r)
+        for (int c = 0; c < N + K; ++c)
+        {
+            const bool in_e = r >= N and r < N + 3 and c >= N and c < N + 3;
+            if (r != c and not in_e) cross_ok = cross_ok and P(r, c) == 0.0;
+        }
+    std::printf("  sanitize: thetatheta = P %d ; e = Sigma_pose %d ; latents = marginals %d ; cross 0 %d ; wall/axis added %d/%d ; "
+                "b = 0 %d ; lever kept %d\n", int(th_ok), int(e_ok), int(lat_ok), int(cross_ok), int(b.wall_prior_added()),
+                int(b.axis_prior_added()), int(b.latent_mean().isZero(0.0)), int(b.chain_lever().l == L0.l));
+    CHECK(th_ok and e_ok and lat_ok and cross_ok);
     CHECK(not b.wall_prior_added() and not b.axis_prior_added());
     CHECK(not b.first_update_done());
     CHECK(b.latent_mean().isZero(0.0));
+    CHECK(b.chain_lever().l == L0.l and b.chain_lever().set);
     CHECK(b.covariance().allFinite());
+}
+
+// spec 7c.7 b: ρ_chain = 0 (a relocalisation) re-draws e: after the latent predict e's mean is 0, its covariance is this
+// frame's Σ_pose with no cross terms, the lever is re-taken at (belief centre − robot), and θ has not moved.
+static void relocalisation_redraws_e()
+{
+    CountableBelief b = make_belief();
+    CountableFrame f = camera_frame(); set_latents(f, 1.0f); f.lidar = two_face_rays();
+    f.sigma_pose = full_sigma_pose();
+    for (int k = 0; k < 3; ++k) b.update(f);
+    constexpr int N = 6, K = CountableBelief::K;
+    const double cross_before = b.joint_covariance().block<N, 3>(0, N).cwiseAbs().maxCoeff();
+    CountableFrame g = f;
+    g.rho_chain = 0.0f;
+    g.sigma_pose = 2.0 * full_sigma_pose();
+    g.robot_xy = kRobot + Eigen::Vector2f(0.4f, -0.3f);
+    g.chain_dr = Eigen::Vector2f(0.1f, 0.05f);
+    const Vec6 th0 = b.state().vec();
+    b.predict_latents_for_test(g);
+    const auto& P = b.joint_covariance();
+    const Eigen::Vector2f expect_l = Eigen::Vector2f(b.state().cx, b.state().cy) - g.robot_xy;
+    double cross = 0.0;
+    for (int r = 0; r < N + K; ++r)
+        for (int c = N; c < N + 3; ++c)
+            if (r < N or r >= N + 3) cross = std::max(cross, std::abs(P(r, c)));
+    std::printf("  relocalisation: e mean %.2e ; |P_ee - Sigma_pose| %.2e ; cross before %.2e after %.2e ; lever (%.4f %.4f) "
+                "expect (%.4f %.4f) ; |dtheta| %.2e\n", b.latent_mean().head<3>().norm(),
+                (P.block<3, 3>(N, N) - g.sigma_pose).cwiseAbs().maxCoeff(), cross_before, cross,
+                b.chain_lever().l.x(), b.chain_lever().l.y(), expect_l.x(), expect_l.y(), (b.state().vec() - th0).norm());
+    CHECK(cross_before > 0.0);                                   // the test can see cross terms when there are some
+    CHECK(b.latent_mean().head<3>().isZero(0.0));
+    CHECK(((P.block<3, 3>(N, N) - g.sigma_pose).cwiseAbs().maxCoeff() <= 1e-15));
+    CHECK(cross == 0.0);
+    CHECK(b.chain_lever().l == expect_l);
+    CHECK(b.state().vec() == th0);
+}
+
+// spec 7c.7 c: at ρ = 1 a parked range jitter reaches nothing — the range share of b_cam's σ changes only through S Σ S = 0.
+// 1000 identical frames; in one run the mask range (hence the range share of b_cam's marginal) is jittered by ±1e-4
+// relative from the second frame on (the first frame draws b_cam at its nominal range in both runs).
+static void parked_range_jitter_equality()
+{
+    const CountableBeliefParams p = params();
+    const auto cam_marginal = [&](float range)
+    {
+        const float pp = p.common_mode_pos_std * p.common_mode_pos_std, ss = p.common_mode_size_std * p.common_mode_size_std,
+                    yy = p.common_mode_yaw_std * p.common_mode_yaw_std;
+        const float lat = 0.02f * range, sz = 0.08f * range, yw = 0.03f * range;
+        return std::array<float, 6>{pp + lat * lat, pp + lat * lat, ss + sz * sz, ss + sz * sz, ss + sz * sz, yy + yw * yw};
+    };
+    CountableFrame f = camera_frame(); set_latents(f, 1.0f); f.lidar = two_face_rays();
+    f.sigma_pose = full_sigma_pose();
+    const float range = 1.65f;
+    f.sig2_cam = cam_marginal(range);
+    CountableBelief a = make_belief(), j = make_belief();
+    std::uint32_t lcg = 12345u;
+    for (int k = 0; k < 1000; ++k)
+    {
+        a.update(f);
+        CountableFrame fj = f;
+        if (k > 0)
+        {
+            lcg = lcg * 1664525u + 1013904223u;
+            const float u = 2.0f * float(lcg >> 8) / float(1u << 24) - 1.0f;   // [-1, 1)
+            fj.sig2_cam = cam_marginal(range * (1.0f + 1e-4f * u));
+        }
+        j.update(fj);
+    }
+    const double dth = rel(j.state().vec(), a.state().vec()), db = (j.latent_mean() - a.latent_mean()).cwiseAbs().maxCoeff(),
+                 dP = rel(j.joint_covariance(), a.joint_covariance());
+    std::printf("  parked range jitter (1000 frames): theta rel %.3e ; max|db| %.3e ; P rel %.3e\n", dth, db, dP);
+    CHECK(dth <= 1e-6);
+    CHECK(db <= 1e-6 * std::max(1e-3, a.latent_mean().cwiseAbs().maxCoeff()));
+    CHECK(dP <= 1e-6);
+}
+
+// spec 7c.7 b, "chain once for both" in its 3×3 form: a parked camera + LiDAR update; the data information the two channels
+// add on (cx, cy, yaw) equals (B Σ_pose Bᵀ + (Σ_cam⁻¹ + Σ_L⁻¹)⁻¹)⁻¹, B the three non-zero rows of B_chain, Σ_ch the channel's
+// data covariance plus its own latent (inverse-free: Σ_ch⁻¹ = (𝟙 + I_ch Σ_b)⁻¹ I_ch). θ-only channel empty (anchors in,
+// (2c) and the depth boost off), no fresh covariance, first update done (P̄ = the recursion's prediction, no θ–b cross terms).
+static void chain_once_for_both_3x3()
+{
+    using M6d = Eigen::Matrix<double, 6, 6>;
+    CountableBeliefParams p = params();
+    p.depth_unobs_precision = 0.0f;
+    p.wall_no_cross_precision = 0.0f;
+    CountableBelief b = make_belief(0.05f, -0.04f, 0.03f, p);
+    b.set_prior_added(true, true);
+    b.set_first_update_done(true);
+    // Camera points on all four sides (a two-face view leaves cx + w/2 and cy + h/2 unobserved: a zero-information direction
+    // makes the channels' combined covariance, and so the comparison, undefined).
+    CountableFrame f = camera_frame(); set_latents(f, 1.0f); f.lidar = two_face_rays();
+    for (int i = 0; i < 12; ++i) for (int j = 0; j < 10; ++j)
+        f.points.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 12.0f, ty + 0.5f * tw, tH * (j + 0.5f) / 10.0f);
+    for (int i = 0; i < 8; ++i) for (int j = 0; j < 10; ++j)
+        f.points.emplace_back(tx + 0.5f * tw, ty - 0.5f * tw + tw * (i + 0.5f) / 8.0f, tH * (j + 0.5f) / 10.0f);
+    f.R.assign(f.points.size(), params().sigma_base_m * params().sigma_base_m);
+    f.sigma_pose = full_sigma_pose();
+    f.robot_xy = Eigen::Vector2f(tx - 1.5f, ty - 1.5f);
+    b.update(f);
+    CHECK(b.dbg_Id_th().norm() == 0.0f);
+    const M6d Pbar = b.dbg_Pbar_tt().cast<double>();
+    const M6d Ppost = b.joint_covariance().topLeftCorner<6, 6>();
+    const M6d I_data = Ppost.inverse() - Pbar.inverse();
+    Mat6 Sbc = Mat6::Zero(), SbL = Mat6::Zero();
+    for (int i = 0; i < 6; ++i) { Sbc(i, i) = f.sig2_cam[i]; SbL(i, i) = f.sig2_L[i]; }
+    const M6d Ac = pu::marginalise_fresh<6>(b.dbg_Id_cam(), Vec6::Zero(), Sbc).I;
+    const M6d AL = pu::marginalise_fresh<6>(b.dbg_Id_L(),   Vec6::Zero(), SbL).I;
+    const Eigen::Matrix<double, 6, 3> B = chain_B(b.chain_lever().l);
+    const std::array<int, 3> ix{0, 1, 5};
+    const M6d Cch = (Ac + AL).inverse();                          // (Σ_cam⁻¹ + Σ_L⁻¹)⁻¹
+    const double min_eig = Eigen::SelfAdjointEigenSolver<M6d>(Ac + AL).eigenvalues().minCoeff();
+    CHECK(min_eig > 0.0);                                         // well posed: every DOF informed
+    const M6d Cdata = I_data.inverse();
+    Eigen::Matrix3d B3, C3, D3;
+    for (int r = 0; r < 3; ++r)
+    {
+        B3.row(r) = B.row(ix[r]);
+        for (int c = 0; c < 3; ++c) { C3(r, c) = Cch(ix[r], ix[c]); D3(r, c) = Cdata(ix[r], ix[c]); }
+    }
+    const Eigen::Matrix3d expect = (B3 * f.sigma_pose * B3.transpose() + C3).inverse();
+    const Eigen::Matrix3d got    = D3.inverse();
+    const double r3 = rel(got, expect);
+    const double r6 = rel(I_data, (B * f.sigma_pose * B.transpose() + Cch).inverse().eval());
+    std::printf("  chain once for both (3x3 on cx, cy, yaw): rel %.3e (6x6 form rel %.3e) ; min eig of the channels' info %.3e ; "
+                "lever (%.3f %.3f) ; diag got %.4e %.4e %.4e expect %.4e %.4e %.4e\n", r3, r6, min_eig, b.chain_lever().l.x(),
+                b.chain_lever().l.y(), got(0, 0), got(1, 1), got(2, 2), expect(0, 0), expect(1, 1), expect(2, 2));
+    CHECK(r3 <= 1e-6);
+}
+
+// spec 7c.7 Pass, transport invariance: a ray-cast nightstand, the robot driving a 90° arc at 1.5 m around it, its pose
+// dead-reckoned with a TRUE heading error δψ = 0.02 rad that arose at the arc's start p0 (the estimated path is the true one
+// rotated by δψ about p0, so every room-frame observation is the true scene under that one rigid map). ρ_chain = 1 (no
+// correction), ρ_cam = ρ_L = 1 (the claims are about e). True e_t = (estimated − true) robot pose.
+static void transport_invariance_arc()
+{
+    constexpr int N = 6;
+    const double dpsi = 0.02;
+    const Eigen::Vector2f c(tx, ty);
+    const Eigen::Rotation2Df Rd(static_cast<float>(dpsi));
+    const int steps = 10;
+    std::vector<Eigen::Vector2f> r_true(steps), r_est(steps);
+    for (int k = 0; k < steps; ++k)
+    {
+        const float a = static_cast<float>((-135.0 + 90.0 * k / (steps - 1)) * M_PI / 180.0);
+        r_true[k] = c + 1.5f * Eigen::Vector2f(std::cos(a), std::sin(a));
+    }
+    const Eigen::Vector2f p0 = r_true[0];
+    for (int k = 0; k < steps; ++k) r_est[k] = p0 + Rd * (r_true[k] - p0);
+    const Eigen::Vector2f c_obs = p0 + Rd * (c - p0);              // the box as the room-frame data shows it
+    const rc::test::SceneBox seen{c_obs, static_cast<float>(dpsi), tw, tw, tH};
+    const std::vector<rc::test::SceneBox> boxes{seen};
+    const std::vector<rc::test::SceneWall> walls;
+    Eigen::Matrix3d Sp = Eigen::Vector3d(0.03 * 0.03, 0.03 * 0.03, 0.02 * 0.02).asDiagonal();
+
+    CountableBelief b(CountableBeliefState{c_obs.x(), c_obs.y(), tH, tw, tw, static_cast<float>(dpsi)}, params());
+    Eigen::Vector3d sd1 = Eigen::Vector3d::Zero();
+    double worst_bf = 0.0, worst_sd = 0.0, nees_lo = 1e30, nees_hi = 0.0, worst_th = 0.0;
+    for (int k = 0; k < steps; ++k)
+    {
+        CountableFrame f;
+        {
+            const Eigen::Vector3f o(r_est[k].x(), r_est[k].y(), 0.945f);
+            std::vector<float> el; for (float e = -40.0f; e <= 5.0f; e += 0.4f) el.push_back(e);
+            f.points = rc::test::select_near(rc::test::raycast_scene(o, boxes, walls, true, 0.4f, el, 6.0f), seen, 0.02f);
+            f.R.assign(f.points.size(), params().sigma_base_m * params().sigma_base_m);
+            f.z_top_obs = tH;
+        }
+        {
+            const Eigen::Vector3f o(r_est[k].x(), r_est[k].y(), 1.1075f);
+            f.lidar.origin = o;
+            f.lidar.endpoints = rc::test::select_near(rc::test::raycast_scene(o, boxes, walls, true, rc::test::kHeliosAzStepDeg,
+                                                                              kElev, 12.0f), seen, 0.02f);
+            f.lidar.precision = 2500.0f; f.lidar.robust_c_m = 0.05f;
+        }
+        set_latents(f, 1.0f);
+        f.sigma_pose = Sp;
+        f.robot_xy = r_est[k];
+        f.chain_dr = k == 0 ? Eigen::Vector2f::Zero() : Eigen::Vector2f(r_est[k] - r_est[k - 1]);
+        const ChainLever Lp = b.chain_lever();
+        b.update(f);
+        const ChainLever L = b.chain_lever();
+        if (k > 0)
+        {
+            const Eigen::Matrix<double, 6, 3> BF = chain_B(L.l) * chain_transport(f.chain_dr), Bp = chain_B(Lp.l);
+            worst_bf = std::max(worst_bf, (BF - Bp).cwiseAbs().maxCoeff());
+        }
+        const auto& P = b.joint_covariance();
+        const Eigen::Matrix3d Se = P.block<3, 3>(N, N);
+        const Eigen::Vector3d sd = Se.diagonal().cwiseSqrt();
+        if (k == 0) sd1 = sd;
+        else worst_sd = std::max(worst_sd, (sd1 - sd).cwiseQuotient(sd1).maxCoeff());
+        const Eigen::Vector2f exy = r_est[k] - r_true[k];
+        const Eigen::Vector3d e_true(exy.x(), exy.y(), dpsi);
+        const Eigen::Vector3d d = b.latent_mean().head<3>() - e_true;
+        const double nees = d.dot(Se.ldlt().solve(d));
+        nees_lo = std::min(nees_lo, nees); nees_hi = std::max(nees_hi, nees);
+        const Vec6 th_true = (Vec6() << tx, ty, tH, tw, tw, 0.0f).finished();
+        const Vec6 err = b.state().vec() - th_true;
+        double wz = 0.0;
+        for (int i = 0; i < 6; ++i) wz = std::max(wz, double(std::abs(err(i)) / std::sqrt(b.covariance()(i, i))));
+        worst_th = std::max(worst_th, wz);
+        std::printf("    arc %d: e (%+.4f %+.4f %+.5f) true (%+.4f %+.4f %+.5f) sd (%.4f %.4f %.5f) NEES %.3f ; theta err cx %+.4f "
+                    "cy %+.4f yaw %+.4f worst |err|/sigma %.2f\n", k, b.latent_mean()(0), b.latent_mean()(1), b.latent_mean()(2),
+                    e_true(0), e_true(1), e_true(2), sd(0), sd(1), sd(2), nees, err(0), err(1), err(5), wz);
+    }
+    std::printf("  transport invariance: max|B_t F_t - B_t-1| %.3e ; worst sd drop below update 1 %.3e ; NEES [%.3f, %.3f] ; "
+                "worst theta |err|/sigma %.2f\n", worst_bf, worst_sd, nees_lo, nees_hi, worst_th);
+    // The lever is float state (Task 12's ChainLever, ruling T12-1): ℓ − Δr rounds at ε_float·|ℓ|, so the identity holds to
+    // float precision of the lever, not to 1e-9.
+    CHECK(worst_bf <= 1e-6);
+    CHECK(worst_sd <= 1e-3);
+    CHECK(nees_lo >= 0.1 and nees_hi <= 10.0);
+    CHECK(worst_th <= 2.0);
 }
 
 // ─── Ruling T4-1a: a CURVED measurement h(θ + b). The caller's restarting loop matches today's eliminated (saturate) path
@@ -640,17 +897,21 @@ int main()
 {
     flag_off_golden();
     nonlinear_restart_matches_eliminated();
-    rho0_equals_engine(true);
-    rho0_equals_engine(false);
+    rho0_regression_zero_pose_cov(true);
+    rho0_regression_zero_pose_cov(false);
     prior_added_once();
     no_cross_pushes_back_persistent();
     aged_belief_returns_to_class_P();
     wall_behind_does_not_pull();
     physical_lidar_only_sigma_bounded();
     parked_camera_is_one_look();
-    zero_chain_cov_runs();
-    mode_rotation_permutes_latents();
-    sanitize_reseeds();
+    zero_pose_cov_runs();
+    mode_rotation_leaves_e();
+    sanitize_reseeds_e();
+    relocalisation_redraws_e();
+    parked_range_jitter_equality();
+    chain_once_for_both_3x3();
+    transport_invariance_arc();
     bad_seed_recovers();
     first_update_no_volatility();
     good_seed_stays();

@@ -261,9 +261,15 @@ private:
     struct LatentInputs
     {
         std::array<float, 6> sig2_cam{}, sig2_L{}, fresh{};
-        std::array<float, 2> sig2_chain{};
     };
     void stage_persistent(CountableInstance& inst, CountableFrame& frame, const LatentInputs& li) const;
+    // The robot's pose in the room at a capture stamp, from the robot→room RT edge (the robot is the RT root): the history
+    // slot whose rt_timestamps entry is NEAREST the stamp (TimeQuery::Nearest; untimestamped ⇒ the single block), its pose
+    // T(robot←room) inverted for the robot's room position, and its rt_covariance block pushed into the room frame by
+    // pose_cov_in_room (double). ok = false (Σ = 0) when the edge, a written slot, or a 36-multiple covariance with a block
+    // for that slot is missing.
+    struct PoseAtStamp { bool ok = false; Eigen::Matrix3d sigma = Eigen::Matrix3d::Zero(); Eigen::Vector2f robot_xy = Eigen::Vector2f::Zero(); };
+    PoseAtStamp pose_at_stamp(std::uint64_t ts_ms) const;
     // After an ACCEPTED persistent update: log the ρ it used, reset the path of each channel that measured, rebase the chain.
     void consume_paths(CountableInstance& inst, const CountableFrame& frame, bool camera, bool lidar);
     // The camera's membership m(p) for this cycle's slice (empty ⇒ unavailable: no slice, no camera, no delivered size).

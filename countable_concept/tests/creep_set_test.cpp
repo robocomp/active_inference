@@ -140,8 +140,8 @@ static CountableFrame lidar_frame(const rc::ai::LidarRays& r)
                 yy = p.common_mode_yaw_std * p.common_mode_yaw_std;
     f.sig2_cam = {pp, pp, ss, ss, ss, yy};
     f.sig2_L   = {pp, pp, ss, ss, ss, yy};
-    f.sig2_chain = {1e-4f, 1e-4f};
-    f.rho_cam.fill(1.0f); f.rho_L.fill(1.0f); f.rho_chain.fill(1.0f);   // parked
+    f.sigma_pose = Eigen::Vector3d(1e-4, 1e-4, 0.0).asDiagonal();   // the robot pose error e: 1 cm on (x, y), none on ψ
+    f.rho_cam.fill(1.0f); f.rho_L.fill(1.0f); f.rho_chain = 1.0f;     // parked
     return f;
 }
 
