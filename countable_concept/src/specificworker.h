@@ -76,6 +76,8 @@
 #include "../../common/epistemic_step/epistemic_step.h"   // rc::epistemic::step (SHARED)
 #include "../../common/graph_layout/graph_layout.h"   // rc::gui::trigger_layout_twopi (SHARED)
 #include "../../common/peripheral_channel/peripheral_channel.h"   // rc::peripheral:: (SHARED)
+#include "tick_timing.h"
+#include "../../common/diag_log/rotating_csv.h"
 #include "../../common/birth_surprise/birth_surprise_log.h"   // rc::BirthSurpriseLog (SHARED)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────────────────────────
@@ -245,6 +247,10 @@ private:
     void process_ricoh_bearings();   // associate ricoh detections to beds BY DIRECTION; collect the unassigned
     void log_detect_probe();         // rc::probe row per live instance: viewpoint + framing + detector outcome
     std::ofstream detect_probe_csv_;
+    rc::TickTiming timing_;              // per-stage timing of the current compute() tick
+    std::ofstream  timing_csv_;          // timing_log.csv (one row per tick)
+    bool           timing_csv_failed_ = false;
+    void write_timing_row();
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     // Bottom panel (replaces the old σ_w/σ_h time-series): the WHOLE belief — every state DOF with its

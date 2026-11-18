@@ -282,6 +282,7 @@ void SpecificWorker::initialize()
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     fitter_->set_chain_cov_source(gaussian_api_.get(), "zed");
     // Object-anchor observation z_o for room_concept's landmark factor (expressed in the localizer base frame).
+    fitter_->set_timing(&timing_);
     fitter_->set_object_observation(cfg_.publish_object_obs, cfg_.object_obs_frame);
 
     // YOLO-independent LiDAR range channel: lidar3D media-plane consumer that stages each cycle's sweep in the
@@ -405,6 +406,26 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     phantom_log_.write(e);
 }
 
+// [timing] One row per tick → timing_log.csv, in the directory of Model.AI2CsvPath (ai2_log.csv); "etc/" if unset.
+void SpecificWorker::write_timing_row()
+{
+    if (not timing_csv_.is_open())
+    {
+        if (timing_csv_failed_) return;
+        const std::filesystem::path ai2{cfg_.ai2_csv_path};
+        const auto dir = ai2.has_parent_path() ? ai2.parent_path() : std::filesystem::path{"etc"};
+        if (not rc::diag::open_rotating(timing_csv_, (dir / "timing_log.csv").string(), rc::TickTiming::header()))
+        {
+            timing_csv_failed_ = true;
+            return;
+        }
+        timing_csv_.imbue(std::locale::classic());
+    }
+    const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+    timing_.write_row(timing_csv_, ts);
+}
+
 void SpecificWorker::compute()
 {
     if (not G or not rt_api_)
@@ -414,6 +435,9 @@ void SpecificWorker::compute()
     room_node_id_ = rc::room::follow_current_room(room_node_id_, rc::room::current_room(*G));
     if (room_node_id_ == 0) return;
 
+    timing_.reset();
+    const auto tick_t0 = std::chrono::steady_clock::now();
+
     // Push the room polygon + interior centroid into the fitter (wall-flush factor). Cheap; room_concept refines it.
     refresh_room_geometry();
 
@@ -422,7 +446,11 @@ void SpecificWorker::compute()
     // could starve this very loop.
     poll_affordance_protocol();
 
-    const bool fresh_masks = mask_ingestor_->refresh();
+    bool fresh_masks = false;
+    {
+        const rc::StageTimer t(&timing_.mask_refresh);   // [timing] mask refresh
+        fresh_masks = mask_ingestor_->refresh();
+    }
 
     // EvidenceMonitor per-cycle counters (cumulative *_cum fields persist across cycles). The producers below
     // (tracker / merge / removal) add to these; the snapshot is pushed at the end of the cycle.
@@ -433,7 +461,10 @@ void SpecificWorker::compute()
     // tracker) and the logging probe (compute() tail) share one read. No-op unless a probe/fusion flag is on.
     if (cfg_.birth_fusion or cfg_.birth_surprise_probe) read_residual_field();
 
-    run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
+    {
+        const rc::StageTimer t(&timing_.tracker);   // [timing] tracker (birth/associate/merge)
+        run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
+    }
 
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
     // never consumes a stale sweep; pump() is main-thread (reads the graph) + dormant while the feature is off.
@@ -443,12 +474,16 @@ void SpecificWorker::compute()
     // Feeds BOTH the birth filter (an unmatured candidate on somebody else's object accrues no evidence) and
     // the existence occupancy discount (a junior instance stops counting its senior's returns). Main thread —
     // collect_graph_obstacles uses a ts==0 transform (CLAUDE.md).
-    foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), cfg_.concept_class);
+    {
+        const rc::StageTimer t(&timing_.foreign_claims);   // [timing] foreign-claims graph walk
+        foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), cfg_.concept_class);
+    }
     if (existence_) existence_->set_foreign_claims(&foreign_claims_);
     if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);   // the FIT judges the same geometry
 
     if (lidar_ingestor_)
     {
+        const rc::StageTimer t(&timing_.lidar_pump);   // [timing] LiDAR pump + stage
         lidar_ingestor_->pump();   // pumps BOTH planes (helios primary; bpearl if LidarBpearlPrecision>0)
         if (lidar_ingestor_->helios_fresh())
         {
@@ -466,6 +501,8 @@ void SpecificWorker::compute()
     // so a stalled RGB stream never re-integrates a stale appearance; pump() (main-thread) decodes into a
     // deep-copied BGR frame and is dormant while FrontDetectEnabled is off.
     fitter_->clear_rgb_frame();
+    {
+    const rc::StageTimer t(&timing_.rgb_stage);   // [timing] RGB (+depth) pump + stage
     if (rgb_ingestor_)
     {
         rgb_ingestor_->pump();
@@ -474,10 +511,14 @@ void SpecificWorker::compute()
     }
     if (depth_ingestor_)
         depth_ingestor_->pump();
+    }
 
     // Robot/camera ego-motion (transform chain) → the "be-still-to-update" confirm-only gate. Once per cycle,
     // BEFORE the instance loop so every run_inference this cycle reads the current robot speed (matches chair).
-    fitter_->update_ego_motion();
+    {
+        const rc::StageTimer t(&timing_.ego_motion);   // [timing] ego-motion
+        fitter_->update_ego_motion();
+    }
 
     // Generic DSR type "object"; the class filter is the "countable_" name prefix + object_subtype attr.
     // The robot left a bed's room: fitting it here would corrupt the pose ltom remembers; ltom offers it back.
@@ -490,11 +531,17 @@ void SpecificWorker::compute()
     const auto object_nodes = G->get_nodes_by_type("object");
     for (const auto& node : object_nodes)
         if (node.name().starts_with(cfg_.concept_class + "_"))   // "bed_": a bedroom_* node is not a bed
+        {
+            const rc::StageTimer t(&timing_.inst_total);   // [timing] per-instance total (summed)
             process_countable_node(node);
+        }
 
     // Ricoh 360 = peripheral attention: associate ricoh detections to beds BY DIRECTION (after the ZED fits,
     // so bed positions are current); an unassigned bearing becomes a "seek a ZED view here" attention target.
-    process_ricoh_bearings();
+    {
+        const rc::StageTimer t(&timing_.ricoh);   // [timing] ricoh bearings
+        process_ricoh_bearings();
+    }
 
     // The detector's truth table. BEFORE removal on purpose: an instance killed this cycle must still
     // leave the row that records the look which killed it — that row is the whole point of the file.
@@ -518,6 +565,7 @@ void SpecificWorker::compute()
                                       ? rgb_ingestor_->stamp_ms()
                                       : (depth_ingestor_ ? depth_ingestor_->stamp_ms() : 0);
         existence_->set_camera_frames(rgb_f, depth_f, cam_stamp, cam_fresh);
+        const rc::StageTimer t_ex(&timing_.existence);   // [timing] existence evaluation (+removal)
         existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_,
             [this](std::uint64_t id, const rc::CountableInstance& inst)
             {   // shadow-mode death record (§4.2) — p_detect here says whether this was a CONFIDENT
@@ -532,7 +580,10 @@ void SpecificWorker::compute()
     // worker sees ALL instances, so mutual inhibition + the removal decision live here (not in the fitter). It
     // owns each instance's class log-odds + a dedicated debounce, so it works whether or not the
     // sensor-existence channel above is enabled. Continuous/bounded; a genuine second bed survives.
-    apply_class_factor();
+    {
+        const rc::StageTimer t(&timing_.class_factor);   // [timing] class factor
+        apply_class_factor();
+    }
 
     // ── Evidence monitor: global counters + throttled snapshot push ──
     ev_g_.instances    = static_cast<int>(fitter_->instances().size());
@@ -548,9 +599,16 @@ void SpecificWorker::compute()
         }
     }
     last_compute_tp_ = now;
-    refresh_evidence_monitor();
-    prune_dead_series();   // drop timeseries lines for beds that were removed from the graph
-    log_birth_surprise();  // EXPERIMENTAL read-only: residual grid → birth-surprise regions (cfg-gated, off by default)
+    {
+        const rc::StageTimer t(&timing_.dashboard);   // [timing] evidence monitor + dashboard series upkeep
+        refresh_evidence_monitor();
+        prune_dead_series();   // drop timeseries lines for beds that were removed from the graph
+        log_birth_surprise();  // EXPERIMENTAL read-only: residual grid → birth-surprise regions (cfg-gated, off by default)
+    }
+
+    timing_.n_inst = static_cast<int>(fitter_->instances().size());
+    timing_.tick = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tick_t0).count();
+    write_timing_row();
 
     fps_counter_.print("[" + cfg_.agent_name + " Compute]");   // std::cout heartbeat: Period/Fps/cpu%/mem (every ~1s)
 }
@@ -627,6 +685,13 @@ void SpecificWorker::process_countable_node(const DSR::Node& node)
     float free_energy = 0.0f;
     CountableObservation last_obs;
     bool updated = false;
+    bool cam_data = false;   // [timing] this instance had camera points this tick
+    // [timing] classify this instance's tick: camera data / LiDAR rays only / nothing (runs on every exit path)
+    struct TimingClassify
+    {
+        rc::TickTiming& t; const bool& cam; bool ray;
+        ~TimingClassify() { if (cam) ++t.n_cam; else if (ray) ++t.n_ray; else ++t.n_none; }
+    } timing_classify{timing_, cam_data, fitter_->has_lidar_sweep()};
 
     // Multi-slice fusion: one belief update per assigned ZED slice of this bed. Sequential Bayesian updates
     // = joint likelihood for the recursive filter, and each slice keeps its OWN R and common-mode (they don't
@@ -650,6 +715,7 @@ void SpecificWorker::process_countable_node(const DSR::Node& node)
             if (not obs.has_fresh_data)
                 continue;
             free_energy = fitter_->run_inference(inst, obs);
+            if (obs.has_fresh_data) cam_data = true;
             last_obs = std::move(obs);
             updated = true;
         }
@@ -663,6 +729,7 @@ void SpecificWorker::process_countable_node(const DSR::Node& node)
         if (not last_obs.has_fresh_data and inst.matched_frames < cfg_.matched_frames_before_aging)
             return;
         free_energy = fitter_->run_inference(inst, last_obs);
+        cam_data = last_obs.has_fresh_data;
     }
 
     publish_countable_cycle(inst, node, last_obs, free_energy);
@@ -676,6 +743,7 @@ void SpecificWorker::publish_countable_cycle(rc::CountableInstance& inst,
                                          const CountableObservation& observation,
                                          float free_energy)
 {
+    const rc::StageTimer t_pub(&timing_.publish);   // [timing] graph write + diagnostics + intentions
     const auto node_id = node.id();
     if (not scene_graph_->persist_countable_belief(inst, node_id, room_node_id_, free_energy))
         return;

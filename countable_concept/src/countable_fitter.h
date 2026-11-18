@@ -41,6 +41,7 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "countable_scene_graph.h"
 #include "../../common/rt_twist/rt_twist.h"   // rc::rt::robot_body_twist, SimClockRate
+#include "tick_timing.h"   // rc::TickTiming (per-stage tick timing)
 
 namespace rc {
 
@@ -51,6 +52,10 @@ public:
     // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
     // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.
     void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { foreign_claims_ = c; }
+
+    /// Borrowed per-tick timing record (worker-owned, same thread). Null ⇒ no timing. Diagnostic only.
+    void set_timing(TickTiming* t) { timing_ = t; }
+    bool has_lidar_sweep() const { return lidar_channel_.has_sweep(); }
 
     struct CountableObservation
     {
@@ -215,6 +220,7 @@ private:
     void evaluate_shape(CountableInstance& inst);
 
     CountableModelParams  make_model_params() const;
+    TickTiming* timing_ = nullptr;
 
     // Append one AI2 belief row (state + Σ diag std + mask R/bias/trunc + gate flag) to cfg_.ai2_csv_path.
     void log_ai2_csv(const CountableInstance& inst, int point_count, float R, bool gated, float energy);

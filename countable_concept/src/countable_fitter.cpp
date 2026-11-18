@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include "tick_timing.h"
 #include <limits>
 #include <locale>
 #include <print>
@@ -706,6 +707,7 @@ bool CountableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_
 // BEARING-ONLY and return empty (never fitted); they drive only the attention path.
 CountableFitter::CountableObservation CountableFitter::observe_slice(CountableInstance& inst, int slice_index)
 {
+    const rc::StageTimer t_obs(timing_ ? &timing_->observe : nullptr);
     CountableObservation observation;
     const auto& masks_packet = mask_ingestor_->packet();
     if (not masks_packet.valid or slice_index < 0
@@ -781,6 +783,7 @@ CountableFitter::CountableObservation CountableFitter::observe_slice(CountableIn
 // Fallback when the tracker assigned NO mask slice this cycle: always a stale observation (age the belief).
 CountableFitter::CountableObservation CountableFitter::observe(CountableInstance& inst, const DSR::Node& node)
 {
+    const rc::StageTimer t_obs(timing_ ? &timing_->observe : nullptr);
     // No mask slice was assigned this cycle. There is no node-attrib sensing path (nothing writes
     // candidate/residual points onto the node), so this is always a stale observation: has_fresh_data=false
     // ⇒ run_inference ages the belief (predict-only) instead of fitting.
@@ -922,6 +925,7 @@ float CountableFitter::interior_support(const Eigen::Vector2f& q) const
 // (Σ grows on the agent's clock) instead of freezing. Result is written back into the legacy CountableState.
 float CountableFitter::run_inference(CountableInstance& inst, const CountableObservation& observation)
 {
+    const rc::StageTimer t_infer(timing_ ? &timing_->infer : nullptr);   // INCLUDES membership + lidar_feed below
     const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
 
     // Lazy init: warm-start the belief from the model state, but on the FIRST frame snap the centre/height
@@ -1197,7 +1201,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     std::function<float(const Eigen::Vector3f&)> membership;
     // Only with a staged sweep: the membership is consumed by the ray selection alone (final review M4; result-preserving).
     if (cfg_.lidar_measures_on_gated and lidar_channel_.has_sweep())
+    {
+        const rc::StageTimer t_mem(timing_ ? &timing_->membership : nullptr);
         membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var);
+    }
     // The latents' marginals (§7c.2): b_cam = the config floors + range lateral/size + the obliquity yaw cap (today's camera
     // fill WITHOUT chain and ego-motion); b_L = the config floors. e's marginal is Σ_pose, staged by stage_persistent (§7c.7).
     // The ego-motion terms are FRESH every frame (ρ = 0), marginalised inside each channel.
@@ -1313,7 +1320,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             frame.chain_cov_size = mot_size_var;
             stage_room(frame);
             stage_persistent(inst, frame, latent_inputs(0.0f));
-            lidar_channel_.feed(inst, frame, anchor, membership);
+            {
+                const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
+                lidar_channel_.feed(inst, frame, anchor, membership);
+            }
             if (rays_usable(frame))
             {
                 lidar_updated = true;
@@ -1432,7 +1442,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         if (cfg_.lidar_measures_on_gated)
             stage_persistent(inst, frame, latent_inputs(cfg_.footprint_residual
                                                          ? 0.0f : obliquity_yaw_std * obliquity_yaw_std));
-        lidar_channel_.feed(inst, frame, frame.points, membership);
+        {
+            const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
+            lidar_channel_.feed(inst, frame, frame.points, membership);
+        }
         inst.dbg_ray_n = ray_count(frame);
 
         // WALL-FLUSH factor (see stage_room above).
