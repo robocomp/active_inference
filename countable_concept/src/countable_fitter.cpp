@@ -237,7 +237,8 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
         // psi is not yet in the chain latent (Task 13): keep the x,y-only behaviour by leaving psi out of c.
         Eigen::Vector3f c = rc::chain_correction(inst.chain);
         c.z() = 0.f;
-        rho_ch = rc::rho_chain(c, Eigen::Vector3f(inst.chain_cov_xx, inst.chain_cov_yy, 0.f).asDiagonal());
+        rho_ch = static_cast<float>(rc::rho_chain(c.cast<double>(),
+            Eigen::Vector3d(inst.chain_cov_xx, inst.chain_cov_yy, 0.0).asDiagonal().toDenseMatrix()));
     }
     frame.rho_cam.fill(rho_cam);
     frame.rho_L   = {rho_lat, rho_lat, rho_H, rho_lat, rho_lat, rho_lat};

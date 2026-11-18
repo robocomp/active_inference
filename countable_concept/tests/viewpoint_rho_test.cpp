@@ -125,10 +125,12 @@ static void degenerate_geometry_unchanged()
 
 using V3 = Eigen::Vector3f;
 using M3 = Eigen::Matrix3f;
+using V3d = Eigen::Vector3d;
+using M3d = Eigen::Matrix3d;
 
 static void rho_chain_zero_correction_is_one_se2()
 {
-    CHECK(rho_chain(V3::Zero(), M3::Zero()) == 1.f);
+    CHECK(rho_chain(V3d::Zero(), M3d::Zero()) == 1.0);
 }
 
 // ρ_chain fails CLOSED when odometry cannot be integrated (final review I1), now on SE(2).
@@ -137,11 +139,11 @@ static void chain_fails_closed()
     const V3 p0(1.f, 2.f, 0.3f), moved = p0 + V3(0.2f, 0.f, 0.f);
     const M3 S = V3(0.02f * 0.02f, 0.02f * 0.02f, 0.02f * 0.02f).asDiagonal();
     {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, std::nullopt);
-        CHECK(rho_chain(chain_correction(t), S) == 1.f); }
+        CHECK(rho_chain(chain_correction(t).cast<double>(), S.cast<double>()) == 1.0); }
     {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V3(0.2f, 0.f, 0.f));
-        CHECK(rho_chain(chain_correction(t), S) == 1.f); }
+        CHECK(std::abs(rho_chain(chain_correction(t).cast<double>(), S.cast<double>()) - 1.0) < 1e-9); }
     {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V3::Zero());
-        CHECK(rho_chain(chain_correction(t), S) < 1.f);
+        CHECK(rho_chain(chain_correction(t).cast<double>(), S.cast<double>()) < 1.0);
         CHECK((chain_correction(t) - V3(0.2f, 0.f, 0.f)).norm() < 1e-6f); }
     {   ChainTracker t; chain_observe(t, p0, std::nullopt); chain_observe(t, moved, V3::Zero());
         chain_observe(t, moved + V3(0.f, 0.5f, 0.f), std::nullopt);
@@ -162,8 +164,8 @@ static void pose_cov_round_trip()
     float blk[36] = {};
     const int idx[3] = {0, 1, 5};
     for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) blk[idx[i] * 6 + idx[j]] = Se(i, j);
-    const M3 R = pose_cov_in_room(std::span<const float>(blk, 36), edge);
-    CHECK((R - S).norm() <= 1e-6f * S.norm());   // matrix-relative: float round-off leaves ~3e-7 on zero entries
+    const M3d R = pose_cov_in_room(std::span<const float>(blk, 36), edge);
+    CHECK((R.cast<float>() - S).norm() <= 1e-6f * S.norm());   // matrix-relative: float round-off leaves ~3e-7 on zero entries
 }
 
 static void pose_cov_absent_is_zero()
@@ -199,10 +201,10 @@ static void chain_correction_wraps_psi()
 static void rho_chain_se2()
 {
     const M3 S = V3(0.034f * 0.034f, 0.0435f * 0.0435f, 0.024f * 0.024f).asDiagonal();
-    CHECK(std::abs(rho_chain(V3(0.f, 0.f, 0.024f), S) - std::exp(-0.5f)) < 1e-6f);
+    CHECK(std::abs(rho_chain(V3d(0, 0, 0.024), S.cast<double>()) - std::exp(-0.5)) < 1e-6);
     M3 Z = S; Z(2, 2) = 0.f;
-    CHECK(rho_chain(V3(0.f, 0.f, 0.01f), Z) == 0.f);
-    CHECK(rho_chain(V3(0.01f, 0.f, 0.f), Z) > 0.f);
+    CHECK(rho_chain(V3d(0, 0, 0.01), Z.cast<double>()) == 0.0);
+    CHECK(rho_chain(V3d(0.01, 0, 0), Z.cast<double>()) > 0.0);
 }
 
 static void lever_transport_invariance()
@@ -240,27 +242,43 @@ static void rho_chain_rank_deficient_float()
     float blk[36] = {};
     const int idx[3] = {0, 1, 5};
     for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) blk[idx[i] * 6 + idx[j]] = Se(i, j);
-    const M3 R = pose_cov_in_room(std::span<const float>(blk, 36), edge);
-    const V3 c(0.02f, -0.01f, 0.f);
+    const M3d R = pose_cov_in_room(std::span<const float>(blk, 36), edge);
+    const V3d c(0.02, -0.01, 0.0);
     const Eigen::Matrix2f S2 = S.topLeftCorner<2, 2>();
-    const float want = std::exp(-0.5f * c.head<2>().dot(S2.inverse() * c.head<2>()));
-    CHECK(std::abs(rho_chain(c, R) - want) < 1e-5f);
-    CHECK(rho_chain(V3(0.f, 0.f, 0.01f), R) == 0.f);
+    CHECK(R(2, 2) == 0.0 and R(0, 2) == 0.0 and R(1, 2) == 0.0);   // psi null survives J and back EXACTLY
+    const double want = std::exp(-0.5 * c.head<2>().dot(S2.cast<double>().inverse() * c.head<2>()));
+    CHECK(std::abs(rho_chain(c, R) - want) < 1e-5);
+    CHECK(want > 0.0 and std::abs(want - 1.0) > 1e-3);                 // positive control is non-trivial
+    CHECK(rho_chain(V3d(c.x(), c.y(), 0.01), R) == 0.0);                // in-range xy part + psi in the null space
+    CHECK(rho_chain(V3d(0, 0, 0.01), R) == 0.0);
+}
+
+static void rho_chain_near_singular_is_continuous()
+{
+    double prev = 2.0;
+    for (const double s : {1e-6, 1e-10, 1e-14})
+    {
+        const M3d S = V3d(0.034 * 0.034, 0.0435 * 0.0435, s).asDiagonal();
+        const double r = rho_chain(V3d(0, 0, 1e-3), S);
+        CHECK(std::isfinite(r) and r >= 0.0 and r <= prev);
+        prev = r;
+    }
+    CHECK(prev < 1e-3);   // exp(-0.5e-6/s) underflows to exactly 0 for s <= 1e-10, hence non-strict
 }
 
 static void rho_chain_never_above_one()
 {
     M3 S = V3(1e-4f, 1e-4f, 1e-4f).asDiagonal();
     S(2, 2) = -1e-12f;
-    const float r = rho_chain(V3(0.01f, 0.f, 0.f), S);
-    CHECK(r >= 0.f and r <= 1.f);
+    const double r = rho_chain(V3d(0.01, 0, 0), S.cast<double>());
+    CHECK(r >= 0.0 and r <= 1.0);
 }
 
 int main()
 {
     chain_fails_closed(); rho_chain_zero_correction_is_one_se2(); pose_cov_round_trip(); pose_cov_absent_is_zero();
     chain_correction_se2(); chain_correction_wraps_psi(); rho_chain_se2(); lever_transport_invariance(); lever_relaxes_with_rho();
-    rho_chain_rank_deficient_float(); rho_chain_never_above_one();
+    rho_chain_rank_deficient_float(); rho_chain_never_above_one(); rho_chain_near_singular_is_continuous();
     parked_is_one(); stale_odometry_is_parked(); odometry_axes(); camera_efold_is_half_width(); lidar_efold();
     composes(); rotation_in_place_is_one(); absent_ring_gap_is_one();
     degenerate_geometry_unchanged();

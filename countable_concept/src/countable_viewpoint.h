@@ -61,13 +61,13 @@ Eigen::Vector3f chain_correction(const ChainTracker& t);
 void chain_rebase(ChainTracker& t);
 
 // exp(−½ cᵀΣ⁻¹c) on the non-zero subspace of Σ (pseudo-inverse). A zero-variance direction with c ≠ 0 ⇒ 0; c = 0 ⇒ 1.
-float rho_chain(const Eigen::Vector3f& c, const Eigen::Matrix3f& Sigma_pose);
+double rho_chain(const Eigen::Vector3d& c, const Eigen::Matrix3d& Sigma_pose);
 
 // ── The robot's pose error in the room frame (spec 7c.7 b) ──────────────────────────────────────────────────────────
 // Σ_pose (x, y, psi) in the room frame from the robot→room edge's 6×6 row-major rt_covariance block (one 36-slot block,
 // ordered [x y z rx ry rz], in the edge's parent frame): slots {0, 1, 5}, pushed through rc::se2_inverse_jacobian
 // evaluated at the pose of the edge (the pose being inverted). Empty span ⇒ zero.
-Eigen::Matrix3f pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose);
+Eigen::Matrix3d pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose);
 
 // F_t = [[1,0,−Δr_y],[0,1,Δr_x],[0,0,1]]: how the pose error e = (δx, δy, δψ) is carried by a robot translation Δr.
 Eigen::Matrix3d chain_transport(const Eigen::Vector2f& dr);

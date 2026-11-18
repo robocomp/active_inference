@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <limits>
 
 #include "place_memory/place_map.h"
@@ -90,31 +91,45 @@ void chain_rebase(ChainTracker& t)
     t.odo.setZero();
 }
 
-float rho_chain(const Eigen::Vector3f& c, const Eigen::Matrix3f& S)
+double rho_chain(const Eigen::Vector3d& c, const Eigen::Matrix3d& S)
 {
-    // Double arithmetic, symmetrised Σ, eigen-decomposition. Eigenvalues ≤ n·ε_double·λ_max (negative ones included: the
-    // PSD projection) are the numerical null space — the standard numerical-rank rule, not a model threshold. Σ⁻¹ acts
-    // on the range only; a component of c in the null space cannot be explained by Σ at all ⇒ ρ = 0.
-    const Eigen::Vector3d cd = c.cast<double>();
-    Eigen::Matrix3d Sd = S.cast<double>();
-    Sd = 0.5 * (Sd + Sd.transpose());
-    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(Sd);
-    const Eigen::Vector3d lam = es.eigenvalues();
-    const double tol = 3.0 * std::numeric_limits<double>::epsilon() * std::max(lam.maxCoeff(), 0.0);
-    double maha = 0.0, null_comp2 = 0.0;
+    // A coordinate whose Σ diagonal is exactly zero is declared by the data to have no uncertainty (PSD ⇒ its row and
+    // column are zero): any non-zero c there cannot be explained at all ⇒ 0. No tolerance anywhere. The remaining
+    // principal sub-block (symmetrised) is decomposed; eigen-directions with λ ≤ 0 (sign test) contribute nothing.
+    std::array<int, 3> keep{};
+    int n = 0;
     for (int i = 0; i < 3; ++i)
     {
-        const double p = es.eigenvectors().col(i).dot(cd);
-        if (lam(i) > tol) maha += p * p / lam(i);
-        else              null_comp2 += p * p;
+        if (S(i, i) == 0.0) { if (c(i) != 0.0) return 0.0; }
+        else keep[static_cast<std::size_t>(n++)] = i;
     }
-    if (std::sqrt(null_comp2) > 3.0 * std::numeric_limits<double>::epsilon() * cd.norm()) return 0.f;
-    return static_cast<float>(std::exp(-0.5 * maha));
+    if (n == 0) return 1.0;
+    Eigen::MatrixXd Sub(n, n);
+    Eigen::VectorXd cs(n);
+    for (int i = 0; i < n; ++i)
+    {
+        cs(i) = c(keep[static_cast<std::size_t>(i)]);
+        for (int j = 0; j < n; ++j)
+            Sub(i, j) = 0.5 * (S(keep[static_cast<std::size_t>(i)], keep[static_cast<std::size_t>(j)])
+                             + S(keep[static_cast<std::size_t>(j)], keep[static_cast<std::size_t>(i)]));
+    }
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Sub);
+    double maha = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double lam = es.eigenvalues()(i);
+        if (lam > 0.0)
+        {
+            const double p = es.eigenvectors().col(i).dot(cs);
+            maha += p * p / lam;
+        }
+    }
+    return std::exp(-0.5 * maha);
 }
 
-Eigen::Matrix3f pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose)
+Eigen::Matrix3d pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::Vector3f& edge_pose)
 {
-    if (rt_cov36.size() < 36) return Eigen::Matrix3f::Zero();
+    if (rt_cov36.size() < 36) return Eigen::Matrix3d::Zero();
     constexpr int idx[3] = {0, 1, 5};
     Eigen::Matrix3d S;
     for (int i = 0; i < 3; ++i)
@@ -123,7 +138,7 @@ Eigen::Matrix3f pose_cov_in_room(std::span<const float> rt_cov36, const Eigen::V
     const Eigen::Matrix3d J = place::se2_inverse_jacobian(edge_pose).cast<double>();
     Eigen::Matrix3d R = J * S * J.transpose();   // double: float J Σ Jᵀ would put ~1e-7 noise on a null direction
     R = 0.5 * (R + R.transpose());
-    return R.cast<float>();
+    return R;
 }
 
 Eigen::Matrix3d chain_transport(const Eigen::Vector2f& dr)
