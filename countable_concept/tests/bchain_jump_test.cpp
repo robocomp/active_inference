@@ -1,0 +1,214 @@
+// bchain_jump_test — live9 nightstand_9: b_chain absorbs 0.45 m on the second persistent update while cx moves 0.35 m the
+// other way (spec 2026-11-15 lidar-measures §7c.2). Fixture: the live9 geometry in the room frame, ray-cast (test_scene.h):
+// back wall y = 4.145, nightstand (0.84, 3.89) 0.50 x 0.51 x 0.62 flush on it, the bed to its -x side (edge x = 0.53), the
+// robot 1.65 m in front of it at (0.83, 2.24). Camera = ZED-height first hits selected by a mask that bleeds 10 cm (the
+// live cloud's ext_major 0.608 for a 0.50 box); rays = Helios first hits selected the same way. Seed = live9's birth on
+// priors (0.87, 3.89, H 0.62, w 0.44, h 0.51, yaw -0.01).
+//
+// Root cause (report: .superpowers/sdd/2026-11-15-lidar-measures/bchain-jump-report.md): predict_latents maps a latent by
+// D = σ_now/σ_prev with process noise (1 − ρ²)σ_now², i.e. b_t = D·b_{t−1} DETERMINISTICALLY at ρ = 1. After an update has
+// pinned the measured sum θ + b, the predicted prior pins θ + b/D; the next frame pins θ + b; the two differ by (1 − 1/D)·b,
+// so any innovation Δu is explained by b = Δu·D/(D − 1) — a gain of ~21 at D = 1.05. In live9 D_chain ≈ 1.05 comes from the
+// fitter computing σ_chain at inst.model's centre: the birth seed (0.92, 3.75) on cycle 2, the posterior (0.89, 3.90) on 3.
+// Both checks below FAIL on the code as of c0474382 and pass with D ≡ 1.
+// Run: ./bchain_jump_test   (BJ_ITER=1 prints the GN iterates)
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <cstdio>
+#include <span>
+#include <vector>
+#include "countable_belief.h"
+#include "test_scene.h"
+
+using namespace rc;
+static int bad = 0;
+#define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
+
+static const rc::test::SceneBox  kStand{Eigen::Vector2f(0.84f, 3.89f), 0.0f, 0.50f, 0.51f, 0.62f};
+static const rc::test::SceneBox  kBed{Eigen::Vector2f(-0.385f, 3.145f), 0.0f, 1.83f, 2.00f, 0.55f};
+static const rc::test::SceneWall kBack{Eigen::Vector2f(-4.0f, 4.145f), Eigen::Vector2f(4.0f, 4.145f), 2.5f};
+static const Eigen::Vector2f     kRobot(0.83f, 2.24f);
+
+static CountableBeliefParams params()
+{
+    CountableBeliefParams p;
+    p.prior_footprint_m = 0.51f; p.prior_footprint_std = 0.06f; p.prior_height_m = 0.62f; p.prior_height_std = 0.10f;
+    p.plaus_height_min = 0.40f; p.plaus_height_soft = 0.08f;
+    p.wall_flush_prior = 0.90f;
+    p.room_axis_std    = 3.0f * 0.017453293f;
+    p.volatility_infer = true;
+    p.persistent       = true;
+    return p;
+}
+
+static std::vector<float> elevations(float lo, float hi, float step)
+{
+    std::vector<float> e;
+    for (float a = lo; a <= hi; a += step) e.push_back(a);
+    return e;
+}
+
+// One frame: camera points (mask bleeding `bleed` m) + Helios rays (same selection), the wall and the room axis staged,
+// the latents at the live9 marginals. chain2 = the localisation variance on (cx, cy); rho = (cam, L, chain).
+static CountableFrame live9_frame(float bleed, float chain2, float rho_cam, float rho_L, float rho_ch)
+{
+    const std::vector<rc::test::SceneBox>  boxes{kStand, kBed};
+    const std::vector<rc::test::SceneWall> walls{kBack};
+    CountableFrame f;
+    {
+        const Eigen::Vector3f o(kRobot.x(), kRobot.y(), 0.945f);
+        const auto el  = elevations(-40.0f, 5.0f, 0.4f);
+        const auto all = rc::test::raycast_scene(o, boxes, walls, true, 0.4f, el, 6.0f);
+        f.points = rc::test::select_near(all, kStand, bleed);
+        const float s = params().sigma_base_m;
+        f.R.assign(f.points.size(), s * s);
+        f.z_top_obs = kStand.H;
+    }
+    {
+        const Eigen::Vector3f o(kRobot.x(), kRobot.y() - 0.155f, 1.075f);
+        const auto el  = rc::test::helios_ring_elev_deg();
+        const auto all = rc::test::raycast_scene(o, boxes, walls, true, rc::test::kHeliosAzStepDeg, el, 12.0f);
+        f.lidar.origin = o;
+        f.lidar.endpoints = rc::test::select_near(all, kStand, bleed);
+        f.lidar.precision = 2500.0f; f.lidar.robust_c_m = 0.05f;
+    }
+    f.wall.ok = true; f.wall.p = Eigen::Vector2f(0.0f, 4.145f); f.wall.n = Eigen::Vector2f(0.0f, -1.0f);
+    f.wall.sigma_m = 0.02f; f.wall.length_m = 8.0f;
+    f.room_axis_ok = true; f.room_axis = 0.0f;
+    // Latent marginals as the fitter stages them at range 1.65 m (latent_inputs): b_cam = floors + range, b_L = floors.
+    const CountableBeliefParams p = params();
+    const float range = 1.65f, lat = 0.02f * range, sz = 0.08f * range, yw = 0.03f * range;
+    const float pp = p.common_mode_pos_std * p.common_mode_pos_std, ss = p.common_mode_size_std * p.common_mode_size_std,
+                yy = p.common_mode_yaw_std * p.common_mode_yaw_std;
+    f.sig2_cam = {pp + lat * lat, pp + lat * lat, ss + sz * sz, ss + sz * sz, ss + sz * sz, yy + yw * yw};
+    f.sig2_L   = {pp, pp, ss, ss, ss, yy};
+    f.sig2_chain = {chain2, chain2};
+    f.rho_cam.fill(rho_cam); f.rho_L.fill(rho_L); f.rho_chain.fill(rho_ch);
+    return f;
+}
+
+static void print_state(const char* tag, const CountableBelief& b)
+{
+    if (std::getenv("BJ_ITER"))
+        for (const auto& v : b.dbg_iterates()) std::printf("      iterate cx %.4f cy %.4f H %.4f w %.4f h %.4f yaw %+.4f\n", v(0), v(1), v(2), v(3), v(4), v(5));
+    const auto s = b.state();
+    const auto l = b.latent_mean();
+    std::printf("  %-10s cx %.4f cy %.4f H %.4f w %.4f h %.4f yaw %+.4f | bchain (%+.4f %+.4f) bcam_x %+.4f bL_x %+.4f | "
+                "cx+bchain %.4f\n", tag, s.cx, s.cy, s.H, s.w, s.h, s.yaw, l(0), l(1), l(2), l(8), s.cx + l(0));
+}
+
+// The fitter's sig2_chain (compute_chain_cov): the robot pose covariance carried to a room point p by the yaw lever,
+// Σ = Σ_xy + σ_θ² r⊥ r⊥ᵀ, r = p − robot. live9 at the birth: σ = (3.4 cm, 4.35 cm, 0.024 rad) (proto_room.csv).
+static std::array<float, 2> chain_var(const Eigen::Vector2f& p)
+{
+    const float sx = 0.034f, sy = 0.0435f, st = 0.024f;
+    const Eigen::Vector2f r = p - kRobot;
+    return {sx * sx + st * st * r.y() * r.y(), sy * sy + st * st * r.x() * r.x()};
+}
+
+// (1) The live sequence on the ray-cast scene. The fitter computes the chain variance at inst.model's centre BEFORE the
+// update: on the birth cycle that is the tracker's birth seed (the cloud centre, 0.92, 3.75), on every later cycle the
+// previous posterior. That lever change alone makes σ_chain differ by ~5 % between update 1 and 2 (D = σ_now/σ_prev ≈ 1.05)
+// while ρ_chain = 1 (the localiser corrected nothing). The camera cloud sits cam_dx off the true box (live9: cloud centre
+// 0.92 vs truth 0.84). Returns the final (cx, b_chain_x, worst |b_chain|/σ_chain).
+struct SeqOut { float cx, bx, worst_z, worst_cx; };
+static SeqOut live9_sequence(bool lever, float cam_dx, bool verbose)
+{
+    const CountableBeliefState seed{0.87f, 3.89f, 0.62f, 0.44f, 0.51f, -0.01f};
+    CountableBelief b(seed, params());
+    b.set_room_interior(Eigen::Vector2f(0.0f, 2.0f));
+    Eigen::Vector2f model_centre(0.92f, 3.75f);                       // inst.model at the birth cycle = the birth seed
+    const auto cv1 = chain_var(model_centre);
+    SeqOut out{0, 0, 0, 0};
+    for (int k = 1; k <= 6; ++k)
+    {
+        const auto cv = lever ? chain_var(model_centre) : cv1;
+        const bool first = (k == 1);
+        CountableFrame f = live9_frame(0.10f, 0.0f, first ? 1.0f : 0.99897f, first ? 1.0f : 0.997257f, 1.0f);
+        f.sig2_chain = cv;
+        for (auto& q : f.points) q.x() += cam_dx;
+        b.update(f);
+        if (verbose)
+        {
+            char tag[16]; std::snprintf(tag, sizeof tag, "update %d", k);
+            std::printf("    sigma_chain (%.4f %.4f)", std::sqrt(cv[0]), std::sqrt(cv[1]));
+            print_state(tag, b);
+        }
+        const auto& l = b.latent_mean();
+        out.worst_z  = std::max({out.worst_z, static_cast<float>(std::abs(l(0))) / std::sqrt(cv[0]),
+                                              static_cast<float>(std::abs(l(1))) / std::sqrt(cv[1])});
+        out.worst_cx = std::max(out.worst_cx, std::abs(b.state().cx - kStand.c.x()));
+        model_centre = Eigen::Vector2f(b.state().cx, b.state().cy);   // the write-back: next cycle's chain centre
+    }
+    out.cx = b.state().cx; out.bx = static_cast<float>(b.latent_mean()(0));
+    return out;
+}
+
+// A 5 % change of the chain prior σ at ρ = 1 must change the posterior by a few % of b_chain, not by a multiple of it:
+// the same scene and frames with σ_chain held at its update-1 value is the control.
+static void lever_arm_sensitivity()
+{
+    const float cam_dx = 0.12f, s = std::sqrt(chain_var(Eigen::Vector2f(0.92f, 3.75f))[0]);
+    std::printf("  lever arm (sigma_chain follows the model centre):\n");
+    const SeqOut lev = live9_sequence(true, cam_dx, true);
+    std::printf("  control (sigma_chain held):\n");
+    const SeqOut ctl = live9_sequence(false, cam_dx, true);
+    std::printf("  lever_arm_sensitivity: b_chain_x lever %+.4f control %+.4f (diff %.2f sigma) ; cx lever %.4f control %.4f ;"
+                " worst |b|/sigma %.2f / %.2f\n", lev.bx, ctl.bx, std::abs(lev.bx - ctl.bx) / s, lev.cx, ctl.cx,
+                lev.worst_z, ctl.worst_z);
+    CHECK(std::abs(lev.bx - ctl.bx) < 0.1f * s);                      // ≤ 0.1 σ: a 5 % prior change, not an innovation gain
+    CHECK(lev.worst_z < 3.0f);
+}
+
+// (2) The mechanism alone, in common/ai_belief/persistent_update.h with the live9 numbers: one DOF θ = cx, latents
+// (b_chain, b_cam, b_L); camera measures θ + b_chain + b_cam, rays θ + b_chain + b_L. Update 1 leaves the measured sum at
+// u1 = 0.892, update 2's data says u2 = 0.99 (live9 rows 0/1). ρ_chain = 1, ρ_cam/ρ_L as logged. Only D_chain varies.
+static Eigen::Vector4d linear_two_updates(double D)
+{
+    namespace pu = rc::ai::persistent;
+    using M = Eigen::Matrix<double, 4, 4>; using V = Eigen::Matrix<double, 4, 1>; using V3 = Eigen::Matrix<double, 3, 1>;
+    const double Ic = 1e5, IL = 1e3;
+    M P = M::Zero(); V x = V::Zero();
+    x(0) = 0.87; P(0, 0) = 0.09;                                      // class prior on cx at the seed, σ = prior_pos_std
+    V3 sp = V3::Zero(), sn(0.05, std::sqrt(0.0021), 0.03), rho(1.0, 1.0, 1.0);
+    pu::predict_latents<1, 3>(P, x, rho, sp, sn);
+    const auto update = [&](double u)
+    {
+        std::array<pu::Channel<1, 3>, 2> ch;
+        ch[0].B << 1, 1, 0; ch[1].B << 1, 0, 1;
+        ch[0].info.I(0, 0) = Ic; ch[0].info.g(0) = Ic * (u - (x(0) + x(1) + x(2)));
+        ch[1].info.I(0, 0) = IL; ch[1].info.g(0) = IL * (u - (x(0) + x(1) + x(3)));
+        const pu::FreshInfo<1> none;
+        const V xn = pu::joint_step<1, 3>(x, x, P, std::span<const pu::Channel<1, 3>>(ch), none);
+        P = pu::joint_cov<1, 3>(P, std::span<const pu::Channel<1, 3>>(ch), none);
+        x = xn;
+    };
+    update(0.892);
+    sp = sn; sn(0) *= D; rho << 1.0, 0.99897, 0.997257;
+    pu::predict_latents<1, 3>(P, x, rho, sp, sn);
+    update(0.99);
+    return x;
+}
+
+static void linear_scale_coupling()
+{
+    for (const double D : {1.0, 1.02, 1.05, 1.27})
+    {
+        const auto x = linear_two_updates(D);
+        std::printf("  linear: D_chain %.2f -> cx %.4f b_chain %+.4f (%.1f sigma) b_cam %+.4f b_L %+.4f\n",
+                    D, x(0), x(1), std::abs(x(1)) / (0.05 * D), x(2), x(3));
+    }
+    const auto ctrl = linear_two_updates(1.0), live = linear_two_updates(1.05);
+    CHECK(std::abs(ctrl(1)) < 3.0 * 0.05);                            // control: σ unchanged ⇒ θ takes the innovation
+    CHECK(std::abs(live(1)) < 3.0 * 0.05 * 1.05);                     // a 5 % lever change must not move b_chain 8σ
+}
+
+int main()
+{
+    linear_scale_coupling();
+    lever_arm_sensitivity();
+    std::printf("bchain_jump_test: %s\n", bad ? "FAILED" : "OK");
+    return bad ? 1 : 0;
+}

@@ -157,3 +157,10 @@ target_include_directories(creep_set_test PRIVATE ../src ../../common ../../comm
 target_compile_options(creep_set_test PRIVATE -O2)
 target_link_libraries(creep_set_test PRIVATE Eigen3::Eigen)
 add_test(NAME creep_set_test COMMAND creep_set_test)
+
+# live9 nightstand_9: b_chain absorbs 0.45 m on the second persistent update (root-cause brief bchain-jump, 2026-11-18).
+add_executable(bchain_jump_test bchain_jump_test.cpp ../src/countable_belief.cpp)
+target_include_directories(bchain_jump_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(bchain_jump_test PRIVATE -O2)
+target_link_libraries(bchain_jump_test PRIVATE Eigen3::Eigen)
+add_test(NAME bchain_jump_test COMMAND bchain_jump_test)
