@@ -175,8 +175,9 @@ void SpecificWorker::run_instance_tracker()
             // Mahalanobis innovation S = P + R²I, not the Euclidean fallback (matters for multi-instance).
             const auto& S = inst.ai2_belief.covariance();   // Σ over [cx,cy,H,w,h,yaw]
             t.cov = Eigen::Matrix2f::Zero();
-            t.cov(0, 0) = S(0, 0) + inst.chain_cov_xx;
-            t.cov(1, 1) = S(1, 1) + inst.chain_cov_yy;
+            const Eigen::Vector2f chain_var = inst.ai2_belief.published_chain_var(inst.chain_cov_xx, inst.chain_cov_yy);
+            t.cov(0, 0) = S(0, 0) + chain_var.x();   // flag on: + 0, Σ already integrates e (spec 7c.7 b)
+            t.cov(1, 1) = S(1, 1) + chain_var.y();
             t.has_cov = true;
         }
         tracks.push_back(t);

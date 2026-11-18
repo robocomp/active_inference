@@ -151,7 +151,7 @@ static void lever_arm_sensitivity()
     const SeqOut lev = live9_sequence(seed, seed, cam_dx, true);
     std::printf("  control (same seed, lever from the truth (%.2f, %.2f)):\n", truth.x(), truth.y());
     const SeqOut ctl = live9_sequence(seed, truth, cam_dx, true);
-    {
+    {   // Task 14: CHECK full truth-seeded control once GN converges (ruling T13-1)
         const SeqOut all = live9_sequence(truth, truth, cam_dx, false);
         std::printf("  diagnostic (seed AND lever at the truth): max|dtheta| %.5f  max|de| %.5f  (not checked)\n",
                     (lev.th - all.th).cast<double>().cwiseAbs().maxCoeff(), (lev.e - all.e).cwiseAbs().maxCoeff());

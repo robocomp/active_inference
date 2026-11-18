@@ -458,6 +458,12 @@ public:
     const MatJd&  joint_covariance() const { return P_; }
     // e's lever ℓ (object − robot, room frame): set when e is a new source, then moved only by the odometry (spec 7c.7 b).
     const ChainLever&      chain_lever()      const { return lever_; }
+    // The localisation share a publisher adds to covariance()'s (cx, cy) variances, given the fitter's per-frame chain cov
+    // (compute_chain_cov). Flag off: that chain cov (the Woodbury path draws it afresh every frame and does not carry it).
+    // Flag on: nothing — Σ_θθ is the joint's θθ marginal, which already integrates e through B_chain (spec 7c.7 b; adding
+    // the chain cov again would count the robot's pose error twice, ruling T13-5).
+    Eigen::Vector2f published_chain_var(float chain_xx, float chain_yy) const
+    { return params_.persistent ? Eigen::Vector2f::Zero() : Eigen::Vector2f(chain_xx, chain_yy); }
     const Eigen::Matrix3d& last_sigma_pose()  const { return last_sigma_pose_; }
     // The relational class anchors, ONE FLAG PER ANCHOR (ruling T6-1): wall flush/parallel and room axis each enter once, on
     // the first admissible camera update whose frame stages their context (f.wall.ok / f.room_axis_ok); the flag is set only

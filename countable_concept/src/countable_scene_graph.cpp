@@ -266,9 +266,11 @@ void CountableSceneGraph::write_rt_covariance(std::uint64_t room_id, CountableIn
     // resolves the mode. See COUNTABLE.md.
     float vyaw = scale * inst.ai2_belief.yaw_marginal_var();
     // Localization/chain covariance J·Σ_chain·Jᵀ (computed in the fitter) — the bed's room-frame
-    // position is conditional on the robot pose, so its published uncertainty must include it.
-    vx += inst.chain_cov_xx;
-    vy += inst.chain_cov_yy;
+    // position is conditional on the robot pose, so its published uncertainty must include it. Flag on, Σ already does
+    // (the joint's θθ marginal integrates e), so the belief adds nothing (published_chain_var).
+    const Eigen::Vector2f chain_var = inst.ai2_belief.published_chain_var(inst.chain_cov_xx, inst.chain_cov_yy);
+    vx += chain_var.x();
+    vy += chain_var.y();
 
     // Everything from here — the self-gate, the 6×6 block layout, the edge write, the trace bookkeeping
     // and the readout — is the SHARED publisher (common/rt_covariance/rt_covariance.h). What stays above is

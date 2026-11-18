@@ -893,6 +893,36 @@ static void first_update_flag_life()
     CHECK(l.first_update_done());
 }
 
+// Ruling T13-5: on the persistent path the published (cx, cy) covariance and the tracker's gate covariance are the joint's θθ
+// marginal, which already integrates e; the fitter's per-frame chain cov is NOT added again. Parked camera frame, live9 Σ_pose.
+// covariance() is the float copy of P's θθ block, so the published float equals float(P_ii) exactly. Flag off keeps the
+// chain cov (self-control).
+static void published_cov_no_chain_double_count()
+{
+    CountableBelief b = make_belief();
+    CountableFrame f = camera_frame(); set_latents(f, 1.0f);
+    f.sigma_pose = Eigen::Vector3d(0.034 * 0.034, 0.0435 * 0.0435, 0.024 * 0.024).asDiagonal();
+    for (int k = 0; k < 3; ++k) b.update(f);
+    const float chain_xx = 2.1e-3f, chain_yy = 2.9e-3f;            // what compute_chain_cov would stage
+    const Eigen::Vector2f extra = b.published_chain_var(chain_xx, chain_yy);
+    const auto& P = b.joint_covariance();
+    double worst = 0.0;
+    for (int i = 0; i < 2; ++i)
+    {
+        const double pub = double(b.covariance()(i, i) + extra(i)), marg = double(static_cast<float>(P(i, i)));
+        worst = std::max(worst, std::abs(pub - marg) / marg);
+    }
+    CountableBeliefParams q = params(); q.persistent = false;
+    CountableBelief off(CountableBeliefState{tx, ty, tH, tw, tw, 0.0f}, q);
+    const Eigen::Vector2f extra_off = off.published_chain_var(chain_xx, chain_yy);
+    std::printf("  published cov: (cx, cy) published %.6e %.6e ; joint marginal %.6e %.6e ; rel %.3e ; e share in it (B Sigma_e B^T)_xx "
+                "%.3e ; flag-off extra %.1e %.1e\n", b.covariance()(0, 0) + extra(0), b.covariance()(1, 1) + extra(1), P(0, 0), P(1, 1),
+                worst, (chain_B(b.chain_lever().l) * P.block<3, 3>(6, 6) * chain_B(b.chain_lever().l).transpose())(0, 0),
+                extra_off(0), extra_off(1));
+    CHECK(worst <= 1e-9);
+    CHECK(extra_off(0) == chain_xx and extra_off(1) == chain_yy);
+}
+
 int main()
 {
     flag_off_golden();
@@ -912,6 +942,7 @@ int main()
     parked_range_jitter_equality();
     chain_once_for_both_3x3();
     transport_invariance_arc();
+    published_cov_no_chain_double_count();
     bad_seed_recovers();
     first_update_no_volatility();
     good_seed_stays();
