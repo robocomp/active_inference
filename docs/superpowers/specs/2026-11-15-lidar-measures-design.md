@@ -5,7 +5,8 @@ amended 11-15 after Fable's plan review (owner: C1 = A, C2 = two-sided); §7c ad
 inference rigorously" — yes to the mixture with the camera prior, yes to LiDAR-first); §7c rev 3 11-16 (owner: class
 prior counted once + Σ bounded by it (B); camera persistence now with the object-size scale). Tasks 1–2 built and
 merged to main 8f4cc821; §7c rev 3.1 folds Fable's rev 3 review (READY WITH CHANGES). §7c.7 rev 3.2 11-18 (owner: "Go"):
-persistent errors never rescale; b_chain becomes the robot pose error with the lever arm in B — PENDING Fable review.
+persistent errors never rescale; b_chain becomes the robot pose error with a fixed lever in B. Rev 3.2.1 folds Fable's
+rev 3.2 review (NOT READY; all 3 Critical, 7 Important, 7 Minor written in as R4-*; C2 = keep F, no parallax claim).
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
@@ -458,65 +459,117 @@ f5b5496f) reproduces the live split within 1 cm and 3 cm from the logged inputs 
 **Why (the D map makes our own σ an observation).** 7c.2's b_t = ρ D b_{t−1} + w, D = σ_t/σ_{t−1}, at ρ = 1 is the
 deterministic map b_t = D b_{t−1}. A frame pins the measured sum u = θ + b, so the predicted prior pins θ + b/D and
 the next frame pins θ + b. The difference (1 − 1/D) b is then MEASURED: with consistent data it forces b → 0, and an
-innovation Δu is explained as b = Δu·D/(D − 1), a gain of 21 at D = 1.05 and 10⁴ at D − 1 = 10⁻⁴. A change of OUR
+innovation Δu is explained as b ≈ Ic·k·Δu/(Ic·k² + 1/σ_b²), k = 1 − 1/D (no-prior limit Δu·D/(D − 1)), a gain that
+peaks near D − 1 = 1/(σ_b√Ic) ≈ 0.06, i.e. at the live value (R4-M1). A change of OUR
 uncertainty is not an event in the world, so it must carry no information. In live9 D_chain ≈ 1.05 came from
 `compute_chain_cov` evaluating the lever at `inst.model`'s centre (the birth seed on one cycle, the posterior on the
 next); the parked jitter of the mask range (1.65017 → 1.65029 m) does the same to the range share of b_cam.
 Supplying Δu = 9.5 cm: the first update's GN did not converge in its 4 iterates (cx 0.835 → 0.831 → 0.913 → 0.853 in
 the fixture) and P was taken at the last iterate, claiming mm precision at a point the data does not support.
 
-**(a) Rule: a latent's scale lives in its measurement matrix B, never in its transition.** Every latent evolves as
-b_t = ρ_t F_t b_{t−1} + w_t, where F_t is the PHYSICAL transport of that error (identity unless stated) and
-Var w_t = (1 − ρ_t²) Σ_t + ρ_t² Q_t, Q_t the error genuinely created since the last update (0 unless stated). D is
-gone. A new source (σ_{t−1} = 0) keeps ρ = 0 (T4-1c).
+**(a) Rule: a latent's scale lives in its measurement matrix B, never in its transition.** Every latent block evolves
+as b_t = R F_t b_{t−1} + w_t, R = diag(ρ_t), F_t the PHYSICAL transport of that error (identity unless stated),
+Var w_t = S Σ_t S, S = diag(√(1 − ρ_t²)), Σ_t the block's current marginal (diagonal for b_cam, b_L; the full 3×3
+Σ_pose,t for e). D is gone; there is no created-error term Q in this spec (R4-I1). Predict, per block: x_b ← R F x_b,
+P's rows and columns of the block by R F (cross blocks with θ and with the other latents included), P_bb += S Σ_t S.
+PSD by construction. A block is a NEW SOURCE when it has never been predicted or its previous Σ was zero: ρ = 0 for
+that transition (T4-1c). `predict_latents` becomes this block form (R4-I4).
 
-**(b) b_chain becomes e = (δx, δy, δψ) ∈ ℝ³, the robot's pose error in the room frame.**
-- Σ_pose,t = the (x, y, rz) 3×3 block of the room→robot RT edge's `rt_covariance` (6×6, parent frame, the stamped
-  history entry at the capture stamp). Heading variance IS published; 7c.2's "no localisation yaw variance" was wrong.
-  The plan verifies that no other edge of the camera / Helios chain carries a covariance; if one does, it is added
-  the same way (its own latent), not lumped.
-- Measurement: B_chain,t (6×3), linearised at the BELIEF's centre c = (cx, cy) and the robot position r_t at the cycle's
-  capture stamp: row cx = [1, 0, −(c_y − r_y)], row cy = [0, 1, c_x − r_x], row yaw = [0, 0, 1], rows H, w, h = 0.
-  Both channels use it (one robot pose per cycle; the camera–Helios stamp difference is stated, not modelled).
-  H_cam = [I B_chain,t I 0], H_L = [I B_chain,t 0 I]; the θ-only channel is unchanged. K = 3 + 6 + 6 = 15.
-- Transport: F_t = [[1, 0, −Δr_y], [0, 1, Δr_x], [0, 0, 1]], Δr the robot's room-frame displacement integrated from
-  the same odometry 7c.2 already walks (a heading error turns into a position error as the robot drives).
-- Created error: Q_t = the published `rt_covariance_velocity` (if present on that edge) integrated over the odometry
-  interval through the same Jacobian; absent ⇒ Q_t = 0, logged once (the marginal then lags dead-reckoning growth
-  until a correction, ρ_chain < 1, mixes it toward Σ_pose,t).
-- ρ_chain: unchanged (7c.2), with the Mahalanobis scale now Σ_pose,t itself (3×3, so the heading correction counts).
-- Consequence: a heading error is now OBSERVABLE through real parallax (the lever c − r changes because the robot
-  moved), bounded by its σ_ψ prior (0.024 rad live ⇒ ≤ 2.4 cm per metre of lever). This replaces the fake
-  observability; it is the active-inference "look from elsewhere" for the localisation error.
-- `compute_chain_cov` stays only for the flag-off path. LTSM restore: e is not stored (a robot pose error is not an
-  object property); `sanitize_covariance` re-seeds e at Σ_pose; `canonicalize` / mode rotation leave e untouched.
+**(b) b_chain becomes e = (δx, δy, δψ) ∈ ℝ³, the robot's pose error in the room frame** (e = estimated − true pose).
+- **Σ_pose,t (R4-C3)** = the robot's pose covariance in the ROOM frame on (x, y, ψ). The published edge is robot→room
+  (the robot is the RT root): its `rt_covariance` slots {0, 1, 5} at the capture stamp hold Σ_edge for
+  T(robot←room) — the room origin's uncertainty in the robot frame, NOT the robot's in the room. Σ_pose,t =
+  J Σ_edge Jᵀ, J = `se2_inverse_jacobian` (common/place_memory/place_map.h) at the stored edge pose (inversion is an
+  involution). Unit test: round trip against `room_scene_graph.cpp`'s forward map (`rt_block_of`), and Σ_pose,t equals
+  the `proto_room.csv` pose σ of the same stamp (1 %). No other edge of the camera / Helios chain carries a covariance
+  (verified at d8215e99: robot_concept writes the mounts with `insert_or_assign_edge_RT_static`, no covariance); a
+  mount error is constant in the robot frame and belongs to b_cam / b_L. 7c.2's "no localisation yaw variance is
+  published" was wrong.
+- **Measurement (R4-C1).** B_chain,t (6×3): row cx [1, 0, −ℓ_y], row cy [0, 1, ℓ_x], row yaw [0, 0, 1], rows H, w,
+  h = 0. The lever ℓ ∈ ℝ² is STATE OF THE INSTANCE, never a function of the belief: set when e is a new source to
+  (seed centre − robot position at the capture stamp), then moved only by the odometry, ℓ ← ℓ − Δr, with the same Δr
+  that enters F. When ρ_chain < 1 it relaxes with the error: ℓ ← ρ_chain(ℓ − Δr) + (1 − ρ_chain)(c − r_t), c the
+  belief's centre, r_t the robot position at the capture stamp (a re-drawn error may take a new lever; a persistent
+  one may not). B_chain is constant over the GN iterates of a cycle. Linearising at the belief's centre instead was
+  rejected: re-linearising the bilinear term θ_c + δψ·J(θ_c − r) at a moving estimate creates information along an
+  unobservable direction (the EKF-SLAM inconsistency; first-estimate Jacobians are the standard cure) — with the
+  live inputs it gives e_ψ = −9.3σ and cx 0.89 → 0.59 m, the live failure again. Stated limit: ℓ differs from the
+  true lever by the seed's error plus odometry drift; the model error is σ_ψ·|Δℓ| (7 mm at 0.024 rad and 30 cm),
+  constant while parked. Both channels use the same B_chain (one robot pose per cycle; the camera–Helios stamp
+  difference is stated, not modelled). H_cam = [I B_chain,t I 0], H_L = [I B_chain,t 0 I]; the θ-only channel is
+  unchanged. K = 3 + 6 + 6 = 15.
+- **Transport.** F_t = [[1, 0, −Δr_y], [0, 1, Δr_x], [0, 0, 1]], Δr the robot's room-frame displacement integrated
+  from the odometry 7c.2 already walks (a heading error turns into a position error as the robot drives).
+- **Consequence (R4-C2).** At ρ_chain = 1, B_chain,t F_t = B_chain,t−1 exactly: the error e predicts at the object
+  does not change, parked or driving. An object alone does not measure the robot's pose error (physically true: a
+  heading error rotates the whole dead-reckoned path about where it arose, so the object's measured room position
+  does not move), and nothing is learned from our own lever. e's job is to be counted ONCE for both channels, with
+  the right correlation between cx, cy and yaw, and to be forgotten at the rate the localiser corrects (ρ_chain).
+  Equivalently, at ρ_chain = 1 the model is a constant 3-D error B₀e₀ on (cx, cy, yaw) in the object's coordinates
+  (R4-M3). Rejected alternative (F = I, parallax kept): it reads a dead-reckoned stretch as a measurement of δψ.
+- **ρ_chain** as 7c.2, with the Mahalanobis scale Σ_pose,t (3×3) and the correction c ∈ ℝ³ (R4-I4): (pose
+  increment) ⊖ (odometry increment) on (x, y, ψ), the ψ part from `robot_current_angular_speed` over the same
+  stamps (`ChainTracker` / `odometry_step_room` gain ψ); an interval that cannot be integrated is absorbed into the
+  reference on all three (fail closed, as today).
+- **Stated limits.** The marginal of e follows Σ_pose,t only through ρ_chain: on a stretch with no correction at all
+  (ρ_chain = 1 while Σ_pose,t grows) it lags, logged as √diag Σ_e against √diag Σ_pose,t (R4-I1). e is carried per
+  instance: two instances seen in one cycle hold independent copies of one physical error (per-object marginals
+  right, cross-object correlation not represented, R4-M4). e is as honest as Σ_pose,t: a collapsed published pose
+  covariance while parked makes ρ_chain → 0 on mm jitter and shrinks the mixing target (R4-M5; logged).
+- **Bookkeeping (R4-M7).** The belief stores the last Σ_pose,t (3×3) and ℓ; `sanitize_covariance` re-seeds e at that
+  Σ_pose with zero cross terms; `canonicalize` / mode rotation leave e and ℓ untouched; `sig_prev_` remains only as
+  the new-source flag of b_cam, b_L. LTSM restore stores neither e nor ℓ (a pose error is not an object property).
+  `compute_chain_cov` stays only for the flag-off path.
 
 **(c) b_cam and b_L keep their 6-vector in θ's coordinates, with F = I and no rescale.** ρ_cam already contains
-exp(−|Δz|/z): the same relative range change that changes σ_cam decorrelates b_cam, so the marginal follows σ_cam,t²
-with a lag of about one e-fold of relative range, and nothing is learned from a parked range jitter. Moving the
-range scale into B instead (a unit latent times range) was rejected: two tight pins at two ranges would again
-"measure" the unit error from our own σ model. b_L's σ is constant (D was 1 already).
+exp(−|Δz|/z): the same relative range change that changes σ_cam decorrelates b_cam, so its marginal follows
+σ_cam,t² with a lag of about one e-fold of relative range (range share of σ 1.79× wide after 3 → 1 m, 0.71× after
+1 → 3 m, inside §8's factor 3), and a parked range jitter reaches nothing (it enters only through S Σ_t S = 0 at
+ρ = 1). Range-in-B for b_cam (a unit latent times range) was rejected for these reasons (R4-M2): σ_cam is a
+quadrature lump of range-free floors and range terms, so one latent has no single scaling; ρ_cam already declares
+the error re-drawn after one e-fold of relative range, so nothing is claimed across ranges; and a range taken from
+the belief would need (b)'s fixed-lever treatment. b_L's σ is constant (D was 1 already).
 
-**(d) The update converges before P is taken.** Step 3's GN runs until the θ step is below a NUMERICAL tolerance
-(1 mm on cx, cy, H, w, h and 1 mrad on yaw — a solver tolerance, not a modelling threshold) or `gn_iters_max`
-iterates, with a damping that cannot oscillate (the plan chooses it; the fixture's oscillating first update is the
-test). Step 4's P is evaluated at the returned θ. A frame that hits `gn_iters_max` unconverged is logged
-(`gn_conv` = 0) and its P is still taken at the returned θ (no rejection gate).
+**(d) The update converges before P is taken (R4-I6).** A solver tolerance is not a modelling threshold.
+- Damping: a proximal (Levenberg) term on θ only, in the inverse-free form
+  (𝟙 + P̄(W + λM)) δ = P̄G − (x̃_k − x̄), M = blockdiag(diag(W_θθ), 0), x_{k+1} = x̃_k + δ.
+  W + λM is PSD, so the solve exists for any PSD P̄; a zero-variance latent keeps δ = 0; λ = 0 is today's step.
+- Acceptance by the joint objective, without P̄⁻¹: J = Σ_ch E_ch(θ + B b) + E_θ(θ) + ½ yᵀ(x − x̄),
+  y = G − (W + λM)δ (then x − x̄ = P̄y, so the last term is the prior energy). J falls: accept, λ ← λ/4; else reject,
+  λ ← 4λ (first λ = 10⁻³), re-solve without re-tracing. λ and its factors are solver constants.
+- Stop when the accepted θ step (after `apply_constraints`, yaw as the wrapped difference) is below 1 mm on cx, cy,
+  H, w, h and 1 mrad on yaw, or after `gn_iters_max` = 12 accepted or rejected steps. The plan measures the cycle
+  cost on the nightstand fixture and reports Hz before live (§8 asks ~10 Hz per class).
+- P at the returned θ, plus P_θθ += δ_last δ_lastᵀ always (below the tolerance it adds < 1 mm²; an unconverged frame
+  carries its own remaining step as uncertainty). A frame that ends unconverged is logged (`gn_conv` = 0); no gate.
+- Caveat for the plan: with the b̄ restart the fixed point is the joint stationary point only to first order in
+  b − b̄. If J stalls above the tolerance on the fixture, the consistent variant is x̃_k = (θ_k, b_k) linearised at
+  θ_k + B b_k (same solve); the per-iterate ρ = 0 equality then becomes a fixed-point equality.
 
-**Log per cycle (additions):** e (3) and √diag Σ_e, the lever c − r, √diag Σ_pose,t, Q_t trace, `gn_it` and `gn_conv`.
+**Log per cycle (additions):** e (3) and √diag Σ_e, ℓ, √diag Σ_pose,t (also reported while parked), the correction
+c (3), `gn_it`, `gn_conv`, the final λ.
 
 **Pass (additions to 7c.5):**
-- `bchain_jump_test::linear_scale_coupling` (live inputs, σ_chain 4.97 → 5.22 cm): |e_x| ≤ 3σ and cx within 0.10 m
-  of truth; `lever_arm_sensitivity`: e within 0.1σ of its held-σ control.
-- Parked range jitter: 1000 identical camera frames with the mask range jittered by ±10⁻⁴ relative: b_cam's
-  √diag stays ≥ 0.9 of its prior (no information from our own σ) and θ does not move (1 mm).
-- Parallax: a ray-cast nightstand, robot pose with a true heading error of 0.02 rad, the robot drives a 90° arc at
-  1.5 m: ê_ψ has the right sign and ≥ 50 % of the truth, θ within 2 cm of truth, NEES of e within [0.1, 10].
-- Convergence: the fixture's first update (seed at the birth on priors, class mean 6 cm off) converges (`gn_conv` = 1)
-  and its P matches P at the true optimum within 5 %.
-- Every 7c.5 check still passes after replacing b_chain by e (the pinned "chain once for both" equality uses
-  B_chain Σ_pose B_chainᵀ in place of Σ_chain).
-- Live: rerun on, off, shift; no instance's |e| exceeds 3σ of Σ_pose; §8 as before.
+- `bchain_jump_test::linear_scale_coupling` (live inputs: belief centre (0.92, 3.75) on update 1, (0.89, 3.90) on
+  update 2, robot (0.83, 2.24), Σ_pose (3.4 cm, 4.35 cm, 0.024 rad)): the result equals the run whose belief centre
+  does not move (1e-9), cx = 0.9385 (1 mm), |e| ≤ 0.1σ per component. `lever_arm_sensitivity` (ray-cast): e and θ
+  equal the control whose seed centre is the truth, within σ_ψ·|seed − truth|.
+- Parked range jitter: 1000 identical frames (ρ = 1), the mask range jittered by ±10⁻⁴ relative, against the same run
+  without jitter: θ, b and P equal to float tolerance.
+- Transport invariance: a ray-cast nightstand, the robot pose dead-reckoned with a true heading error of 0.02 rad, a
+  90° arc at 1.5 m, ρ_chain = 1: B_chain,t F_t = B_chain,t−1 to 1e-9 at every update; √diag of e's posterior does
+  not fall below its value after the first update (0.1 %); NEES of e within [0.1, 10]; θ's error stays within its
+  own 2σ.
+- Σ_pose: the round trip and the `proto_room.csv` equality of (b).
+- Convergence: the fixture's first update (seed at the birth on priors, class mean 6 cm off) returns `gn_conv` = 1
+  within `gn_iters_max`; J is non-increasing over accepted steps; θ equals the same solver run for 200 steps (1 mm,
+  1 mrad) and √diag P equals it within 5 % per component. Second update, parked: θ moves less than the tolerance.
+- The ρ = 0 regression of 7c.5 runs with Σ_pose = 0 (a zero-variance e; b_cam, b_L as today) and pins the persistent
+  path against the flag-off path without chain covariance, on fixtures where no step is rejected (stated in the
+  test). The "chain once for both" equality becomes the 3×3 form on (cx, cy, yaw): data information =
+  (B Σ_pose Bᵀ + (Σ_cam⁻¹ + Σ_L⁻¹)⁻¹)⁻¹, B the 3 non-zero rows of B_chain. Every other 7c.5 check still passes.
+- Live: rerun on, off, shift; no instance's |e| exceeds 3σ of Σ_pose; √diag Σ_pose,t while parked reported; §8 as
+  before.
 
 ## 8. Pass
 
