@@ -369,7 +369,18 @@ std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(c
     const CountableProjection* proj = projection_.get();
     rc::Projector project = [proj, zed_T_room, cols, rows](const Eigen::Vector3f& p)
     { return proj->project_to_zed(zed_T_room, p, cols, rows); };
-    const float sigma_chain = std::sqrt(std::max(0.0f, 0.5f * (inst.chain_cov_xx + inst.chain_cov_yy)));
+    // The robot pose error between the two legs of the membership: a Helios return goes into the room at the SWEEP's
+    // capture stamp (lidar_plane_reader.cpp:181, room<-helios, Interpolated) and back into the ZED image with zed_T_room at
+    // the MASK's capture stamp (countable_projection.cpp:136, room<-body, Interpolated) — the same robot→room ring, two
+    // different stamps, so the error does not cancel exactly (ruling T13-6). Flag on: the in-image-relevant std of the
+    // robot's pose error at the mask stamp, √(½(Σ_pose,xx + Σ_pose,yy)) (spec 7c.7 b); flag off: the chain cov at the
+    // belief centre, as before (compute_chain_cov).
+    float sigma_chain = std::sqrt(std::max(0.0f, 0.5f * (inst.chain_cov_xx + inst.chain_cov_yy)));
+    if (cfg_.lidar_measures_on_gated)
+    {
+        const Eigen::Matrix3d Sp = pose_at_stamp(inst.last_mask_timestamp_ms).sigma;
+        sigma_chain = static_cast<float>(std::sqrt(std::max(0.0, 0.5 * (Sp(0, 0) + Sp(1, 1)))));
+    }
     return rc::make_membership(std::move(project), mm, f, cfg_.existence_sensor_sigma_m, sigma_chain, mot_pos_var,
                                sl.confidence);
 }
