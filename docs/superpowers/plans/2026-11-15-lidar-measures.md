@@ -480,3 +480,218 @@ As Task 10 Steps 1–4 (claim Webots from room and chat; rebuild nightstand/bed/
 instance's |e| exceeds 3σ of Σ_pose; √diag Σ_pose,t while parked against `proto_room.csv`'s pose σ at the same stamps
 (the C3 live check, 1 %); median `gn_it` and the share of `gn_conv` = 0; fit rate ≥ 8 Hz. Results in
 `docs/superpowers/results/2026-11-18-lidar-measures-live10.md`.
+
+## Revision 5 (11-20): spec §7c.8 rev 3.3.3 — a miss is evidence: the persistent ray likelihood is a smooth beam model
+
+**Spec:** §7c.8 rev 3.3.3 (owner "approved" 11-20, i.e. "Yes" to the rev 3.3.3 read). Reviews behind it:
+`fable-7c8-review.md`, `fable-7c8-rereview.md`, `fable-7c8-rereview2.md`. Executors read §7c.8 in full: its Pass list
+is the test list below, and every number a test asserts is copied from it.
+
+**Goal:** On the persistent path, every return whose ray passes the select box and has a camera label enters a smooth
+beam likelihood (surface offset marginalised, ownership as a mixture), so a miss is evidence, the energy is continuous,
+GN converges with rays, and cx / w are observed by silhouette edges.
+
+**Architecture:** Three layers. (1) Shared, pure, double: `common/ai_belief/beam_ray.h` — the 1-D likelihood
+(Student-t, Φ / Φ⁻¹, conditional-quantile quadrature, panels) and the ray geometry on ORIENTED-BOX PARTS (closest
+approach d and ∇d in closed form, level crossings by one monotone march per part), the energy, the exact gradient and
+the two-part curvature; plus a new ray-set type and a new staging function in `common/lidar_select`. (2) countable:
+the model exposes its convex parts as oriented boxes with analytic Jacobians; a persistent label returning an
+optional; config `Model.MaskPixelErrorRate`. (3) The persistent belief and the fitter use them; flag off and every
+other caller untouched.
+
+**Decision (controller's call): parts are oriented boxes.** Every convex part of a countable model is an oriented box
+(the main box; the bed's headboard panel). The shared geometry takes `struct BeamPart { Eigen::Vector3d c; double yaw;
+Eigen::Vector3d half; Eigen::Matrix<double, 7, 6> J; }` (J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ) and never calls a
+model SDF, so every Jacobian is analytic and no `fd_eps` / `jac_slope_clamp` acts on this path (spec (a) "Convex
+parts"). The headboard's thickness min(t_hb, h) contributes ∂/∂h only where t_hb > h (one-sided, stated in the hook).
+
+### Global Constraints (revision 5, in addition to the above)
+
+- Persistent path only. `LidarRays`, `select_into`, `select_into_weighted`, `make_membership`, every function in
+  `lidar_ray_factor.h` and `lidar_select.h` that exists today: NOT edited (new functions and types only). Flag off ⇒
+  `lidar_golden_test` bit-exact; door and hood tests that include `lidar_ray_factor.h` pass unchanged.
+- Constants (spec (c)): K from the accuracy test (start K = 8); ε of the one-sided tangents and the 1e-4 m bracket as
+  7c.6; the 8σ_s numerical floor (π_i < 7e-16), flagged as machine-precision, not a model gate. NO other constant.
+  New model constant, flagged: ε_px = `Model.MaskPixelErrorRate`, per class, measured (Task 15).
+- Config validations refused at load with a message: p₀c² > 1 (p₀ from `Model.LidarPrecision` and the SensorModel
+  σ_sensor: 1/p₀ = 1/LidarPrecision + σ_sensor²; c = `Model.LidarRobustCM`); 0 < ε_px < ½.
+- ρ_max = `max_range_m` (6 m); p_pass = 1/ρ_max; σ_s = `Model.ModelSigmaM`; ν = p₀c² − 1; scale² = c²/ν.
+- Label m_i = ε_px + (1 − 2ε_px)·π_mask·Φ(s_i/σ_px); κ from the UNFLOORED q_i = π_mask·Φ(s_i/σ_px) on the
+  endpoint-in-box subset, exactly today's two down-weights, handed over as one number κ = coverage·ca ∈ [0, 1].
+- "The LiDAR channel measured" ⇔ κ > 0 and the staged set is not empty (persistent path: `frame_has_lidar`,
+  `rays_usable`, the b_L predict, `record_channels`, `lidar_only`).
+- Everything numerical in double; Φ via erfc; Φ⁻¹ accurate to 1e-15 (AS241).
+- Do not patch symptoms: a failing Pass item is reported with its numbers (the gap fixture, the flush neighbour and the
+  5 cm background go to the owner, not tuned).
+
+### Review Focus (revision 5)
+
+1. **Sensor inside the dilated part** (t = 0 crossing; robot brushing the bed): finite E, gradient and curvature, the
+   formula refutes the model by itself, no special case (Task 17 `sensor_inside_part_is_finite`).
+2. **Ray parallel to a face / exactly through an edge** (non-unique minimiser, d_i = 0): no NaN, gradient matches the
+   one-sided differences (Task 17 `parallel_ray_is_finite`).
+3. **No return in range** (ρ_i > ρ_max or the sweep's max-range sentinel): staged as ρ_max, E finite (Task 18
+   `no_return_staged_at_rho_max`).
+4. **`sl.confidence` = 1.0f / π_mask = 1** and **κ = 0**: finite energy; κ = 0 leaves the belief at the prediction
+   (Task 18 `label_bounds`, Task 19 `kappa_zero_is_prediction`).
+5. **Bed, a level where the first-hit part switches or two parts tie**: continuous energy, C¹ off the stated kinks
+   (Task 17 `headboard_continuity`, `headboard_gradient`).
+
+### Task 15 (controller, before building): the three numbers the spec asks for first
+
+- [ ] **Step 1:** In live10's run folders (`room_concept/estimation_scripts/crossing/objects_live10*`), count per
+  instance the persistent-path cycles with rays and no membership (no RGB frame staged / camera unbound / no focal /
+  empty slice) and the longest consecutive run; if the log cannot tell, say so and add the column in Task 20. A
+  systematic cause (pose lookup failing while turning) is reported before Task 20 wires the skip.
+- [ ] **Step 2:** Confirm whether live10 recorded ground-truth masks. If yes, measure ε_px per class as spec (a0) says
+  (over LiDAR returns if Webots ground truth allows, pixels otherwise; say which); if no, a short recorded run with the
+  Webots segmentation camera (claim Webots: CLAIM → ACK → FREE with room and chat). Compute b*(ε_px) from
+  ε/(1 − ε)·St(b*)/p_pass + G(−b*) = 1 at the configured p₀, c.
+- [ ] **Step 3:** Write both numbers to `.superpowers/sdd/2026-11-15-lidar-measures/eps-px-measurement.md` and the
+  ledger; they go to the owner before live11 (not before building). If ε_px < 0.5 %, record that Camera coverage (ii)
+  decides and the value is NOT raised.
+
+### Task 16: The beam likelihood in one dimension (shared, pure)
+
+**Files:** Create `common/ai_belief/beam_ray.h` (math part); Test `countable_concept/tests/beam_ray_test.cpp` (new
+target, header-only, in `tests/CMakeLists.txt`).
+
+**Interfaces — Produces (namespace `rc::ai::beam`):**
+- `struct StudentT { double p0, c, nu, scale2; static std::optional<StudentT> make(double p0, double c); double pdf(double e) const; double cdf(double e) const; double dlogpdf(double e) const; }` — nullopt when p₀c² ≤ 1. `cdf` exact or tabulated at load; if tabulated, its derivative is the table's own and |cdf′ − pdf| < 1e-6.
+- `double Phi(double x)`, `double Phi_upper(double x)` (erfc), `double Phi_inv(double p)` (AS241).
+- `struct GaussLegendre01 { std::vector<double> u, w; static GaussLegendre01 make(int K); }`.
+- `struct RayLik { double E; double r_member; double o_front; double S_bar, G_bar, t_bar, var_t; }` — the per-ray result (E per spec "Energy"; r_i; o_i; Ŝ, Ḡ, t̄, Var t under the quadrature weights).
+- `RayLik ray_likelihood(const StudentT& st, double rho, double m, double pi, double rho_max, std::span<const double> t_nodes, std::span<const double> w_nodes, std::span<double> dE_dt, double* dE_dpi)` — weights sum to 1 (conditional mean given a hit), p(ρ | θ) = (1 − π)(1 − m)p_pass + π·Σ_k w_k[m·St(t_k − ρ) + (1 − m)p_pass·G(t_k − ρ)], E = −log[p/((1 − m)p_pass)]; outputs ∂E/∂t_k and ∂E/∂π for Task 17's chain rule.
+- `void quantile_nodes(double d, double sigma_s, std::span<const double> b, const GaussLegendre01& gl, std::vector<double>& delta, std::vector<double>& w)` — panels b_0 = 0 < … < b_n = π (upper-tail probabilities), δ_jk = −σ_s Φ⁻¹(b_{j−1} + (b_j − b_{j−1})u_k), weight (b_j − b_{j−1})/π · ω_k.
+
+- [ ] **Step 1: Write the failing tests** in `beam_ray_test.cpp`:
+  - `student_t_constants`: p₀ = 2500, c = 0.05 ⇒ ν = 5.25 (1e-12), pdf(0) ≈ 17.5 m⁻¹ (1e-2); −log pdf(e) − (−log pdf(0)) = ½p₀c²·log(1 + e²/c²) (1e-12); `make(2500, 0.02)` (p₀c² = 1) = nullopt; ∫pdf over [−1, 1] m = cdf(1) − cdf(−1) (1e-9); |cdf′ − pdf| < 1e-6 on a 1e-4 m grid over [−0.5, 0.5].
+  - `phi_inv_accuracy`: Phi(Phi_inv(p)) = p, relative 1e-14, for p ∈ {1e-300, 1e-16, 1e-6, 0.3, 0.5, 1 − 1e-12}.
+  - `nodes_fixed_deep_inside`: d = −10σ_s ⇒ the δ nodes equal those at d = −20σ_s to 1e-12 (no tail cancellation).
+  - `face_numbers` (spec "Numbers"): one face-on node set, t_k = ρ + δ_k (n̂·u = 1), π = 1 − 1e-12: E at e = 0 within 0.1 nats of −6.85 at m = 0.9 and of −4.66 at m = 0.5; π = 0 ⇒ E = 0 exactly; m = 0.05, return 0.40 m behind a fully blocking model ⇒ E within 1 nat of +11; return 0.30 m in front, m = 0.9 ⇒ E ≤ −log(1 − 0.9) + 1e-9.
+  - `dE_matches_fd`: ∂E/∂t_k and ∂E/∂π against central differences (1e-6 relative or 1e-9 absolute) at m ∈ {0.05, 0.9}, e ∈ {−0.3, 0, 0.1}.
+  - `panels_sum_to_one`: n = 3 panels ⇒ Σw = 1 (1e-14); n = 1 panel ⇒ the one-part node set exactly.
+- [ ] **Step 2:** Build `beam_ray_test` (-j8 after `pgrep -a cc1plus`); run. Expected: FAIL (header missing).
+- [ ] **Step 3:** Implement the math part of `beam_ray.h` with the interfaces above.
+- [ ] **Step 4:** Run `beam_ray_test`. Expected: PASS.
+- [ ] **Step 5:** Commit `beam_ray: the 1-D smooth beam likelihood and its quadrature (spec 7c.8 a)`.
+
+### Task 17: Ray geometry on oriented-box parts, energy, gradient, curvature (shared, pure)
+
+**Files:** Modify `common/ai_belief/beam_ray.h` (geometry + assembly part); Test `beam_ray_test.cpp`; header note in
+`common/ai_belief/lidar_ray_factor.h` (comment only: "a ray that misses the model carries no term — except on the
+countable persistent path, `beam_ray.h`", spec (d) R6-M8).
+
+**Interfaces:**
+- Consumes: Task 16.
+- Produces:
+  - `struct BeamPart` (as in the Decision above).
+  - `struct BeamRays { Eigen::Vector3d origin; std::vector<Eigen::Vector3d> endpoints; std::vector<double> m; double kappa = 0; double rho_max = 6.0; double sigma_s = 0.01; }` — the persistent ray-set (ranges ≥ ρ_max already clamped by staging).
+  - `struct BeamConfig { StudentT st; GaussLegendre01 gl; double eps_tangent = 1e-4, bracket_m = 1e-4; }`.
+  - `double closest_approach(const BeamPart&, const Eigen::Vector3d& o, const Eigen::Vector3d& u, double rho_max, Eigen::Matrix<double, 6, 1>* grad)` — d_ip and ∇_θ d_ip: closed-form segment–box distance for a miss; for a crossing the two-tangent crease d = intersection of the tangents at t* ∓ ε, ∇d = (s₊J₋ + s₋J₊)/(s₋ + s₊); one-sided at t = 0 / ρ_max.
+  - `template <int N> void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays&, const BeamConfig&, Eigen::Matrix<double, N, N>& W, Eigen::Matrix<double, N, 1>& g, double* E)` with N = 6 — κ·Σ E_i, its exact gradient (through π_i, node levels, panel limits, crossings: ∂t/∂θ = −(∂s/∂θ)/(∂s/∂t), ∂t/∂δ = 1/(∂s/∂t)), and the PSD curvature κ·Σ[r_i J̄J̄ᵀ/V_i + (1 − o_i) I_d,i ∇d∇dᵀ] with V_i = (1 + ē²/c²)/p₀ + Var t and I_d,i = (φ(d_i/σ_s)/σ_s)²·[m_i/π_i + (1 − m_i)(1 − t̄_i/ρ_max)/(1 − π_i)] (Mills ratio in the tails); cross term dropped. Rays with d_i > 8σ_s stop after the closest approach and contribute exactly 0.
+  - `double beam_rays_energy(std::span<const BeamPart>, const BeamRays&, const BeamConfig&)` — the same E, no derivatives.
+  - Cost savings are part of the task (spec c): one monotone march per part collecting all K·panels levels in t order; cos/sin of yaw once per part per build.
+
+- [ ] **Step 1: Write the failing tests** (ray-cast true scenes from `test_scene.h`; m by hand: 0.9 on, ε_px = 0.02 off):
+  - `closest_approach_corner`: rays 0.05–1 mm outside a corner: d equals the exact distance (1e-9), ∇d against central differences (1 %); rays cutting a corner at n̂·u far from 45°: ∇d against one-sided differences on each side (1 %).
+  - `continuity_box`: cx swept 2 cm across a ray edge in 0.05 mm steps: |E(x+h) − 2E(x) + E(x−h)| < 0.01 nats at every step.
+  - `headboard_continuity`: bed with headboard, rings at elevations −1°…+1° relative to the mattress top, swept across a first-hit switch and across the appearance of the headboard's own minimum: the same 0.01 bound.
+  - `gradient_box` and `headboard_gradient`: analytic vs central differences (h = 0.1 mm), 1 % or 1e-3 nats/m, every step; where some d_i changes sign, two parts tie, or a panel appears inside the stencil: vs the one-sided difference on each side.
+  - `quadrature_K`: |E_K − E_64| < 0.01 nats per ray over n̂·u ∈ [0.1, 1], e ∈ [−0.3, 0.3] m, d ∈ [−4σ_s, 4σ_s], m ∈ {0.9, 0.05}, box and headboard; on a face E_K decreasing toward its minimum from each side (minimum at e > 0: 7 µm at m = 0.9, 1.3 mm at m = 0.05, printed). Print the smallest passing K; `BeamConfig` default K = that value.
+  - `several_parts_equals_one`: the panel code on a one-part model equals the one-part code to 1e-12 per ray, energy and gradient.
+  - `far_rays_exact_zero`: d_i > 8σ_s ⇒ contribution exactly 0.0.
+  - `reduction_to_7c6`: rays deep in a face (π > 1 − 1e-6), m = 1 − 1e-6, κ = 1, n̂·u ∈ {1, 0.25}: curvature = a aᵀ/((n̂·u)²·R_range + σ_s²) within 1 %.
+  - `sensor_inside_part_is_finite`, `parallel_ray_is_finite`: finite E, g, W; W PSD.
+  - `largest_curvature_printed`: for a claimed ray 1.5–3σ_s outside a corner, print the largest per-ray curvature along ∇d (spec R6-M3; no bound).
+  - `cost`: 256 near rays, box and 2-part bed: ms per build and per energy, printed (the median ≤ 5 ms check is Task 19's on the belief).
+- [ ] **Step 2:** Build and run. Expected: FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run `beam_ray_test`, `lidar_golden_test`, and the door and hood tests that include `lidar_ray_factor.h` (`grep -rl lidar_ray_factor.h --include=CMakeLists.txt` finds their targets). Expected: PASS, golden bit-exact.
+- [ ] **Step 5:** Commit `beam_ray: oriented-box parts, closest approach, smooth energy, gradient and curvature (spec 7c.8 a, b)`.
+
+### Task 18: Ray staging, the persistent label, config (shared + countable)
+
+**Files:** Modify `common/lidar_select/lidar_select.h` (new function only); `countable_concept/src/countable_mask_membership.h/.cpp` (new function only); `countable_config.h/.cpp`; `etc/config.toml` of nightstand, bed, toilet (`Model.MaskPixelErrorRate` = Task 15's value); Test `countable_concept/tests/beam_staging_test.cpp` (new), `mask_membership_test.cpp`, `config_migration_test.cpp`.
+
+**Interfaces:**
+- Consumes: Task 17's `BeamRays`.
+- Produces:
+  - `struct PersistentLabel { double m; float q; };` and `std::function<std::optional<PersistentLabel>(const Eigen::Vector3f&)> make_persistent_label(Projector, const MaskMembership&, float f_px, float sigma_range_m, float sigma_chain_m, float mot_pos_var_m2, float pi_mask, double eps_px)` — nullopt when the projector returns nullopt (behind / outside the image); q = π_mask·Φ(s/σ_px) (today's value), m = ε_px + (1 − 2ε_px)q.
+  - `int rc::lidar_select::select_rays_beam(const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin, const Eigen::Vector2f& centroid_xy, const Box& box, const Weights& w, double rho_max, const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label, rc::ai::beam::BeamRays& out, BeamStageStats* stats)` — stages every return whose ray (origin → return → ρ_max) intersects the box's cylinder ∩ z-band, with a label (nullopt ⇒ not staged, counted); ρ_i > ρ_max staged at ρ_max; κ = coverage·ca computed exactly as `select_into_weighted` does but over the endpoint-in-box returns with weight q; returns the staged count.
+  - `struct BeamStageStats { int staged, no_label, in_box; float kappa, q_sum; };`
+  - `CountableConfig::mask_pixel_error_rate` (`Model.MaskPixelErrorRate`, no default when `Model.LidarMeasuresOnGated` = true: missing ⇒ refused); load refuses 0 < ε_px < ½ violations and p₀c² ≤ 1 (with SensorModel σ_sensor when present) with a message.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `beam_staging_test`: `ray_through_box_staged` (a return 1 m behind the box, ray through it ⇒ staged; a return whose ray misses the cylinder ⇒ not); `short_return_staged` (return in front of the box on a ray through it ⇒ staged); `no_return_staged_at_rho_max` (endpoint at 8 m ⇒ staged at ρ_max = 6, E finite through `beam_rays_energy`); `no_label_not_staged` (label nullopt ⇒ not staged, `no_label` counted); `kappa_unfloored` (all returns q = 0 with m = ε_px ⇒ κ = 0; the same returns with today's labels ⇒ κ equals `select_into_weighted`'s precision/base on the same sweep, 1e-6).
+  - `mask_membership_test`: `persistent_label_bounds` (m ∈ [ε_px, 1 − ε_px]; π_mask = 1.0f ⇒ m ≤ 1 − ε_px, finite; outside image ⇒ nullopt; `make_membership` unchanged on the same inputs, bit-exact).
+  - `config_migration_test`: ε_px = 0, 0.5, missing (flag on) ⇒ refused; LidarPrecision 300 with c = 0.05 (p₀c² = 0.75) ⇒ refused.
+- [ ] **Step 2:** Build and run. Expected: FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the three tests and `lidar_weights_test`, `lidar_golden_test`. Expected: PASS.
+- [ ] **Step 5:** Commit `beam staging: rays through the select box, the persistent label with ε_px, config checks (spec 7c.8 a0)`.
+
+### Task 19: The persistent belief uses the beam model (countable, flag on)
+
+**Files:** Modify `countable_concept/src/countable_belief.h/.cpp`; Test `persistent_belief_test.cpp`, new `countable_concept/tests/beam_belief_test.cpp`, `creep_set_test.cpp`, `lidar_only_update_test.cpp` (the `over_deep_belief_is_not_held` expectation).
+
+**Interfaces:**
+- Consumes: Task 17's `BeamPart`, `BeamRays`, `BeamConfig`, `accumulate_beam_rays<6>`, `beam_rays_energy`.
+- Produces:
+  - `int CountableBelief::n_beam_parts() const` (1, or 2 with a headboard); `rc::ai::beam::BeamPart CountableBelief::beam_part(const CountableBeliefState&, int k) const` (analytic J; main box z ∈ [0, H]; headboard as `sdf_headboard`).
+  - `CountableFrame::beam` (`rc::ai::beam::BeamRays`), read only when `params.persistent`; `CountableBeliefParams::beam` (`BeamConfig`, set by the fitter).
+  - On the persistent path `accumulate_channels` and `persistent_data_energy` use the beam terms on `f.beam` in place of the first-crossing ray-sets (the flag-off path and `f.lidar` untouched); `frame_has_lidar`, `rays_usable`, the b_L predict and `record_channels` read the measured rule (κ > 0 and staged non-empty).
+  - Accessors for the log: `int last_beam_staged() const`, `int last_gap_rays() const` (rays with π_i > 0.99 and e < −5c).
+
+- [ ] **Step 1: Write the failing tests** in `beam_belief_test.cpp` (ray-cast true scenes, hand labels 0.9 on / ε_px off unless stated; "tolerance" = 1 mm / 1 mrad):
+  - `kappa_zero_is_prediction`: κ = 0 ⇒ state, Σ, ω at the prediction; the channel's odometry path not restarted. Σq = 5 (κ ≈ 0.08): update finite, per-ray hit/miss energy difference = κ × the κ = 1 value.
+  - `reduction_update`: the Task 17 reduction rays through a belief update: θ equals 7c.7's update within 0.1σ per component, √diag P within 3 % (difference printed).
+  - `occluder_in_front`: occluder 30 cm in front, m = 0.05: θ moves less than the tolerance AND every √diag P component within 1 % of the run with those rays unstaged (κ unchanged). One silhouette occluded: σ_w, σ_cx not more than 1 % below the run without the occluded rays.
+  - `wall_2cm_printed`: over-segmented mask on a wall 2 cm behind the face, m = 0.9 and 0.05: depth printed.
+  - `depth_basin`: camera + rays, seed 30 cm behind the surface, m = 0.9: depth within its own σ of truth in ≤ 10 frames; summed ray gradient along the view axis never points away from the returns; rays-only run printed.
+  - `silhouette_hand_labels`: front-only sweep, seed 3 cm too narrow and 3 cm too wide, backgrounds 20 cm and 1 m: w within σ_w of truth and σ_w below the prior's in 10 frames; 5 cm background printed; largest per-ray curvature printed.
+  - `parked_floors`: 1000 identical sweeps: σ_w, σ_cx not below b_L's floors; w moves < 1 mm after frame 10; θ step sizes non-increasing and below the tolerance at frame 10.
+  - `first_update_converges_with_rays`: the camera + ray fixture's first update returns `gn_conv` = 1.
+  - In `bchain_jump_test`: `lever_arm_sensitivity` as a CHECK: θ's position equals the truth-seeded control within σ_ψ·|seed − truth|.
+  - `persistent_belief_test`: the ρ = 0 regression restricted to CAMERA-ONLY frames (frames with rays differ by design; say so in the test).
+  - `lidar_only_update_test`: re-run `over_deep_belief_is_not_held`, print its result, rewrite its expectation from that number (the commit message quotes it).
+  - `creep_set_test`: 0/16 unchanged.
+  - `beam_cost`: one update's ray work at 256 near rays, first update and parked, box and bed: median ms printed and ≤ 5 ms.
+- [ ] **Step 2:** Build and run. Expected: FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run every countable test (`/usr/bin/ctest` in the tests build). Expected: PASS; `lidar_golden_test` bit-exact.
+- [ ] **Step 5:** Commit `countable belief: the smooth beam model on the persistent path (spec 7c.8 a, b)`.
+
+### Task 20: Fitter wiring, logs, and the live-staging fixtures (countable, flag on)
+
+**Files:** Modify `countable_concept/src/countable_lidar_range_channel.h/.cpp` (new `feed_beam`), `countable_fitter.cpp/.h`, `countable_instance.h` (log fields); `countable_concept/tools/lidar_measures_score.py` (new columns); Test new `countable_concept/tests/beam_live_staging_test.cpp`, `countable_concept/tests/test_scene.h` (a rendered-mask helper).
+
+**Interfaces:**
+- Consumes: Task 18's `select_rays_beam`, `make_persistent_label`, `BeamStageStats`; Task 19's `CountableFrame::beam`, accessors.
+- Produces:
+  - `void CountableLidarRangeChannel::feed_beam(CountableInstance&, CountableFrame&, std::span<const Eigen::Vector3f> anchor_cloud, const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label) const` — helios only (bpearl not staged on this path); the probe / `dbg_lidar_rays` / coverage instruments keep reading the endpoint-in-box subset.
+  - Fitter, flag on: a cycle without membership (no RGB frame staged, camera unbound, no focal, empty slice) stages no rays, runs the camera update as usual and is counted; otherwise `feed_beam` with `make_persistent_label`.
+  - ai2_log columns appended after Task 14's: `beam_staged,beam_nolabel,beam_kappa,nomem_cycle,gap_rays`.
+  - `test_scene.h`: `RenderedMask render_mask(const Camera&, const SceneBox& target, std::span<const SceneBox> others, float erode_m)` + a projector, so live-staging fixtures build m through `make_persistent_label` with σ_px and ε_px as live.
+
+- [ ] **Step 1: Write the failing tests** in `beam_live_staging_test.cpp` (spec Pass "live staging" items; bounds copied):
+  - `silhouette_live`: correctly sized seed, backgrounds 20 cm and 1 m: |Δw|, |Δcx| < 5 mm over 10 frames; ±3 cm seeds end within σ_w of truth. 5 cm background: Δw, Δcx printed against the predicted +1.9 / +3.7 / +5.3 / +6.9 cm at the fixture's σ_px, and the shift per edge < 2σ_px.
+  - `flush_neighbour_printed`: surface 2 cm behind the face plane, 30 cm beside the box, 10 frames: Δw with rays vs camera-only, printed.
+  - `camera_coverage`: (i) box half outside the image, correct seed: |Δw|, |Δcx|, |Δcy| < 5 mm over 10 frames and no outside-image ray staged; (ii) mask eroded 3 cm on one side: bias of w and cx not above the camera-only run's (both printed).
+  - `gap_under_furniture`: box on a 15 cm gap, background 1 m, Helios height: vs the run without the gap rays staged, cy, h, H each move < 1 cm; gap-ray count and energy printed. A failure is reported, not tuned.
+  - `calibration_nees`: silhouette fixture through live staging, 200 draws (range noise + per-ray σ_s offset): mean NEES(cx, w)/2 ∈ [0.5, 2] on the 20 cm and 1 m backgrounds, each printed separately, cx and w alone printed; 5 cm printed only.
+  - `no_membership_cycle_skips_rays`: a cycle without membership leaves P untouched by rays and increments the log counter.
+  - `staging_cost_printed`: `select_rays_beam` + labels over a full Helios sweep, ms printed.
+- [ ] **Step 2:** Build and run. Expected: FAIL.
+- [ ] **Step 3:** Implement; build the three agents (nightstand, bed, toilet: -j8) so their binaries are current.
+- [ ] **Step 4:** Run every countable test. Expected: PASS except items a spec line says are reported to the owner (gap, calibration on 20 cm / 1 m are CHECKs: a failure is reported with numbers, not tuned).
+- [ ] **Step 5:** Commit `countable fitter: beam rays staged by geometry on the persistent path, logs (spec 7c.8 a0)`.
+
+### Task 21 (controller, live): objects_live11, objects_live11off, objects_live11shift
+
+As Task 10 again (claim Webots from room and chat; ai2_log cleared before each run; 2 legs each), plus spec Pass
+"Live11": fit rate ≥ 8 Hz; `gn_conv` = 0 share on updates with rays below live10's (5 / 12 / 3 / 20 %); final centre
+errors not worse than live10's by more than 1 cm; no DOF over-confident (two-sided §8), w and cx reported separately;
+per instance the staged ray count, rays without camera information, cycles without membership and their longest run,
+and the gap-ray count. ε_px and b* from Task 15, and Task 20's printed flush / 5 cm / gap numbers, go to the owner in
+`docs/superpowers/results/2026-11-20-lidar-measures-live11.md`. Push the branch when done; no merge.
