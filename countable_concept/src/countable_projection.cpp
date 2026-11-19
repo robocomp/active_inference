@@ -10,6 +10,7 @@
 
 #include "countable_projection.h"
 #include "tick_timing.h"
+#include "rt_memo.h"
 #include "countable_config.h"   // rc::k*OwnWallSkipM (shared with the perception card)
 
 #include <algorithm>
@@ -133,24 +134,7 @@ std::optional<Eigen::Matrix4d> CountableProjection::room_T_zed_matrix(std::uint6
     // same window. A clamp only costs geometry while the robot moves; the controller's rate goes
     // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
     static rc::rtprobe::Probe rt_probe{"countable_projection room<-body"};
-    DSR::RT_API::TimeQueryInfo rt_info;
-    rc::count_rt_call();
-    std::optional<Mat::RTMat> rtb;
-    {
-        const auto t_rb = rc::sub_stage(&rc::TickTiming::ego_rt_room_body);   // [timing] room<-body query + probe note
-        rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G_), "body", pose_ts_ms, "RT",
-                                                      DSR::RT_API::TimeQuery::Interpolated,
-                                                      &rt_info);
-        rt_probe.note(rt_info, G_);
-    }
-    rc::count_rt_call();
-    std::optional<Mat::RTMat> btz;
-    {
-        const auto t_bz = rc::sub_stage(&rc::TickTiming::ego_rt_body_zed);   // [timing] body<-zed query
-        btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
-    }
-    if (not (rtb.has_value() and btz.has_value()))
-        return std::nullopt;
+    const std::string room_frame = rc::room::current_room_frame(*G_);
     const auto to_mat4 = [](const Mat::RTMat& T)
     {
         Eigen::Matrix4d m;
@@ -158,7 +142,33 @@ std::optional<Eigen::Matrix4d> CountableProjection::room_T_zed_matrix(std::uint6
         for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = s(i, j);   // no aligned load
         return m;
     };
-    return to_mat4(rtb.value()) * to_mat4(btz.value());
+    // [memo] one consistent pose per tick: the same (room frame, pose stamp) is answered once (spec: profile 11-19).
+    const auto compute = [&]() -> std::optional<Eigen::Matrix4d>
+    {
+        DSR::RT_API::TimeQueryInfo rt_info;
+        rc::count_rt_call();
+        std::optional<Mat::RTMat> rtb;
+        {
+            const auto t_rb = rc::sub_stage(&rc::TickTiming::ego_rt_room_body);   // [timing] room<-body query + probe note
+            rtb = inner_eigen_->get_transformation_matrix(room_frame, "body", pose_ts_ms, "RT",
+                                                          DSR::RT_API::TimeQuery::Interpolated, &rt_info);
+            rt_probe.note(rt_info, G_);
+        }
+        std::optional<Mat::RTMat> btz;
+        {
+            const auto t_bz = rc::sub_stage(&rc::TickTiming::ego_rt_body_zed);   // [timing] body<-zed query
+            btz = rc::cached_rt(inner_eigen_, "body", "zed", 0);                  // rigid mount: once per tick
+        }
+        if (not (rtb.has_value() and btz.has_value()))
+            return std::nullopt;
+        return to_mat4(rtb.value()) * to_mat4(btz.value());
+    };
+    if (rc::g_rt_memo == nullptr)
+        return compute();
+    bool hit = false;
+    const auto r = rc::g_rt_memo->room_zed.get(room_frame + '|' + std::to_string(pose_ts_ms), compute, hit);
+    if (hit) rc::count_rt_hit();
+    return r;
 }
 
 // ─── Projected ROI ──────────────────────────────────────────────────────────────────────────────

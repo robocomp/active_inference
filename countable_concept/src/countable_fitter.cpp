@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include "tick_timing.h"
+#include "rt_memo.h"
 #include <limits>
 #include <locale>
 #include <print>
@@ -122,25 +123,26 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
     // The Helios position: this cycle's staged sweep origin (the worker stages the sweep before update_ego_motion); on a
     // cycle without a fresh sweep the last staged origin is kept.
     if (const auto o = lidar_channel_.helios_origin(); o.has_value()) { helios_now_ = *o; have_helios_ = true; }
-    // The robot node (Shadow, type "robot"): found once by type, then read by id (no per-cycle copy of every robot node).
-    std::optional<DSR::Node> robot;
+    // The robot node (Shadow, type "robot"): found once by type (id only), then its twist attributes are read BY ID —
+    // no per-cycle copy of the node. If the id yields no twist (node gone / producer absent) it is looked up again.
+    std::optional<rc::rt::Twist> tw;
     {
         const auto t_rn = rc::sub_stage(&rc::TickTiming::ego_robot_node);   // [timing] robot node lookup
-        if (robot_node_id_ != 0) robot = G_->get_node(robot_node_id_);
-        if (not robot.has_value())
+        if (robot_node_id_ != 0) tw = rc::rt::robot_body_twist(*G_, robot_node_id_);
+        if (not tw.has_value())
         {
             const auto robots = G_->get_nodes_by_type("robot");
-            if (not robots.empty()) { robot = robots.front(); robot_node_id_ = robots.front().id(); }
+            if (not robots.empty()) { robot_node_id_ = robots.front().id(); tw = rc::rt::robot_body_twist(*G_, robot_node_id_); }
         }
     }
-    if (robot.has_value())
+    if (robot_node_id_ != 0)
     {
         const auto t_tw = rc::sub_stage(&rc::TickTiming::ego_twist);   // [timing] both twist reads
         // The shared reader (one place for the advance/side axis convention): linear = [side (x), advance (y), 0].
-        if (const auto tw = rc::rt::robot_body_twist(*G_, robot.value()); tw.has_value() and tw->stamp_ms != 0)
+        if (tw.has_value() and tw->stamp_ms != 0)
         { odo_adv_ = tw->linear.y(); odo_side_ = tw->linear.x(); odo_omega_ = tw->angular.z(); odo_ts_ = tw->stamp_ms; }
         // The twist is per SIMULATION second on a simulator: feed the wall→sim clock (identity on real hardware).
-        if (const auto st = rc::rt::robot_twist_sim_stamps(*G_, robot.value()); st.has_value())
+        if (const auto st = rc::rt::robot_twist_sim_stamps(*G_, robot_node_id_); st.has_value())
             sim_clock_.observe(st->first, st->second);
     }
     // The Helios beam pattern (spec §7c.2: g = max_ring_gap_rad of its SensorModel). It can be advertised late, so it is
@@ -550,8 +552,7 @@ void CountableFitter::compute_object_observation(CountableInstance& inst)
     c_cam /= static_cast<double>(e - b);
 
     // STATIC camera→base extrinsic (ts=0, rigid mount) — carries NO localization pose ⇒ z_o ⟂ robot pose.
-    rc::count_rt_call();
-    const auto m = inner_eigen_->get_transformation_matrix(obs_robot_frame_, obs_cam_frame_, 0);
+    const auto m = rc::cached_rt(inner_eigen_, obs_robot_frame_, obs_cam_frame_, 0);
     if (not m.has_value())
         return;
     const Mat::Vector3d p = m.value() * c_cam;
@@ -566,8 +567,7 @@ void CountableFitter::compute_object_observation(CountableInstance& inst)
         const Eigen::Vector2f cen_xy{inst.obs_robot.x(), inst.obs_robot.y()};
         const auto bs = inst.ai2_belief.state();
         float box_yaw_body = bs.yaw;
-        rc::count_rt_call();
-        if (const auto br = inner_eigen_->get_transformation_matrix(obs_robot_frame_, rc::room::current_room_frame(*G_), 0); br.has_value())
+        if (const auto br = rc::cached_rt(inner_eigen_, obs_robot_frame_, rc::room::current_room_frame(*G_), 0); br.has_value())
             box_yaw_body = bs.yaw + static_cast<float>(std::atan2(br.value().linear()(1, 0),
                                                                   br.value().linear()(0, 0)));
         inst.obs_robot_cov = rc::object_anchor::ray_anisotropic_cov(

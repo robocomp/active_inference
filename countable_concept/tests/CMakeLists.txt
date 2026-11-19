@@ -164,3 +164,9 @@ target_include_directories(bchain_jump_test PRIVATE ../src ../../common ../../co
 target_compile_options(bchain_jump_test PRIVATE -O2)
 target_link_libraries(bchain_jump_test PRIVATE Eigen3::Eigen)
 add_test(NAME bchain_jump_test COMMAND bchain_jump_test)
+
+# Per-tick transform memo (tick_memo.h): same key -> one call, new tick -> recompute. Header-only, no graph.
+add_executable(tick_memo_test tick_memo_test.cpp)
+target_include_directories(tick_memo_test PRIVATE ../src)
+target_compile_options(tick_memo_test PRIVATE -O2)
+add_test(NAME tick_memo_test COMMAND tick_memo_test)

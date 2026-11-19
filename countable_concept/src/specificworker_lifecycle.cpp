@@ -91,11 +91,10 @@ float SpecificWorker::slice_world_fraction(const rc::MaskIngestor::MasksPacket& 
     };
     if (not pkt.support_points_cam.empty())
     {
-        rc::count_rt_call();
-        if (const auto m = inner_eigen_->get_transformation_matrix("body", "zed", 0); m.has_value())
+        if (const auto m = rc::cached_rt(inner_eigen_, "body", "zed", 0); m.has_value())
             carry(pkt.support_points_cam, m.value());
     }
-    else if (const auto m = inner_eigen_->get_transformation_matrix("body", rc::room::current_room_frame(*G), 0);
+    else if (const auto m = rc::cached_rt(inner_eigen_, "body", rc::room::current_room_frame(*G), 0);
              m.has_value())
         carry(pkt.support_points, m.value());
     if (pts_robot.empty())
@@ -646,8 +645,7 @@ void SpecificWorker::process_ricoh_bearings()
     ricoh_attention_targets_.clear();
     if (not inner_eigen_ or not mask_ingestor_ or not fitter_)
         return;
-    rc::count_rt_call();
-    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);   // robot pose in room
+    const auto rtb = rc::cached_rt(inner_eigen_, rc::room::current_room_frame(*G), "body", 0);   // robot pose in room
     if (not rtb.has_value())
         return;
     const Eigen::Vector2f robot_xy{static_cast<float>(rtb.value()(0, 3)),
@@ -717,16 +715,14 @@ void SpecificWorker::log_detect_probe()
     // No pose ⇒ no row.
     if (not inner_eigen_)
         return;
-    rc::count_rt_call();
-    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "body", 0);
+    const auto rtb = rc::cached_rt(inner_eigen_, rc::room::current_room_frame(*G), "body", 0);
     if (not rtb.has_value())
         return;
     const auto& Tb = rtb.value();
     const float rx = static_cast<float>(Tb(0, 3)), ry = static_cast<float>(Tb(1, 3));
     const float rtheta = static_cast<float>(std::atan2(Tb(1, 0), Tb(0, 0)));
     float cam_z = static_cast<float>(Tb(2, 3));
-    rc::count_rt_call();
-    if (const auto rtz = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", 0); rtz.has_value())
+    if (const auto rtz = rc::cached_rt(inner_eigen_, rc::room::current_room_frame(*G), "zed", 0); rtz.has_value())
         cam_z = static_cast<float>(rtz.value()(2, 3));
 
     const auto& pkt = mask_ingestor_->packet();

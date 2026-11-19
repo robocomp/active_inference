@@ -25,7 +25,7 @@ struct TickTiming
     // ex_* are inside existence. rt_calls = get_transformation_matrix calls made this tick (room_T_zed_matrix = 2).
     double ego_rt_room_body = 0, ego_rt_body_zed = 0, ego_robot_node = 0, ego_twist = 0, ego_sensor_model = 0;
     double ex_silhouette = 0, ex_contour = 0, ex_lidar_carve = 0, ex_decide = 0, ex_removal = 0;
-    int rt_calls = 0;
+    int rt_calls = 0, rt_hits = 0;   // rt_calls = real cortex calls (memo misses); rt_hits = answered by the per-tick memo
     int n_inst = 0, n_cam = 0, n_ray = 0, n_none = 0;   // instances: camera data / LiDAR rays only / nothing
 
     void reset() { *this = TickTiming{}; }
@@ -35,7 +35,7 @@ struct TickTiming
         return "ts_ms,n_inst,n_cam,n_ray,n_none,mask_refresh,tracker,foreign_claims,lidar_pump,rgb_stage,ego_motion,"
                "inst_total,observe,membership,lidar_feed,infer,publish,ricoh,existence,class_factor,dashboard,tick,"
                "ego_rt_room_body,ego_rt_body_zed,ego_robot_node,ego_twist,ego_sensor_model,"
-               "ex_silhouette,ex_contour,ex_lidar_carve,ex_decide,ex_removal,rt_calls\n";
+               "ex_silhouette,ex_contour,ex_lidar_carve,ex_decide,ex_removal,rt_calls,rt_hits\n";
     }
 
     void write_row(std::ofstream& f, long long ts_ms) const
@@ -46,7 +46,7 @@ struct TickTiming
                                dashboard, tick, ego_rt_room_body, ego_rt_body_zed, ego_robot_node, ego_twist,
                                ego_sensor_model, ex_silhouette, ex_contour, ex_lidar_carve, ex_decide, ex_removal})
             f << ',' << v;
-        f << ',' << rt_calls;
+        f << ',' << rt_calls << ',' << rt_hits;
         f << '\n';
         f.flush();
     }

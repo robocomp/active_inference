@@ -130,6 +130,24 @@ struct Twist
     return t;
 }
 
+// By node id: the same read without copying the node (DSRGraph::get_attrib_by_name<att>(id) reads under the shared
+// lock). Identical result to the Node overload; ADDED so a per-cycle caller need not hold a full copy of the robot node.
+[[nodiscard]] inline std::optional<Twist> robot_body_twist(DSR::DSRGraph &G, std::uint64_t robot_id)
+{
+    const auto adv  = G.get_attrib_by_name<robot_current_advance_speed_att>(robot_id);
+    const auto side = G.get_attrib_by_name<robot_current_side_speed_att>(robot_id);
+    const auto rot  = G.get_attrib_by_name<robot_current_angular_speed_att>(robot_id);
+    if (not adv.has_value() or not side.has_value() or not rot.has_value())
+        return std::nullopt;
+
+    Twist t;
+    t.linear  = {side.value(), adv.value(), 0.f};   // axis order, as the Node overload
+    t.angular = {0.f, 0.f, rot.value()};
+    if (const auto ts = G.get_attrib_by_name<robot_current_speed_timestamp_att>(robot_id); ts.has_value())
+        t.stamp_ms = static_cast<std::uint64_t>(ts.value());
+    return t;
+}
+
 // ── THE TWIST'S OWN CLOCK (2026-10-19, Task 9) ───────────────────────────────────────────────────
 // ★A SIMULATOR'S VELOCITIES ARE PER SIMULATION SECOND. robot_concept forwards them as the producer states them, with
 // the producer's sim stamp (robot_current_speed_sim_timestamp) and robot_current_speed_simulated beside the wall stamp
@@ -187,6 +205,17 @@ private:
     if (not sim.has_value() or not sim.value()) return std::nullopt;
     const auto wall = G.get_attrib_by_name<robot_current_speed_timestamp_att>(robot);
     const auto sts  = G.get_attrib_by_name<robot_current_speed_sim_timestamp_att>(robot);
+    if (not wall.has_value() or not sts.has_value()) return std::nullopt;
+    return std::pair{static_cast<std::int64_t>(wall.value()), static_cast<std::int64_t>(sts.value())};
+}
+
+// By node id (no node copy); same result as the Node overload.
+[[nodiscard]] inline std::optional<std::pair<std::int64_t, std::int64_t>> robot_twist_sim_stamps(DSR::DSRGraph &G, std::uint64_t robot_id)
+{
+    const auto sim = G.get_attrib_by_name<robot_current_speed_simulated_att>(robot_id);
+    if (not sim.has_value() or not sim.value()) return std::nullopt;
+    const auto wall = G.get_attrib_by_name<robot_current_speed_timestamp_att>(robot_id);
+    const auto sts  = G.get_attrib_by_name<robot_current_speed_sim_timestamp_att>(robot_id);
     if (not wall.has_value() or not sts.has_value()) return std::nullopt;
     return std::pair{static_cast<std::int64_t>(wall.value()), static_cast<std::int64_t>(sts.value())};
 }

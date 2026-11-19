@@ -436,6 +436,7 @@ void SpecificWorker::compute()
     if (room_node_id_ == 0) return;
 
     timing_.reset();
+    const rc::RtMemoTickScope rt_memo_scope(rt_memo_);   // one consistent pose per tick; off again on every return
     rc::g_tick_timing = &timing_;   // sub-stage timers + rt_calls in projection/fitter/existence
     const auto tick_t0 = std::chrono::steady_clock::now();
 
@@ -836,8 +837,7 @@ rc::nbv::Sensor SpecificWorker::zed_sensor_model() const
     // room frame, so mixing the two would bias the binding axis by that offset.
     if (inner_eigen_)
     {
-        rc::count_rt_call();
-        if (const auto rtz = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", 0); rtz.has_value())
+        if (const auto rtz = rc::cached_rt(inner_eigen_, rc::room::current_room_frame(*G), "zed", 0); rtz.has_value())
             s.height_m = static_cast<float>(rtz.value()(2, 3));
     }
     return s;
