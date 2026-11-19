@@ -21,6 +21,11 @@ struct TickTiming
     double mask_refresh = 0, tracker = 0, foreign_claims = 0, lidar_pump = 0, rgb_stage = 0;
     double ego_motion = 0, inst_total = 0, observe = 0, membership = 0, lidar_feed = 0, infer = 0;
     double publish = 0, ricoh = 0, existence = 0, class_factor = 0, dashboard = 0, tick = 0;
+    // Sub-stages (ms), NESTED: ego_rt_* / ego_robot_node / ego_twist / ego_sensor_model are inside ego_motion;
+    // ex_* are inside existence. rt_calls = get_transformation_matrix calls made this tick (room_T_zed_matrix = 2).
+    double ego_rt_room_body = 0, ego_rt_body_zed = 0, ego_robot_node = 0, ego_twist = 0, ego_sensor_model = 0;
+    double ex_silhouette = 0, ex_contour = 0, ex_lidar_carve = 0, ex_decide = 0, ex_removal = 0;
+    int rt_calls = 0;
     int n_inst = 0, n_cam = 0, n_ray = 0, n_none = 0;   // instances: camera data / LiDAR rays only / nothing
 
     void reset() { *this = TickTiming{}; }
@@ -28,7 +33,9 @@ struct TickTiming
     static const char* header()
     {
         return "ts_ms,n_inst,n_cam,n_ray,n_none,mask_refresh,tracker,foreign_claims,lidar_pump,rgb_stage,ego_motion,"
-               "inst_total,observe,membership,lidar_feed,infer,publish,ricoh,existence,class_factor,dashboard,tick\n";
+               "inst_total,observe,membership,lidar_feed,infer,publish,ricoh,existence,class_factor,dashboard,tick,"
+               "ego_rt_room_body,ego_rt_body_zed,ego_robot_node,ego_twist,ego_sensor_model,"
+               "ex_silhouette,ex_contour,ex_lidar_carve,ex_decide,ex_removal,rt_calls\n";
     }
 
     void write_row(std::ofstream& f, long long ts_ms) const
@@ -36,8 +43,10 @@ struct TickTiming
         f << ts_ms << ',' << n_inst << ',' << n_cam << ',' << n_ray << ',' << n_none << std::fixed << std::setprecision(3);
         for (const double v : {mask_refresh, tracker, foreign_claims, lidar_pump, rgb_stage, ego_motion, inst_total,
                                observe, membership, lidar_feed, infer, publish, ricoh, existence, class_factor,
-                               dashboard, tick})
+                               dashboard, tick, ego_rt_room_body, ego_rt_body_zed, ego_robot_node, ego_twist,
+                               ego_sensor_model, ex_silhouette, ex_contour, ex_lidar_carve, ex_decide, ex_removal})
             f << ',' << v;
+        f << ',' << rt_calls;
         f << '\n';
         f.flush();
     }
@@ -59,4 +68,17 @@ private:
     double* slot_;
     std::chrono::steady_clock::time_point t0_;
 };
+
+// The record of the tick in progress, for code that has no TickTiming pointer (projection, existence). Set by the
+// worker at the top of each tick; thread_local so a worker thread calling the same code never touches it.
+inline thread_local TickTiming* g_tick_timing = nullptr;
+
+// Timer on a sub-stage field of the current tick's record (a no-op when none is set).
+inline StageTimer sub_stage(double TickTiming::* field)
+{
+    return StageTimer(g_tick_timing ? &(g_tick_timing->*field) : nullptr);
+}
+
+// Counts one get_transformation_matrix call in the current tick.
+inline void count_rt_call() { if (g_tick_timing) ++g_tick_timing->rt_calls; }
 }  // namespace rc

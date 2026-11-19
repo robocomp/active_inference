@@ -9,6 +9,7 @@
  */
 
 #include "countable_projection.h"
+#include "tick_timing.h"
 #include "countable_config.h"   // rc::k*OwnWallSkipM (shared with the perception card)
 
 #include <algorithm>
@@ -133,11 +134,21 @@ std::optional<Eigen::Matrix4d> CountableProjection::room_T_zed_matrix(std::uint6
     // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
     static rc::rtprobe::Probe rt_probe{"countable_projection room<-body"};
     DSR::RT_API::TimeQueryInfo rt_info;
-    const auto rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G_), "body", pose_ts_ms, "RT",
-                                                             DSR::RT_API::TimeQuery::Interpolated,
-                                                             &rt_info);
-    rt_probe.note(rt_info, G_);
-    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
+    rc::count_rt_call();
+    std::optional<Mat::RTMat> rtb;
+    {
+        const auto t_rb = rc::sub_stage(&rc::TickTiming::ego_rt_room_body);   // [timing] room<-body query + probe note
+        rtb = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G_), "body", pose_ts_ms, "RT",
+                                                      DSR::RT_API::TimeQuery::Interpolated,
+                                                      &rt_info);
+        rt_probe.note(rt_info, G_);
+    }
+    rc::count_rt_call();
+    std::optional<Mat::RTMat> btz;
+    {
+        const auto t_bz = rc::sub_stage(&rc::TickTiming::ego_rt_body_zed);   // [timing] body<-zed query
+        btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
+    }
     if (not (rtb.has_value() and btz.has_value()))
         return std::nullopt;
     const auto to_mat4 = [](const Mat::RTMat& T)

@@ -3,6 +3,7 @@
  */
 
 #include "countable_existence.h"
+#include "tick_timing.h"
 #include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict / out_of_room_logodds
 
 #include "../../common/contour_edge/contour_edge_check.h"    // rc::edges — the classifier-free RGB check
@@ -131,6 +132,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         // (out of FoV / fully occluded) ⇒ mask_evidence HOLDs.
         if (fresh_masks)
         {
+            const auto t_sil = rc::sub_stage(&rc::TickTiming::ex_silhouette);   // [timing] silhouette channel
             const auto sil = fitter.compute_silhouette_existence(inst);
             inst.dbg_ex_sil_occ = sil.e_occ; inst.dbg_ex_sil_free = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable; inst.dbg_ex_sil_ntotal = sil.n_total;
             if (sil.n_detectable > 0)
@@ -285,6 +287,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
                          : (depth_frame_ != nullptr ? depth_frame_->cols : 0);
             const int fr = (rgb_frame_ != nullptr and not rgb_frame_->empty()) ? rgb_frame_->rows
                          : (depth_frame_ != nullptr ? depth_frame_->rows : 0);
+            const auto t_ct = rc::sub_stage(&rc::TickTiming::ex_contour);   // [timing] contour channel (RT + edge/depth)
             const auto cs = fitter.compute_contour_set(inst, frame_stamp_ms_, fc, fr);
             float verdict = 0.0f;
             int   n_used  = 0;
@@ -353,6 +356,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         // With Model.ExistenceCarveParts the carve uses the class's composed parts (carve_parts) instead of this one solid box.
         if (sweep)
         {
+            const auto t_lc = rc::sub_stage(&rc::TickTiming::ex_lidar_carve);   // [timing] LiDAR carve channel
             // Model.ExistenceCarveParts: carve the class's composed parts (headboard, legs, tank, …) instead of the
             // one solid fitted box. The parts depend on this cycle's fitted state, so they are laid out per instance.
             std::vector<rc::exist::BoxPart> carve_parts;
@@ -498,6 +502,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         // arithmetic here is unchanged — a non-resolving cycle adds 0, and a belief above the boundary is
         // already reset — what changes is that the stall becomes observable, and that `required` now falls
         // with confidence (see rc::exist::required_observations).
+        const auto t_dec = rc::sub_stage(&rc::TickTiming::ex_decide);   // [timing] removal decision + per-cycle log (to end of body)
         const auto verdict = rc::exist::decide_removal(
                 inst.existence, inst.existence_debounce, policy, cycle_p_detect);
         doomed_now = verdict.remove;
@@ -539,6 +544,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
     ev_g.removals_cum += static_cast<long>(doomed.size());
     for (const std::uint64_t id : doomed)
     {
+        const auto t_rm = rc::sub_stage(&rc::TickTiming::ex_removal);   // [timing] removal + graph delete
         std::print("{}: [existence] removing {} id={} — free-space evidence (empty volume)\n", cfg_.agent_name, cfg_.concept_class, id);
         if (auto it = fitter.instances().find(id); it != fitter.instances().end())
         {
