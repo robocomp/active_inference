@@ -40,20 +40,22 @@ Eigen::Vector3f CountableLidarRangeChannel::cloud_centroid(std::span<const Eigen
     return c;
 }
 
-std::vector<Eigen::Vector3f> CountableLidarRangeChannel::helios_returns_in_select_box(
-    std::span<const Eigen::Vector3f> anchor_cloud) const
+std::vector<CountableLidarRangeChannel::DumpReturn> CountableLidarRangeChannel::helios_returns_in_select_box(
+    std::span<const Eigen::Vector3f> anchor_cloud, float margin_m) const
 {
-    std::vector<Eigen::Vector3f> out;
+    std::vector<DumpReturn> out;
     if (not lidar_have_sweep_ or anchor_cloud.empty())
         return out;
     const Eigen::Vector3f c = cloud_centroid(anchor_cloud);
     const auto [rxy, z_lo, z_hi] = select_box();
-    const float r2 = rxy * rxy;
+    const float rg = rxy + margin_m, r2 = rg * rg;
+    const float zlo_g = z_lo - margin_m, zhi_g = z_hi + margin_m;
     for (const auto& p : lidar_sweep_room_)
     {
         const float dx = p.x() - c.x(), dy = p.y() - c.y();
-        if (dx * dx + dy * dy > r2 or p.z() < z_lo or p.z() > z_hi) continue;   // select_into's own box test
-        out.push_back(p);
+        const float d2 = dx * dx + dy * dy;
+        if (d2 > r2 or p.z() < zlo_g or p.z() > zhi_g) continue;   // select_into's box test, grown by margin_m
+        out.push_back({p, std::max(0.f, std::sqrt(d2) - rxy)});
     }
     return out;
 }

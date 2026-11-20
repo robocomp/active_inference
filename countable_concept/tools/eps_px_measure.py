@@ -155,7 +155,7 @@ def main():
                 sel = [on for q, on, _ in qa if a0 <= q < a1]
                 if sel: print('    [%.2f,%.2f)  %5d  %.3f' % (a0, a1, len(sel), sum(sel) / len(sel)))
             print('%s: by z = s/sigma_px   n   frac_on   (a wrong label: on-object far outside, foreign far inside)' % cls)
-            for a0, a1 in ((-1e9, -3), (-3, -2), (-2, -1), (-1, 0), (0, 1), (1, 1.5), (1.5, 1e9)):
+            for a0, a1 in ((-1e9, -8), (-8, -5), (-5, -3), (-3, -2), (-2, -1), (-1, 0), (0, 1), (1, 1.5), (1.5, 1e9)):
                 sel = [on for _, on, z in qa if a0 <= z < a1]
                 if sel: print('    [%5.1f,%5.1f)  %5d  %.3f' % (max(a0, -99), min(a1, 99), len(sel), sum(sel) / len(sel)))
 

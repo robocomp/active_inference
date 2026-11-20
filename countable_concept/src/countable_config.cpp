@@ -445,6 +445,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "camera attributes, LiDAR measures (spec 2026-11-15 lidar-measures §7c): persistent shared errors + class prior once, mask-attributed LiDAR-only updates on gated cycles");
     out.label_dump_enabled        = getb("Model.LabelDumpEnabled", false,
             "measurement only (spec 7c.8 a0): with LidarMeasuresOnGated write label_dump.csv, the camera label inputs of every Helios return in the select box");
+    out.label_dump_margin_m       = getf("Model.LabelDumpMarginM", 0.0f,
+            "measurement only: metres the label dump's select box (XY radius and z-band) is grown by; the fit's selection is unchanged");
     out.existence_removal_prob    = getf("Model.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when L < log(p/(1−p))");
     out.existence_out_of_room_gain = getf("Model.ExistenceOutOfRoomGain", 1.5f,

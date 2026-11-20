@@ -53,7 +53,10 @@ public:
 
     // Measurement only (label dump): the staged HELIOS returns inside this instance's select box, anchored on the same
     // mask-cloud centroid feed() uses. Empty without a fresh helios sweep or an anchor.
-    std::vector<Eigen::Vector3f> helios_returns_in_select_box(std::span<const Eigen::Vector3f> anchor_cloud) const;
+    // `margin_m` grows the XY radius and the z-band (dump only; the fit's selection is unchanged); dist_box_m is the
+    // horizontal distance beyond the ORIGINAL select radius (0 inside).
+    struct DumpReturn { Eigen::Vector3f p; float dist_box_m; };
+    std::vector<DumpReturn> helios_returns_in_select_box(std::span<const Eigen::Vector3f> anchor_cloud, float margin_m = 0.f) const;
 
 private:
     static Eigen::Vector3f cloud_centroid(std::span<const Eigen::Vector3f> cloud);

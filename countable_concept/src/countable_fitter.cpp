@@ -405,7 +405,7 @@ void CountableFitter::dump_labels(const CountableInstance& inst, std::span<const
 {
     if (not label_components_ or label_csv_failed_)
         return;
-    const auto returns = lidar_channel_.helios_returns_in_select_box(anchor_cloud);
+    const auto returns = lidar_channel_.helios_returns_in_select_box(anchor_cloud, cfg_.label_dump_margin_m);
     if (returns.empty())
         return;
     if (not label_csv_.is_open())
@@ -413,19 +413,19 @@ void CountableFitter::dump_labels(const CountableInstance& inst, std::span<const
         const std::filesystem::path ai2{cfg_.ai2_csv_path};
         const auto dir = ai2.has_parent_path() ? ai2.parent_path() : std::filesystem::path{"etc"};
         if (not rc::diag::open_rotating(label_csv_, (dir / "label_dump.csv").string(),
-                                        "pkt_ts,node,cls,gated,ex,ey,ez,in_image,s_px,sigma_px,pi_mask,q\n"))
+                                        "pkt_ts,node,cls,gated,ex,ey,ez,in_image,s_px,sigma_px,pi_mask,q,dist_box_m\n"))
         {
             label_csv_failed_ = true;
             return;
         }
         label_csv_.imbue(std::locale::classic());
     }
-    for (const auto& p : returns)
+    for (const auto& [p, dist_box] : returns)
     {
         const auto c = label_components_(p);
         label_csv_ << inst.last_mask_timestamp_ms << ',' << inst.node_name << ',' << cfg_.concept_class << ','
                    << (gated ? 1 : 0) << ',' << p.x() << ',' << p.y() << ',' << p.z() << ','
-                   << (c.in_image ? 1 : 0) << ',' << c.s_px << ',' << c.sigma_px << ',' << c.pi_mask << ',' << c.q << '\n';
+                   << (c.in_image ? 1 : 0) << ',' << c.s_px << ',' << c.sigma_px << ',' << c.pi_mask << ',' << c.q << ',' << dist_box << '\n';
     }
     label_csv_.flush();
 }

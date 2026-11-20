@@ -332,6 +332,9 @@ struct CountableConfig
     // Measurement only (spec 7c.8 a0, plan Task 15b): with LidarMeasuresOnGated, write label_dump.csv (one row per Helios
     // return in the select box: the camera label inputs) next to AI2CsvPath. Changes no behaviour.
     bool  label_dump_enabled        = false;
+    // Measurement only: grow the DUMP's select region (XY radius and z-band) by this many metres to expose the far tail;
+    // the fit's LiDAR selection is untouched.
+    float label_dump_margin_m       = 0.0f;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
     float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and
