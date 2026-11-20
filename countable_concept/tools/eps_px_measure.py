@@ -15,7 +15,7 @@ instance's ground-truth PART boxes (bed_*; ns_body + its ns_leg; toilet_*), else
   eps_in  = P(in_image, s/sigma > +3 | foreign)        the label says "this" off the object
   eps_px  = max(eps_out, eps_in)
 plus the share of returns with in_image = 0, and b*(eps_px): the root b > 0 of  eps/(1-eps) * St(b)/p_pass + G(-b) = 1,
-St the normalised Student-t with nu = p0 c^2 - 1, scale^2 = c^2/nu (p0 = 2500, c = 0.05), G the standard normal density,
+St the normalised Student-t with nu = p0 c^2 - 1, scale^2 = c^2/nu (p0 = 2500, c = 0.05), G its CDF (so G(-b) = 1/2 - int_0^b St),
 p_pass = 1/6. Numbers are read with float(); no locale.
 """
 import argparse, csv, math, os, sys
@@ -60,8 +60,12 @@ def bstar(eps):
     sc = C / math.sqrt(nu)
     lg = math.lgamma(0.5 * (nu + 1)) - math.lgamma(0.5 * nu) - 0.5 * math.log(nu * math.pi)
     St = lambda b: math.exp(lg - 0.5 * (nu + 1) * math.log1p((b / sc) ** 2 / nu)) / sc
-    G = lambda b: math.exp(-0.5 * b * b) / math.sqrt(2 * math.pi)
-    f = lambda b: eps / (1 - eps) * St(b) / P_PASS + G(b) - 1.0
+    def G_neg(b, n=2000):   # G(-b) = 1/2 - int_0^b St (Simpson)
+        if b <= 0.0: return 0.5
+        h = b / n
+        acc = St(0.0) + St(b) + sum((4 if k % 2 else 2) * St(k * h) for k in range(1, n))
+        return 0.5 - acc * h / 3.0
+    f = lambda b: eps / (1 - eps) * St(b) / P_PASS + G_neg(b) - 1.0
     if not 0 < eps < 1 or f(0.0) <= 0: return None
     lo, hi = 0.0, 1.0
     while f(hi) > 0 and hi < 1e3: hi *= 2
