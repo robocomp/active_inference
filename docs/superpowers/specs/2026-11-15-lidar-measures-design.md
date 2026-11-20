@@ -11,7 +11,7 @@ rev 3.2 review (NOT READY; all 3 Critical, 7 Important, 7 Minor written in as R4
 smooth beam model. Rev 3.3.1 11-18 folds Fable's rev 3.3 review (NOT READY; 4 C, 8 I, 9 M); owner C3 = A (returns
 staged by ray geometry, mask ownership as a mixture; reverses 7c.3's "first-hit physics stays out").
 Rev 3.3.2 folds the rev 3.3.1 re-review (READY WITH CHANGES; 2 C, 5 I, 9 M). Rev 3.3.3 folds the rev 3.3.2 re-review
-(READY WITH CHANGES; 1 C, 3 I, 6 M) and the owner's rulings of 11-18; APPROVED by the owner 11-20 ("Yes"). Rev 3.3.5 (11-20, owner: "Spec fix, Fable checks"): the quadrature amendment at the end of §7c.8 (rev 3.3.4 NOT READY, R8 folded), pending Fable.
+(READY WITH CHANGES; 1 C, 3 I, 6 M) and the owner's rulings of 11-18; APPROVED by the owner 11-20 ("Yes"). Rev 3.3.6 (11-20, owner: "Spec fix, Fable checks"): the quadrature amendment at the end of §7c.8 (rev 3.3.4 NOT READY, R8 folded in 3.3.5; 3.3.5 READY WITH CHANGES, R9 folded), pending the owner.
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
@@ -959,21 +959,23 @@ hand. "The tolerance" is 7c.7's 1 mm / 1 mrad. The bounds chosen in this list wi
   rays left out for lack of camera information, the cycles without membership and their longest run, and the
   gap-ray count of stated limit 1.
 
-**Amendment 11-20 (rev 3.3.5; owner: "Spec fix, Fable checks"): the likelihood is integrated in t on a composite rule.**
+**Amendment 11-20 (rev 3.3.6; owner: "Spec fix, Fable checks"): the likelihood is integrated in t on a composite rule.**
+Rev 3.3.6 folds Fable's rev 3.3.5 review (`fable-7c8-amend-3.3.5-review.md`, READY WITH CHANGES, R9-*).
 Rev 3.3.4 (integrate the member term in v = G(e), the foreign term by parts) was reviewed NOT READY
 (`fable-7c8-amend-3.3.4-review.md`, R8-*): its change of variable and identities are right, but in v the crossing
 bump becomes a spike whenever the surface sits in St's tail (21 nats face-on at e = −30 cm), the by-parts form is
 ill-conditioned where a ray refutes the model, and the mass at t = 0 was dropped. This revision folds all of R8. It
 SUPERSEDES: (a) "Quadrature" (the δ-quantile nodes are no longer the rule for the likelihood; they stay for the
 curvature's moments, below), the rev 3.3.3 sentence "the weights sum to 1 and E_δ is the same conditional mean", (b)
-"d and ∇d"'s t* ± ε tangents (its one-sided rule at t = 0 and ρ_max stays), and (c)'s cost count and constants line.
+"d and ∇d"'s t* ± ε tangents (its one-sided rule at t = 0 and ρ_max stays), (b)'s "Gradient" bullet (replaced by the
+one below), and (c)'s cost count, estimate and constants line (R9-M5).
 What was measured (Task 17, 32d879f5, `task-17-report.md`): with δ-quantile Gauss–Legendre nodes no K ≤ 16 meets
 |E_K − E_64| < 0.01 nats per ray (box 1.94, headboard fixture 4.95 at K = 8; n̂·u = 0.1 never converges): in δ the
 member density St(t(δ) − ρ) is a peak of width ≈ c·(n̂·u) and G a step of the same width, against nodes spread
 over σ_s.
 - **The map (R8-C3, M1, M2).** For a convex part p the first crossing of a level δ ∈ (d_p, s_p(0)) lies on the
   descending branch t ∈ [0, t*_p], t*_p the SMALLEST minimiser of s_p along the ray, where it is inverted by one SDF
-  evaluation: δ = s_p(o + t·u), dδ = ∂_t s_p dt. Every δ ≥ s(0) = min_p s_p(o) maps to t = 0 (the sensor inside the
+  evaluation: δ = s_p(o + t·u), dδ = ∂_t s_p dt. Every δ ≥ s(0) = min_p s_p(o), the minimum over ALL parts including those the 8σ_s floor drops (R9-M2), maps to t = 0 (the sensor inside the
   dilated model): an atom of mass F(s(0)), F(δ) = P(δ' > δ) the upper tail of N(0, σ_s²). Part p is first hit at t
   iff t ≤ t*_p and s_p(t) = M(t), the running minimum over all parts and all earlier t; a panel behind a nearer
   part q's minimum starts where s_p(t) = d_q (a level crossing), and the first-hit part switches where s_p = s_q.
@@ -991,25 +993,34 @@ over σ_s.
   families; t = 0, t = ρ_max and t*_p; and the points where the integrand is not smooth: inside the part (δ < 0) the
   points where the nearest face changes (∂_t s jumps), for δ_c > −8σ_s, and outside the face/edge/vertex region
   boundaries (∂²s/∂t² jumps). All are in closed form in Task 17's box geometry. Starting point: L = 11 levels at
-  z_j = −3, −2.4, …, +3 and n = 3 (Fable's script: worst 5e-4 nats over the Pass grid, 2e-5 for n̂·u ≥ 0.25, on a
-  face-entry profile); L and n are numerical constants set by the Quadrature item, as K was. The part-level 8σ_s
+  z_j = −z_max … +z_max at spacing 0.6 (z_max = 3, L = 11) and n = 3: Fable's script on an exact box SDF, one part,
+  worst 3.3e-3 / 2.6e-3 / 1.7e-3 nats on face-entry / edge-miss / corner-chord rays (R9-I2; without the geometric
+  breakpoints 0.036 and 0.16, so they are required). z_max (with L at the same spacing) and n are numerical constants
+  set by the Quadrature item, searched in this order: n ∈ {3, 4}, then z_max and L together (raising n alone at fixed
+  z_max plateaus). The part-level 8σ_s
   floor (Task 17) stays: a part with d_p > 8σ_s opens no panel. Why it is exact to rounding (R8-M3): a dropped part
-  lies in front of the first-hit part, where on a refuted ray St and G are increasing toward e = 0, so the dropped
-  mass is at most F(8σ_s)/π of the term kept; on a ray not refuted p ≥ (1 − m)p_pass·min(π/2, 1 − π). Either way the
-  relative change is below ~1e-15.
+  matters only if it lies in front of the first-hit part, where on a refuted ray St and G are increasing toward
+  e = 0, so the dropped mass is at most F(8σ_s)/π of the term kept; on a ray not refuted
+  p ≥ (1 − m)p_pass·max(1 − π, π/2) ≥ (1 − m)p_pass/3 (R9-M1). Either way the relative change is below ~1e-15.
 - **The curvature's moments (R8-M5)** (t̄, J̄, Var t of the range part, (b)) stay on the δ-quantile nodes, the right
   nodes for the crossing measure, with their own K_m; the node variance of δ is scaled by the truncated normal's
-  closed form, Var_exact(δ | δ > d)/Var_nodes(δ), which is exact on a face at any K_m (Task 17's 2.6 % at
+  closed form: Var(t) is taken as Var_nodes(t)·Var_exact(δ | δ > d)/Var_nodes(δ), with
+  Var_exact(δ | δ > d) = σ_s²·(1 + αλ − λ²), α = d/σ_s, λ = φ(α)/(1 − Φ(α)) (the Mills ratio, in log space), which is
+  exact on a face at any K_m (R9-M3) (Task 17's 2.6 % at
   n̂·u = 0.25, K = 8, is this). K_m starts at 8 and is set by the Reduction item. I_d and o_i use A, B.
 - **Gradient (R8-I2).** The exact gradient of the discretised energy: through s_p(t; θ) and ∂_t s_p(t; θ) at every
   node (∂²s/∂t∂θ, analytic on a box part); through π_i and the atom, −φ_σ(s(0))·∂_θ s(0)·[m·St(−ρ) + (1 − m)p_pass·G(−ρ)];
   and through every θ-dependent breakpoint, which moves its subinterval's nodes (needs ∂_t of the integrand at each
   node: St′(e) or St(e), φ_σ′(δ)·∂_t s, and ∂²s/∂t², zero on a face piece, not outside an edge or corner): the level
-  crossings t_p(δ_j) (dt = −∂_θ s_p/∂_t s_p), t*_p (tangent case −(∂²s/∂t∂θ)/(∂²s/∂t²); crease case the derivative of
+  crossings t_p(δ_j) (dt = −∂_θ s_p/∂_t s_p, which diverges next to a tangent minimum: the motion term is formed as
+  the finite product St·φ_σ·∂_θ s_p, never as ∞·0, R9-I1), t*_p (tangent case −(∂²s/∂t∂θ)/(∂²s/∂t²); crease case the derivative of
   the intersection of the two face lines; for a ray parallel to a face the one-sided rule of stated kink (ii)),
-  plateau ends (s_p(t) = d_q: dt = (∇d_q − ∂_θ s_p)/∂_t s_p), switch roots, and the face-change and region-boundary
+  plateau ends (s_p(t) = d_q: dt = (∇d_q − ∂_θ s_p)/∂_t s_p), switch roots (s_p = s_q:
+  dt = −(∂_θ s_p − ∂_θ s_q)/(∂_t s_p − ∂_t s_q)), and the face-change and region-boundary
   points. The integrand at t*_p is NOT zero on a crease (St(t* − ρ)·φ_σ(d_p)·s₋ for a crossing ray): that limit's
-  motion counts. Roots at machine precision (Task 17: 1e-4 m was not enough).
+  motion counts. Roots at machine precision (Task 17: 1e-4 m was not enough). Stated kink (iv) of the discretised
+  energy (R9-I1): a breakpoint that appears, is clipped to a panel limit, or changes order with another is a small
+  kink of the gradient (about 1e-3 nats/m per ray); the Gradient item applies its one-sided rule there.
 - **The crease (Task 17).** For d_ip < 0 the minimum is on the crease of the two faces of the part that meet there,
   found exactly from the box geometry; the t* ± ε tangents are withdrawn (near a grazing face they picked the wrong
   face: one bed ray gave ∂d/∂cy 0.638 against 0.034). ∇d = (s₊J₋ + s₋J₊)/(s₋ + s₊) on that pair.
@@ -1017,25 +1028,31 @@ over σ_s.
   - Quadrature: the reference is an INDEPENDENT integration in t (adaptive, or composite with ≥ 10³ nodes and
     breakpoints at the kinks), itself checked by doubling to 1e-4 nats; the grid is rev 3.3.3's with n̂·u extended to
     0.017, the bed fixture included, and the builder adds edge-miss and corner-chord profiles (Fable's script covered
-    a face entry only). Bound |E_rule − E_ref| < 0.01 nats per ray; the smallest (L, n) that meets it is used; if none
-    with n ≤ 6 does, the table goes to the owner (not tuned).
-  - Mass: per panel, the rule applied to φ_σ(s)|∂_t s| alone returns F(δ_lo) − F(δ_hi) to the Quadrature bound, and
-    Σ panels + atom = π (the cheapest detector of a missed panel). The several-part code on a one-part model equals
+    a face entry only). Bound |E_rule − E_ref| < 0.01 nats per ray; the first (n, z_max) in the search order above that
+    meets it is used; if none with n ≤ 4 and z_max ≤ 5 does, the table goes to the owner (not tuned).
+  - Mass: per panel, the rule applied to φ_σ(s)|∂_t s| alone returns F(δ_lo) − F(δ_hi), and Σ panels + atom = π (the
+    cheapest detector of a missed panel), with an ABSOLUTE bound: |Σ panels + atom − π| < 0.01 and the same per panel
+    (a relative bound fails correct code at d = 6σ_s, where π ≈ 1e-9; R9-I3). The several-part code on a one-part model equals
     the one-part code to 1e-12 per ray (as before).
-  - Continuity (box and bed, same 0.01 nats, no new constant): a step passes if |D(h)| < 0.01 nats, or else if
-    Ĵ(h) = |4·D(h/2) − D(h)|/3 < 0.01 nats, halving h until it does or h reaches 1e-9 m (Richardson removes the smooth
-    part: a smooth E falls 16× per halving, a stated kink 2× and passes, a jump tends to |J| and fails).
-  - Gradient: on the box as rev 3.3.3; on the bed at h = 1e-7 m (1 %), with the one-sided rule at stated kinks. It
+  - Continuity (box and bed, same 0.01 nats, no new constant; R9-C1 replaces R8-I5's centred-halving rule, which a
+    jump escaped once h/2 fell below its distance from the sweep point): with D(x, h) = E(x + h) − 2E(x) + E(x − h),
+    a step passes if |D(x, h)| < 0.01 nats; otherwise it is replaced by the two half-size stencils that cover
+    [x − h, x + h] (centres x ± h/2, half-width h/2), each tested the same way, recursively; it fails if any stencil
+    still has |D| ≥ 0.01 at half-width 1e-9 m. A smooth E falls 4× per level, a kink 2×, a jump stays at |J| in the
+    sub-stencil that holds it.
+  - Gradient: on the box as rev 3.3.3, and a miss at h = 0.1 mm is re-checked at h = 1e-7 m (R9-M4); on the bed at
+    h = 1e-7 m (1 %), with the one-sided rule at stated kinks. It
     cannot see a jump in E, so Continuity stays a CHECK beside it.
   - Sensor inside a part (the atom): sensor 20 cm inside, ρ = 1 m, m = 0.9 ⇒ E within 0.01 nats of the independent
     reference (Fable: 11.9 nats); sensor 2σ_s outside the surface likewise.
   - Face minima (measured, K = 64 δ-rule, converged face-on): e = +10 µm at m = 0.9, +1.70 mm at m = 0.05 (rev 3.3.3's
     7 µm / 1.3 mm were estimates).
-- **Cost and constants (R8-M4).** Per ray near the model: the breakpoints (closed form), up to ~2L + a few
-  subintervals × n nodes, one SDF evaluation and one Jacobian each, plus K_m crossings and Jacobians for the moments;
-  re-measured by the Cost item against the same 5 ms median. Numerical constants of the section, none a model
-  threshold: L and the level set, n, K_m, the root tolerance (machine precision), the 8σ_s floor (ray and part),
-  and the test-side h = 1e-7 m, the 1e-9 m halving limit and the n ≤ 6 reporting limit. ε of the tangents and the
+- **Cost and constants (R8-M4, R9-M5).** Per ray near the model: the breakpoints (closed form), up to ~2L + a few
+  subintervals × n nodes (up to about 84 nodes per panel at L = 11, n = 3), one SDF evaluation and one Jacobian each,
+  plus K_m crossings and Jacobians for the moments. (c)'s estimate no longer stands; only the Cost item's measurement
+  against the same 5 ms median counts. Numerical constants of the section, none a model
+  threshold: z_max and L (spacing 0.6), n, K_m, the root tolerance (machine precision), the 8σ_s floor (ray and part),
+  and the test-side h = 1e-7 m, the 1e-9 m halving limit and the n ≤ 4 / z_max ≤ 5 reporting limit. ε of the tangents and the
   1e-4 m bracket are withdrawn.
 
 ## 8. Pass
