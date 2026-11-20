@@ -969,13 +969,13 @@ over σ_s. At n̂·u = 0.1 the peak is 0.5 mm wide against σ_s = 10 mm; on the 
 - **Change of variable.** For a convex part p the first crossing of level δ lies on the descending branch of the ray's
   SDF profile, t ∈ [0, t*_p] with t*_p the closest-approach parameter, where s_p(o + t·u) is strictly decreasing. So the
   crossing is inverted by one SDF evaluation: δ_p(t) = s_p(o + t·u), and dδ = ∂_t s_p dt. With e = t − ρ and φ_σ the
-  N(0, σ_s²) density, on a panel where part p is first hit, levels (δ_lo, δ_hi] ↔ ranges [t_lo, t_hi):
+  N(0, σ_s²) density, on a panel where part p is first hit for levels δ ∈ (δ_lo, δ_hi] — t decreases in δ, so e_lo = e(δ_hi) < e_hi = e(δ_lo):
       ∫ St(t(δ) − ρ) φ_σ(δ) dδ = ∫_{e_lo}^{e_hi} St(e) · φ_σ(s_p(o + (ρ + e)u)) · |∂_t s_p| de.
   The St peak is absorbed by the variable v = G(e): Gauss–Legendre in v over [G(e_lo), G(e_hi)], dv = St(e) de, leaves
   the integrand φ_σ(δ(e))·|∂_t s_p(e)|, which is smooth (C¹ on a box part: the outside SDF is C¹; its weight → 0 at t*_p).
   The member term is m/π times the panel sum. No new constant: the nodes follow the sensor's own density.
 - **Foreign term, by parts in the same variable.** With F(δ) = P(δ' > δ) (upper tail of N(0, σ_s²)) and e(δ) decreasing,
-      ∫_{δ_lo}^{δ_hi} G(e(δ)) φ_σ(δ) dδ = F(δ_lo)·G(e(δ_lo)) − F(δ_hi)·G(e(δ_hi)) − ∫_{e_lo}^{e_hi} St(e)·F(δ(e)) de,
+      ∫_{δ_lo}^{δ_hi} G(e(δ)) φ_σ(δ) dδ = F(δ_lo)·G(e_hi) − F(δ_hi)·G(e_lo) − ∫_{e_lo}^{e_hi} St(e)·F(δ(e)) de,
   so the step G becomes the smooth F(δ(e)) on the same v-nodes, plus boundary terms at the panel limits (F computed
   in log space as Task 16 does). The likelihood of "The likelihood" is unchanged; only its quadrature moves.
 - **Panels.** As "Quadrature": split at each part's own minimum and at each level where the first-hit part switches,
