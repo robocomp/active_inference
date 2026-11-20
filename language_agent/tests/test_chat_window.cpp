@@ -8,6 +8,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QScreen>
 #include <QTemporaryDir>
 
 namespace
@@ -25,6 +26,13 @@ int main(int argc, char** argv)
     QTemporaryDir cfg;
     setenv("XDG_CONFIG_HOME", cfg.path().toUtf8().constData(), 1);
     QApplication app(argc, argv);
+    // A display with no monitor on it (screen off, the person away: xrandr lists 0 monitors) reports one screen of
+    // size 0x0. restoreGeometry() then refuses every saved geometry, so the questions below cannot be asked here.
+    if (const auto* sc = QGuiApplication::primaryScreen(); sc == nullptr or sc->availableGeometry().isEmpty())
+    {
+        std::println("test_chat_window: skipped (no monitor on this display)");
+        return 0;
+    }
     int checks = 0;
 
     // ── closed with the canvas open: it reopens at that size, the canvas inside it, not added once more ─────────
