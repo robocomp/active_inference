@@ -58,4 +58,15 @@ std::function<float(const Eigen::Vector3f&)> make_membership(Projector proj, con
                                                              float sigma_range_m, float sigma_chain_m,
                                                              float mot_pos_var_m2, float pi_mask);
 
+// The components behind make_membership's value, for the label-error measurement (spec 7c.8 a0). Same inputs, same
+// arithmetic; q equals make_membership's result. in_image == false ⇒ the projector returned nothing (s, sigma, q = 0).
+struct MembershipComponents
+{
+    bool  in_image = false;
+    float s_px = 0.f, sigma_px = 0.f, pi_mask = 0.f, q = 0.f;
+};
+std::function<MembershipComponents(const Eigen::Vector3f&)> make_membership_components(
+    Projector proj, const MaskMembership& mm, float f_px, float sigma_range_m, float sigma_chain_m,
+    float mot_pos_var_m2, float pi_mask);
+
 }  // namespace rc

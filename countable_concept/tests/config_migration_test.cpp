@@ -134,6 +134,7 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
     std::set<std::string> produced = {"Concept.Class", "Model.ClassAltStdM", "Model.BirthHeightNoiseM", "Model.BirthHeightOutlierFrac",
                                       "Tracker.BirthAdmitPlausibility",    // final review I1: admission gate off
                                       "Model.ExistenceCarveParts",         // carve-parts (2026-11-15), no old key
+                                      "Model.LabelDumpEnabled",            // eps_px measurement (plan Task 15b), temporary
                                       "Model.LidarMeasuresOnGated"};       // lidar-measures (spec 2026-11-15 §7c), no old key
     // keys removed by the class factor (spec 2026-11-14 countable class existence): the plaus_evidence accumulator's
     // clamp, its tanh gain into the existence log-odds, and the shape LLR's alternative footprint (class_log_evidence

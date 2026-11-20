@@ -329,6 +329,9 @@ struct CountableConfig
     // errors (CountableBeliefParams::persistent), counts the class prior once, and on a GATED camera cycle with an assigned
     // mask runs a LiDAR-only update whose rays are weighted by the mask's membership. false ⇒ byte-identical to before.
     bool  lidar_measures_on_gated   = false;
+    // Measurement only (spec 7c.8 a0, plan Task 15b): with LidarMeasuresOnGated, write label_dump.csv (one row per Helios
+    // return in the select box: the camera label inputs) next to AI2CsvPath. Changes no behaviour.
+    bool  label_dump_enabled        = false;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
     float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and

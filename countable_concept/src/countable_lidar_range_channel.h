@@ -51,7 +51,13 @@ public:
     void feed(CountableInstance& inst, CountableFrame& frame, std::span<const Eigen::Vector3f> anchor_cloud,
               const std::function<float(const Eigen::Vector3f&)>& membership = {}) const;
 
+    // Measurement only (label dump): the staged HELIOS returns inside this instance's select box, anchored on the same
+    // mask-cloud centroid feed() uses. Empty without a fresh helios sweep or an anchor.
+    std::vector<Eigen::Vector3f> helios_returns_in_select_box(std::span<const Eigen::Vector3f> anchor_cloud) const;
+
 private:
+    static Eigen::Vector3f cloud_centroid(std::span<const Eigen::Vector3f> cloud);
+
     // Select returns from `sweep` (sensor at `origin`) that land on this bed into `out`, with the two
     // informativeness down-weights (ray-count + angular coverage) applied to `precision_base`. Returns the
     // staged ray count; writes the angular-coverage weight to *cov_ang (if non-null). Shared by helios + bpearl.

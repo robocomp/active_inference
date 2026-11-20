@@ -32,6 +32,32 @@ CountableLidarRangeChannel::SelectBox CountableLidarRangeChannel::select_box() c
              -m, cfg_.tracker_birth_height_m + m };
 }
 
+Eigen::Vector3f CountableLidarRangeChannel::cloud_centroid(std::span<const Eigen::Vector3f> cloud)
+{
+    Eigen::Vector3f c = Eigen::Vector3f::Zero();
+    for (const auto& p : cloud) c += p;
+    c /= static_cast<float>(cloud.size());
+    return c;
+}
+
+std::vector<Eigen::Vector3f> CountableLidarRangeChannel::helios_returns_in_select_box(
+    std::span<const Eigen::Vector3f> anchor_cloud) const
+{
+    std::vector<Eigen::Vector3f> out;
+    if (not lidar_have_sweep_ or anchor_cloud.empty())
+        return out;
+    const Eigen::Vector3f c = cloud_centroid(anchor_cloud);
+    const auto [rxy, z_lo, z_hi] = select_box();
+    const float r2 = rxy * rxy;
+    for (const auto& p : lidar_sweep_room_)
+    {
+        const float dx = p.x() - c.x(), dy = p.y() - c.y();
+        if (dx * dx + dy * dy > r2 or p.z() < z_lo or p.z() > z_hi) continue;   // select_into's own box test
+        out.push_back(p);
+    }
+    return out;
+}
+
 int CountableLidarRangeChannel::select_into(const CountableInstance& inst, const Eigen::Vector3f& centroid,
                                         const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
                                         float precision_base, rc::ai::LidarRays& out, float* cov_ang,
@@ -82,9 +108,7 @@ void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& f
     // Anchor XY on this cycle's fresh mask-cloud centroid (shared by both devices; NOT the fitted state, which a
     // diverging fit would drag into empty space, starving LiDAR exactly when it is most needed). Footprint select
     // box + z-band are the BIRTH dims (floor-referenced band spans the LEGS + rim) — see select_into().
-    Eigen::Vector3f c = Eigen::Vector3f::Zero();
-    for (const auto& p : anchor_cloud) c += p;
-    c /= static_cast<float>(anchor_cloud.size());
+    const Eigen::Vector3f c = cloud_centroid(anchor_cloud);
     const auto& s = inst.ai2_belief.state();
 
     // ── Primary: helios (high 360) → frame.lidar (range factor AND free-space VACATE) + z-cal / coverage diag ──

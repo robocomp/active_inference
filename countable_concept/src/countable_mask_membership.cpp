@@ -108,4 +108,24 @@ std::function<float(const Eigen::Vector3f&)> make_membership(Projector proj, con
     };
 }
 
+std::function<MembershipComponents(const Eigen::Vector3f&)> make_membership_components(
+    Projector proj, const MaskMembership& mm, float f_px, float sigma_range_m, float sigma_chain_m,
+    float mot_pos_var_m2, float pi_mask)
+{
+    return [proj = std::move(proj), mm, f_px, sigma_range_m, sigma_chain_m, mot_pos_var_m2,
+            pi_mask](const Eigen::Vector3f& p_room) -> MembershipComponents
+    {
+        MembershipComponents c;
+        c.pi_mask = pi_mask;
+        const auto cr = proj(p_room);
+        if (not cr.has_value())
+            return c;
+        c.in_image = true;
+        c.sigma_px = projection_sigma_px(f_px, cr->z(), sigma_range_m, sigma_chain_m, mot_pos_var_m2, mm.stride_px());
+        c.s_px     = mm.signed_distance_px(cr->x(), cr->y());
+        c.q        = pi_mask * membership_weight(c.s_px, c.sigma_px);
+        return c;
+    };
+}
+
 }  // namespace rc

@@ -22,6 +22,7 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -36,6 +37,7 @@
 #include "countable_config.h"        // rc::CountableConfig
 #include "countable_instance.h"      // rc::CountableInstance, CountableState
 #include "countable_model.h"         // CountableModel / CountableModelParams
+#include "countable_mask_membership.h"   // rc::MembershipComponents
 #include "countable_projection.h"    // rc::CountableProjection, rc::SilhouetteExistence
 #include "countable_lidar_range_channel.h"   // rc::CountableLidarRangeChannel
 #include "../../common/mask_ingestor/mask_ingestor.h"
@@ -282,6 +284,11 @@ private:
     std::function<float(const Eigen::Vector3f&)> build_membership(const CountableInstance& inst, int slice_index,
                                                                    const Eigen::Matrix4f& zed_T_room, bool have_cam,
                                                                    float mot_pos_var);
+    // Measurement only (spec 7c.8 a0): set by build_membership when cfg_.label_dump_enabled, the components behind m(p).
+    std::function<rc::MembershipComponents(const Eigen::Vector3f&)> label_components_;
+    std::ofstream label_csv_;
+    bool          label_csv_failed_ = false;
+    void dump_labels(const CountableInstance& inst, std::span<const Eigen::Vector3f> anchor_cloud, bool gated);
 
     // Ego-motion state (camera pose deltas → robot speed), updated once per cycle in update_ego_motion().
     // (Ported 1:1 from chair_concept — the "be-still-to-update" signal source.)

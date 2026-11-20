@@ -73,6 +73,7 @@ ModelSigmaM = 0.010         # residual model/surface std floor (m)
 FootprintResidual = false   # true to enable (needs the ray geometry; supersedes the FootprintMoment* + obliquity yaw knobs)
 QuotientChart = false       # C2v symmetry-quotient chart [s,a1,a2] (Stage 3): kills 90°/180° yaw snaps + honest near-square σ_yaw; retires the fold/flip machinery. Pair with FootprintResidual
 LidarMeasuresOnGated = true  # camera attributes, LiDAR measures: persistent shared errors + mask-attributed LiDAR-only updates (spec docs/superpowers/specs/2026-11-15-lidar-measures-design.md §7c)
+LabelDumpEnabled = true      # MEASUREMENT ONLY (spec 7c.8 a0, plan Task 15b): writes label_dump.csv next to ai2_log.csv; the controller turns it off afterwards
 DepthTiltStd = 0.020        # shared per-frame depth TILT prior std (m/rad) — the azimuth-odd mode that aliases into yaw
 DepthBiasStd = 0.015        # shared per-frame depth bias prior std (m)   — extent/pos nuisance (future)
 DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) — extent nuisance (future)

@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <cstdint>
 #include "tick_timing.h"
 #include "rt_memo.h"
@@ -357,6 +358,7 @@ std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(c
                    "predict, admissible ones use unweighted rays\n");
         rgb_absent_logged_ = true;
     }
+    label_components_ = {};
     if (slice_index < 0 or not have_cam or not mask_ingestor_ or rgb_frame_.empty())
         return {};
     const auto& pkt = mask_ingestor_->packet();
@@ -389,8 +391,43 @@ std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(c
         const Eigen::Matrix3d Sp = pose_at_stamp(inst.last_mask_timestamp_ms).sigma;
         sigma_chain = static_cast<float>(std::sqrt(std::max(0.0, 0.5 * (Sp(0, 0) + Sp(1, 1)))));
     }
+    if (cfg_.label_dump_enabled)
+        label_components_ = rc::make_membership_components(project, mm, f, cfg_.existence_sensor_sigma_m, sigma_chain,
+                                                           mot_pos_var, sl.confidence);
     return rc::make_membership(std::move(project), mm, f, cfg_.existence_sensor_sigma_m, sigma_chain, mot_pos_var,
                                sl.confidence);
+}
+
+// Measurement only (spec 7c.8 a0, plan Task 15b): one row per Helios return in this instance's select box with the
+// camera's label inputs; offline (tools/eps_px_measure.py) ground-truth part boxes decide if the return truly hit the object.
+void CountableFitter::dump_labels(const CountableInstance& inst, std::span<const Eigen::Vector3f> anchor_cloud,
+                                 bool gated)
+{
+    if (not label_components_ or label_csv_failed_)
+        return;
+    const auto returns = lidar_channel_.helios_returns_in_select_box(anchor_cloud);
+    if (returns.empty())
+        return;
+    if (not label_csv_.is_open())
+    {
+        const std::filesystem::path ai2{cfg_.ai2_csv_path};
+        const auto dir = ai2.has_parent_path() ? ai2.parent_path() : std::filesystem::path{"etc"};
+        if (not rc::diag::open_rotating(label_csv_, (dir / "label_dump.csv").string(),
+                                        "pkt_ts,node,cls,gated,ex,ey,ez,in_image,s_px,sigma_px,pi_mask,q\n"))
+        {
+            label_csv_failed_ = true;
+            return;
+        }
+        label_csv_.imbue(std::locale::classic());
+    }
+    for (const auto& p : returns)
+    {
+        const auto c = label_components_(p);
+        label_csv_ << inst.last_mask_timestamp_ms << ',' << inst.node_name << ',' << cfg_.concept_class << ','
+                   << (gated ? 1 : 0) << ',' << p.x() << ',' << p.y() << ',' << p.z() << ','
+                   << (c.in_image ? 1 : 0) << ',' << c.s_px << ',' << c.sigma_px << ',' << c.pi_mask << ',' << c.q << '\n';
+    }
+    label_csv_.flush();
 }
 
 // Robust combined ego-motion magnitude (m/s): the per-mask corruption speed OR'd with the robot's own measured
@@ -1329,6 +1366,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             stage_persistent(inst, frame, latent_inputs(0.0f));
             {
                 const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
+                if (cfg_.label_dump_enabled and membership) dump_labels(inst, anchor, true);
                 lidar_channel_.feed(inst, frame, anchor, membership);
             }
             if (rays_usable(frame))
@@ -1451,6 +1489,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
                                                          ? 0.0f : obliquity_yaw_std * obliquity_yaw_std));
         {
             const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
+            if (cfg_.label_dump_enabled and membership) dump_labels(inst, frame.points, false);
             lidar_channel_.feed(inst, frame, frame.points, membership);
         }
         inst.dbg_ray_n = ray_count(frame);
