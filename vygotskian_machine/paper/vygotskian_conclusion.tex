@@ -7,20 +7,18 @@
 \label{sec:conclusion}
 
 We have proposed a way of giving a robot the knowledge contained in a vision-language model without letting that
-model write the robot's beliefs. The proposal starts from an architecture that already exists, in which Active
-Inference agents maintain a probabilistic hierarchy of beliefs and a language agent plans under a deterministic gate.
-To this architecture we add an inner voice that asks questions and lets perception answer them, a demand signal that
-decides when the voice is needed, and a cultural plane in which the VLM supplies what rooms are for, writes missions
-whose steps predict their belief outcomes, and imagines on the robot's own models. In every role the VLM proposes and
-the robot's generative models decide, and the VLM's contribution enters as pseudo-counts and stored missions that the
-robot's experience progressively replaces.
+model write the robot's beliefs. On an existing Active Inference architecture we add an inner voice whose questions
+perception answers, a demand signal that decides when the voice is needed, and a cultural plane in which the VLM
+supplies room functions, missions and imagination, always as proposals that the robot's experience progressively
+replaces.
 
 The machine is inspired by Vygotsky rather than derived from him. Its components exist in other forms, and its
 contribution is their integration into one probabilistic hierarchy under one rule of evidence. Whether the name is
 deserved depends on two results that the experiments of Section~\ref{sec:experiments} are designed to produce. The
 first is that a VLM deprived of the culture attached to its words falls behind the machine in proportion to the
-novelty of a task. The second is that the inner voice becomes shorter before it falls silent, which a cache of the
-VLM's answers would not do. Several parts of the design remain open. The thresholds of the demand signal are declared
+novelty of a task. The second is that the robot's requests to the VLM, assembled from its beliefs and habits, shrink
+on a recurring task to what is still in doubt before they stop, which a cache of the VLM's answers, keyed on its input
+rather than on the robot's uncertainty, would not do. Several parts of the design remain open. The thresholds of the demand signal are declared
 rather than derived, the weaker form of the grounding constraint lets the VLM's description of an unfamiliar object
 shape the answer, and a confidently wrong model leaves the voice silent until its errors have consequences. The
 experiments will show which of these limits matter in practice.

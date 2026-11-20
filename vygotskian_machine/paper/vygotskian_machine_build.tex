@@ -13,19 +13,20 @@
 \usetikzlibrary{arrows.meta,positioning,fit,shapes.geometric,calc,backgrounds,shadows}
 \usepackage{adjustbox}
 % colours and macros shared with the Autonomous Robots paper's figures
-\definecolor{conceptc}{RGB}{0,82,155}
-\definecolor{conceptf}{RGB}{225,238,255}
-\definecolor{bodyc}{RGB}{180,40,40}
-\definecolor{bodyf}{RGB}{255,230,230}
-\definecolor{arrowc}{RGB}{0,140,120}
-\definecolor{azuloscuro}{RGB}{0,70,140}
-\definecolor{wmf}{RGB}{210,245,250}
-\definecolor{wmc}{RGB}{0,150,200}
-\definecolor{memc}{RGB}{30,120,50}
-\definecolor{memf}{RGB}{225,245,225}
-\definecolor{langc}{RGB}{110,40,150}
-\definecolor{langf}{RGB}{240,228,250}
-\definecolor{cmdc}{RGB}{190,20,20}
+% ochre palette, higher contrast (2026-11-20)
+\definecolor{conceptc}{RGB}{150,100,22}
+\definecolor{conceptf}{RGB}{250,235,198}
+\definecolor{bodyc}{RGB}{178,84,52}
+\definecolor{bodyf}{RGB}{248,221,206}
+\definecolor{arrowc}{RGB}{104,110,46}
+\definecolor{azuloscuro}{RGB}{84,56,32}
+\definecolor{wmf}{RGB}{252,242,212}
+\definecolor{wmc}{RGB}{184,132,36}
+\definecolor{memc}{RGB}{84,108,44}
+\definecolor{memf}{RGB}{228,238,206}
+\definecolor{langc}{RGB}{128,44,56}
+\definecolor{langf}{RGB}{246,222,225}
+\definecolor{cmdc}{RGB}{160,46,22}
 \providecommand{\cortex}{\textsc{cortex}}
 \providecommand{\result}[1]{\textcolor{red}{#1}}   % value pending: swap in, keep the prose
 \usepackage[shortlabels]{enumitem}
@@ -37,18 +38,19 @@
 \begin{document}
 \maketitle
 \begin{abstract}
-We propose a robot architecture that follows Vygotsky's account of how higher mental functions develop, first
-between people and then within the individual. The robot is built on \cortex{}, an existing architecture in which
-Active Inference agents maintain a probabilistic hierarchy of beliefs about the robot, its rooms, the objects in them
-and aggregates of objects, and in which a language agent already plans and talks with a person. We add two things.
-The first is an inner voice, a loop in which a vision-language model (VLM) proposes questions and tests and only the
+We propose a robot architecture inspired by Vygotsky's account of how higher mental functions develop, first between
+people and then within the individual. The robot is built on \cortex{}, an existing architecture in which Active
+Inference agents maintain a probabilistic hierarchy of beliefs about the robot, its rooms, the objects in them and
+aggregates of objects, and in which a language agent already plans and talks with a person. We add two things. The
+first is an inner voice, a loop in which a vision-language model (VLM) proposes questions and tests and only the
 robot's perception changes the answers, called on by a demand signal built from the surprise that the agents report.
 The second is a cultural plane, in which the VLM supplies a level-4 hypothesis about what each room is for, writes
 missions whose steps predict their own belief outcomes, and imagines on the robot's own models while demand is low.
 The VLM's knowledge enters as pseudo-counts and stored missions that the robot's own experience progressively
 replaces. We relate the proposal to Sutton's bitter lesson and to the argument that intelligence cannot be fully
-amortised, and we design seven experiments, not yet run, that would show whether culture rather than the format of
-language is what the machine uses.
+amortised, and we design seven experiments, not yet run. The two decisive tests are whether a VLM stripped of the
+culture attached to its words falls behind with novelty, and whether the robot's requests to the VLM shrink to what
+is still in doubt, which a cache of the VLM's answers would not do.
 \end{abstract}
 \input{vygotskian_machine}
 \input{vygotskian_cortex}
@@ -56,5 +58,6 @@ language is what the machine uses.
 \input{vygotskian_cultural_plane}
 \input{vygotskian_experiments}
 \input{vygotskian_conclusion}
+\renewcommand*{\bibfont}{\footnotesize\setlength{\parskip}{0pt}}\setlength{\bibitemsep}{1pt}
 \printbibliography
 \end{document}
