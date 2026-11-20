@@ -106,6 +106,7 @@ def main():
         for r in csv.DictReader(open(path)):
             rows.setdefault(r['node'], []).append(r)
         n = {'on': 0, 'off': 0, 'on_img': 0, 'off_img': 0, 'out': 0, 'in': 0}
+        qa = []   # (q, on, z) of every in-image return: the label model's own calibration
         for node, rr in sorted(rows.items()):
             last = inst.get(node, [None])[-1] if inst.get(node) else None
             if last is not None: cx, cy = to_world(last['cx'], last['cy'])
@@ -125,6 +126,7 @@ def main():
                     z = S.fnum(r['s_px']) / S.fnum(r['sigma_px'])
                     if on and z < -NSIG: n['out'] += 1
                     if not on and z > NSIG: n['in'] += 1
+                    qa.append((S.fnum(r['q']), on, z))
             print('  %s -> GT %s (%d returns)' % (node, name, len(rr)))
         tot = n['on'] + n['off']
         e_out = n['out'] / n['on_img'] if n['on_img'] else float('nan')
@@ -137,6 +139,25 @@ def main():
         print('%s: eps_out %d/%d = %s   eps_in %d/%d = %s   eps_px = %s   b*(eps_px) = %s' % (
             cls, n['out'], n['on_img'], S.fmt(e_out, '.4f'), n['in'], n['off_img'], S.fmt(e_in, '.4f'), S.fmt(eps, '.4f'),
             'n/a' if eps != eps else ('none (neutral at b=0)' if b is None else '%.3f' % b)))
+        if qa:
+            # The 3-sigma counts can only see a wrong label where the select band reaches 3 sigma_px past the boundary; print
+            # how far it reaches, then the label model's own fit: P(on | q) = eps + (1 - 2 eps) q, eps by maximum likelihood.
+            zs = [z for _, _, z in qa]
+            print('%s: z = s/sigma_px reach in the select band: min %.2f max %.2f' % (cls, min(zs), max(zs)))
+            def nll(e): return -sum(math.log(e + (1 - 2 * e) * q) if on else math.log(1 - e - (1 - 2 * e) * q) for q, on, _ in qa)
+            grid = [10 ** (-6 + 0.01 * k) for k in range(0, 570)]   # 1e-6 .. ~0.5
+            e_ml = min(grid, key=nll)
+            lo = [e for e in grid if nll(e) - nll(e_ml) <= 1.92]   # 95 % profile interval
+            print('%s: ML eps (label model P(on|q) = eps + (1-2eps) q): %.4g  95%% [%.3g, %.3g]   b*(ML) = %s' % (
+                cls, e_ml, min(lo), max(lo), (lambda bb: 'none' if bb is None else '%.3f' % bb)(bstar(e_ml))))
+            print('%s: reliability  q-bin   n   frac_on' % cls)
+            for a0, a1 in ((0, .01), (.01, .1), (.1, .3), (.3, .5), (.5, .7), (.7, 1.01)):
+                sel = [on for q, on, _ in qa if a0 <= q < a1]
+                if sel: print('    [%.2f,%.2f)  %5d  %.3f' % (a0, a1, len(sel), sum(sel) / len(sel)))
+            print('%s: by z = s/sigma_px   n   frac_on   (a wrong label: on-object far outside, foreign far inside)' % cls)
+            for a0, a1 in ((-1e9, -3), (-3, -2), (-2, -1), (-1, 0), (0, 1), (1, 1.5), (1.5, 1e9)):
+                sel = [on for _, on, z in qa if a0 <= z < a1]
+                if sel: print('    [%5.1f,%5.1f)  %5d  %.3f' % (max(a0, -99), min(a1, 99), len(sel), sum(sel) / len(sel)))
 
 
 if __name__ == '__main__':
