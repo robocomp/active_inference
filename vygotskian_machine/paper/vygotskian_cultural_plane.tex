@@ -60,10 +60,12 @@ cannot pursue a goal it was not built for, and it does not look ahead.
 \paragraph{Latent and evidence.}
 For each room $r$ and function $f$ we maintain an independent hypothesis ``$r$ serves $f$'', compared with its
 complement ``$r$ does not serve $f$''. The hypotheses for different functions are not mutually exclusive, because
-open-plan rooms serve several functions. The evidence comes from observation units $c$, each of which is either a
-class that belongs to no level-3 aggregate or a level-3 aggregate such as a kitchen run or a dining set, whose
-members then do not count separately. Correlated classes such as a counter, a hood and the kitchen cabinets thus
-contribute one observation. For each unit, the observation is a binary variable $z_c$ that equals one if $c$ has been
+open-plan rooms serve several functions. The evidence comes from observation units $c$, defined by instance. A unit is either the
+class of the object instances in $r$ that are not bound into any level-3 aggregate, so that a refrigerator standing
+alone in a bedroom counts under its class, or a level-3 aggregate such as a kitchen run or a dining set, whose members
+then do not count separately. Correlated objects such as a counter, a hood and the kitchen cabinets thus contribute one
+observation, and a kitchen that lacks its refrigerator changes $\Lambda_f$ through the membership and the Bayes
+factor of its aggregate. For each unit, the observation is a binary variable $z_c$ that equals one if $c$ has been
 detected in $r$, so that ten chairs are not ten pieces of evidence. Under $f$ the unit is present with probability
 $\pi_{cf}$ and, if present, detected with probability $d_c$, so $P(z_c = 1 \mid f) = \pi_{cf} d_c$, and under the
 complement $\pi_{c\bar f} = P(c \text{ present} \mid \text{not } f)$ replaces $\pi_{cf}$. Since a detection may be
@@ -74,11 +76,12 @@ false, we take the expected log-likelihood ratio under the probability $p_c$ tha
     \qquad p_c = 1 - \prod_{i \in c} (1 - p_i).
     \label{eq:lh_function_evidence}
 \end{equation}
-For a class, $p_i$ is the existence probability of instance $i$ in $r$, the product runs over the instances that have
-been observed at least once, and $p_c = 0$ for a class with no instance. For an aggregate, $p_c$ is its own existence
-probability, given by its log Bayes factor. The prior log-odds of $f$ and the probabilities $\pi_{c\bar f}$ are
-elicited from the VLM like $\pi_{cf}$, and $\pi_{c\bar f}$ is replaced by counts over confirmed rooms of other
-functions. Put simply, a unit that was found speaks for the functions that expect it, and a unit looked for and not
+For a class unit, $p_i$ is the existence probability of unbound instance $i$ in $r$, the product runs over the
+unbound instances observed at least once, and $p_c = 0$ when there is none. For an aggregate unit, $\pi_{cf}$ is the
+probability that an aggregate of that schema is present given $f$, $d_c$ is the detectability of its most detectable
+member, and $p_c$ is its existence probability, given by its log Bayes factor. The prior log-odds of $f$ and the
+probabilities $\pi_{c\bar f}$ are elicited from the VLM like $\pi_{cf}$. Because functions are not exclusive,
+$\pi_{c\bar f}$ is then replaced by counts over rooms that a person confirmed do not serve $f$. Put simply, a unit that was found speaks for the functions that expect it, and a unit looked for and not
 found speaks against them in proportion to how thoroughly it was looked for. The sum is exact when presence is
 certain and otherwise approximates the log marginal likelihood. Because $p_i$ does not depend on the search for other
 instances, $d_c$ enters the evidence once, and the dependence that remains between units makes $\Lambda_f$ somewhat
@@ -89,7 +92,7 @@ occupied before the second stage below is enabled.
 
 \paragraph{Priors from culture, replaced by experience.}
 The conditional probabilities $\pi_{cf}$ cannot be supplied by any geometric model. We elicit them from the VLM over
-a closed vocabulary, consisting of the class names already used in the graph and a fixed set of functions, and give
+a closed vocabulary, consisting of the class and aggregate schema names already used in the graph and a fixed set of functions, and give
 each of them a Beta prior whose strength must be earned through measured reliability,
 \begin{equation}
     \pi_{cf} \sim \mathrm{Beta}\big(\alpha + \kappa\beta_f\,\pi^{\text{VLM}}_{cf},\;
@@ -110,7 +113,7 @@ The counts must not confirm the prior that produced them, as they would if a roo
 computed with $\hat\pi_{cf}$ had become confident. We therefore admit a room into $n_f$ only if a person has stated its
 function, or if the evidence \eqref{eq:lh_function_evidence} for $f$ remains positive when recomputed with a prior
 built only from the other rooms the robot has confirmed, without the VLM's pseudo-counts. The second route is closed
-until a few rooms have been confirmed by a person. The same elicitation will replace priors that are currently written
+until three rooms have been confirmed by a person, a number we choose as a design parameter. The same elicitation will replace priors that are currently written
 by hand, such as the kitchen membership log-odds tested in Section~\ref{sec:experiments:e1}.
 
 \paragraph{How a function hypothesis influences lower levels without confirming itself.}
@@ -131,17 +134,20 @@ tier of base units under a worktop, so a refrigerator, which belongs to a tall t
 $0.00$ as a member. The VLM then proposes a revision in focused mode, and a person accepts it.
 
 \paragraph{Cultural affordances.}
-What can be done with an object is also largely cultural knowledge, such as pulling a refrigerator door open by its
-handle. Ramstead and colleagues call such possibilities for action cultural affordances and treat them within Active
-Inference \cite{gibson1979ecological, ramstead2016cultural}. In \cortex{}, concept agents already offer affordances in
-the graph and the controller ranks them by expected free energy (Section~\ref{sec:cortex}). We let the VLM propose new
-affordances for a known class, each with its preconditions and predicted change of belief, for example that pulling
-the handle changes the door angle and exposes the interior. The robot tests a proposal as an epistemic action through
-the command gate, and only the observed outcome counts. The success probability $\rho_a$ of affordance $a$ has the
-prior of \eqref{eq:lh_beta_prior}, with $\rho^{\text{VLM}}_a$ in place of $\pi^{\text{VLM}}_{cf}$, so the robot's
-trials outweigh the VLM's estimate. Once $\rho_a$ is high, the concept agent itself offers the affordance and the
-controller chooses it without the VLM. A person who says ``you can push that door'' passes on a cultural affordance in
-speech, which enters the counts as a confirmed trial. Only actions that the gate classifies as reversible are tested.
+What the robot can do with an object is also partly cultural knowledge, such as that a door left ajar can be pushed
+open or that the space under a high table can be crossed. Ramstead and colleagues call such possibilities for action
+cultural affordances and treat them within Active Inference \cite{gibson1979ecological, ramstead2016cultural},
+and robotics has long learned affordances from the robot's own trials \cite{sahin2007affordances, jamone2018affordances}. In
+\cortex{}, concept agents already offer affordances in the graph, and the controller ranks them by expected free
+energy (Section~\ref{sec:cortex}). We let the VLM propose new affordances for a known class, restricted to actions
+the mobile base can perform. A proposal is a mission step with its preconditions and predicted change of belief, for
+example that pushing a door ajar with the body raises its opening angle until the passage is traversable, and its
+test is an inner question with two hypotheses, scored by \eqref{eq:inner_value}. Only the observed outcome counts as a
+trial. The success probability $\rho_a$ has the prior of \eqref{eq:lh_beta_prior}, with $\rho^{\text{VLM}}_a$ in
+place of $\pi^{\text{VLM}}_{cf}$, and a person's statement such as ``you can push that door'' adds a further
+pseudo-count of its own weight rather than a trial. The concept agent offers the affordance with its current
+$\rho_a$, so that the controller's expected free energy weighs it without any threshold, and an affordance that fails
+loses weight in the same way. Only actions that the gate classifies as reversible are tried.
 
 \subsection{Sequencing over the hierarchy}
 \label{sec:lang_hierarchy:sequencing}
@@ -155,16 +161,17 @@ worktop plane, a sequence the exploration drive cannot produce.
 We require each mission step to declare the change in belief it should produce, not only completion. Let
 $\phi_k$ be the predicate over beliefs that step $k$ predicts, which must hold by the end of the step, and let
 $\psi_j$ be the assumptions on which the running plan relies (``door 3 is open'', ``room 2 is still the
-kitchen''). Both enter the demand signal \eqref{eq:inner_demand} in the same centred, positive-part form as its other
-terms,
+kitchen''). Both enter the demand signal \eqref{eq:inner_demand} in a centred, positive-part form,
 \begin{equation}
-    s^{\text{plan}}_t = \max\!\big(0,\, -\log P_t(\phi_k) - \bar s^{\text{plan}}_k\big) \;\text{at the step's deadline},
+    s^{\text{plan}}_t = \max\!\big(0,\, -\log P_t(\phi_k) + \log P_{t_0}(\phi_k)\big) \;\text{at the step's deadline},
     \qquad
     s^{\text{assume}}_{j,t} = \max\!\big(0,\, -\log P_t(\psi_j) + \log P_{t_0}(\psi_j)\big),
     \label{eq:lh_plan_surprise}
 \end{equation}
-where $P_t$ is the current belief, $\bar s^{\text{plan}}_k$ is the surprisal expected for step $k$ when the plan was
-made, and $t_0$ is the time the plan was made. The first term catches a step that reported success but diverged, and
+where $P_t$ is the current belief and $t_0$ is the time the plan was made, so that each term is the surprisal of its
+predicate in excess of its value at plan time. Unlike the observation surprisals of
+Section~\ref{sec:inner_speech:modes}, these are probabilities of predicates under the belief, and both are averaged
+with them. The first term catches a step that reported success but diverged, and
 the second raises attention when an assumption weakens before any step fails. A plan thus becomes the same kind of
 object as an inner question (Section~\ref{sec:inner_speech:questions}), since both are proposals whose predictions the
 belief dynamics confirm or refute.
@@ -175,10 +182,10 @@ habit term $E$ with the expected free energy $G$, weighted by a precision $\gamm
 \cite{friston2017process, parr2022active},
 \begin{equation}
     \begin{aligned}
-    p(\pi \mid g, x) &= \sigma\big(\ln E(\pi \mid g, x) - \gamma\, G(\pi)\big),
+    p(\pi \mid g, x) &= \sigma\big(\ln E(\pi \mid g, x) - \gamma\, G(\pi \mid g, x)\big),
     \qquad
     E(\pi \mid g, x) = \frac{\epsilon + n_{g,x}(\pi)}{\sum_{\pi'} \big(\epsilon + n_{g,x}(\pi')\big)},\\
-    G(\pi) &= -\sum_k \mathbb{E}\big[I(s_k; o_k \mid \pi)\big]
+    G(\pi \mid g, x) &= -\sum_k \mathbb{E}\big[I(s_k; o_k \mid \pi)\big]
     \;-\; \mathbb{E}\big[\ln P(g \text{ and the norms of } x \text{ hold} \mid \pi)\big].
     \end{aligned}
     \label{eq:lh_habit}
@@ -194,12 +201,11 @@ defines the candidate missions and supplies the norms that enter the preference 
 A successful mission is stored with its objects replaced by roles. The role stored for each object is the most
 specific role that the arrangement agents had assigned to it when the mission ran, so ``go to chair 34'' becomes ``go
 to a chair of the dining set'', and in a new room the arrangement agents bind the roles again. Each habit also
-carries the assumptions $\psi_j$ under which it succeeded. Storing validated missions is a form of caching, but a
-habit is not reused whole as a cache entry. Its steps whose roles are bound and whose assumptions still hold run
-without the VLM, and only the remaining steps, those whose assumptions have weakened or whose roles could not be
-bound, are sent to the VLM. Every request to the VLM is assembled in this way from current beliefs and habits, so it
-contains only what is still in doubt and shrinks with experience. What is sent back to the VLM is selected by the
-robot's uncertainty rather than by the form of the input, which is the mechanism behind the abbreviation of P9.
+carries the assumptions $\psi_j$ under which it succeeded. Storing and reusing validated missions is caching, as in classical plan reuse with monitored preconditions
+\cite{fikes1972learning}. Steps whose roles are bound and whose assumptions still hold run without the VLM, and only
+the steps whose assumptions have weakened or whose roles could not be bound are sent to it, so every request is
+assembled from current beliefs and habits and shrinks with experience. What P9 tests is whether this selection by
+the robot's uncertainty serves better than selection by input match or at random, at equal request size.
 
 \subsection{Imagination while the automatic level runs well}
 \label{sec:lang_hierarchy:imagination}
@@ -252,8 +258,8 @@ retrieved under expected free energy. Because probabilities stated by a model ha
 \cite{tian2023just, xiong2024can}, the robot measures the reliability $\beta$ instead of trusting them.
 
 Three-dimensional scene graphs layer a building into rooms, objects and the cameras that observed them
-\cite{armeni2019scene}. Hydra added places and builds and optimises such graphs in real time
-\cite{hughes2022hydra}, ConceptGraphs labels them with an open vocabulary \cite{gu2024conceptgraphs},
+\cite{armeni2019scene}. Rosinol et al.\ added a layer of places \cite{rosinol2020dynamic}, Hydra builds
+and optimises such graphs in real time \cite{hughes2022hydra}, ConceptGraphs labels them with an open vocabulary \cite{gu2024conceptgraphs},
 language models have labelled rooms from the objects they contain \cite{chen2022leveraging}, and language-enabled
 spatial ontologies have guided the construction of such graphs \cite{strader2024indoor}. Inferring room categories
 from objects is also established in semantic mapping \cite{pronobis2012large}. These systems are the closest relatives
@@ -263,13 +269,13 @@ hypothesis whose VLM prior is replaced by confirmed counts and weighed against e
 Vygotskian robotics \cite{mirolli2011towards} and autotelic agents \cite{colas2022language} use language as a tool for
 thought, and Pipitone and Chella's robot speaks its reasoning aloud, which made its decisions more transparent to its
 partner \cite{pipitone2021robots}. Here inner speech is instead an epistemic action recruited on surprise, whose
-conclusions perception must confirm. Developmental robotics stages competence through interaction
-\cite{cangelosi2015developmental}, and Active Inference has been applied to robot perception and control \cite{lanillos2021active}, and Pezzulo et al.\ argue that passively
-trained models such as large language models lack the grounding that action provides \cite{pezzulo2024generating}.
-Amortised inference learns a
-mapping that replaces repeated inference \cite{gershman2014amortized}, and hybrid schemes combine an amortised policy
-with iterative planning when the amortised one is uncertain \cite{tschantz2020control}. The machine's internalisation
-is a simpler, count-based form of the same idea, whose return to deliberation is triggered by reported surprise.
+conclusions perception must confirm. Developmental robotics stages competence through interaction \cite{cangelosi2015developmental}. Active Inference
+has been applied to robot perception and control \cite{lanillos2021active}, and Pezzulo et al.\ argue that passively
+trained models such as large language models lack the grounding that action provides \cite{pezzulo2024generating},
+which is the grounding the machine supplies by letting only its own models decide. Amortised inference learns a
+mapping that replaces repeated inference \cite{gershman2014amortized}, and hybrid schemes initialise iterative
+planning with an amortised policy \cite{tschantz2020control}. The machine's internalisation is a simpler,
+count-based form of the same idea, and its trigger for returning to deliberation, reported surprise, is its own.
 
 \subsection{Testable predictions}
 \label{sec:lang_hierarchy:predictions}
@@ -285,8 +291,8 @@ Section~\ref{sec:experiments} assigns each prediction to an experiment.
     \item Structural replay proposes the missing tall tier when the single-tier kitchen model is re-created.
     \item As confirmed rooms and missions accumulate, the effective weight of the VLM falls, and VLM calls per hour
     fall while task success holds.
-    \item A proposed affordance of a novel object is confirmed or rejected within a few trials, a false proposal
-    never becomes an offer, and a confirmed one is then offered by the concept agent without the VLM.
+    \item A proposed affordance of a known class is confirmed or rejected by trial, false proposals are chosen far
+    less often than when proposals are accepted without trial, and a confirmed one is then used without the VLM.
 \end{enumerate}
 
 \subsection{Limitations}

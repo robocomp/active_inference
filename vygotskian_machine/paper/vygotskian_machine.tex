@@ -73,9 +73,9 @@ Mirolli and Parisi argued for a Vygotskian cognitive robotics in which language 
 and a system that verifies, as in SayCan \cite{ahn2022saycan}, the compilation of deliberation into rules in Soar and
 ACT-R \cite{laird1986chunking, anderson1982acquisition, taatgen2002production}, and language models as stores of transmitted culture
 \cite{yiu2024transmission}. We therefore present the machine as inspired by Vygotsky. Its contribution is the
-integration of these ideas into a belief hierarchy that cannot confirm itself, because each aggregate's message to a
-member excludes that member's own evidence (the cavity rule of Section~\ref{sec:lang_hierarchy}) and because the counts
-admit only experience the VLM did not produce. An attention mechanism decides whether language is needed at all.
+integration of these ideas into a belief hierarchy that is protected against two routes of self-confirmation,
+because each aggregate's message to a member excludes that member's own evidence (the cavity rule of
+Section~\ref{sec:lang_hierarchy}) and because the counts admit only experience the VLM did not produce. An attention mechanism decides whether language is needed at all.
 
 Two qualifications follow. The VLM does not adapt its help to the robot, so only the person scaffolds in the sense of
 Wood, Bruner and Ross. A fall in language use with competence would also appear in a cache of the VLM's answers, so
@@ -116,11 +116,10 @@ The machine combines the two, and its novelty lies in four aspects.
 \end{enumerate}
 
 \paragraph{What would demonstrate that the paper's goal has been achieved?}
-The central claim rests on two predictions that a cache of the VLM's answers would not satisfy. First, the
-format-only control falls behind the machine in proportion to the novelty of a situation (P7 in
-Section~\ref{sec:inner_speech:predictions}). Second, the inner voice's requests to the VLM are assembled from the
-robot's beliefs and habits and omit whatever is already settled, so on a recurring task they shrink to what is still
-in doubt before they stop (P9). A cache, even one that reuses parts of answers, keys on its input rather than on the
-robot's uncertainty, and would not show this selection. Rising language use with difficulty
-(P8) and falling VLM calls with experience (L6 in Section~\ref{sec:lang_hierarchy:predictions}) are necessary but not
-sufficient.
+The central claim rests on P7 (Section~\ref{sec:inner_speech:predictions}). The format-only and permuted-names
+controls fall behind the machine in proportion to the novelty of a situation, with the machine also run without images
+so that the gap cannot come from vision. Three further predictions support the claim without carrying it. The inner
+voice's requests keep only what is still in doubt, and at equal size they do better when chosen by the robot's
+uncertainty than when chosen by matching past requests (P9), a property that classical plan reuse with monitored
+preconditions shares \cite{fikes1972learning}. Language use rises with difficulty (P8), and VLM calls fall with
+experience while success holds (L6 in Section~\ref{sec:lang_hierarchy:predictions}).

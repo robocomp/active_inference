@@ -12,13 +12,9 @@ perception answers, a demand signal that decides when the voice is needed, and a
 supplies room functions, missions and imagination, always as proposals that the robot's experience progressively
 replaces.
 
-The machine is inspired by Vygotsky rather than derived from him. Its components exist in other forms, and its
-contribution is their integration into one probabilistic hierarchy under one rule of evidence. Whether the name is
-deserved depends on two results that the experiments of Section~\ref{sec:experiments} are designed to produce. The
-first is that a VLM deprived of the culture attached to its words falls behind the machine in proportion to the
-novelty of a task. The second is that the robot's requests to the VLM, assembled from its beliefs and habits, shrink
-on a recurring task to what is still in doubt before they stop, which a cache of the VLM's answers, keyed on its input
-rather than on the robot's uncertainty, would not do. Several parts of the design remain open. The thresholds of the demand signal are declared
-rather than derived, the weaker form of the grounding constraint lets the VLM's description of an unfamiliar object
-shape the answer, and a confidently wrong model leaves the voice silent until its errors have consequences. The
-experiments will show which of these limits matter in practice.
+The machine is inspired by Vygotsky rather than derived from him, and its contribution is the integration of known
+components into one probabilistic hierarchy under one rule of evidence. Its Vygotskian claim rests on P7, that a VLM
+deprived of the culture attached to its words falls behind in proportion to novelty, and P9 tests the weaker claim that
+plan reuse is selected by the robot's uncertainty. Open parts remain. The demand thresholds are declared rather than
+derived, the weak grounding constraint lets the VLM's description of an unfamiliar object shape the answer, and a
+confidently wrong model stays silent until its errors have consequences, which the experiments will weigh.

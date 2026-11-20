@@ -50,7 +50,7 @@
 % ---------- working memory with a miniature graph
 \node[ellipse, draw=wmc, very thick, fill=wmf, minimum width=72mm, minimum height=44mm] (wm) at (0,0) {};
 \node[font=\bfseries, text=wmc!70!black] at (0,1.8) {Working memory};
-\node[font=\scriptsize, text=wmc!55!black, align=center] at (2.15,-1.35) {replicated\\graph of beliefs};
+\node[font=\scriptsize, text=wmc!55!black, align=center] at (-1.95,-1.4) {replicated\\graph of beliefs};
 \node[mini, fill=black] (root) at (-0.3,-1.5) {};  \node[font=\tiny, right] at (root.east) {root};
 \node[mini, fill=wmc!40] (room) at (-0.3,-0.9) {};  \node[font=\tiny, right] at (room.east) {room};
 \node[mini, fill=bodyc!60] (rob) at (0.7,-0.35) {};  \node[font=\tiny, right] at (rob.east) {robot};
@@ -91,7 +91,7 @@
 % Episodic memory: a chain of missions, some with recorded effects
 \node[memov] (ems) at (-7.1,1.15) {};
 \begin{scope}[shift={(-7.1,1.15)}]
-  \node[mtitle, font=\tiny\bfseries] at (0,0.36) {Episodic memory};
+  \node[mtitle, font=\tiny\bfseries] at (0,0.32) {Episodic memory};
   \foreach \i/\x in {1/-0.75,2/-0.25,3/0.25,4/0.75} \node[mm] (e\i) at (\x,0.1) {};
   \foreach \a/\b in {e1/e2,e2/e3,e3/e4} \draw[mme, -{Latex[length=0.9mm]}] (\a) -- (\b);
   \foreach \i in {2,4} {\node[mm, fill=white, minimum size=1.2mm] (f\i) at ($(e\i)+(0.2,-0.2)$) {}; \draw[mme] (e\i) -- (f\i);}
@@ -121,7 +121,7 @@
 \node[stack]   (hc)  at (6.15,-1.95) {Human concept};
 \node[concept] (res) at (6.15,-3.0)  {Residual\\[-1pt]{\scriptsize null hypothesis}};
 % ---------- top of cognitive level: the gate the language agent acts through, and self-calibration
-\node[lang] (gate) at (-2.6,3.8) {Command gate\\[-1pt]{\scriptsize checks names, plans, capabilities}};
+\node[lang, double, double distance=1.2pt, rounded corners=0pt] (gate) at (-2.6,3.8) {Command gate\\[-1pt]{\scriptsize checks names, plans, capabilities}};
 \node[body] (sc) at (3.1,3.8) {Self-calibration\\[-1pt]{\scriptsize body beliefs}};
 % ---------- bottom of cognitive level: the bridge
 \node[body] (rbc) at (-3.6,-3.55) {Robot concept\\[-1pt]{\scriptsize frame tree, bridge}};

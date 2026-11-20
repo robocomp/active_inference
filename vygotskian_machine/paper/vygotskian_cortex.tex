@@ -28,8 +28,8 @@ from the robot's base to its sensors. An agent is a process that maintains a pro
 entity and publishes it with its mean and covariance. Other agents treat this posterior as evidence weighted by its
 covariance, and never as ground truth. Effects that a conventional system would express as a threshold, such as
 ignoring distant detections, are instead written into the generative model, usually as a covariance that grows with a
-physical quantity. The attention arbitration of Section~\ref{sec:inner_speech:modes} is the one place where this
-paper declares thresholds, three of them, and says why.
+physical quantity. The thresholds that this paper does introduce are declared, with their justification, in
+Section~\ref{sec:inner_speech:modes}.
 
 \paragraph{A probabilistic hierarchy.}
 The beliefs in the graph form a hierarchy of five levels (Table~\ref{tab:lh_levels}), namely the robot itself, its
@@ -50,7 +50,7 @@ apartment.
         1 & room(s) & layout of each room, the robot's place in it, the doors that join rooms & authored generative model, fitted online; spatial memory & implemented \\ \hline
         2 & objects & per instance: class, pose, extent, existence & authored generative models, fitted online & implemented \\ \hline
         3 & meta-objects (aggregates) & arrangements: a ring of chairs around a table, the rectilinear frame of a kitchen & authored schemas & implemented (the kitchen's priors not yet sent down) \\ \hline
-        4 & cultural abstraction & the function of a room (kitchen, dining, bedroom, \ldots) & \textbf{culture: the VLM}, calibrated against counts & \textbf{added by this paper} (Section~\ref{sec:lang_hierarchy:culture}) \\ \hline
+        4 & cultural abstraction & the function of a room (kitchen, dining, bedroom, \ldots) & \textbf{culture: the VLM}, weighted by measured reliability and replaced by counts & \textbf{added by this paper} (Section~\ref{sec:lang_hierarchy:culture}) \\ \hline
     \end{tabular}
     \caption{The probabilistic belief hierarchy. Levels 0--3 are \cortex{} as it exists; level 4 is the addition of this paper.}
     \label{tab:lh_levels}
@@ -84,8 +84,16 @@ in \cortex{} and is the contribution of this paper (Section~\ref{sec:lang_hierar
         \centering
         \begin{tikzpicture}
             \node[anchor=south west, inner sep=0] (img) at (0,0)
-                {\includegraphics[width=\linewidth,trim=760 200 2850 420,clip]{figures/full_graph_white.png}};
+                {\includegraphics[width=\linewidth,trim=760 200 2850 420,clip]{figures/full_graph_white_clean.png}};
             \begin{scope}[x={(img.south east)}, y={(img.north west)}]
+                % labels redrawn apart; the overlapping originals were removed from full_graph_white_clean.png
+                \tikzset{lab/.style={draw=black!45, fill=white, rounded corners=1.5pt, inner sep=1.2pt,
+                         font=\ttfamily\tiny}}
+                \node[lab, anchor=east] at (0.690,0.800) {room\_1};
+                \node[lab, anchor=west] at (0.425,0.505) {wall-shelf};
+                \node[lab, anchor=west] at (0.470,0.462) {dinner-set};
+                \node[lab, anchor=west] at (0.565,0.542) {kitchen-rig};
+                \node[lab, anchor=west] at (0.775,0.515) {afford\_room};
                 \fill[yellow!85!orange, draw=conceptc!80!black, thick] (0.80,0.585) circle (2.6pt);
                 \node[draw=black!50, fill=white, rounded corners=1.5pt, inner sep=1.5pt,
                       font=\ttfamily\tiny, anchor=west] at (0.825,0.60) {chair\_34};
@@ -99,7 +107,7 @@ in \cortex{} and is the contribution of this paper (Section~\ref{sec:lang_hierar
     \caption{Left: the output of \cortex{} in the simulated apartment, drawn by stratum: the robot (level~0),
     localised in \texttt{room\_1} (level~1); the objects and their affordances (level~2); and the aggregates fitted
     over them (level~3). The bottom stratum is the simulator's true geometry, shown for reference, and strata numbers
-    give the drawing order, not the levels of Table~\ref{tab:lh_levels}. Right: a schematic of one node as a belief,
+    give the drawing order, not the levels of Table~\ref{tab:lh_levels}. Right: a schematic of the node marked \texttt{chair\_34} on the left, as a belief
     owned by one agent, whose existence log-odds rises when the object is seen, is held while it is occluded, and
     falls only when it is absent where it could have been detected.}
     \label{fig:cortex_graph}

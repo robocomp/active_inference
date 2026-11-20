@@ -44,9 +44,10 @@ question object and from the robot's current beliefs and habits. A hypothesis or
 below $\eta$ is not posed as open but stated as settled, and a mission step that a habit covers, with all its
 monitored assumptions still probable, is stated as already planned rather than asked for. The request therefore
 contains only what the robot is still uncertain about, and it becomes smaller as counts and habits accumulate. We
-measure its size as the number of open hypotheses plus the number of mission steps left to the language model. A
-cache, even one with partial hits, is keyed on the input, whereas here what is retained depends on posterior entropy
-and on the probability of assumptions, and this dependence is what prediction P9 tests.
+measure its size as the number of open hypotheses plus the number of mission steps left to the language model. This
+is plan reuse selected by uncertainty, as in classical plan reuse with monitored preconditions
+\cite{fikes1972learning}, and prediction P9 tests whether the robot's uncertainty selects what to send better than
+matching the request against past ones.
 
 \paragraph{One step of the loop.}
 Given $\mathcal{Q}$, the language model proposes a test, which consists of an epistemic action $a$, such as turning
@@ -85,10 +86,11 @@ the rule holds exactly. When $h$ lies outside every model, such as a bag or a ro
 and we do not allow the language model to supply the likelihood in its place. Instead, the language model must
 state its prediction in quantities that existing agents already measure with their own noise models, namely extent,
 height, occupancy, motion, the residual of a shape fit, and the label distribution of the retina's segmentation
-network, whose confusion matrix is measured on labelled data. For a measured quantity $y$ with measurement variance
-$\sigma_y^2$, the language model's description gives a range with centre $\mu_h$ and spread $s_h$, and the likelihood
-is $p(y \mid h) = \mathcal{N}\big(y;\, \mu_h,\, \max(s_h^2, \sigma_y^2) + \sigma_y^2\big)$, so it is never sharper than
-the measurement. The hypothesis ``unknown'' receives a likelihood that covers the whole measurable range. In this
+network, whose confusion matrix is measured on labelled data. The quantities are treated as independent. For a
+measured quantity $o$ with measurement variance $\sigma_o^2$, the language model's description gives a range with
+centre $\mu_h$ and spread $s_h$, and $p(o \mid h) = \mathcal{N}\big(o;\, \mu_h,\, \max(s_h^2, \sigma_o^2) +
+\sigma_o^2\big)$, which is never sharper than the measurement. For the label, the likelihood is the row of the
+confusion matrix for the class that the description names. The hypothesis ``unknown'' receives a likelihood that covers the whole measurable range. In this
 weaker form the measurement still comes from perception, but the description of what a bag would look like comes
 from the language model, so the posterior inherits any error in that description. Such an answer is therefore
 stored as a resolved question and not as a concept belief, and it becomes a belief only when a person confirms it
@@ -115,31 +117,33 @@ ground truth, so that the proposer is never scored against answers that its own 
 model does not change, so $\beta_x$ measures the robot's knowledge of how far the model can be trusted, not an
 improvement of the model. The effective weight of the proposer, $\kappa\beta_x / (\kappa\beta_x + N_x)$, is large
 early in the robot's life and falls as the robot's own experience accumulates. The same conjugate form already
-governs the language agent's decision to ask a person or to assume that they moved an object.
+governs the language agent's decision to ask a person or to assume that they moved an object. Most of what the voice
+needs already exists in the language agent (Section~\ref{sec:cortex}), and the parts to be built are the question
+objects, the request assembly, the demand signal and the imagined store.
 
 \subsection{Attention, automaticity and the wandering mind}
 \label{sec:inner_speech:modes}
 
-A driver on an easy road can steer without attending to it, and attention returns as soon as something unexpected
-happens \cite{smallwood2015science, christoff2016mind}. In Active Inference, attention is the precision assigned to
-prediction errors, withdrawn while the habitual policy is reliable and raised again by surprise
-\cite{feldman2010attention}. Accounts of the arbitration between habitual and deliberative control by their relative
-uncertainty have the same structure \cite{daw2005uncertainty}. We make the allocation of the deliberative voice
+A driver on an easy road steers without attending to it until something unexpected happens
+\cite{smallwood2015science, christoff2016mind}. In Active Inference, attention is the precision assigned to prediction
+errors, raised again by surprise \cite{feldman2010attention}, and arbitration between habitual and deliberative
+control by relative uncertainty has the same structure \cite{daw2005uncertainty}. We make the allocation of the deliberative voice
 explicit through a scalar \emph{demand} signal, computed without the language model each time the summary of the
 belief graph is updated,
 \begin{equation}
-    D_t \;=\; \sum_{k} \max\!\Big(0,\; -\log p_k(o_{k,t}) \;-\; \mathbb{E}_{p_k}\!\big[-\log p_k(o_k)\big] \Big).
+    D_t \;=\; \frac{1}{K}\sum_{k=1}^{K} \max\!\Big(0,\; -\log p_k(o_{k,t}) \;-\; \mathbb{E}_{p_k}\!\big[-\log p_k(o_k)\big] \Big).
     \label{eq:inner_demand}
 \end{equation}
-Here $o_{k,t}$ is the $k$-th monitored observation and $p_k$ is the predictive distribution that the agent
+Here $o_{k,t}$ is the $k$-th of $K$ monitored observations and $p_k$ is the predictive distribution that the agent
 responsible for it already computes. The monitored observations are the occupancy that no model explains, the
 detections and door-state observations that update existence and door beliefs, the localisation residual, the
 progress of mission steps and the controller's acceptance of commands. A discrete event such as a refusal enters
 through the probability its agent assigned to it, and the plan surprisals of Section~\ref{sec:lang_hierarchy:sequencing}
 enter in the same centred form. Each term is a surprisal minus its expected value, so all terms share one unit and a
 confident prediction that fails contributes more than an uncertain one. Only the positive part is kept, because an
-agent that predicts slightly better than expected must not cancel a real surprise reported by another. Three modes
-follow,
+agent that predicts slightly better than expected must not cancel a real surprise reported by another. Each positive
+part has a positive mean even for a calibrated agent, and the average over $K$ keeps that baseline independent of the
+number of agents. Three modes follow,
 \begin{equation}
     m_t =
     \begin{cases}
@@ -149,11 +153,13 @@ follow,
     \end{cases}
     \label{eq:inner_modes}
 \end{equation}
-Being addressed by a person is not a prediction error, so it is a separate condition. Entering \textsc{wandering} requires demand to stay low for a dwell time $T$, whereas a single sample above
-$\theta_{\text{hi}}$ ends it, and focused mode ends when its loop terminates by \eqref{eq:inner_stop}. The values
-$\theta_{\text{hi}}$, $\theta_{\text{lo}}$ and $T$ are the only thresholds the arbitration introduces. We have not
-found a way to derive them from the generative model, so we declare them as design parameters and will report results
-over a range of values. In principle $\theta_{\text{hi}}$ is the demand at which a call to the language model is worth
+Being addressed by a person is not a prediction error, so it is a separate condition. Entering \textsc{wandering}
+requires demand to stay low for a dwell time $T$, whereas a single sample above $\theta_{\text{hi}}$ ends it. Focused
+mode ends when its loop terminates by \eqref{eq:inner_stop}, or, when a person opened it, when the person's turn is
+answered. The thresholds of the voice are $\theta_{\text{hi}}$, $\theta_{\text{lo}}$, $T$ and $\eta$, which also
+governs request assembly, together with the question budget $b$ and the refractory period. We have not found a way to
+derive them from the generative model, so we declare them as design parameters and will report results over a range
+of values. In principle $\theta_{\text{hi}}$ is the demand at which a call to the language model is worth
 its latency. The signal has one blind spot. A model that is confidently wrong reports no surprise and leaves the voice
 silent until its errors have consequences, which is the failure that the new bitter lesson describes. Safety does not
 depend on the arbitration, because the controller's reflexes act below the voice and its commands pass the same gate.
@@ -179,17 +185,15 @@ ordinary operating state.
 \label{sec:inner_speech:cot}
 
 Chain-of-thought is inner speech that is convergent and ungrounded. Our focused loop interleaves reasoning with
-action and observation \cite{yao2023react}, and the observation, through \eqref{eq:inner_update}, steers it. Extended
-thinking therefore belongs to the wandering mode, where delay costs nothing, and because generated traces do not
-always reflect the computation behind an answer \cite{turpin2023language}, the record of the robot's reasoning is the
-structured record of hypotheses, predictions, observations and updates, not the text.
+action and observation \cite{yao2023react}, extended thinking belongs to the wandering mode, and because generated
+traces do not always reflect the computation behind an answer \cite{turpin2023language}, the record of the robot's
+reasoning is its hypotheses, predictions, observations and updates, not the text.
 
 \subsection{Consequences for belief and learning}
 \label{sec:inner_speech:learning}
 
-The question loop reduces uncertainty where surprise occurred rather than where the sensors happened to point, so
-the robot's own data become a biased sample that a decaying novelty term \cite{schwartenbeck2019curiosity} must
-correct. Every confirmed answer is also a labelled example. Over days it updates the priors of the long-term
+The question loop reduces uncertainty where surprise occurred, so the robot's own data become a biased sample that a
+decaying novelty term \cite{schwartenbeck2019curiosity} must correct. Every confirmed answer is also a labelled example. Over days it updates the priors of the long-term
 memories, over weeks it retrains detector and concept likelihoods, and more slowly, recurrent ``unknown'' answers are
 named by the voice and proposed as a new concept. Loops that resolve the same way are compiled into habits, so the
 number of language-model calls per hour should fall as competence grows.
@@ -217,20 +221,20 @@ agents' models are core knowledge, the counts $n_x(h)$ are individual experience
 culture. Because faculty and content can be separated, a model that keeps the first and loses the second can be
 built, which makes the contribution of culture an experimental question.
 
-\subsection{A control experiment: a language-like format without human culture}
+\paragraph{Controls for culture.}
 \label{sec:inner_speech:library}
-
-A Vygotskian machine needs culture and not merely a language-like format, and only a machine with the format but
-not the culture can test this. Section~\ref{sec:experiments} uses the format-only control, the same model with every
-class and function name replaced by a nonsense token. A stronger control would build its language from the robot's
+To show that the machine needs culture and not merely a language-like format, we compare it with machines that keep
+the format and lose or corrupt the culture. Section~\ref{sec:experiments} uses two such controls, the format-only
+control, in which every class and function name is replaced by a nonsense token, and the permuted-names control, in
+which real names are exchanged consistently. The machine is also run without images, so that a difference cannot come
+from vision. A stronger control would build its language from the robot's
 experience alone, by library learning as in DreamCoder \cite{ellis2021dreamcoder}, and we leave it to later work
 because it is a substantial system in its own right.
 
 \subsection{Testable predictions}
 \label{sec:inner_speech:predictions}
 
-Most of what the voice needs already exists in the language agent (Section~\ref{sec:cortex}). The parts to be built
-are the question objects, the request assembly, the demand signal and the imagined store. Each prediction below
+Each prediction below
 compares policies inside one closed loop with the body, sensors and environment held fixed.
 \begin{enumerate}[label=\textbf{P\arabic*}]
     \item The unexplained residual mass per room decreases faster with the focused loop than without it.
@@ -242,22 +246,25 @@ compares policies inside one closed loop with the body, sensors and environment 
     \item Plans prepared while wandering reduce the latency from surprise to a validated response.
     \item With the proposer replaced by a fixed hypothesis set (the existing classes and ``unknown''), fewer
     questions outside the built-in models are resolved.
-    \item \emph{The format-only control.} The nonsense-token control matches the machine on recurring goals and
-    falls further behind the more novel a goal is, with novelty fixed before the experiment.
+    \item \emph{Culture against format.} The format-only and permuted-names controls match the machine without
+    images on recurring goals and fall further behind the more novel a goal is, with novelty fixed in advance. The
+    permuted-names control does worse than the format-only control on novel goals until the counts override it.
     \item \emph{Private speech.} Language-model calls rise when tasks are made harder or novel and fall with
     repetition, while task success is maintained \cite{berk1992children}.
-    \item \emph{Abbreviation.} Before the voice falls silent on a recurring task, the size of its requests falls, as
-    in Vygotsky's inner speech \cite{vygotsky1986thought}, and the components retained are those with high posterior
-    entropy or weakened assumptions.
+    \item \emph{Plan reuse selected by uncertainty.} At equal request size, requests chosen by the robot's
+    uncertainty give higher answer accuracy and task success than requests chosen by matching past requests or at
+    random. Items stated as settled are wrong in fewer than 5\% of cases, and when an assumption is silently broken,
+    the affected step re-enters the request before the step fails.
 \end{enumerate}
-P7 separates culture from the format of language. P8 would also hold for a cache of the VLM's answers, and P9 does
-not, because a cache shortens its requests by matching inputs rather than by the robot's uncertainty.
+P7 separates culture from the format of language. P8 would also hold for a cache of the VLM's answers. P9 does not
+claim that the machine is not a cache, only that the robot's uncertainty is a better selector of what to reuse than
+input matching, which is the sense in which its requests become abbreviated like Vygotsky's inner speech
+\cite{vygotsky1986thought}.
 
 \subsection{Limitations}
 \label{sec:inner_speech:limitations}
 
-The demand signal is only as good as the agents' predictive distributions, and its thresholds must be set again
-when agents are added. One language model serves the person and both loops, which bounds offline reasoning on a busy
+The demand signal is only as good as the agents' predictive distributions. One language model serves the person and both loops, which bounds offline reasoning on a busy
 robot. The estimate $\beta_x$ is learned only from confirmed answers, which over-represents questions that a person or
-a built-in model can settle, and the nonsense-token control may leave the model able to recognise a scene from its
+a built-in model can settle, and the format-only control may leave the model able to recognise a scene from its
 structure. Finally, the analogy with human inner speech is functional rather than mechanistic.
