@@ -1125,46 +1125,78 @@
 \section{\texorpdfstring{The Laplace approximation\\[0.4em]{\normalsize\mdseries\color{muted} We need a simple $q$}}{The Laplace approximation}}
 % =================================================================================================
 
-\begin{frame}{Laplace: read a Gaussian belief off the bottom of the bowl}
+\begin{frame}{Why the posterior is not Gaussian: a nonlinear likelihood}
   \centering
   {\small
   \begin{tabular}{@{}r@{\;\;}l@{}}
-   \textbf{we write} & the model $p(o,s) = \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$: sensor datasheet + what we know of the world\\
-   \textbf{the robot computes} & the belief $\textcolor{accent}{q(s)}$ from the bowl $-\ln p(o,s)$ \;($-\ln$ of a Gaussian is a parabola)
-  \end{tabular}}
-  \vspace{0.2em}
-
-  \includegraphics[width=0.74\textwidth]{d1_laplace.pdf}
-
-  \begin{tikzpicture}[stp/.style={draw, thick, rounded corners, minimum height=0.9cm, align=center, font=\small}]
-    \node[stp, draw=accent, fill=accent!8] (a) at (0,0) {find the bottom\\mean $\mu$};
-    \node[stp, draw=accent, fill=accent!8] (b) at (4.2,0) {measure its curvature\\$\Hess$ at $\mu$};
-    \node[stp, draw=accent, fill=accent!8] (c) at (8.4,0) {belief width\\$\Sigma = \Hess^{-1}$};
-    \draw[-{Stealth[length=2.5mm]}, thick] (a) -- (b); \draw[-{Stealth[length=2.5mm]}, thick] (b) -- (c);
-  \end{tikzpicture}
+   \textbf{we write} & $s$: distance to the wall, hidden; prior \textcolor{cool!80!black}{$p(s) = \N(3, 1^2)$}\\
+   & $o$: the wall's apparent size in the image, \textcolor{good!70!black}{$o = 1/s$} (twice as far, half as tall), noise $\pm 0.1$
+  \end{tabular}}\\[0.5em]
+  \includegraphics[width=\textwidth]{d1_why_skew.pdf}\\[0.4em]
+  {\small If $o$ were a straight line in $s$ (say $o = s$): a symmetric likelihood, and a Gaussian posterior.}
   \vfill
-  \lesson{Sharp bowl, sure belief: the precision \emph{is} the curvature.}
+  \lesson{A nonlinear sensor bends the likelihood, and the posterior inherits the bend.}
 \end{frame}
 
-\begin{frame}{Why $\Sigma = \Hess^{-1}$: $F$ balances two pulls on the width}
+\begin{frame}{The Laplace approximation: a Gaussian fitted at the peak}
   \centering
-  {\small $q = \N(\mu,\sigma^2)$ on the bowl $-\ln p(o,s) \approx -\ln p(o,\mu) + \tfrac12\Hess\,(s-\mu)^2$; average it under $q$:}
-  \[\large
-    F(\mu,\sigma^2) \approx \underbrace{-\ln p(o,\mu)}_{\text{fit at the mean}}
-    \;+\; \underbrace{\textcolor{accent}{\tfrac12\,\Hess\,\sigma^2}}_{\substack{\text{a wide } q \text{ climbs}\\ \text{the walls: costs}}}
-    \;\underbrace{\textcolor{cool!80!black}{-\,\tfrac12\ln\sigma^2}}_{\substack{\text{a wide } q \text{ hedges}\\ \text{(entropy): pays}}}
-    \;+\;\text{const}
-  \]
-  \pause
-  \[
-    \frac{\partial F}{\partial \sigma^2} = \textcolor{accent}{\tfrac12\Hess} \textcolor{cool!80!black}{\;-\;\frac{1}{2\sigma^2}} = 0
-    \quad\Longrightarrow\quad \boxed{\;\sigma^2 = \Hess^{-1}\;}
-  \]
-  {\small The mean term does not depend on $\sigma^2$: finding $\mu$ is just minimising $-\ln p(o,s)$ (least squares).}\\[0.3em]
-  {\footnotesize\color{muted} In $n$ dimensions: $F \approx -\ln p(o,\mu) + \tfrac12\operatorname{tr}(\Hess\Sigma) - \tfrac12\ln|\Sigma| + \text{const}$,
-   $\;\Hess = -\nabla^2_s \ln p(o,s)\big|_\mu$, $\;\Sigma = \Hess^{-1}$.}
+  Any curve $g(s)$ with one peak. Its $-\ln g(s)$ is a bowl, lowest at the peak $\mu$:\\[0.2em]
+  \includegraphics[width=0.78\textwidth]{d1_laplace_generic.pdf}\\[0.2em]
+  Expand the bowl around $\mu$ (Taylor):\\[0.1em]
+  $-\ln g(s) \approx \underbrace{-\ln g(\mu)}_{\text{height at }\mu}
+   + \underbrace{0\cdot(s-\mu)}_{\text{slope is 0 at the bottom}}
+   + \underbrace{\tfrac12\,\Hess\,(s-\mu)^2}_{\Hess\text{: curvature at }\mu}$\\[0.3em]
+  Undo the log: $g(s) \approx g(\mu)\,e^{-\frac12\Hess(s-\mu)^2}$, a Gaussian $\N(\mu, 1/\Hess)$ ($g(\mu)$ only scales it).
   \vfill
-  \lesson{The uncertainty comes free with the fit: no extra model, just the curvature.}
+  \lesson{Laplace: the peak gives the mean; the curvature of $-\ln g$ gives the precision $1/\sigma^2$.}
+\end{frame}
+
+\begin{frame}{Laplace on frame 43: nearly exact on a sharp bowl, not on a lopsided one}
+  \centering
+  {\small $g$ = the posterior of frame 43 ($o = 1/s$, reading $0.4$, prior $\N(3, 1^2)$), for two sensor noises}\\[0.2em]
+  \includegraphics[width=0.82\textwidth]{d1_laplace.pdf}
+  \vfill
+  \lesson{Lopsided bowl: the parabola fits only near $\mu$, so the Gaussian misses the far tail.}
+\end{frame}
+
+\begin{frame}{Free Energy with $q$ as a Gaussian Belief}
+  \centering
+  {\small From frame 39, split the log:}\\[0.2em]
+  $F = \displaystyle\textcolor{cool!80!black}{\int q\ln q\,\mathrm{d}s} \;+\; \textcolor{accent}{\int q\,\big[-\ln p(o,s)\big]\,\mathrm{d}s}$
+  \qquad {\small with $q(s) = \N(\mu,\sigma^2)$: centre $\mu$, spread $\sigma$}\\[0.3em]
+  \uncover<2->{%
+  \begin{tikzpicture}
+    \node[draw=cool!80!black, thick, rounded corners, fill=cool!6, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
+      \textbf{first integral.} For any Gaussian it is known:
+      $\textstyle\int q\ln q\,\mathrm{d}s = -\tfrac12\ln(2\pi e\,\sigma^2) = \textcolor{cool!80!black}{-\tfrac12\ln\sigma^2} + \text{const}$\quad(minus the entropy of $q$)};
+  \end{tikzpicture}}\\[0.3em]
+  \uncover<3->{%
+  \begin{tikzpicture}
+    \node[draw=accent, thick, rounded corners, fill=accent!5, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
+      \textbf{second integral.} Replace the bowl by its Taylor expansion around $\mu$ (Laplace, frame 44):\\[0.2em]
+      \hspace*{1em}$-\ln p(o,s) \approx -\ln p(o,\mu) + \text{slope}\cdot(s-\mu) + \tfrac12\Hess\,(s-\mu)^2$, \quad $\Hess$: curvature at $\mu$\\[0.1em]
+      Average each term under $q$. $q$ is centred at $\mu$, so $(s-\mu)$ averages to $0$ and $(s-\mu)^2$ to $\sigma^2$:\\[0.2em]
+      \hspace*{1em}$\textstyle\int q\,\big[-\ln p(o,s)\big]\,\mathrm{d}s \approx -\ln p(o,\mu) + 0 + \textcolor{accent}{\tfrac12\Hess\,\sigma^2}$};
+  \end{tikzpicture}}\\[0.3em]
+  \uncover<4->{%
+  {\large $\boxed{\;F(\mu,\sigma) \approx -\ln p(o,\mu) \;+\; \textcolor{accent}{\tfrac12\Hess\,\sigma^2} \;\textcolor{cool!80!black}{-\;\tfrac12\ln\sigma^2} \;+\; \text{const}\;}$}}
+  \vfill
+  \uncover<4->{\lesson{With a Gaussian belief, $F$ is a formula in two numbers: its centre $\mu$ and its spread $\sigma$.}}
+\end{frame}
+
+\begin{frame}{Why $\sigma^2 = 1/\Hess$: the spread of the belief that makes $F$ smallest}
+  \centering
+  $F(\mu,\sigma) \approx
+   \;\underbrace{-\ln p(o,\mu)}_{\substack{\text{misfit of } \mu \text{ to the reading}\\ \text{and the prior (frame 42)}}}
+   \quad+\quad \underbrace{\textcolor{accent}{\tfrac12\Hess\sigma^2}}_{\text{grows with } \sigma}
+   \quad\textcolor{cool!80!black}{-}\quad \underbrace{\textcolor{cool!80!black}{\tfrac12\ln\sigma^2}}_{\substack{\text{entropy of } q\text{:}\\ \text{grows with } \sigma}}
+   \quad+\; \text{const}$\\[0.3em]
+  \includegraphics[width=0.68\textwidth]{d1_sigma_balance.pdf}\\[0.1em]
+  {\small
+  $\mu$: only $-\ln p(o,\mu)$ depends on it, so the best $\mu$ is the bottom of the bowl.\\
+  $\sigma$: set the slope of $F$ to zero: $\tfrac12\Hess - \tfrac{1}{2\sigma^2} = 0 \;\Longrightarrow\; \boxed{\sigma^2 = 1/\Hess}$, so the spread is $\sigma = \sqrt{1/\Hess}$}
+  \vfill
+  \lesson{Minimising $F$ over a Gaussian $q$ gives the Laplace approximation: mean $\mu$, $\sigma^2 = 1/\Hess$.}
 \end{frame}
 
 % removed for now (user, 2026-11-15)
@@ -1200,156 +1232,174 @@
 \end{frame}
 \fi
 
-\begin{frame}{One quantity, differentiated twice}
-  \centering
-  \begin{tikzpicture}[arr/.style={-{Stealth[length=2.5mm]}, very thick}, side/.style={font=\small, muted}]
-    \fill[muted!20] (-0.5,-0.9) rectangle (0.5,0.9);
-    \node[side] at (-3.2,1.25) {robot}; \node[side] at (0,1.25) {senses}; \node[side] at (3.2,1.25) {world};
-    \node[draw=accent, thick, rounded corners, fill=accent!10, minimum width=2.4cm, minimum height=0.9cm, align=center] (q) at (-3.2,0) {belief $\mu$\\[-2pt]$F[q,o]$};
-    \node[draw=cool!80!black, thick, circle, fill=cool!15, minimum size=1cm] (w) at (3.2,0) {$s$};
-    \draw[arr, good!70!black] ([yshift=0.25cm]w.west) -- node[above, pos=0.5] {$o$} ([yshift=0.25cm]q.east);
-    \draw[arr, black!70] ([yshift=-0.25cm]q.east) -- node[below, pos=0.5] {$a$} ([yshift=-0.25cm]w.west);
-  \end{tikzpicture}
+% an eye looking at a target 20 degrees up: x, y, gaze angle, belief label, o label
+\newcommand{\eyescene}[5]{% x, y, gaze angle, belief text, o text
+    \begin{scope}[shift={(#1,#2)}]
+      \draw[black!40, dashed, thick] (0,0) -- (#3:2.3);
+      \node[star, star points=5, star point ratio=2.2, fill=prob, draw=prob!70!black, inner sep=1.6pt] at (20:2.1) {};
+      \draw[thick, fill=white] (0,0) circle (0.32);
+      \fill[black!80] (#3:0.17) circle (0.11);
+      \node[font=\footnotesize, text=good!70!black, anchor=west] at (2.25,0.75) {#5};
+      \node[draw=accent, rounded corners, fill=accent!8, font=\footnotesize, inner sep=2pt] at (0.9,-0.65) {#4};
+    \end{scope}}
 
-  \vspace{0.3em}
-  \begin{columns}[T]
-    \begin{column}{0.46\textwidth}
-      \centering
-      \textbf{Perception}: change the belief\\to fit the data
-      \[ \dot\mu = -\frac{\partial F}{\partial\mu} \]
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \centering
-      \textbf{Action}: change the data\\to fit the belief
-      \[ \dot a = -\frac{\partial F}{\partial o}\,\frac{\partial o}{\partial a} \]
-    \end{column}
-  \end{columns}
-  \pause
-  \vspace{0.2em}
-  \centering\small
-  A scan already taken cannot change, so a decision scores the scans it \emph{would} bring:
-  \[
-    G(a) \approx
-    \underbrace{-\,I(s;o\given a)}_{\text{what I would learn}}
-    \;\underbrace{-\,\E_{q(o\given a)}\ln p(o)}_{\text{what I want to see}}
-    \qquad\text{(Day 4)}
-  \]
+\begin{frame}{Perception and action: two ways to lower the same $F$}
+  \centering
+  {\small A target appears $o = 20^\circ$ from the centre of gaze; the belief $\mu$ says where it should appear.}\\[0.3em]
+  \begin{tikzpicture}[arr/.style={-{Stealth[length=2.5mm]}, very thick, black!60}]
+    % perception row
+    \node[font=\small\bfseries, anchor=west] at (-0.5,1.35) {Perception: change the belief to fit the data};
+    \eyescene{0}{0}{0}{$\mu = 0^\circ$}{$o = 20^\circ$}
+    \draw[arr] (3.2,0.2) -- (3.9,0.2);
+    \eyescene{4.4}{0}{0}{\textcolor{accent}{$\mu = 20^\circ$}}{$o = 20^\circ$}
+    \node[font=\footnotesize, align=left, anchor=west] at (7.8,0.35) {the eye stays,\\the belief moves};
+    \node[anchor=west] at (7.8,-0.45) {$\dot\mu = -\dfrac{\partial F}{\partial\mu}$};
+    % action row
+    \node[font=\small\bfseries, anchor=west] at (-0.5,-1.3) {Action: change the data to fit the belief};
+    \eyescene{0}{-2.55}{0}{$\mu = 0^\circ$}{$o = 20^\circ$}
+    \draw[arr] (3.2,-2.35) -- (3.9,-2.35);
+    \eyescene{4.4}{-2.55}{20}{$\mu = 0^\circ$}{\textcolor{good!70!black}{$o = 0^\circ$}}
+    \node[font=\footnotesize, align=left, anchor=west] at (7.8,-2.2) {the belief stays, the eye turns:\\$a = 20^\circ$, so $o = 20^\circ - a = 0^\circ$};
+    \node[anchor=west] at (7.8,-3.0) {$\dot a = -\dfrac{\partial F}{\partial o}\,\dfrac{\partial o}{\partial a}$};
+  \end{tikzpicture}\\[0.2em]
+  {\footnotesize $a$: the eye's angle. $F$ has no $a$ in it, but it has $o$, and $o = 20^\circ - a$: the eye changes $F$ through $o$.\par}
+  \vfill
+  \lesson{Both remove the mismatch between $o$ and $\mu$: perception moves $\mu$, action moves $o$.}
 \end{frame}
 
-\begin{frame}{Laplace + the two derivatives: a robot that keeps its distance}
+\begin{frame}{The robot's $F$: two springs, and one of them pulls to the goal}
+  \centering
+  {\small\begin{tabular}{@{}r@{\;\;}l@{}}
+    \textbf{we write} & prior = \emph{the goal}: \textcolor{cool!80!black}{$p(s) = \N(1.0,\, 0.5^2)$}, ``I am 1\,m from the wall''\\
+    & sensor: \textcolor{good!70!black}{$o = s + \text{noise}$}, noise $0.2$
+  \end{tabular}}\\[0.8em]
+  \[
+  \begin{array}{r@{\;}l@{\qquad}l}
+    F &\approx -\ln p(o,\mu) + (\text{terms in } \sigma) & \text{\small frame 46}\\[0.6em]
+    \uncover<2->{-\ln p(o,\mu) &= -\ln \textcolor{good!70!black}{p(o\given\mu)} - \ln \textcolor{cool!80!black}{p(\mu)} & \text{\small $p(o,\mu) = p(o\given\mu)\,p(\mu)$}}\\[0.6em]
+    \uncover<3->{&= \underbrace{\tfrac12\,\textcolor{good!70!black}{25}\,(o-\mu)^2}_{\text{reading vs belief}}
+             + \underbrace{\tfrac12\,\textcolor{cool!80!black}{4}\,(\mu-1)^2}_{\text{belief vs goal}} + \text{const} & \text{\small both Gaussian}}
+  \end{array}
+  \]
+  \vspace{0.3em}
+  {\small The terms in $\sigma$ do not involve $\mu$ or the robot's speed $a$: perception and action see only $-\ln p(o,\mu)$.}\\[0.2em]
+  \uncover<3->{{\small $25 = 1/0.2^2$ and $4 = 1/0.5^2$ are the precisions: the two springs of frame 42.}}
+  \vfill
+  \uncover<3->{\lesson{The reading pulls the belief to the data; the prior pulls it to the goal, 1\,m.}}
+\end{frame}
+
+\begin{frame}{Put the goal in the prior: the robot drives until it comes true}
   \begin{columns}[c]
-    \begin{column}{0.47\textwidth}
+    \begin{column}{0.48\textwidth}
       \small
-      Prior = where it expects to be: $s\sim\N(\textcolor{cool!80!black}{1.0},0.5^2)$\\
-      Sensor: $o = s + \text{noise}$, $\sigma = 0.2$\\[0.4em]
-      Laplace: $F \approx \tfrac12\,\textcolor{good!70!black}{25}\,\varepsilon_o^2 + \tfrac12\,\textcolor{cool!80!black}{4}\,\varepsilon_p^2$\\[0.2em]
-      \quad $\varepsilon_o = o-\mu$ \;(sensor error), \;$\varepsilon_p = \mu-1.0$\\
-      \quad {\footnotesize precision $= 1/\text{variance}$: $1/0.2^2 = \textcolor{good!70!black}{25}$, $1/0.5^2 = \textcolor{cool!80!black}{4}$}\\[0.5em]
+      $F \approx \tfrac12\,\textcolor{good!70!black}{25}\,(o-\mu)^2 + \tfrac12\,\textcolor{cool!80!black}{4}\,(\mu-1)^2$\\[0.8em]
       \begin{tikzpicture}
-        \node[draw=accent, thick, rounded corners, fill=accent!6, align=left, font=\small, inner sep=6pt] {%
-          \textbf{every step}\\[0.2em]
-          read $o$\\
-          \textcolor{accent}{perception:} $\mu \mathrel{+}= \kappa_\mu\,(\textcolor{good!70!black}{25}\,\varepsilon_o - \textcolor{cool!80!black}{4}\,\varepsilon_p)$\\
-          \textcolor{black!70}{action:} \hspace{1.05em}$a \mathrel{-}= \kappa_a\,\textcolor{good!70!black}{25}\,\varepsilon_o\,\frac{\partial o}{\partial a}$\\
-          move with speed $a$ \quad{\footnotesize($\partial o/\partial a = \Delta t$)}};
+        \node[draw=accent, thick, rounded corners, fill=accent!6, align=left, font=\small, inner sep=5pt] {%
+          \textbf{the robot, every 0.1\,s}\\[0.2em]
+          1. read $o$\\[0.2em]
+          2. \textcolor{accent}{perception}: move $\mu$ downhill on $F$\\
+          \hspace*{1.2em}{\footnotesize pulled to the reading and to 1\,m}\\[0.2em]
+          3. \textcolor{black!70}{action}: change the speed $a$\\
+          \hspace*{1.2em}downhill on $F$\\
+          \hspace*{1.2em}{\footnotesize drive so that $o$ comes closer to $\mu$}};
       \end{tikzpicture}
     \end{column}
-    \begin{column}{0.51\textwidth}
+    \begin{column}{0.52\textwidth}
       \centering
-      \includegraphics[width=\textwidth]{d1_ai_loop.pdf}\\
-      {\footnotesize start 2.6\,m; $\kappa_\mu=0.04$, $\kappa_a=2$, 10 steps per second}
+      \includegraphics[width=\textwidth]{d1_ai_loop.pdf}
     \end{column}
   \end{columns}
   \vfill
-  \lesson{The expectation is the goal: perception and action descend one $F$.}
+  \lesson{The robot believes it is 1\,m away; acting is how it makes the readings agree.}
 \end{frame}
 
-\begin{frame}{Gauss--Newton: jump to the bottom of a parabola, repeat}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
+\begin{frame}{Gauss--Newton: find the bottom of the bowl one parabola at a time}
+  \centering
+  {\small With a nonlinear sensor there is no formula for Laplace's $\mu$ and $\Hess$.\\ Fit a parabola where you stand, jump to its bottom, repeat.}\par\vspace{0.6em}
+  \begin{columns}[T]
+    \begin{column}{0.44\textwidth}
       \centering
       \includegraphics[width=\textwidth]{d1_gauss_newton.pdf}\\
-      {\footnotesize range $o=2.0$ to a landmark 0.8\,m aside,\\ $h(s)=\sqrt{s^2+0.8^2}$, prior $\N(1.0, 0.5^2)$}
+      {\footnotesize range $o = 2.0$ to a landmark 0.8\,m aside,\\ $h(s)=\sqrt{s^2+0.8^2}$, prior $\N(1.0, 0.5^2)$}
     \end{column}
-    \begin{column}{0.48\textwidth}
+    \begin{column}{0.56\textwidth}
       \small
-      \begin{tikzpicture}
-        \node[draw=accent, thick, rounded corners, fill=accent!6, align=left, font=\small, inner sep=6pt] {%
-          \textbf{repeat until $s$ stops}\\[0.2em]
-          error $\varepsilon_o = o - h(s)$,\; slope $J = h'(s)$\\
-          $\Hess = \textcolor{good!70!black}{25}\,J^2 + \textcolor{cool!80!black}{4}$ \hfill {\footnotesize curvature}\\
-          $s \mathrel{+}= \big(\textcolor{good!70!black}{25}\,J\,\varepsilon_o - \textcolor{cool!80!black}{4}\,(s-1.0)\big) / \Hess$\\[0.2em]
-          then $\mu = s$,\; $\Sigma = 1/\Hess$};
-      \end{tikzpicture}\\[0.6em]
-      {\footnotesize The perception step's pull, divided by the curvature: no step size to tune. Here 3 steps: $\mu = 1.70$, $\sigma = 0.20$.}
+      parabola at $s_k$:\;
+      $P_k(s) = \text{bowl}(s_k) + g_k\,(s-s_k) + \tfrac12\Hess_k\,(s-s_k)^2$\\
+      {\footnotesize $g_k$: slope of the bowl at $s_k$. $\Hess_k$: its curvature, $25\,J_k^2 + 4$\\ with $J_k = h'(s_k)$ the sensor's slope (Gauss--Newton)}\\[0.2em]
+      its bottom: $\;s_{k+1} = s_k - g_k/\Hess_k$\\[0.5em]
+      \footnotesize
+      \renewcommand{\arraystretch}{1.3}
+      \begin{tabular}{@{}l@{\;\;}l@{\;\;}l@{}}
+        \textcolor{accent}{$P_0$} & $12.8 - 16.6\,(s-0.60) + \tfrac12\,13.0\,(s-0.60)^2$ & $\to 1.88$\\
+        \textcolor{prob}{$P_1$} & $1.56 + 4.4\,(s-1.88) + \tfrac12\,25.2\,(s-1.88)^2$ & $\to 1.70$\\
+        \textcolor{cool!80!black}{$P_2$} & $1.16 + 0.07\,(s-1.70) + \tfrac12\,24.5\,(s-1.70)^2$ & $\to 1.70$, stop
+      \end{tabular}\\[0.5em]
+      \small
+      belief: $\mu = 1.70$,\; $\sigma^2 = 1/24.5$,\; $\sigma = 0.20$
     \end{column}
   \end{columns}
-  \vspace{0.3em}
-  {\footnotesize\color{muted} Many numbers: $\Hess = J^\top R^{-1}J + P^{-1}$, $\Delta s = \Hess^{-1}\big(J^\top R^{-1}\varepsilon_o - P^{-1}(s-m)\big)$. Lab: \texttt{laplace(...)}.}
   \vfill
   \lesson{Each step fits a parabola and jumps to its bottom; the last parabola is the belief.}
 \end{frame}
 
-\begin{frame}{Example: one wall as a belief}
-  \begin{columns}[c]
-    \begin{column}{0.55\textwidth}
-      \includegraphics[width=\textwidth]{d1_wall_belief.pdf}
-    \end{column}
-    \begin{column}{0.43\textwidth}
-      \small
-      A line with normal $n(\alpha)$ at distance $d$:
-      \[ r_i = \cos\alpha\,x_i + \sin\alpha\,y_i - d \]
-      \[ \frac{\partial r_i}{\partial(\alpha,d)} = \big[\,-\sin\alpha\,x_i + \cos\alpha\,y_i,\; -1\,\big] \]
-      \begin{itemize}
-        \item The first column is a \textbf{lever arm}. Points far apart along the wall pin the
-              angle.
-        \item $\alpha$ and $d$ come out correlated ($\rho\approx-0.97$), because $d$ is measured
-              from an origin the points are far away from.
-      \end{itemize}
-    \end{column}
-  \end{columns}
+\begin{frame}{A real wall: two numbers, one belief that tilts}
+  \centering
+  \includegraphics[width=0.82\textwidth]{d1_wall_belief.pdf}\\[0em]
+  \footnotesize
+  \begin{tabular}{@{}p{0.16\textwidth}@{}p{0.84\textwidth}@{}}
+    \textbf{we write} &
+      robot's frame: $\alpha$, direction of the wall's normal; $d$, robot--wall distance. Point $i$ at $(x_i,y_i)$\\
+    & (forward, left) is off the line by $r_i = \cos\alpha\,x_i + \sin\alpha\,y_i - d$; right line: only noise, \textcolor{good!70!black}{$\sigma_i \approx 2$\,cm}\\[0.1em]
+    \textbf{the robot} &
+      minimises the bowl $F \approx \tfrac12\sum_{i=1}^{82} (r_i/\sigma_i)^2$ over $(\alpha, d)$ with Gauss--Newton (frame 51):\\
+    \textbf{computes} & its bottom and curvature give the belief \textcolor{accent}{$q(\alpha,d)$}
+  \end{tabular}\\[0.2em]
+  \vfill
+  \lesson{Same recipe, two numbers: the belief is an ellipse, and its tilt says angle and distance move together.}
 \end{frame}
 
-\begin{frame}{Is the covariance honest?}
+\begin{frame}{Check the belief's spread: scan 400 times from the same place}
+  \centering
+  {\small The spread $\sigma = \sqrt{1/\Hess}$ predicts how far the estimate would move on another scan.\\
+   Test: 400 scans from one pose, fit each one, measure how much the 400 estimates really scatter.}\\[0.3em]
   \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
+    \begin{column}{0.5\textwidth}
+      \centering
       \includegraphics[width=\textwidth]{d1_honesty.pdf}
     \end{column}
-    \begin{column}{0.53\textwidth}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.95]
+        \draw[line width=2.5pt, black!80] (-0.3,2.2) -- (3.6,2.2) node[right, font=\footnotesize] {wall};
+        \fill[black!60] (0,0) circle (0.12) node[below=2pt, font=\footnotesize] {lidar};
+        \draw[good!70!black, thick, -{Stealth}] (0,0) -- (2.2,2.2);
+        \draw[good!70!black, line width=2pt] (1.85,1.85) -- (2.55,2.55);
+        \node[font=\footnotesize, text=good!70!black, anchor=west] at (2.55,2.65) {2\,cm along the beam};
+        \draw[accent, line width=2pt] (2.95,1.85) -- (2.95,2.55);
+        \draw[accent, dashed] (1.85,1.85) -- (2.95,1.85) (2.55,2.55) -- (2.95,2.55);
+        \node[font=\footnotesize, text=accent, anchor=west] at (3.0,1.75) {less across the wall};
+        \draw (0.55,0) arc (0:45:0.55); \node[font=\footnotesize] at (0.9,0.3) {slant};
+      \end{tikzpicture}\\[0.4em]
       \small
-      $\Sigma=\Hess^{-1}$ is a \emph{claim} about how far the fit would move on a re-scan.
-      Test it with 400 scans from one pose:
-      \begin{itemize}
-        \item uniform $\sigma$: about 10\% too pessimistic, and it does not average away;
-        \item the noise is along the \emph{beam}, the residual along the wall's \emph{normal}:
-              $\sigma_i=\sigma\,|u_i^\top n|$;
-        \item with that likelihood: within a few per cent.
-      \end{itemize}
+      The noise is along the beam; only its part across the wall moves the estimate, and it shrinks when the beam hits at a slant.
     \end{column}
   \end{columns}
-  \lesson{A Laplace covariance is exactly as honest as the likelihood you wrote.}
+  \vfill
+  \lesson{The belief's spread is only as right as the noise model we write.}
 \end{frame}
 
-\begin{frame}{Free energy compares models: the price of a parameter}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d1_occam.pdf}
-    \end{column}
-    \begin{column}{0.53\textwidth}
-      \small
-      Two models of the same wall:
-      \begin{itemize}
-        \item \textbf{Manhattan}: the angle is fixed at $90^\circ$; one parameter, $d$.
-        \item \textbf{free}: $\alpha\sim\N(90^\circ,s^2)$; two parameters.
-      \end{itemize}
-      Both fit equally well. The free model pays
-      $\approx\ln(s/\sigma_\alpha)$ nats of \emph{complexity}: the cost of squeezing the prior
-      down to the posterior.\\[0.4em]
-      Tilt the points by $1.5^\circ$ and the verdict flips by \alert{70 nats}.
-    \end{column}
-  \end{columns}
-  \lesson{Nobody wrote ``if the angle error exceeds $k$ degrees''. That is the first instance of
-          \textbf{no thresholds}.}
+\begin{frame}{$F$ also compares models: an extra parameter must pay for itself}
+  \centering
+  {\small\begin{tabular}{@{}r@{\;\;}l@{}}
+    \textbf{we write two models} & \textbf{fixed}: the wall's angle is known, $\alpha = 90^\circ$; the robot estimates only $d$\\
+    \textbf{of the same wall} & \textbf{free}: $\alpha \sim \N(90^\circ, s^2)$, $s$: how unsure we are of the angle; it estimates $\alpha$ and $d$
+  \end{tabular}}\\[0.3em]
+  \includegraphics[width=0.84\textwidth]{d1_occam.pdf}\\[0.1em]
+  {\footnotesize Wall at $90^\circ$: equal fit, so the free model pays only its complexity (frame 41), $\approx\ln(s/\sigma_\alpha)$;
+   $\sigma_\alpha$: the angle's spread after the scan. Nats: units of $\ln$.}
+  \vfill
+  \lesson{Lower $F$ wins: an extra parameter stays only if the data pay for it.}
 \end{frame}
 
 % =================================================================================================
