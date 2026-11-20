@@ -170,3 +170,9 @@ add_executable(tick_memo_test tick_memo_test.cpp)
 target_include_directories(tick_memo_test PRIVATE ../src)
 target_compile_options(tick_memo_test PRIVATE -O2)
 add_test(NAME tick_memo_test COMMAND tick_memo_test)
+
+# The smooth beam likelihood in one dimension (spec 2026-11-15 lidar-measures §7c.8 a): header-only common/ai_belief/beam_ray.h.
+add_executable(beam_ray_test beam_ray_test.cpp)
+target_include_directories(beam_ray_test PRIVATE ../../common)
+target_compile_options(beam_ray_test PRIVATE -O2)
+add_test(NAME beam_ray_test COMMAND beam_ray_test)
