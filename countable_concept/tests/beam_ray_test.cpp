@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <numbers>
 #include <vector>
 #include "ai_belief/beam_ray.h"
@@ -33,10 +34,12 @@ static std::vector<double> face_on(double rho, double e, const std::vector<doubl
 }
 
 static double energy(const bm::StudentT& st, double rho, double m, double pi, const std::vector<double>& t,
-                     const std::vector<double>& w, std::vector<double>* g = nullptr, double* gpi = nullptr)
+                     const std::vector<double>& w, std::vector<double>* g = nullptr, double* gpi = nullptr,
+                     std::vector<double>* gw = nullptr)
 {
     std::vector<double> scratch(t.size());
-    return bm::ray_likelihood(st, rho, m, pi, kRhoMax, t, w, g ? std::span<double>(*g) : std::span<double>(scratch), gpi).E;
+    return bm::ray_likelihood(st, rho, m, pi, kRhoMax, t, w, g ? std::span<double>(*g) : std::span<double>(scratch), gpi,
+                              gw ? std::span<double>(*gw) : std::span<double>()).E;
 }
 
 // ─── Student-t ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -222,34 +225,123 @@ static void dE_matches_fd()
     const auto st = *bm::StudentT::make(kP0, kC);
     const auto gl = bm::GaussLegendre01::make(kK);
     const double d = -0.5 * kSigmaS, pi = bm::Phi_upper(d / kSigmaS), rho = 2.0;
-    std::vector<double> delta, w;
-    one_part_nodes(d, gl, delta, w);
+    // Two node sets: one part, and three panels given as level z-scores {+inf, 1.3, 0.2, d/σ_s}.
+    std::vector<double> delta1, w1, delta3, w3;
+    one_part_nodes(d, gl, delta1, w1);
+    const std::array<double, 4> z{std::numeric_limits<double>::infinity(), 1.3, 0.2, d / kSigmaS};
+    bm::quantile_nodes_z(kSigmaS, z, gl, delta3, w3);
     const auto ok = [](double fd, double an) { return std::abs(fd - an) <= std::max(1e-6 * std::abs(an), 1e-9); };
     double worst = 0.0;
-    for (double m : {0.05, 0.9})
-        for (double e : {-0.3, 0.0, 0.1})
-        {
-            auto t = face_on(rho, e, delta);
-            std::vector<double> g(t.size());
-            double gpi = 0.0;
-            energy(st, rho, m, pi, t, w, &g, &gpi);
-            for (std::size_t k = 0; k < t.size(); ++k)
+    int n_checked = 0;
+    for (int set = 0; set < 2; ++set)
+    {
+        const auto& delta = set == 0 ? delta1 : delta3;
+        auto w = set == 0 ? w1 : w3;
+        for (double m : {0.05, 0.9})
+            for (double e : {-0.3, 0.0, 0.1})
             {
-                const double h = 1e-6, tk = t[k];
-                t[k] = tk + h; const double Ep = energy(st, rho, m, pi, t, w);
-                t[k] = tk - h; const double Em = energy(st, rho, m, pi, t, w);
-                t[k] = tk;
-                const double fd = (Ep - Em) / (2.0 * h);
-                worst = std::max(worst, std::abs(fd - g[k]) / std::max(std::abs(g[k]), 1e-3));
-                if (not ok(fd, g[k])) std::printf("  dE/dt m=%.2f e=%+.2f k=%zu fd=%.12e an=%.12e\n", m, e, k, fd, g[k]);
-                CHECK(ok(fd, g[k]));
+                auto t = face_on(rho, e, delta);
+                std::vector<double> g(t.size()), gw(t.size());
+                double gpi = 0.0;
+                energy(st, rho, m, pi, t, w, &g, &gpi, &gw);
+                const double h = 1e-6;
+                const auto report = [&](const char* what, std::size_t k, double fd, double an)
+                {
+                    worst = std::max(worst, std::abs(fd - an) / std::max(std::abs(an), 1e-3));
+                    ++n_checked;
+                    if (not ok(fd, an))
+                        std::printf("  %s set=%d m=%.2f e=%+.2f k=%zu fd=%.12e an=%.12e\n", what, set, m, e, k, fd, an);
+                    CHECK(ok(fd, an));
+                };
+                for (std::size_t k = 0; k < t.size(); ++k)
+                {
+                    const double tk = t[k];
+                    t[k] = tk + h; const double Ep = energy(st, rho, m, pi, t, w);
+                    t[k] = tk - h; const double Em = energy(st, rho, m, pi, t, w);
+                    t[k] = tk;
+                    report("dE/dt", k, (Ep - Em) / (2.0 * h), g[k]);
+
+                    const double wk = w[k];   // weights taken as free: perturb one, no renormalisation
+                    w[k] = wk + h; const double Wp = energy(st, rho, m, pi, t, w);
+                    w[k] = wk - h; const double Wm = energy(st, rho, m, pi, t, w);
+                    w[k] = wk;
+                    report("dE/dw", k, (Wp - Wm) / (2.0 * h), gw[k]);
+                }
+                report("dE/dpi", 0, (energy(st, rho, m, pi + h, t, w) - energy(st, rho, m, pi - h, t, w)) / (2.0 * h), gpi);
             }
-            const double h = 1e-6;
-            const double fd = (energy(st, rho, m, pi + h, t, w) - energy(st, rho, m, pi - h, t, w)) / (2.0 * h);
-            if (not ok(fd, gpi)) std::printf("  dE/dpi m=%.2f e=%+.2f fd=%.12e an=%.12e\n", m, e, fd, gpi);
-            CHECK(ok(fd, gpi));
+    }
+    std::printf("dE_matches_fd  %d partials (dt, dw, dpi; 1 and 3 panels) worst relative gap %.3e\n", n_checked, worst);
+}
+
+// ─── A ray ~38σ_s from the model: π underflows through the subnormals to 0, every output stays finite ───────────────
+static void tail_band_is_finite()
+{
+    const auto st = *bm::StudentT::make(kP0, kC);
+    const auto gl = bm::GaussLegendre01::make(kK);
+    const double rho = 2.0;
+    int n_bad = 0, n_sub = 0, n_zero = 0;
+    double prev_front = 0.0, max_jump = 0.0;
+    for (int i = 0; i <= 400; ++i)
+    {
+        const double zd = 36.0 + 0.01 * i, d = zd * kSigmaS, pi = bm::Phi_upper(zd);
+        n_sub  += (pi > 0.0 and pi < std::numeric_limits<double>::min());
+        n_zero += (pi == 0.0);
+        std::vector<double> delta, w;
+        one_part_nodes(d, gl, delta, w);
+        double sw = 0.0;
+        for (std::size_t k = 0; k < delta.size(); ++k)
+        {
+            sw += w[k];
+            if (not std::isfinite(delta[k]) or not std::isfinite(w[k]) or not (delta[k] > d)) ++n_bad;
         }
-    std::printf("dE_matches_fd  worst relative gap %.3e\n", worst);
+        if (std::abs(sw - 1.0) > 1e-14) ++n_bad;
+        if (i > 0) max_jump = std::max(max_jump, std::abs(delta.front() - prev_front));
+        prev_front = delta.front();
+        for (double m : {0.05, 0.9})
+            for (double e : {-0.3, 0.0, 0.1})
+            {
+                const auto t = face_on(rho, e, delta);
+                std::vector<double> g(t.size()), gw(t.size());
+                double gpi = 0.0;
+                const double E = energy(st, rho, m, pi, t, w, &g, &gpi, &gw);
+                bool fin = std::isfinite(E) and std::isfinite(gpi);
+                for (std::size_t k = 0; k < t.size(); ++k) fin = fin and std::isfinite(g[k]) and std::isfinite(gw[k]);
+                if (not fin)
+                {
+                    if (n_bad < 5) std::printf("  non-finite at d/sigma=%.2f m=%.2f e=%+.2f E=%g dEdpi=%g\n", zd, m, e, E, gpi);
+                    ++n_bad;
+                }
+            }
+    }
+    std::printf("tail_band_is_finite  d/sigma in [36, 40]: %d subnormal-pi, %d zero-pi steps; non-finite/bad = %d; "
+                "largest step of the deepest node %.3e m\n", n_sub, n_zero, n_bad, max_jump);
+    CHECK(n_sub > 0 and n_zero > 0);   // the sweep does cross both regimes
+    CHECK(n_bad == 0);
+    CHECK(max_jump < 1e-3);            // the node moves continuously (≈ 0.01σ_s·… per step), no jump at underflow
+
+    // log_Phi_upper: the Mills-ratio branch agrees with the direct log where Phi_upper is a normal double.
+    double worst = 0.0;
+    for (double x = 4.0; x <= 37.0; x += 0.05)
+        worst = std::max(worst, std::abs(bm::log_Phi_upper(x) - std::log(bm::Phi_upper(x))) / std::abs(std::log(bm::Phi_upper(x))));
+    std::printf("tail_band_is_finite  log_Phi_upper vs log(Phi_upper) on [4, 37]: worst relative %.3e\n", worst);
+    CHECK(worst < 1e-13);
+}
+
+// ─── The z-score form gives the same nodes as the probability form ──────────────────────────────────────────────
+static void z_form_matches_b_form()
+{
+    const auto gl = bm::GaussLegendre01::make(kK);
+    const double d = -1.2 * kSigmaS;
+    const std::array<double, 4> z{std::numeric_limits<double>::infinity(), 1.0, -0.3, d / kSigmaS};
+    const std::array<double, 4> b{0.0, bm::Phi_upper(z[1]), bm::Phi_upper(z[2]), bm::Phi_upper(z[3])};
+    std::vector<double> dz, wz, db, wb;
+    bm::quantile_nodes_z(kSigmaS, z, gl, dz, wz);
+    bm::quantile_nodes(d, kSigmaS, b, gl, db, wb);
+    double worst = 0.0, sw = 0.0;
+    for (std::size_t k = 0; k < dz.size(); ++k) { worst = std::max({worst, std::abs(dz[k] - db[k]), std::abs(wz[k] - wb[k])}); sw += wz[k]; }
+    std::printf("z_form_matches_b_form  max gap %.3e  sum w - 1 = %.3e\n", worst, sw - 1.0);
+    CHECK(worst < 1e-14);
+    CHECK(std::abs(sw - 1.0) < 1e-14);
 }
 
 int main()
@@ -260,6 +352,8 @@ int main()
     panels_sum_to_one();
     face_numbers();
     dE_matches_fd();
+    tail_band_is_finite();
+    z_form_matches_b_form();
     std::printf(bad ? "beam_ray_test: %d FAILED\n" : "beam_ray_test: all passed\n", bad);
     return bad ? 1 : 0;
 }
