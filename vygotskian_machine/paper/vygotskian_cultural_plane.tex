@@ -130,6 +130,19 @@ rather than evidence. Levels 2--3 can also report that their \emph{model} is wro
 tier of base units under a worktop, so a refrigerator, which belongs to a tall tier of full-height units, scored
 $0.00$ as a member. The VLM then proposes a revision in focused mode, and a person accepts it.
 
+\paragraph{Cultural affordances.}
+What can be done with an object is also largely cultural knowledge, such as pulling a refrigerator door open by its
+handle. Ramstead and colleagues call such possibilities for action cultural affordances and treat them within Active
+Inference \cite{gibson1979ecological, ramstead2016cultural}. In \cortex{}, concept agents already offer affordances in
+the graph and the controller ranks them by expected free energy (Section~\ref{sec:cortex}). We let the VLM propose new
+affordances for a known class, each with its preconditions and predicted change of belief, for example that pulling
+the handle changes the door angle and exposes the interior. The robot tests a proposal as an epistemic action through
+the command gate, and only the observed outcome counts. The success probability $\rho_a$ of affordance $a$ has the
+prior of \eqref{eq:lh_beta_prior}, with $\rho^{\text{VLM}}_a$ in place of $\pi^{\text{VLM}}_{cf}$, so the robot's
+trials outweigh the VLM's estimate. Once $\rho_a$ is high, the concept agent itself offers the affordance and the
+controller chooses it without the VLM. A person who says ``you can push that door'' passes on a cultural affordance in
+speech, which enters the counts as a confirmed trial. Only actions that the gate classifies as reversible are tested.
+
 \subsection{Sequencing over the hierarchy}
 \label{sec:lang_hierarchy:sequencing}
 
@@ -238,9 +251,9 @@ belief state, each step declares a change in belief that is monitored while the 
 retrieved under expected free energy. Because probabilities stated by a model have known limits
 \cite{tian2023just, xiong2024can}, the robot measures the reliability $\beta$ instead of trusting them.
 
-Three-dimensional scene graphs organise a building into layers for the building, its rooms, its objects and the
-cameras that observed them \cite{armeni2019scene}. Hydra added a layer of places and builds and optimises such graphs
-in real time \cite{hughes2022hydra}, ConceptGraphs labels them with an open vocabulary \cite{gu2024conceptgraphs},
+Three-dimensional scene graphs layer a building into rooms, objects and the cameras that observed them
+\cite{armeni2019scene}. Hydra added places and builds and optimises such graphs in real time
+\cite{hughes2022hydra}, ConceptGraphs labels them with an open vocabulary \cite{gu2024conceptgraphs},
 language models have labelled rooms from the objects they contain \cite{chen2022leveraging}, and language-enabled
 spatial ontologies have guided the construction of such graphs \cite{strader2024indoor}. Inferring room categories
 from objects is also established in semantic mapping \cite{pronobis2012large}. These systems are the closest relatives
@@ -251,10 +264,9 @@ Vygotskian robotics \cite{mirolli2011towards} and autotelic agents \cite{colas20
 thought, and Pipitone and Chella's robot speaks its reasoning aloud, which made its decisions more transparent to its
 partner \cite{pipitone2021robots}. Here inner speech is instead an epistemic action recruited on surprise, whose
 conclusions perception must confirm. Developmental robotics stages competence through interaction
-\cite{cangelosi2015developmental}, and the machine adds a staging of reliance on culture. Active Inference
-has been applied to robot perception and control \cite{lanillos2021active}, and Pezzulo et al.\ argue that passively
+\cite{cangelosi2015developmental}, and Active Inference has been applied to robot perception and control \cite{lanillos2021active}, and Pezzulo et al.\ argue that passively
 trained models such as large language models lack the grounding that action provides \cite{pezzulo2024generating}.
-The machine couples such a model to an acting agent that alone decides what is believed. Amortised inference learns a
+Amortised inference learns a
 mapping that replaces repeated inference \cite{gershman2014amortized}, and hybrid schemes combine an amortised policy
 with iterative planning when the amortised one is uncertain \cite{tschantz2020control}. The machine's internalisation
 is a simpler, count-based form of the same idea, whose return to deliberation is triggered by reported surprise.
@@ -273,6 +285,8 @@ Section~\ref{sec:experiments} assigns each prediction to an experiment.
     \item Structural replay proposes the missing tall tier when the single-tier kitchen model is re-created.
     \item As confirmed rooms and missions accumulate, the effective weight of the VLM falls, and VLM calls per hour
     fall while task success holds.
+    \item A proposed affordance of a novel object is confirmed or rejected within a few trials, a false proposal
+    never becomes an offer, and a confirmed one is then offered by the concept agent without the VLM.
 \end{enumerate}
 
 \subsection{Limitations}
@@ -280,5 +294,5 @@ Section~\ref{sec:experiments} assigns each prediction to an experiment.
 
 The function evidence \eqref{eq:lh_function_evidence} approximates the marginal likelihood and is somewhat
 overconfident for units that remain correlated. The VLM's notion of a typical home carries a cultural bias that only
-the robot's counts can correct. Expected outcomes are hard to state for open-ended exploration, and structural
-revisions remain the task of a person.
+the robot's counts can correct. Expected outcomes are hard to state for open-ended exploration, structural
+revisions remain the task of a person, and affordances whose actions cannot be undone are not learned by trial.

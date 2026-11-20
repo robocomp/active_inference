@@ -25,7 +25,7 @@ Sections~\ref{sec:inner_speech:predictions} and~\ref{sec:lang_hierarchy:predicti
         E2 & Does the function evidence recover what rooms are for? & L1 (corpus) & offline \\ \hline
         E3 & Does the function agent work live and resist a missing object or a wrong prior? & L1 (live) & live, read-only \\ \hline
         E4 & Do missions over beliefs search better and catch divergences early? & L2, L3 & live \\ \hline
-        E5 & Does the inner voice resolve what the automatic level cannot? & P1, P2, P4, P6 & live \\ \hline
+        E5 & Does the inner voice resolve what the automatic level cannot, and learn new affordances? & P1, P2, P4, P6, L7 & live \\ \hline
         E6 & Does imagination prepare the robot for what comes next? & L4, L5, P5 & live \\ \hline
         E7 & Is the scaffold withdrawn, does culture do the work, and does a stale habit give way? & L6, P3, P7--P9 & live, repeated sessions \\ \hline
     \end{tabular}
@@ -94,10 +94,9 @@ unannotated class as searched, and compare four sources of $\pi_{cf}$: the VLM, 
 table, and co-occurrence frequencies measured on half of the corpus and tested on the other half. As a fifth baseline,
 the VLM is shown an image of the room and asked for its function directly. We report precision and recall of the
 functions that receive positive evidence (\result{--}). The co-occurrence frequencies bound what any prior can
-achieve, and the image baseline is what the machine must justify, since it needs no belief hierarchy. On the robot's
-recorded tours, with rooms labelled from the simulator, each $\Lambda_f$ should leave its prior log-odds only as the
-room is explored (Figure~\result{--}). The corpus assumes perfect detection, so only the tours test the evidence
-under the robot's own perception.
+achieve, and the image baseline, which needs no belief hierarchy, is what the machine must justify. Because the corpus
+assumes perfect detection, the robot's recorded tours test the evidence under its own perception, where each
+$\Lambda_f$ should leave its prior log-odds only as the room is explored (Figure~\result{--}).
 
 \subsection{E3: The function agent, live and read-only}
 \label{sec:experiments:e3}
@@ -135,7 +134,10 @@ unexplained residual mass per room over time (P1: \result{--}, \result{--} and \
 the proposer as confirmed answers accumulate (P2), inner questions per hour over repeated visits with habituation
 disabled, since habituation alone would lower the rate (P4: \result{--} to \result{--}), and the number of questions
 outside the built-in models whose answer matches the simulator's ground truth, compared with the machine whose VLM is
-replaced by the fixed hypothesis set (P6: \result{--} versus \result{--}).
+replaced by the fixed hypothesis set (P6: \result{--} versus \result{--}). For L7, a cabinet with a sliding
+door and a push-to-open refrigerator are introduced, and we report trials until each proposed affordance is confirmed or
+rejected, false proposals that became offers (predicted zero), and whether a confirmed affordance is then chosen without
+the VLM (\result{--} trials, \result{--} false offers).
 
 \subsection{E6: Imagination}
 \label{sec:experiments:e6}
@@ -154,10 +156,9 @@ The robot lives in the procedural apartments over repeated sessions, with recurr
 internalises what it receives, the effective weight of the VLM's priors falls, VLM calls for planning fall while task
 success holds, reported separately from calls to understand the person (L6: \result{--} to \result{--} per hour), and
 VLM use rises again when difficulty is raised by shutting doors that are usually open, introducing unfamiliar objects
-and giving goals in fewer words (P8). A cache of the VLM's answers would show all three effects. For P9 we therefore
-measure the size of each request to the VLM for a recurring task, counted as its open hypotheses plus the mission steps
-left to the VLM, together with the correlation between whether a component is retained and its posterior entropy or the
-probability of its assumptions. P9 holds if request size falls before the calls stop (\result{--} to \result{--}
+and giving goals in fewer words (P8). Since a cache of the VLM's answers would show all three effects, for P9 we
+measure the size of each request for a recurring task (open hypotheses plus steps left to the VLM) and the correlation
+between retaining a component and its posterior entropy or the probability of its assumptions. P9 holds if request size falls before the calls stop (\result{--} to \result{--}
 components) and retention follows the robot's uncertainty (correlation \result{--}). Detectors retrained only on answers
 confirmed by a person, a built-in model or the simulator should lose false negatives (P3: \result{--} to
 \result{--}).
@@ -167,9 +168,8 @@ every class and function name is replaced by a consistent nonsense token. In the
 are exchanged consistently, so the vocabulary stays familiar to the model but the culture it evokes is wrong. In both,
 images are withheld from the VLM, and the person's words pass through the same substitution. P7 holds if both controls
 match the machine on recurring tasks and fall behind in proportion to novelty (Figure~\result{--}). Three further
-controls isolate the other parts of the design, each with its predicted outcome. When the VLM writes labels and beliefs
-directly, without the test by perception, we predict more confident errors and more wrong beliefs after a wrong
-proposal, which tests the claim that the VLM's output must remain a proposal and never a belief. With counts and habits
+controls isolate the other parts of the design. When the VLM writes beliefs directly, without the test by perception,
+we predict more wrong beliefs after a wrong proposal, which tests that its output must remain a proposal. With counts and habits
 frozen, we predict no fall in the VLM's effective weight and no fall in request size. With hand-written or uniform
 priors, we predict slower labelling of rooms on first visits. Finally, an apartment is changed after a habit has been
 compiled, by moving the dining set or locking a door, and we predict that the habit's monitored assumptions detect the

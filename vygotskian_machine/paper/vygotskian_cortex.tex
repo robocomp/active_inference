@@ -56,16 +56,7 @@ apartment.
     \label{tab:lh_levels}
 \end{table}
 
-\begin{figure}[!tb]
-    \centering
-    \includegraphics[width=0.5\linewidth,trim=760 200 2850 420,clip]{figures/full_graph_white.png}
-    \caption{The output of \cortex{} in the simulated apartment, drawn by stratum. From the top, the robot (level~0),
-    localised in \texttt{room\_1} (level~1) through an edge that carries a transform and its covariance; the objects
-    and their affordances (level~2); and the aggregates fitted over them (level~3), a dining set, the kitchen frame and
-    a wall shelf. The bottom stratum is the simulator's true geometry, shown for reference and not a belief. The
-    stratum numbers give the drawing order, not the levels of Table~\ref{tab:lh_levels}.}
-    \label{fig:cortex_graph}
-\end{figure}
+
 
 \paragraph{Levels 0 to 3.}
 At level 0, an agent dedicated to the body maintains the tree of frames from the base to each sensor, and a
@@ -84,6 +75,35 @@ kitchen. The existence of an aggregate is a log Bayes factor against an explicit
 each aggregate sends empirical priors to its members, computed without that member's own contribution
 (Eq.~\eqref{eq:lh_cavity}). Level 4, the purpose of a room and how the robot should behave there, is not represented
 in \cortex{} and is the contribution of this paper (Section~\ref{sec:lang_hierarchy:culture}).
+
+
+
+\begin{figure}[!h]
+    \centering
+    \begin{minipage}[c]{0.53\linewidth}
+        \centering
+        \begin{tikzpicture}
+            \node[anchor=south west, inner sep=0] (img) at (0,0)
+                {\includegraphics[width=\linewidth,trim=760 200 2850 420,clip]{figures/full_graph_white.png}};
+            \begin{scope}[x={(img.south east)}, y={(img.north west)}]
+                \fill[yellow!85!orange, draw=conceptc!80!black, thick] (0.80,0.585) circle (2.6pt);
+                \node[draw=black!50, fill=white, rounded corners=1.5pt, inner sep=1.5pt,
+                      font=\ttfamily\tiny, anchor=west] at (0.825,0.60) {chair\_34};
+            \end{scope}
+        \end{tikzpicture}
+    \end{minipage}\hfill
+    \begin{minipage}[c]{0.43\linewidth}
+        \centering
+        \resizebox{\linewidth}{!}{\input{figures/belief-node}}
+    \end{minipage}
+    \caption{Left: the output of \cortex{} in the simulated apartment, drawn by stratum: the robot (level~0),
+    localised in \texttt{room\_1} (level~1); the objects and their affordances (level~2); and the aggregates fitted
+    over them (level~3). The bottom stratum is the simulator's true geometry, shown for reference, and strata numbers
+    give the drawing order, not the levels of Table~\ref{tab:lh_levels}. Right: a schematic of one node as a belief,
+    owned by one agent, whose existence log-odds rises when the object is seen, is held while it is occluded, and
+    falls only when it is absent where it could have been detected.}
+    \label{fig:cortex_graph}
+\end{figure}
 
 \paragraph{Action and memory.}
 A controller plans and follows paths. Its epistemic planner scores the actions that the concept agents offer, such as
@@ -111,8 +131,6 @@ this route succeed?''. The imagination of Section~\ref{sec:lang_hierarchy:imagin
 
 \paragraph{What is missing.}
 \cortex{} can therefore perceive, hold beliefs, act, remember, talk and, when asked, imagine. Its VLM is used only when a
-person speaks, and nothing it knows ever becomes a prior. The robot never questions itself, never imagines on its own
-initiative, and has no signal that tells it when language is needed. Nothing the language agent does is ever learned,
-so the hundredth mission to the kitchen requires the same VLM calls as the first. The inner voice
-(Section~\ref{sec:inner_speech}) and the cultural plane (Section~\ref{sec:lang_hierarchy}) are the additions that
-address these gaps.
+person speaks, nothing it knows becomes a prior, the robot never questions itself or imagines on its own initiative,
+and the hundredth mission to the kitchen requires the same VLM calls as the first. The inner voice
+(Section~\ref{sec:inner_speech}) and the cultural plane (Section~\ref{sec:lang_hierarchy}) address these gaps.
