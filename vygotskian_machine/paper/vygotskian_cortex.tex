@@ -1,0 +1,198 @@
+% =====================================================================================================
+% vygotskian_cortex.tex — The Vygotskian machine, part 2: the CORTEX architecture it is built on
+%
+% DRAFT (2026-11-20). Describes what exists today, as a given resource. Descriptive, not a report of results:
+% every component named here is in the robocomp/active_inference repository (ARCHITECTURE.md is the source).
+% Include after vygotskian_machine.tex and before vygotskian_internalisation.tex.
+% =====================================================================================================
+
+\section{The Starting Point: the CORTEX Architecture}
+\label{sec:cortex}
+
+The Vygotskian machine is not built from scratch. It is added to an existing and working robot architecture, CORTEX,
+which already builds a probabilistic model of the robot's surroundings, acts on that model, remembers it, and talks
+about it with a person through a language agent. This section describes the architecture as it currently stands,
+because each proposal in the later sections is defined by what it adds to these parts and by which of the parts it
+uses without modification. Table~\ref{tab:cortex_parts} summarises this correspondence.
+
+\input{figures/cortex-architecture-overview}
+
+\paragraph{A shared graph of beliefs.}
+At its core, CORTEX is a scene graph that is shared, distributed and persistent. The graph is read and written
+concurrently by a set of independent processes called agents. There is no central server, and agents do not send
+messages to one another; instead, the graph itself is the only interface through which they communicate
+(Figure~\ref{fig:cortex_overview}). Each agent keeps a full replica of the graph, and the replicas are merged as
+conflict-free replicated data types, which are data structures whose copies converge to the same state without
+coordination, over a publish--subscribe middleware. Nodes are typed (room, wall, object, robot, agent) and carry typed
+attributes. The geometric edges hold a rigid transform together with its covariance and a short history of
+timestamps. These edges form a tree that runs from the world through the rooms to the objects, and from the robot's
+base to its sensors, so that the pose of any frame relative to any other is obtained simply by naming the two frames.
+
+In this framework, an agent is not a module that merely detects something. It is a process that maintains a
+probabilistic belief over one kind of entity and publishes that belief into the graph, with its mean and covariance
+together. Other agents treat this posterior as evidence, weighted by the covariance that accompanies it, and never as
+ground truth. A single rule runs through the whole design. Effects that a conventional system would express as a
+threshold, such as ignoring distant detections or deleting an object after ten missed frames, are instead written
+into the generative model, usually as a covariance that grows or shrinks with a physical quantity, so that the
+resulting behaviour follows from the inference itself.
+
+\paragraph{A probabilistic hierarchy.}
+The beliefs in the graph are organised in a hierarchy of five levels (Table~\ref{tab:lh_levels}): the robot itself,
+the rooms it is in, the objects in those rooms, aggregates of objects, and the cultural abstractions, such as what a
+room is for, which CORTEX does not represent and which this paper adds. The hierarchy is probabilistic in both
+directions. Each level is expressed in the frame of the level below it, so that the robot's sensors are expressed in
+its body, the robot's pose in a room, an object's pose in the room that contains it, and an arrangement over the poses
+of its members. The measurements of each level are the posteriors published by the level below, weighted by their
+covariance, and each level can in turn send back down an empirical prior, that is, a message stating what it expects
+its parts to be. The first four levels constitute CORTEX as it exists, and they are built automatically and without
+language. The fifth level is the addition made in this paper, and it is where the Vygotskian machine introduces
+culture. Figure~\ref{fig:cortex_graph} shows, level by level, the graph that CORTEX builds while the robot is in the
+apartment.
+
+\begin{table}[ht]
+    \centering
+    \small
+    \begin{tabular}{|>{\raggedright\arraybackslash}p{0.05\linewidth}|>{\raggedright\arraybackslash}p{0.16\linewidth}|>{\raggedright\arraybackslash}p{0.33\linewidth}|>{\raggedright\arraybackslash}p{0.17\linewidth}|>{\raggedright\arraybackslash}p{0.13\linewidth}|}
+        \hline
+        \textbf{Level} & \textbf{What} & \textbf{Latent} & \textbf{Source of its model} & \textbf{Status} \\ \hline
+        0 & robot (self) & body, sensor mounts, pose & calibration, self-calibration & implemented \\ \hline
+        1 & room(s) & layout of each room, the robot's place in it, the doors that join rooms & authored generative model, fitted online; spatial memory & implemented \\ \hline
+        2 & objects & per instance: class, pose, extent, existence & authored generative models, fitted online & implemented \\ \hline
+        3 & meta-objects (aggregates) & arrangements: a ring of chairs around a table, the rectilinear frame of a kitchen & authored schemas & implemented (the kitchen's priors not yet sent down) \\ \hline
+        4 & cultural abstraction & the function of a room (kitchen, dining, bedroom, \ldots) & \textbf{culture: the VLM}, calibrated against counts & \textbf{added by this paper} (Section~\ref{sec:lang_hierarchy:culture}) \\ \hline
+    \end{tabular}
+    \caption{The probabilistic belief hierarchy. Levels 0--3 are CORTEX as it exists, with geometry authored up to level 3; level 4, cultural abstraction, is the addition of this paper.}
+    \label{tab:lh_levels}
+\end{table}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.8\linewidth,trim=760 200 2850 420,clip]{figures/full_graph_white.png}
+    \caption{The output of CORTEX as a probabilistic active scene graph in the simulated apartment, drawn by stratum.
+    From the top: the robot (Shadow, level~0), localised in \texttt{room\_1} (level~1) through an RT edge that carries
+    a timestamped transform and its covariance~$\Sigma$; the room with its floor, walls and a person; the objects and
+    the affordances they offer (level~2); and the aggregates fitted over the objects (level~3): a dining set, the
+    kitchen frame and a wall shelf. The bottom stratum is not a belief: it is the apartment's true geometry from the
+    simulator, shown for reference, with dashed lines joining each belief to the entity it refers to. The stratum
+    numbers printed in the figure give the drawing order, not the levels of Table~\ref{tab:lh_levels}. Level~4, cultural
+    abstraction, has no stratum, because it is the level that this paper adds.}
+    \label{fig:cortex_graph}
+\end{figure}
+
+\paragraph{Level 0: the robot.}
+An agent dedicated to the robot's body maintains the tree of frames from the base to each sensor and publishes the
+robot's odometry and sensor streams. A self-calibration agent estimates where each sensor is mounted from the robot's
+own observations, so that the transforms on which every other level depends are themselves beliefs with a covariance
+rather than fixed constants.
+
+\paragraph{Level 1: rooms.}
+A room agent jointly estimates the layout of the room the robot is in and the robot's location within it, using LiDAR
+and cameras. The agent decides on the basis of evidence whether the robot has entered a new room or has returned to
+one it already knows. Rooms are joined by doors, and when the robot leaves a room, the spatial memory described below
+retains it. The robot's world is therefore a graph of rooms, of which only one is actively estimated at any given time.
+
+\paragraph{Level 2: objects.}
+Each class of object has its own concept agent, for instance for tables, chairs, cabinets, refrigerators, doors, beds,
+nightstands, toilets and people. All of these agents follow the same pattern. They read the segmentation masks and
+depth published by a perception hub, track individual instances, update a belief over a class-specific generative
+model using a recursive variational Laplace engine shared by all agents, and publish the pose and covariance of each
+instance in the frame of the room that contains it. A door is fitted in the frame of the wall that holds it, so that
+the belief about the wall constrains the door. A residual agent models whatever occupancy the other agents do not
+explain, and it therefore acts as the null hypothesis of the scene. Every instance carries a belief about its
+existence, expressed in log-odds. This belief is raised by evidence that was predicted and observed, and lowered by
+evidence that was predicted but absent, although only where the object could actually have been detected; an occluded
+object is thus retained rather than refuted. The life of an instance, comprising its birth, update, removal, history
+and ownership, follows a single contract that is implemented once in shared modules, so that no agent can omit any of
+these stages.
+
+\paragraph{Level 3: meta-objects.}
+Two agents fit aggregates of objects rather than individual objects. The ring metaconcept fits a table surrounded by
+a ring of chairs, and the kitchen metaconcept fits the frame shared by a kitchen's units, namely one common axis, one
+worktop plane and one carcass depth. The measurements of these agents are the posteriors published by other agents.
+The existence of an aggregate is given by a log Bayes factor that compares the arrangement against an explicit null
+hypothesis of independent objects, and each aggregate sends empirical priors back down to its members. The message
+sent to each member is computed from the arrangement fitted without that member (the cavity of
+Eq.~\eqref{eq:lh_cavity}), so that no member is ever asked to agree with its own evidence. In a limited and purely
+geometric sense, Level 3 is already capable of imagination, because an empty slot in an arrangement predicts where an
+unseen member should be.
+
+\paragraph{Level 4: cultural abstraction --- the addition of this paper.}
+The purpose a room serves, which objects belong together in it, and how the robot should behave there are not
+geometric facts, and none of them is represented in CORTEX. This level is therefore not part of the architecture from
+which we start. It is the contribution of this paper, namely the level that the Vygotskian machine adds on top of the
+four existing ones (Section~\ref{sec:lang_hierarchy:culture}).
+
+\paragraph{Action.}
+The robot is moved by a controller, which plans paths, follows them, and maintains a local model of obstacles. The
+controller's epistemic planner scores the actions offered by the concept agents (for example, looking at a door from a
+given place, or approaching a chair) by their expected free energy, so that the robot moves to where it will learn the
+most. An exploration drive turns this scoring into a default behaviour that requires no instruction. The robot explores
+the current room until further exploration no longer yields enough information, crosses the nearest door that it has
+not yet crossed, and returns in depth-first order. In the terms of Section~\ref{sec:lang_hierarchy:sequencing}, this
+drive constitutes the robot's compiled epistemic plan.
+
+\paragraph{Memory.}
+Three agents retain the information that the live graph discards. The long-term spatial memory stores each room the
+robot has left, together with the doors that connect it to its neighbours, and restores a room as a prior when the
+robot returns to it. The long-term object memory keeps a persistent record of the object instances the robot has seen
+and offers them back for recognition. The episodic memory records the robot's commitments, that is, its missions,
+their steps and the actions it claimed, together with how each of them ended. The episodic memory and the long-term
+object memory provide the counts and the history from which the priors and habits of the Vygotskian machine will be
+learned.
+
+\paragraph{The language agent.}
+The language agent connects a person to all of the components above through a vision-language model (VLM). The
+deployed model is an open-weights model with 26 billion parameters, served on an embedded GPU module with extended
+reasoning disabled, because a reasoning model spent 40 to 80 seconds thinking before each tool call. The design of the
+agent follows a single principle, stated in the code as ``the model proposes, C++ decides''. The VLM sees a summary of
+the graph and of the memories, and it can act only by calling tools. Every tool call passes through a deterministic
+gate, which checks the names it uses against the graph and its arguments against the robot's capabilities. Anything
+the robot would do over an extended period is written as a mission in a small mission language (cross a door, explore
+a room, approach an object, watch for a condition, if, repeat). A checker validates each mission against the current
+graph, and the person must approve it before it runs. While a mission runs, robot events, such as a step finishing, a
+step failing or a watched condition being met, wake the model in turns in which it is restricted to looking, querying
+memory, stopping and proposing, and in which it cannot act. Whether to ask the person or to make an assumption is
+decided by a small decision rule over counts and costs, not by the model. What a person asserts about the world
+(``that is my chair'') is recorded only after an explicit confirmation.
+
+The language agent can also answer subjunctive questions, that is, questions about hypothetical situations, and it
+answers them with the robot's own models rather than with the VLM. An imagined copy of the current room can be edited
+(for example, with a door half open or a chair moved), but this copy can never write to the live graph. On the copy,
+the controller's own model of whether the robot fits through a space answers ``would I fit?'', the perception models
+answer ``would I see it from there?'', a concept's generative prior rendered through the sensor models answers ``how
+likely am I to detect it?'', and the episodic counts answer ``would this route succeed?''. These are the tools on which
+the imagination described in Section~\ref{sec:lang_hierarchy:imagination} relies.
+
+\begin{table}[ht]
+    \centering
+    \small
+    \begin{tabular}{|>{\raggedright\arraybackslash}p{0.3\linewidth}|>{\raggedright\arraybackslash}p{0.6\linewidth}|}
+        \hline
+        \textbf{Existing CORTEX part} & \textbf{What the Vygotskian machine uses it for} \\ \hline
+        Shared belief graph; posteriors published with their covariance
+            & the only place beliefs live; the VLM reads it and never writes a belief into it \\ \hline
+        Concept agents with existence log-odds weighted by detectability
+            & the members whose presence and absence are evidence for a room's function \\ \hline
+        Metaconcepts, their explicit null and the cavity rule
+            & the structure on which the level-4 hypothesis about a room's function is built, and the rule that culture may not confirm itself \\ \hline
+        Controller, epistemic planner, exploration drive
+            & the automatic level that runs while the inner voice is silent; the habit that a specific goal overrides \\ \hline
+        Spatial, object and episodic memories
+            & the counts that replace the VLM's priors, and the episodes that are replayed and compiled into habits \\ \hline
+        Language agent: gate, mission language, checker, restricted wake turns, ask-or-assume rule
+            & the outer and private speech of the machine; the inner voice reuses the same gate and the same missions \\ \hline
+        Imagined room and the \texttt{imagine} tools
+            & imagination answered by the robot's models, chosen by the VLM \\ \hline
+    \end{tabular}
+    \caption{What CORTEX provides today and how the Vygotskian machine uses it.}
+    \label{tab:cortex_parts}
+\end{table}
+
+\paragraph{What is missing.}
+CORTEX can therefore already perceive, hold beliefs, act, remember, talk and, when asked, imagine. The rest of the
+paper is concerned with what it cannot yet do. The VLM is used only when a person speaks, and its knowledge reaches the
+belief state only through what the person approves, so that nothing it knows ever becomes a prior. The robot never
+questions itself, never imagines on its own initiative, and has no signal that tells it when language is needed.
+Moreover, nothing that the language agent does once is ever learned, so that the hundredth mission to the kitchen
+requires the same VLM calls as the first. The Vygotskian machine is the set of additions that closes these gaps,
+namely the inner voice (Section~\ref{sec:inner_speech}) and the cultural plane (Section~\ref{sec:lang_hierarchy}).

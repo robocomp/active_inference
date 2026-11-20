@@ -1,0 +1,45 @@
+% Standalone build of the three Vygotskian machine sections (the same preamble packages main.tex uses).
+%   pdflatex vygotskian_machine_build && biber vygotskian_machine_build && pdflatex vygotskian_machine_build && pdflatex vygotskian_machine_build
+\documentclass[a4paper, twoside]{article}
+\usepackage[backend=biber,style=ieee,sorting=none]{biblatex}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\geometry{a4paper,total={170mm,250mm},left=20mm, top=20mm,}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,shapes.geometric,calc,backgrounds,shadows}
+\usepackage{adjustbox}
+% colours and macros shared with the Autonomous Robots paper's figures
+\definecolor{conceptc}{RGB}{0,82,155}
+\definecolor{conceptf}{RGB}{225,238,255}
+\definecolor{bodyc}{RGB}{180,40,40}
+\definecolor{bodyf}{RGB}{255,230,230}
+\definecolor{arrowc}{RGB}{0,140,120}
+\definecolor{azuloscuro}{RGB}{0,70,140}
+\definecolor{wmf}{RGB}{210,245,250}
+\definecolor{wmc}{RGB}{0,150,200}
+\definecolor{memc}{RGB}{30,120,50}
+\definecolor{memf}{RGB}{225,245,225}
+\definecolor{langc}{RGB}{110,40,150}
+\definecolor{langf}{RGB}{240,228,250}
+\definecolor{cmdc}{RGB}{190,20,20}
+\providecommand{\cortex}{\textsc{cortex}}
+\providecommand{\result}[1]{\textcolor{red}{#1}}   % value pending: swap in, keep the prose
+\usepackage[shortlabels]{enumitem}
+\usepackage{parskip}
+\addbibresource{vygotskian_machine.bib}
+\title{The Vygotskian Machine}
+\author{Pablo Bustos \and Vicente Matell\'an}
+\date{\today}
+\begin{document}
+\maketitle
+\input{vygotskian_machine}
+\input{vygotskian_cortex}
+\input{vygotskian_internalisation}
+\input{vygotskian_cultural_plane}
+\input{vygotskian_experiments}
+\printbibliography
+\end{document}
