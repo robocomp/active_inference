@@ -1002,11 +1002,71 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
     {
         if (not params.allow_start_in_collision)
         { last_failure_ = "start is not footprint-feasible"; return std::nullopt; }
+        int ex = -1, ey = -1;
+        // ★ PREFER A WAY OUT FROM WHICH THE GOAL IS REACHABLE (objects_eps1 leg 2, 2026-11-20). The nearest feasible cell
+        //   can lie in a pocket the belief has sealed — the body overlaps residual cells on both sides of it — and then
+        //   every plan from here fails "not connected" although the robot drove in through that very matter. So first look,
+        //   within the body's reach, for a feasible cell that REACHES the goal, stepping only through free cells and
+        //   residual-only cells (the evidence the robot's own presence contradicts) — never through the room mask or an
+        //   obstacle polygon. The reach is the circumscribed radius: the matter the body overlaps lies within it, and a pose
+        //   just past that matter is within one more body radius of it. Nothing found → the nearest feasible cell, as before.
+        {
+            constexpr int DXr[kHeadings] = {1, 1, 0, -1, -1, -1, 0, 1};
+            constexpr int DYr[kHeadings] = {0, 1, 1, 1, 0, -1, -1, -1};
+            // cells from which the lattice reaches the goal: reverse of plan()'s reachability rule (enter (n,d) iff cell_free(n,d))
+            std::vector<std::uint8_t> to_goal(static_cast<std::size_t>(n_cells), 0);
+            std::vector<int> stack{idx(gx, gy)};
+            to_goal[static_cast<std::size_t>(idx(gx, gy))] = 1;
+            while (not stack.empty())
+            {
+                const int c = stack.back(); stack.pop_back();
+                const int cx = c % w_, cy = c / w_;
+                for (int d = 0; d < kHeadings; ++d)
+                {
+                    const int px = cx - DXr[d], py = cy - DYr[d];
+                    if (not in_bounds(px, py) or to_goal[static_cast<std::size_t>(idx(px, py))] or not cell_free(cx, cy, d)) continue;
+                    bool p_free = false;
+                    for (int h = 0; h < kHeadings and not p_free; ++h) p_free = cell_free(px, py, h);
+                    if (not p_free) continue;
+                    to_goal[static_cast<std::size_t>(idx(px, py))] = 1;
+                    stack.push_back(idx(px, py));
+                }
+            }
+            const float reach = 2.f * footprint.circumscribed_radius();
+            const bool split = occ_nocells_.size() == occ_.size();
+            const auto passable = [&](int ix, int iy)
+            { return not occ_[static_cast<std::size_t>(idx(ix, iy))] or (split and not occ_nocells_[static_cast<std::size_t>(idx(ix, iy))]); };
+            std::vector<std::uint8_t> seen(static_cast<std::size_t>(n_cells), 0);
+            std::queue<std::pair<int, int>> q;
+            q.push({sx, sy});
+            seen[static_cast<std::size_t>(idx(sx, sy))] = 1;
+            const Eigen::Vector2f s0 = cell_to_world(sx, sy);
+            int bx = -1, by = -1;
+            float best = std::numeric_limits<float>::infinity();
+            while (not q.empty())
+            {
+                const auto [cx, cy] = q.front();
+                q.pop();
+                constexpr int NX[4] = {1, -1, 0, 0}, NY[4] = {0, 0, 1, -1};
+                for (int d = 0; d < 4; ++d)
+                {
+                    const int nx = cx + NX[d], ny = cy + NY[d];
+                    if (not in_bounds(nx, ny) or seen[static_cast<std::size_t>(idx(nx, ny))]) continue;
+                    seen[static_cast<std::size_t>(idx(nx, ny))] = 1;
+                    const float dist = (cell_to_world(nx, ny) - s0).norm();
+                    if (dist > reach or not passable(nx, ny)) continue;
+                    if (to_goal[static_cast<std::size_t>(idx(nx, ny))] and dist < best) { best = dist; bx = nx; by = ny; }
+                    q.push({nx, ny});
+                }
+            }
+            ex = bx; ey = by;
+        }
+        if (ex < 0)   // no goal-connected way out within reach: the nearest feasible cell, as before
+        {
         std::vector<std::uint8_t> seen(static_cast<std::size_t>(n_cells), 0);
         std::queue<std::pair<int, int>> q;
         q.push({sx, sy});
         seen[idx(sx, sy)] = 1;
-        int ex = -1, ey = -1;
         while (not q.empty() and ex < 0)
         {
             const auto [cx, cy] = q.front();
@@ -1022,6 +1082,7 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
                 if (ex >= 0) break;
                 q.push({nx, ny});
             }
+        }
         }
         if (ex < 0)
         { last_failure_ = "start is inside an obstacle and NO footprint-feasible cell is reachable from it"; return std::nullopt; }
