@@ -11,7 +11,7 @@ rev 3.2 review (NOT READY; all 3 Critical, 7 Important, 7 Minor written in as R4
 smooth beam model. Rev 3.3.1 11-18 folds Fable's rev 3.3 review (NOT READY; 4 C, 8 I, 9 M); owner C3 = A (returns
 staged by ray geometry, mask ownership as a mixture; reverses 7c.3's "first-hit physics stays out").
 Rev 3.3.2 folds the rev 3.3.1 re-review (READY WITH CHANGES; 2 C, 5 I, 9 M). Rev 3.3.3 folds the rev 3.3.2 re-review
-(READY WITH CHANGES; 1 C, 3 I, 6 M) and the owner's rulings of 11-18; APPROVED by the owner 11-20 ("Yes").
+(READY WITH CHANGES; 1 C, 3 I, 6 M) and the owner's rulings of 11-18; APPROVED by the owner 11-20 ("Yes"). Rev 3.3.4 (11-20, owner: "Spec fix, Fable checks"): the quadrature amendment at the end of §7c.8, pending Fable.
 Branch: `feat/cost-removal` (worktree `active_inference.worktrees/cost-removal`) — this is the prerequisite the
 cost-based-removal spec's G0b found (§2), so it lands on the same branch, before G0b resumes.
 
@@ -958,6 +958,47 @@ hand. "The tolerance" is 7c.7's 1 mm / 1 mrad. The bounds chosen in this list wi
   over-confident (two-sided §8 rule), w and cx reported separately; reported per instance: the staged ray count, the
   rays left out for lack of camera information, the cycles without membership and their longest run, and the
   gap-ray count of stated limit 1.
+
+**Amendment 11-20 (rev 3.3.4; owner: "Spec fix, Fable checks"): the member and foreign terms are integrated in e, not in δ.**
+What was measured (Task 17, 32d879f5, report `task-17-report.md`): with the δ-quantile nodes of "Quadrature" no K ≤ 16
+meets |E_K − E_64| < 0.01 nats per ray: worst 1.94 nats on the box and 4.95 on the headboard fixture at K = 8; by
+incidence on the box n̂·u = 0.1 never passes (E_64 itself is not converged), 0.25 needs K = 19, 0.5 needs K = 21, 1.0
+needs K = 6. The cause is the integrand, not the node placement: in δ the member density St(t(δ) − ρ) is a peak of
+width ≈ c·|∂s/∂t| = c·(n̂·u) on a face, and G(t(δ) − ρ) a step of the same width, while the quantile nodes are spread
+over σ_s. At n̂·u = 0.1 the peak is 0.5 mm wide against σ_s = 10 mm; on the bed's mattress top (n̂·u ≈ 0.017) 0.08 mm.
+- **Change of variable.** For a convex part p the first crossing of level δ lies on the descending branch of the ray's
+  SDF profile, t ∈ [0, t*_p] with t*_p the closest-approach parameter, where s_p(o + t·u) is strictly decreasing. So the
+  crossing is inverted by one SDF evaluation: δ_p(t) = s_p(o + t·u), and dδ = ∂_t s_p dt. With e = t − ρ and φ_σ the
+  N(0, σ_s²) density, on a panel where part p is first hit, levels (δ_lo, δ_hi] ↔ ranges [t_lo, t_hi):
+      ∫ St(t(δ) − ρ) φ_σ(δ) dδ = ∫_{e_lo}^{e_hi} St(e) · φ_σ(s_p(o + (ρ + e)u)) · |∂_t s_p| de.
+  The St peak is absorbed by the variable v = G(e): Gauss–Legendre in v over [G(e_lo), G(e_hi)], dv = St(e) de, leaves
+  the integrand φ_σ(δ(e))·|∂_t s_p(e)|, which is smooth (C¹ on a box part: the outside SDF is C¹; its weight → 0 at t*_p).
+  The member term is m/π times the panel sum. No new constant: the nodes follow the sensor's own density.
+- **Foreign term, by parts in the same variable.** With F(δ) = P(δ' > δ) (upper tail of N(0, σ_s²)) and e(δ) decreasing,
+      ∫_{δ_lo}^{δ_hi} G(e(δ)) φ_σ(δ) dδ = F(δ_lo)·G(e(δ_lo)) − F(δ_hi)·G(e(δ_hi)) − ∫_{e_lo}^{e_hi} St(e)·F(δ(e)) de,
+  so the step G becomes the smooth F(δ(e)) on the same v-nodes, plus boundary terms at the panel limits (F computed
+  in log space as Task 16 does). The likelihood of "The likelihood" is unchanged; only its quadrature moves.
+- **Panels.** As "Quadrature": split at each part's own minimum and at each level where the first-hit part switches,
+  now located in t (the switch is where t_ip = t_iq, the same root). A range of t in which no part is first hit, or
+  t > t*_p, or t < 0, carries no member term. A part with d_ip > 8σ_s opens no panel (the part-level form of the 8σ_s
+  floor of (c), Task 17; machine precision, not a gate).
+- **The curvature's moments** (t̄, J̄, Var t of the range part, (b)) stay on the δ-quantile nodes, which integrate the
+  smooth t(δ); their K_m is set by the Reduction item (smallest K_m meeting its 1 %; Task 17 measured 2.6 % at
+  n̂·u = 0.25 with K = 8 and 4.6e-4 at K = 64). I_d and o_i use S̄, Ḡ from the e-nodes.
+- **Gradient.** θ enters through δ(e; θ) = s_p(o + (ρ + e)u; θ), through |∂_t s_p| (∂²s/∂t∂θ, analytic on a box part),
+  through π_i and the panel limits; at t*_p the integrand's weight is 0, so that limit contributes nothing. Pass's
+  Gradient item checks it as before.
+- **ε-tangent rule withdrawn (Task 17).** For d_ip < 0 the crease at the minimum is found exactly as the two faces of the
+  part that meet there (box geometry), not by tangents at t* ± ε: the ε rule picked the wrong face near a grazing face
+  (one bed ray gave ∂d/∂cy 0.638 against 0.034). ε of the one-sided tangents and the 1e-4 m bracket leave the constants.
+- **Pass changes.** Quadrature: the same grid, with n̂·u extended to 0.017 (the bed's mattress-top rings) and the bed
+  fixture included; the smallest K meeting 0.01 nats is used, and if none ≤ 32 does, the table goes to the owner (not
+  tuned). Continuity and Gradient on the bed: the 0.01-nat second difference and h = 0.1 mm cannot tell a jump from the
+  smooth curvature of a ray at n̂·u ≈ 0.017 (Task 17: 2.38 nats, no jump on refinement), so on that fixture a step
+  passes when its second difference falls by 4× ± 1 on halving h (a jump does not fall), and the gradient is checked
+  at h = 1e-7 m (1 %); the box keeps the original bounds. Face minima (measured, K = 64): e = +10 µm at m = 0.9,
+  +1.70 mm at m = 0.05 (rev 3.3.3's 7 µm / 1.3 mm were estimates). Cost is re-measured; Task 17's δ-node build was
+  0.37 ms (box) / 0.87 ms (bed) at 256 near rays.
 
 ## 8. Pass
 
