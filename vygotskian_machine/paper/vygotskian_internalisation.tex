@@ -95,28 +95,49 @@ ignored for a refractory period.
 
 \paragraph{The grounding constraint.}
 The central design rule is that the language model may suggest hypotheses but only perception may decide between
-them; in short, \emph{the language model proposes and perception disposes}. Text produced by the model may
-introduce hypotheses, predictions and tests, but it may never change a posterior. Only the likelihood
-$p(o \mid h, a)$ in \eqref{eq:inner_update}, computed by the perceptual agents from sensor data, can do so. This
-rule is the counterpart, on the side of beliefs, of the rule that the language agent already enforces for actions,
-under which every proposed command is validated in C++ against the belief graph before it reaches the controller.
-Without it, a language loop addressed to itself would be a closed system in which text is conditioned only on
-text, and it would converge on its own confabulations.
+them. Text produced by the model may introduce hypotheses, predictions and tests, but it may never change a
+posterior. Only the likelihood $p(o \mid h, a)$ in \eqref{eq:inner_update}, computed by the perceptual agents from
+sensor data, can do so. This rule is the counterpart, on the side of beliefs, of the rule that the language agent
+already enforces for actions, under which every proposed command is validated in C++ against the belief graph before
+it reaches the controller. Without it, a language loop addressed to itself would be a closed system in which text is
+conditioned only on text, and it would converge on its own confabulations.
+
+How strictly the rule can be applied depends on whether the hypothesis lies inside or outside the robot's models.
+When $h$ is a class that some concept agent represents, $p(o \mid h, a)$ is that agent's own observation model, and
+the rule holds exactly. When $h$ lies outside every model, such as a bag or a robot vacuum, no agent can evaluate it
+directly, and we do not allow the language model to supply the likelihood in its place. Instead, the language model
+must state its prediction in terms of quantities that existing agents already measure, with their own noise models,
+namely extent, height, occupancy, motion, the residual of a shape fit, and the label and confusion matrix of the
+open-vocabulary detector. The likelihood of the hypothesis is then the probability that the perceptual agents assign
+to their measurements, under a distribution of those quantities that the language model has described in broad
+terms and that is tempered so as not to be sharper than the measurements. The hypothesis ``unknown'' receives a
+broad likelihood that covers the whole measurable range. This weaker form of the rule must be stated plainly. The
+measurement still comes from perception, but the description of what a bag would look like is part of the
+hypothesis and comes from the language model, so a posterior over hypotheses outside the robot's models inherits any
+error in that description. For this reason, such an answer is stored as a resolved question and not as a concept
+belief, and it becomes a belief only when a person confirms it or when a concept model for the class exists.
 
 \paragraph{The proposer as a calibrated prior.}
 The hypotheses the model names, and the probabilities it attaches to them, encode world knowledge the robot has
 not acquired by itself (``chairs come with tables''). We treat this knowledge as a prior whose weight must be
 earned through demonstrated accuracy. Let
-$\pi_{\text{LM}}(h \mid x)$ be the proposer's distribution in context $x$ and $n_x(h)$ the robot's own counts of
-resolved questions in that context. The prior entering \eqref{eq:inner_update} is
+$\pi_{\text{LM}}(h \mid x)$ be the proposer's distribution in context $x$, $n_x(h)$ the robot's own count of
+resolved questions in that context whose answer was $h$, and $N_x = \sum_h n_x(h)$. The prior entering
+\eqref{eq:inner_update} is the mean of a Dirichlet distribution in which the proposer contributes pseudo-counts,
 \begin{equation}
-    q_0(h \mid x) \;\propto\; \pi_{\text{LM}}(h \mid x)^{\beta_x}\, \big(\alpha + n_x(h)\big),
+    q_0(h \mid x) \;=\; \frac{\alpha + \kappa\beta_x\,\pi_{\text{LM}}(h \mid x) + n_x(h)}
+    {\alpha\,|\mathcal{H}| + \kappa\beta_x + N_x},
     \label{eq:inner_prior}
 \end{equation}
-a tempered product of the proposer and a Dirichlet over experience, where $\beta_x \in [0,1]$ is set from the
-proposer's measured calibration in that context (for instance from its Brier score on past questions). Early in
-the robot's life the proposer dominates this prior, and as the counts accumulate, the robot's own experience
-progressively replaces the knowledge borrowed from the language model. The same conjugate form already governs the language agent's decision to ask a person or to assume
+where $\alpha > 0$ is a small symmetric base count that keeps the prior defined before any evidence exists,
+$\kappa$ is the number of resolved questions that the proposer is worth at most, and $\beta_x \in [0,1]$ is the
+robot's estimate of the proposer's reliability in that context. We take $\beta_x$ to be the posterior mean of a
+$\mathrm{Beta}(1,1)$ distribution over the probability that the proposer's most probable hypothesis turns out to be
+the answer, updated once for each resolved question. The language model itself does not change, so $\beta_x$ does
+not measure an improvement of the model but the robot's growing knowledge of how far the model can be trusted.
+The effective weight of the proposer in the prior is $\kappa\beta_x / (\kappa\beta_x + N_x)$. It is large early in
+the robot's life and decreases as the counts accumulate, so that the robot's own experience progressively replaces
+the knowledge borrowed from the language model. The same conjugate form already governs the language agent's decision to ask a person or to assume
 that they moved an object, where a Beta posterior over the person's past answers is compared against the costs of
 asking and of being wrong.
 
@@ -136,12 +157,20 @@ that drives, avoids obstacles and executes missions without the language model, 
 the deliberative voice. We propose to make the allocation of this voice explicit through a scalar \emph{demand}
 signal, computed without the language model each time the textual digest of the belief graph is updated,
 \begin{equation}
-    D_t \;=\; \sum_{k} \pi_k\, \varepsilon_{k,t}^{2} \;+\; \lambda\, \mathbb{1}\!\left[\text{person active}_t\right],
+    D_t \;=\; \sum_{k} \Big( -\log p_k(o_{k,t}) \;-\; \mathbb{E}_{p_k}\!\big[-\log p_k(o_k)\big] \Big)
+    \;+\; \lambda\, \mathbb{1}\!\left[\text{person addresses the robot}_t\right],
     \label{eq:inner_demand}
 \end{equation}
-where $\varepsilon_{k,t}$ are normalised prediction errors reported by the agents (unexplained residual occupancy,
-flips of existence or door beliefs, localisation uncertainty, stalled or failed mission steps, controller refusals)
-and $\pi_k$ their precisions. Three operating modes then follow from two thresholds with asymmetric hysteresis:
+where $o_{k,t}$ is the $k$-th monitored quantity and $p_k$ is the predictive distribution that the agent
+responsible for it already computes. The monitored quantities are the unexplained residual occupancy, the existence
+and door beliefs, the localisation error, the progress of mission steps and the controller's acceptance of
+commands, and a discrete event such as a controller refusal enters through the probability that its agent assigned
+to it. Each term is a surprisal minus its expected value, so that it is zero on average while the agent predicts
+well, and every term is measured in the same unit, which makes them commensurable without any further weighting.
+The precision of each prediction is already contained in $p_k$, so a confident prediction that fails contributes
+more than an uncertain one. Being addressed by a person is not a prediction error, and its term $\lambda$ is set
+equal to $\theta_{\text{hi}}$ below, so that speech addressed to the robot always calls the voice. Three operating
+modes then follow:
 \begin{equation}
     m_t =
     \begin{cases}
@@ -151,15 +180,27 @@ and $\pi_k$ their precisions. Three operating modes then follow from two thresho
     \end{cases}
     \label{eq:inner_modes}
 \end{equation}
-Entering \textsc{wandering} requires demand to stay low for a dwell time $T$; leaving it requires a single sample
-above $\theta_{\text{hi}}$. The robot is therefore slow to let its attention drift away from the task and
-immediate in returning to it. Safety never depends on this arbitration, because the controller's reflexes act on
-their own and the deliberative voice engages only after the reflex has acted, just as a driver becomes aware of a
-hazard only after having braked.
+Entering \textsc{wandering} requires demand to stay low for a dwell time $T$, whereas leaving it requires a single
+sample above $\theta_{\text{hi}}$, and focused mode ends when its question loop terminates by
+\eqref{eq:inner_stop}. The robot is therefore slow to let its attention drift away from the task and immediate in
+returning to it. The values $\theta_{\text{hi}}$, $\theta_{\text{lo}}$ and $T$ are thresholds, and they are the only
+ones that the arbitration introduces. We have not found a way to derive them from the generative model, and we
+declare them as design parameters. In principle $\theta_{\text{hi}}$ is the demand at which the expected value of a
+call to the language model equals the cost of its latency, and we will report the results for a range of values of
+each. The demand signal has one blind spot that must be stated. It responds only to surprise that the automatic
+level itself reports, so a model that is confidently wrong yields low demand and leaves the voice silent. This is
+the failure that the new bitter lesson describes, and the machine detects it only when its consequences eventually
+produce a surprise.
 
-\paragraph{Focused mode} runs the question loop of Section~\ref{sec:inner_speech:questions} on the triggering
-event. \paragraph{Monitoring mode} makes no calls to the language model, so that the voice is ready to engage but
-remains silent.
+Safety does not depend on this arbitration. The controller's reflexes act on their own, below the level at which
+the voice operates, and every command that the voice issues passes the same gate as any other command. A driver
+similarly becomes aware of a hazard only after having braked.
+
+\paragraph{Focused mode.} This mode runs the question loop of Section~\ref{sec:inner_speech:questions} on the
+triggering event.
+
+\paragraph{Monitoring mode.} This mode makes no calls to the language model, so that the voice is ready to engage
+but remains silent.
 
 \paragraph{Wandering mode.}
 When the voice is freed from the task, it is seeded with one recent experience chosen by salience, such as an
@@ -192,8 +233,9 @@ to reality serves the automatic layer on three timescales.
     the scene, arbitration between goals, re-planning through the remembered topology, and recourse to a person.
     \item \textbf{Attention.} The voice can raise precision where it matters, by orienting sensors, increasing a
     detector's rate in a region, or passing a hypothesis to the concept agents as a spatial prior. Such a prior has
-    bounded weight, so that it may accelerate the recognition of an object that is present but cannot create one
-    that is absent, which preserves the grounding constraint.
+    bounded weight. It can accelerate the recognition of an object that is present, and it can raise the
+    existence probability of an absent object only by that bounded amount, which the evidence of absence from the
+    following views then removes.
     \item \textbf{Teaching.} Each resolved surprise is a labelled example that the automatic layer could not have
     produced alone. For instance, an unexplained residual later identified as a chair is a false negative of the
     chair detector, a door that is repeatedly shut in the evening becomes a prior, and a recovery that repeatedly
@@ -228,7 +270,7 @@ convergent, it can be interrupted, and its products persist.
         Goal                    & answer a given question   & resolve a given surprise & none given; seeded by salience \\ \hline
         Dynamics                & convergent                & convergent             & divergent, associative \\ \hline
         Contact with the world  & none                      & thought--action--observation & none (imagination only) \\ \hline
-        Persistence             & discarded                 & question objects, beliefs, lessons & imagined store, hypotheses \\ \hline
+        Persistence             & discarded                 & question objects, perceptually resolved answers, lessons & imagined store, hypotheses \\ \hline
         Interruptible           & no                        & yes                    & yes, resumable \\ \hline
         Latency budget          & n/a                       & $\sim$1\,s, no extended thinking & unbounded, extended thinking \\ \hline
     \end{tabular}
@@ -275,9 +317,8 @@ question is a labelled example, and learning proceeds at four timescales (Table~
 
 The last row of the table engages most directly the hypothesis that language serves as a medium for thought,
 since a cluster of anomalies that no existing concept can explain becomes learnable once it has been named. The
-loop also learns about its own operation. The salience weights $\pi_k$ in \eqref{eq:inner_demand} are adjusted
-according to the information that each trigger actually yielded, the option of asking a person is weighed against
-that of looking, and loops that repeatedly resolve the same way are compiled into
+loop also learns about its own operation. Triggers whose questions repeatedly yield no information are habituated for longer
+periods, the option of asking a person is weighed against that of looking, and loops that repeatedly resolve the same way are compiled into
 reflexive rules, so that the number of language-model calls per hour should \emph{decrease} as competence grows.
 
 \subsection{Why a language model: generation versus evaluation}
@@ -295,7 +336,9 @@ explanations and plans. We therefore use it only as a \emph{proposal distributio
 candidates in a generate-and-test loop whose test is carried out by active inference:
 \begin{itemize}
     \item \emph{Hypotheses outside the built-in models.} A residual blob can be proposed to be a bag, a toppled
-    chair or a robot vacuum, none of which any concept agent represents; the question loop then tests them.
+    chair or a robot vacuum, none of which any concept agent represents. The question loop then tests them
+    through the quantities that existing agents measure, in the weaker form of the grounding constraint
+    described in Section~\ref{sec:inner_speech:questions}.
     \item \emph{Amortised policy search.} Instead of enumerating multi-step policies, the model writes a few
     candidate missions, which are small programs in the mission language; the gate validates them and expected
     free energy scores them.
@@ -314,115 +357,34 @@ deterministic gates can parse and check it and people can audit it; and, once th
 communication with a person comes at no further cost.
 
 \paragraph{Where the knowledge comes from.}
-This argument raises a difficulty for the internalist thesis introduced in the motivation. If the inner voice
-precedes the outer one, the common-sense knowledge on which the value of the proposer rests cannot have arrived
-through communication, and yet a language model acquires all of that knowledge from human text, that is, from the
-outer voices of other people. The difficulty disappears once the language \emph{faculty} is distinguished from its
-\emph{content}. The internalist claim concerns the former, namely a computational system for building unbounded
-hierarchical structures, which is available for thought before it is used for communication
-\cite{hauser2002faculty, berwick2016why}. It makes no claim that what a person knows was acquired without
-language. Human knowledge has three sources: core systems for objects, agents, number and space, present before
-learning \cite{spelke2007core}; individual experience; and, once outer language exists, cumulative cultural
-transmission, which supplies most of what an adult knows \cite{tomasello1999cultural}. Even on the internalist
-view, the inner voice of a modern human is filled largely by the outer voices of others.
-
-The architecture has the same three sources of knowledge, arranged differently. The hand-built generative models
-of the concept agents play the role of \emph{core knowledge}, since they are given before experience and limited
-to a few domains. The robot's own counts $n_x(h)$ in \eqref{eq:inner_prior} constitute \emph{individual
-experience}. The language model plays the role of \emph{culture}, that is, of knowledge distilled from a
-community's communication and inherited by this individual at birth. The robot therefore resembles a child born
-into a culture more than an early hominin, and its inner voice is Vygotskian in origin, because both its format and
-its content were learned from outer speech. Two consequences follow. First, the proposal does not demonstrate the
-internalist thesis and should not be read as doing so. Its claim is functional, namely that an inner use of
-language has epistemic value independently of communication, and this claim holds whatever the origin of the
-language system. Second, the format and the content of the voice can in principle be separated, which turns the
-question into an experiment. A compositional generator over the robot's own concepts and mission language, trained
-only on the robot's experience, would supply the format without the culture. Section~\ref{sec:inner_speech:library}
-describes such a generator.
+This argument might seem to conflict with the internalist thesis introduced in the motivation, because the knowledge
+on which the value of the proposer rests was acquired from human text, that is, from the outer voices of other
+people. The conflict disappears once the language \emph{faculty} is distinguished from its \emph{content}. The
+internalist claim concerns the faculty, a computational system for building hierarchical structures
+\cite{hauser2002faculty, berwick2016why}, and makes no claim that what a person knows was acquired without language.
+The architecture has the three sources of knowledge that a person has \cite{spelke2007core, tomasello1999cultural}.
+The hand-built generative models of the concept agents play the role of core knowledge, the robot's counts $n_x(h)$
+in \eqref{eq:inner_prior} are its individual experience, and the language model plays the role of culture. The
+proposal therefore does not test the internalist thesis. Its claim is functional, namely that an inner use of
+language has epistemic value independently of communication. Because format and content can be separated, the
+contribution of culture becomes an experimental question, which Section~\ref{sec:inner_speech:library} takes up.
 
 \subsection{A control experiment: a language-like format without human culture}
 \label{sec:inner_speech:library}
 
-We claim that a Vygotskian machine needs culture and not merely a language-like format, and this claim can be
-tested only against a machine that has the format without the culture. Library learning, a technique from the
-field of program induction, offers a concrete candidate for such a machine. DreamCoder \cite{ellis2021dreamcoder} learns to
-solve tasks by writing programs and, at the same time, learns the language in which it writes them. It maintains a
-library $\mathcal{L}$, initially a small base language of typed primitives, and a prior $P(\rho \mid \mathcal{L})$
-over programs $\rho$ given by a probabilistic grammar over that library, under which a program that reuses library
-functions is short and therefore probable. Each task $x$ supplies a likelihood $P(x \mid \rho)$, in the original
-work usually the indicator that $\rho$ solves $x$. The system seeks the library and the sets of solutions
-$\mathcal{F}_x$ that jointly maximise
-\begin{equation}
-    P(\mathcal{L}) \prod_{x \in \mathcal{X}} \sum_{\rho \in \mathcal{F}_x} P(x \mid \rho)\, P(\rho \mid \mathcal{L}),
-    \label{eq:dc_objective}
-\end{equation}
-together with a recognition model $Q(\rho \mid x)$, a neural network that predicts from a task which parts of the
-library its solution is likely to use. Optimisation alternates three phases:
-\begin{enumerate}
-    \item \textbf{Wake.} For each task, programs are enumerated in decreasing probability under $Q$, within a time
-    budget, and the best few that solve it are kept in $\mathcal{F}_x$.
-    \item \textbf{Abstraction sleep.} The solutions found so far are refactored to expose shared sub-programs, and
-    those whose addition to $\mathcal{L}$ most shortens the library plus the rewritten solutions become new library
-    functions, following a minimum description length criterion. Refactoring by inverse $\beta$-reduction over
-    version spaces finds abstractions that appear in no program literally.
-    \item \textbf{Dream sleep.} $Q$ is trained to minimise $-\log Q(\rho \mid x)$ on two sources: \emph{replays}, the
-    tasks solved in wake paired with their solutions, and \emph{fantasies}, programs sampled from the current
-    library and executed to produce synthetic tasks, as in the Helmholtz machine \cite{dayan1995helmholtz}.
-\end{enumerate}
-The three phases reinforce one another, because a richer library makes complex solutions short, short solutions
-are found sooner, more solved tasks provide more material to compress, and a better recognition model makes the
-search faster. Concepts such as higher-order list functions or parametrised drawing routines appear in the library
-without ever being defined by hand. Later work makes abstraction learning substantially faster
-\cite{bowers2023stitch} and uses a language model to guide the search and to name the learned abstractions
-\cite{grand2024lilo}, but this use of a language model reintroduces precisely the culture that the present
-experiment excludes.
-
-\paragraph{Relation to the inner voice and to free energy.}
-The negative logarithm of \eqref{eq:dc_objective} is a description length: the complexity of the library and the
-programs plus the inaccuracy of the programs on the tasks. Its minimisation is therefore a form of free-energy
-minimisation over structure, and abstraction sleep is the constructive counterpart of the Bayesian model reduction
-that Active Inference assigns to sleep \cite{friston2017curiosity}. Whereas reduction removes structure whose
-complexity is not justified by the accuracy it provides, abstraction adds structure whose complexity is justified
-in this way. The three phases also correspond to the modes of
-Section~\ref{sec:inner_speech:modes}. Wake is the focused voice solving questions and carrying out missions;
-abstraction sleep is consolidation while wandering, which compresses repeated solutions into reusable lessons; and
-dream sleep is imagination while wandering, which trains the proposer on simulated outcomes. In this generator the
-recognition model occupies the place that the language model occupies in Section~\ref{sec:inner_speech:why_lm},
-since it is also a learned proposal distribution, but one trained only on what this robot has done and imagined.
-
-\paragraph{Two ways to apply library learning to the robot.}
-\begin{itemize}
-    \item \emph{Over the mission language, for policies.} The base language is the mission language's operations
-    (\texttt{cross}, \texttt{explore}, \texttt{approach}, \texttt{watch}, \texttt{if}, \texttt{repeat}) and its
-    predicates. Tasks are the goals the robot has been given or has set itself through inner questions, and the
-    likelihood is the probability that a mission achieves its goal, measured by the controller's outcome on the
-    real robot or, cheaply and repeatably, in simulation. The learned library entries are macro-missions, such as
-    ``look behind door~$D$ and return'' or ``approach $X$ from the side it was last seen from'', which are
-    discovered by compressing the robot's own successful missions instead of being written by people.
-    \item \emph{Over shape primitives, for new concepts.} The concept agents already describe object classes as
-    compositions of primitives in signed distance fields; a table, for instance, is a smooth box top on four
-    cylindrical legs. Taking these primitives and their composition operators (smooth union, placement, repetition,
-    symmetry) as the base language, a recurrent cluster of residual observations that every concept agent leaves
-    unexplained becomes a task, which consists of finding a program whose distance field explains the point clouds
-    of the clusters. The
-    likelihood is the concept agents' existing measurement model, a noise model on signed distance, and the
-    continuous parameters of each candidate program are fitted with the same optimisers the concept agents use.
-    Compression across clusters yields reusable parts and whole-object programs, and a program that recurs is a
-    candidate for a new concept agent. This is structure learning whose candidates come from perception rather than
-    from text.
-\end{itemize}
-
-\paragraph{How the robot setting differs from program induction.}
-Applying library learning to the robot requires three departures from the original setting. First, likelihoods are graded and noisy rather than binary, which
-the objective \eqref{eq:dc_objective} admits directly but which makes enumeration less decisive. Second, real tasks
-are expensive, since a mission takes minutes and a cluster accumulates over days, so that dream sleep in simulation
-carries more of the learning than it does in DreamCoder. Third, tasks are few, so the inner question loop also
-serves as a curriculum, in which surprises select the tasks on which the library is trained.
-
-The resulting library is a compositional language of thought whose vocabulary comes only from what the robot has
-perceived and done. Its abstractions are unnamed, because naming them requires a language shared with others. It
-is at this point that a language model, and with it culture, would enter the architecture, in order to externalise
-concepts that already exist internally, which is the order that the internalist thesis proposes.
+We claim that a Vygotskian machine needs culture and not merely a language-like format, and this claim can be tested
+only against a machine that has the format without the culture. The control used in Section~\ref{sec:experiments}
+is the same language model with every class and function name replaced by a consistent nonsense token. It keeps the
+model's architecture, compute and ability to compose, and loses the cultural knowledge attached to the words. A
+stronger control would build its language from the robot's experience alone, by library learning as in DreamCoder
+\cite{ellis2021dreamcoder}. Such a system writes programs to solve tasks and, between rounds, compresses the solutions
+it has found into new library functions under a minimum description length criterion. Over the mission language, the
+library would come to contain macro-missions such as ``look behind door~$D$ and return''. Over the shape primitives
+of the concept agents, a recurrent cluster of unexplained observations would become a task, and a program that
+explains several such clusters would be a candidate for a new concept. This control is free of the culture carried by
+text but not of its designers' knowledge, which enters through the base language. It is also a substantial system in
+its own right, since the robot's likelihoods are graded and noisy and its tasks are few and expensive, so we leave
+it to later work.
 
 \subsection{Mapping onto the existing architecture}
 \label{sec:inner_speech:mapping}
@@ -441,12 +403,13 @@ which bounded spatial priors reach the concept agents.
 \label{sec:inner_speech:predictions}
 
 In keeping with the evaluation principle adopted throughout this paper, under which policies are compared against
-each other inside one closed loop with the body, sensors and environment held fixed, the proposal makes eight
+each other inside one closed loop with the body, sensors and environment held fixed, the proposal makes nine
 falsifiable predictions, each tested in simulation by moving known objects and introducing unfamiliar ones:
 \begin{enumerate}[label=\textbf{P\arabic*}]
     \item The unexplained residual mass per room decreases faster with the focused loop than without it.
-    \item The proposer's calibration on resolved questions improves, and $\beta_x$ in \eqref{eq:inner_prior}
-    decreases, as the robot's own counts accumulate.
+    \item The estimate $\beta_x$ in \eqref{eq:inner_prior} converges to the proposer's measured reliability on
+    resolved questions, and the effective weight of the proposer, $\kappa\beta_x/(\kappa\beta_x + N_x)$, decreases as
+    the robot's own counts accumulate.
     \item Detector false-negative rates fall after retraining on question-labelled examples.
     \item Inner questions per hour decrease over repeated exposure to the same environment while answer accuracy
     is maintained.
@@ -455,47 +418,49 @@ falsifiable predictions, each tested in simulation by moving known objects and i
     \item With the language-model proposer replaced by a fixed hypothesis set (the existing concept classes and
     ``unknown'') and template-based missions, the loop resolves fewer questions about objects and failures outside
     the built-in models, and acquires new categories more slowly.
-    \item \emph{The non-Vygotskian control.} A library-learning generator trained only on the robot's own experience
-    (Section~\ref{sec:inner_speech:library}), with no language model in the loop, supplies the format without the
-    culture. The prediction has two parts.
-    \begin{enumerate}[label=(\alph*)]
-        \item \emph{Policies.} Over the mission language, the mean description length of the robot's successful
-        missions decreases across wake--sleep cycles; the library-learning proposer approaches the language-model
-        proposer on recurring goal types in a familiar environment, and falls further behind it the further a goal
-        departs from those seen before.
-        \item \emph{Concepts.} An object class absent from every concept agent and introduced in simulation (boxes,
-        for instance) is recovered as a library program whose likelihood on held-out instances exceeds that of the
-        ``unknown'' model, and whose adoption as a concept prior reduces the unexplained residual mass.
-    \end{enumerate}
+    \item \emph{The non-Vygotskian control.} The same VLM, with every class and function name replaced by a
+    consistent nonsense token, supplies the format of language without its culture. The machine fed with culture
+    and the control perform alike on recurring goal types in a familiar environment, and the control falls further
+    behind the further a goal departs from those seen before. The departure is measured before the experiment, as the
+    number of object classes, mission operations and rooms in a reference solution of the goal that do not occur in
+    any goal the robot has already performed.
     \item \emph{Private speech.} The rate of language-model calls behaves as children's private speech does
     \cite{berk1992children}: within an environment it rises when tasks are made harder or novel (doors shut that are
     usually open, unfamiliar objects introduced) and falls with repeated exposure to the same tasks, while task
-    success is maintained.
+    success is maintained. This prediction alone does not distinguish the machine from a cache of the VLM's answers.
+    \item \emph{Abbreviation.} Before the inner voice falls silent on a recurring task, it becomes abbreviated, as
+    Vygotsky described for inner speech \cite{vygotsky1986thought}. The questions and missions that the robot
+    produces for that task lose the components that are already settled in its counts and habits, and keep only
+    those still in doubt, so that their length decreases over sessions before the calls stop. A cache of the VLM's
+    answers would instead reuse the full answer until it stops calling.
 \end{enumerate}
 A failure of P1 would indicate that the epistemic value of language-mediated questions does not exceed that of
 the existing exploration; a failure of P4 would indicate that the loop does not transfer competence to the
 automatic layer, which is its principal claim; and a failure of P6 would indicate that the language model adds
 nothing a fixed hypothesis set does not, which would remove the case for including it. P7 is the control for the
 central claim of the machine, because it separates the contribution of language as a format for thought from that
-of the culture it carries. If the culture-free generator matches the culture-fed one on situations far from the robot's
-experience, the machine need not be Vygotskian; if it falls behind there, culture is doing work that format alone
-cannot. Success of P7(b) would in addition show that a compositional inner language grounded only in perception can
-form a new concept before any word for it exists. P8 tests the dynamics implied by the name of the machine, in
-which language is recruited when a task becomes difficult and withdrawn once the task has been mastered.
+of the culture it carries. If the control matches the machine fed with culture on situations far from the robot's experience, the machine need
+not be Vygotskian. If it falls behind there, culture is doing work that format alone cannot do. The library-learning
+control of Section~\ref{sec:inner_speech:library} would test in addition whether a compositional inner language
+grounded only in perception can form a new concept before any word for it exists, and we leave that test to later
+work. P8 tests the dynamics implied by the name of the machine, in
+which language is recruited when a task becomes difficult and withdrawn once the task has been mastered. Because a
+cache of the VLM's answers would show the same dynamics, P8 is necessary but not sufficient, and P9 is the test that
+separates internalisation from caching.
 
 \subsection{Limitations}
 \label{sec:inner_speech:limitations}
 
-The demand signal \eqref{eq:inner_demand} sums heterogeneous prediction errors whose precisions must themselves be
-calibrated, and a poorly scaled term will either suppress the voice or keep it permanently engaged. A single
-language model serves the person, the focused loop and the wandering loop; pre-emption keeps the person first but
-bounds how much offline reasoning a busy robot can do. The tempered prior \eqref{eq:inner_prior} is a heuristic
-combination rather than a derived posterior. The generator of P7 is substantially harder to build than the
-ablation of P6. Library learning is computationally expensive, and its search over program structure must here be
-interleaved with continuous fitting of shape parameters. Its base languages, namely the mission operations and the
-shape primitives, are designed by people, so the generator is free of the culture carried by text but not of the
-designers' knowledge, which plays the role of core knowledge. A cheaper approximation, in which a small pre-trained
-model is fine-tuned on the robot's logs, would reintroduce culture through its pre-training. Finally, the analogy
+The demand signal \eqref{eq:inner_demand} is only as good as the predictive distributions of the agents. An agent
+whose predictive distribution is too narrow will keep the voice engaged, and one whose distribution is too broad
+will suppress it. The signal also grows with the number of monitored quantities, so its thresholds must be set again
+when agents are added. A single language model serves the person, the focused loop and the wandering loop.
+Pre-emption keeps the person first, but it bounds how much offline reasoning a busy robot can do. The pseudo-count
+$\kappa$ in \eqref{eq:inner_prior} is a design choice, and the estimate of reliability $\beta_x$ is learned only from
+questions that were resolved, which over-represents the questions that are easy to resolve. The nonsense-token control
+of P7 removes the culture attached to words, but the VLM may still recognise a scene from its structure, so the
+control removes most of the culture but not all of it. The library-learning control would avoid this, at the cost
+of a separate system. Finally, the analogy
 with human inner speech is functional rather than mechanistic. The proposal is that the same computational role,
 namely serial and compositional self-questioning in the service of epistemic value, is useful for a robot, not
 that the robot's voice resembles the human one in any further respect.

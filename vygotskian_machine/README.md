@@ -28,7 +28,7 @@ first between people, then within the individual (Vygotsky).
 | `paper/figures/cortex-architecture-overview.tex` | Fig. 1: TikZ architecture (from the Autonomous Robots paper), extended with a LANGUAGE LEVEL band (outer speech solid; inner voice + cultural plane dashed = this paper), the command gate, and a dashed level-4 function agent |
 | `paper/vygotskian_machine.bib` | shared bibliography (all entries written from memory — **verify before submission**) |
 | `paper/vygotskian_machine_build.tex` | standalone build: `pdflatex`, `biber`, `pdflatex` ×2 |
-| `paper/vygotskian_machine.pdf` | the built draft, 27 pp. (authors: Pablo Bustos, Vicente Matellán) |
+| `paper/vygotskian_machine.pdf` | the built draft, 29 pp. (authors: Pablo Bustos, Vicente Matellán) |
 | `paper/figures/full_graph.png` | original render (dark background) of Fig. 2 |
 | `paper/figures/full_graph_white.png` | Fig. 2 as used: recoloured to a white background with black text (grey pixels inverted, saturated colours kept); included as `figures/full_graph_white.png` (relative to `paper/`), cropped with `trim` |
 

@@ -1,64 +1,86 @@
 % =====================================================================================================
 % vygotskian_experiments.tex — The Vygotskian machine, part 5: experimental evidence
 %
-% DRAFT (2026-11-20). STRUCTURE ONLY: no experiment of the Vygotskian machine has been run yet. Every number is a
-% red \result{} placeholder; the prose says what each experiment measures and which prediction it tests, so that the
-% values can be swapped in without rewriting. Order = the build order of the design note (Part E): each experiment
-% gates the next. Include after vygotskian_cultural_plane.tex.
+% DRAFT (2026-11-20, revised after the critical review). STRUCTURE ONLY: no experiment of the Vygotskian machine
+% has been run yet. Every number is a red \result{} placeholder; the prose says what each experiment measures and
+% which prediction it tests, so that the values can be swapped in without rewriting. Order = the build order of the
+% design note (Part E): each experiment gates the next. Include after vygotskian_cultural_plane.tex.
 % =====================================================================================================
 
 \section{Experimental Evidence}
 \label{sec:experiments}
 
-The experiments are presented in the order in which the machine is built, and each experiment must succeed before
-the next one begins. Each new piece of the machine is first run in a read-only mode, in which it logs what it would
-have done and is scored against what actually happened; only when that score is good is the piece allowed to
-influence the robot. The existing metaconcepts were introduced by the same rule (Section~\ref{sec:cortex}), and as a
-consequence every experiment below also checks that the previous step changed nothing it should have left untouched.
-Table~\ref{tab:exp_overview} lists the experiments together with the predictions that each one tests.
+We present the experiments in the order in which the machine is built, and each experiment must succeed before the
+next one begins. Each new piece of the machine is first run in a read-only mode, in which it logs what it would have
+done and is scored against what actually happened. Only when that score is good is the piece allowed to influence the
+robot. As a consequence, every experiment also checks that the previous step changed nothing it should have left
+untouched. Table~\ref{tab:exp_overview} lists the experiments together with the predictions that each one tests.
+Every prediction of Sections~\ref{sec:inner_speech:predictions} and~\ref{sec:lang_hierarchy:predictions} is assigned
+to exactly one experiment.
 
 \begin{table}[ht]
     \centering
     \small
-    \begin{tabular}{|>{\raggedright\arraybackslash}p{0.06\linewidth}|>{\raggedright\arraybackslash}p{0.36\linewidth}|>{\raggedright\arraybackslash}p{0.14\linewidth}|>{\raggedright\arraybackslash}p{0.32\linewidth}|}
+    \begin{tabular}{|>{\raggedright\arraybackslash}p{0.06\linewidth}|>{\raggedright\arraybackslash}p{0.40\linewidth}|>{\raggedright\arraybackslash}p{0.15\linewidth}|>{\raggedright\arraybackslash}p{0.27\linewidth}|}
         \hline
         & \textbf{Question} & \textbf{Predictions} & \textbf{Mode} \\ \hline
-        E1 & Does culture, elicited from the VLM, agree with the priors we wrote by hand? & L0 & offline \\ \hline
-        E2 & Does the function evidence recover what each room is for? & L1 & offline, on recorded tours \\ \hline
-        E3 & Does the level-4 function agent work live, and survive a missing object? & L1 & live, read-only \\ \hline
-        E4 & Does every mission step predict its belief outcome, and is a divergence caught early? & L3 & live, display only \\ \hline
-        E5 & Does the inner voice resolve what the automatic level cannot? & P1, P4, P6 & live \\ \hline
-        E6 & Does imagination prepare the robot for what comes next? & L4, P5 & live \\ \hline
-        E7 & Is the scaffold withdrawn, and is culture what does the work? & L6, P7, P8 & live, repeated sessions \\ \hline
+        E1 & Does culture elicited from the VLM agree with measured frequencies and with the priors we wrote by hand? & L0 & offline \\ \hline
+        E2 & Does the function evidence recover what rooms are for? & L1 (corpus) & offline, labelled corpus and recorded tours \\ \hline
+        E3 & Does the function agent work live, survive a missing object, and resist a wrong prior? & L1 (live) & live, read-only \\ \hline
+        E4 & Do missions over beliefs search better, and is a divergence caught early? & L2, L3 & live \\ \hline
+        E5 & Does the inner voice resolve what the automatic level cannot? & P1, P2, P4, P6 & live \\ \hline
+        E6 & Does imagination prepare the robot for what comes next? & L4, L5, P5 & live \\ \hline
+        E7 & Is the scaffold withdrawn, is culture what does the work, and does a stale habit give way? & L6, P3, P7, P8, P9 & live, repeated sessions \\ \hline
     \end{tabular}
     \caption{The experiments, in build order. Each gates the next.}
     \label{tab:exp_overview}
 \end{table}
 
-\subsection{Setting}
+\subsection{Setting and statistical design}
 \label{sec:experiments:setting}
 
-All experiments run on \cortex{}, as described in Section~\ref{sec:cortex}, with every agent of
-Figure~\ref{fig:cortex_overview} active. The robot operates in a simulated apartment of three rooms connected in a
-ring by three doors: an open-plan room containing a kitchen run, a dining table with chairs and a desk; a bedroom; and
-a bathroom. Because the simulation fixes the body, the sensors and the world, two versions of the machine can be
-compared in the same closed loop on identical tours, and the simulator provides the true function of every room and
-the true position of every object. The language agent uses the deployed open-weights model (Section~\ref{sec:cortex}).
-The same VLM is used in every condition, so that any differences between conditions arise from how the model is used
-rather than from which model is used. During every run, a passive recorder logs the history of the shared graph, so
-that the offline experiments can replay real tours. Experiments E5--E7 are repeated on the physical robot, Shadow, in a
-real apartment, in order to check that the results obtained in simulation carry over.
+All live experiments run on \cortex{}, as described in Section~\ref{sec:cortex}, with every agent of
+Figure~\ref{fig:cortex_overview} active. Experiments E3 to E6 use a simulated apartment of three rooms connected in a
+ring by three doors, namely an open-plan room containing a kitchen run, a dining table with chairs and a desk, a
+bedroom and a bathroom. Because the simulation fixes the body, the sensors and the world, two versions of the machine
+can be compared in the same closed loop on identical tours, and the simulator provides the true function of every room
+and the true position of every object. Three rooms are too few for the robot's counts to outweigh the VLM, since each
+function would be confirmed at most once. Experiment E7 therefore uses a set of \result{--} simulated apartments,
+furnished procedurally from a library of rooms, in which the same functions recur with different furniture and
+layouts. Experiments E1 and E2 are offline and use, in addition to the robot's own recorded tours, a labelled corpus
+of real homes with room categories and object annotations, such as Matterport3D or HM3D, which contains several
+hundred rooms. A passive recorder logs the history of the shared graph during every run, so that the offline
+experiments can replay real tours. Experiments E5 to E7 are repeated on the physical robot, Shadow, in a real
+apartment, with \result{--} sessions per condition, to check that the results obtained in simulation carry over.
 
-\subsection{E1 --- Culture elicited from the VLM}
+The language agent uses the deployed open-weights model (Section~\ref{sec:cortex}), and every condition uses the same
+model unless stated otherwise, so that differences between conditions arise from how the model is used rather than
+from which model is used. Every conclusion is therefore conditional on that model, and E7 repeats its main comparison
+with a second VLM. Each live condition is run \result{--} times with different random seeds for the start pose, the
+placement of movable objects and the timing of seeded events. We report means with 95\% bootstrap confidence
+intervals, and compare conditions with paired tests on identical seeds. The novelty of a goal, used in E7, is fixed
+before any data are collected, as the number of object classes, mission operations and rooms in a reference solution
+of the goal that do not occur in any goal the robot has already performed.
+
+\subsection{E1: Culture elicited from the VLM}
 \label{sec:experiments:e1}
 
 In the current system, the kitchen metaconcept weighs each candidate member of a kitchen unit by its log-odds of
 membership, $\log P(c \mid \text{kitchen unit}) / P(c \mid \text{not})$, a value that was written by hand for each of
-seven object classes. In this experiment, we elicit the same quantity from the VLM. The model is asked one question per
-class and per hypothesis, chooses its answer from a closed vocabulary and runs at temperature zero; each question is
-posed in three paraphrases, of which we keep the median answer and record the spread. Table~\ref{tab:exp_e1} compares
-the elicited values with the authored ones. Prediction L0 holds if the elicited values agree in sign with the authored
-ones, and if replaying the logged kitchen fits with the elicited values changes no correct membership decision.
+seven object classes. In this experiment, we elicit the same level-3 quantity from the VLM, together with the level-4
+probabilities $\pi_{cf}$ and $\pi_{c0}$ of Eq.~\eqref{eq:lh_function_evidence}, which have no hand-written
+counterpart. The model is asked one question per class and per hypothesis, chooses its answer from a closed vocabulary
+and runs at temperature zero. Each question is posed in three paraphrases, of which we keep the median answer and
+record the spread. Agreement in sign with the hand-written values would be a weak test, because six of the seven are
+positive and a model that always answers ``likely'' would agree on six. We therefore report three measures. The
+first is the rank correlation between the elicited and hand-written log-odds (Table~\ref{tab:exp_e1}). The second is
+the calibration of the elicited $\pi_{cf}$ against the frequencies of each class in the rooms of each function in the
+labelled corpus, measured by the Brier score and compared with a prior that always answers ``likely'' and with a
+uniform prior. The third is the number of correct membership decisions that change when the logged kitchen fits are
+replayed with the elicited values. Prediction L0 holds if the rank correlation is positive, if the elicited priors are
+better calibrated than both baselines, and if no correct decision changes. The hand-written values are themselves
+cultural guesses, so agreement with them shows only consistency, and the comparison with measured frequencies is what
+tests the elicited culture against the world.
 
 \begin{table}[ht]
     \centering
@@ -74,67 +96,93 @@ ones, and if replaying the logged kitchen fits with the elicited values changes 
         microwave        & $1.5$  & \result{--} & \result{--} \\ \hline
         chest of drawers & $-0.5$ & \result{--} & \result{--} \\ \hline
     \end{tabular}
-    \caption{Kitchen membership log-odds written by hand, compared with those elicited from the VLM (E1). Number of
-    membership decisions changed on replay: \result{--} of \result{--}.}
+    \caption{Kitchen membership log-odds written by hand, compared with those elicited from the VLM (E1). Rank
+    correlation: \result{--}. Brier score of the elicited $\pi_{cf}$ on the corpus: \result{--}, against \result{--}
+    for the constant prior and \result{--} for the uniform prior. Membership decisions changed on replay:
+    \result{--} of \result{--}.}
     \label{tab:exp_e1}
 \end{table}
 
-When the same procedure is extended to every class known to the concept agents and to the seven room functions, it
-produces the pseudo-counts of Eq.~\eqref{eq:lh_beta_prior}. Their spread across paraphrases is reported for each
-entry, because a prior that the VLM cannot state consistently should carry less weight.
+When the procedure is extended to every class known to the concept agents and to the room functions of the corpus
+(kitchen, dining room, living room, bedroom, bathroom, office and corridor), it produces the pseudo-counts of
+Eq.~\eqref{eq:lh_beta_prior}. Their spread across paraphrases is reported for each entry, because a prior that the
+VLM cannot state consistently should carry less weight. The limit of this experiment is that the corpus describes
+homes of a particular culture and period, so calibration against it measures agreement with that culture rather than
+with homes in general.
 
-\subsection{E2 --- Function evidence on recorded tours}
+\subsection{E2: Function evidence offline}
 \label{sec:experiments:e2}
 
-In this experiment, the function evidence $\Lambda_f(r)$ of Section~\ref{sec:lang_hierarchy:culture}, that is, the
-evidence that room $r$ serves function $f$, is computed offline over recorded tours from the objects present in each
-room and from the places where the robot searched. Each room is labelled with its true function from the simulator,
-using the robot's true position at the moment the room was first instantiated, since the robot names rooms in the
-order in which it enters them. Two results are reported. The first is the set of functions whose evidence rises above
-the null value in each room, compared with the true functions: \result{--} of \result{--} rooms are correct, with
-\result{--} false functions. The second is the evolution of $\Lambda_f$ as the exploration of the room becomes more
-complete. If the term for objects that are expected but absent works as intended, every $\Lambda_f$ starts at zero and
-moves away from zero only as the room is explored (Figure~\result{--}).
+In this experiment, the function evidence $\Lambda_f(r)$ of Section~\ref{sec:lang_hierarchy:culture} is computed
+offline. On the labelled corpus, we treat each annotated object as a detection with $p_c = 1$, and we take $d_c = 1$
+for classes that are annotated as absent, because the corpus is complete. We compare four sources of the priors
+$\pi_{cf}$, namely the VLM, a uniform prior, the hand-written table where one exists, and the empirical
+co-occurrence frequencies measured on one half of the corpus and tested on the other half. As a fifth baseline, the
+VLM is shown an image of the room and asked directly for its function. For each source we report the fraction of
+rooms whose true functions receive positive evidence, the number of false functions, and the area under the
+precision--recall curve (\result{--}). The empirical frequencies are an upper bound on what any prior can achieve,
+and the VLM shown the image is the baseline that the machine must justify, because it requires no belief hierarchy.
 
-\subsection{E3 --- The function agent, live and read-only}
+On the robot's recorded tours, each room is labelled with its true function from the simulator, using the robot's
+true position at the moment the room was first instantiated. Here the question is how $\Lambda_f$ evolves as the room
+is explored. Each $\Lambda_f$ should start at its prior log-odds and move away from it only as the room is explored,
+since the term for expected but absent classes is weighted by detectability (Figure~\result{--}). The limit of the
+corpus evaluation is that it assumes perfect detection, so it tests the priors and the form of the evidence, and the
+recorded tours are needed to test them under the robot's own perception.
+
+\subsection{E3: The function agent, live and read-only}
 \label{sec:experiments:e3}
 
-In this experiment, the level-4 function agent runs live on the metaconcept chassis while the robot explores the
+In this experiment, the level-4 function agent runs live on the metaconcept machinery while the robot explores the
 apartment from scratch. The agent publishes nothing and only logs $\Lambda_f$ for every room. It is scored as in E2,
-but now on the posteriors as they evolve during exploration. In a second condition, the refrigerator is removed from
-the simulated kitchen. Prediction L1 holds if the kitchen hypothesis becomes weaker without disappearing; we report the
-final value of $\Lambda_{\text{kitchen}}$ with the refrigerator (\result{--}), without it (\result{--}), and the null
-value (\result{0}). If a function hypothesis collapses when a single diagnostic object is missing, it has been given
-too strong a prior, and in that case the priors obtained in E1 are revised before the next experiment begins.
+but now on the posteriors as they evolve during exploration. Three further conditions test the protections described
+in Section~\ref{sec:lang_hierarchy:culture}. In the first, the refrigerator is removed from the simulated kitchen.
+Prediction L1 requires the kitchen hypothesis to become weaker without disappearing, and we report the final value of
+$\Lambda_{\text{kitchen}}$ with the refrigerator (\result{--}) and without it (\result{--}), against its prior
+log-odds (\result{--}). In the second, a room is furnished atypically, with a refrigerator in the bedroom. In the
+third, the elicited prior is deliberately corrupted, by exchanging the values of $\pi_{cf}$ between the kitchen and
+the bathroom. In the last two conditions, we report how many rooms a person must confirm before the robot's counts
+override the wrong prior, and whether the posterior computed with the VLM's pseudo-counts and the posterior computed
+without them agree on held-out rooms once they do (\result{--}). These conditions test the claim that the VLM's output
+is a proposal and never a belief. If a function hypothesis collapses when a single diagnostic object is missing, its
+prior is too strong, and the priors obtained in E1 are revised before the next experiment begins.
 
-\subsection{E4 --- Plans that predict their belief outcome}
+\subsection{E4: Missions over beliefs}
 \label{sec:experiments:e4}
 
-Each mission step declares the change of belief that it is expected to produce
-(Section~\ref{sec:lang_hierarchy:sequencing}), and the interpreter checks this expectation against the graph. In this
-experiment, the demand signal, which decides when the robot switches into focused mode, is computed and displayed but
-does not drive anything. Divergences between the plan and the world are seeded deliberately during missions: a door on
-which the plan relies is closed, an object is moved, or a room is left unexplored. For each seeded divergence, we
-measure whether it is detected, how much earlier it is detected than the moment at which a step would have failed, and
-whether the demand signal crossed into focused mode. Prediction L3 states that, when expected outcomes and assumptions are included in the
-demand signal, \result{--}\% of the seeded divergences are caught before any step fails, compared with \result{--}\%
-when they are not included.
+This experiment has two parts. In the first, the robot is asked to find objects (``find a mug'') with and without the
+level-3 and level-4 predicates and goals of Section~\ref{sec:lang_hierarchy:sequencing}. Prediction L2 holds if the
+search takes less time and distance with them than with the exploration drive alone, and if fewer objects remain
+unseen in rooms counted as explored (\result{--} versus \result{--}). In the second part, each mission step declares
+the change of belief that it is expected to produce, and the interpreter checks this expectation against the graph.
+The demand signal is computed and displayed but does not drive anything. Divergences between the plan and the world
+are seeded during missions. A door on which the plan relies is closed, an object is moved, or a room is left
+unexplored. For each seeded divergence, we measure whether it is detected, how much earlier it is detected than the
+moment at which a step would have failed, and whether the demand signal crossed into focused mode. Prediction L3 holds
+if, with expected outcomes and assumptions in the demand signal, a larger fraction of seeded divergences is caught
+before any step fails, and earlier, than when the demand signal sees only step completion and failure (\result{--}\%
+versus \result{--}\%, median lead time \result{--}~s).
 
-\subsection{E5 --- The inner voice}
+\subsection{E5: The inner voice}
 \label{sec:experiments:e5}
 
 In this experiment, the inner voice is enabled. Detectors raise questions that the robot addresses to itself about
 unexplained occupancy and about unfamiliar objects, the VLM proposes tests that could answer them, and only perception
-is allowed to change the answer (Section~\ref{sec:inner_speech:questions}). The machine is compared with \cortex{}
-alone on the same tours, in which known objects are moved and unfamiliar ones are introduced. Three measures
-correspond to the predictions. The first is the unexplained residual mass per room over time, that is, the part of the
-observed occupancy that no current model accounts for (P1: \result{--} with the voice, \result{--} without). The second
-is the number of inner questions per hour over repeated visits to the same rooms, while answer accuracy is maintained
-(P4: from \result{--} to \result{--}). The third repeats the same loop with the VLM replaced by a fixed set of
-hypotheses, namely the existing classes and ``unknown'', in order to measure what the VLM contributes (P6: questions
-resolved outside the built-in models, \result{--} versus \result{--}).
+is allowed to change the answer (Section~\ref{sec:inner_speech:questions}). Known objects are moved and unfamiliar
+ones are introduced. The machine is compared with \cortex{} alone, and also with \cortex{} equipped with a look policy
+that chooses views by expected information gain without language and that is given the same budget of motion and
+time as the voice uses. The second comparison separates the contribution of the questions from the contribution of
+simply looking more. Four measures correspond to the predictions. The first is the unexplained residual mass per room
+over time, that is, the part of the observed occupancy that no current model accounts for (P1: \result{--} with the
+voice, \result{--} with \cortex{} alone, \result{--} with the matched look policy). The second is the estimate
+$\beta_x$ of the proposer's reliability and the effective weight of the proposer, recorded as resolved questions
+accumulate (P2, Figure~\result{--}). The third is the number of inner questions per hour over repeated visits to the
+same rooms while answer accuracy is maintained, reported with the habituation of triggers disabled, since habituation
+alone would reduce the rate (P4: from \result{--} to \result{--}). The fourth repeats the loop with the VLM replaced
+by a fixed set of hypotheses, namely the existing classes and ``unknown'', to measure what the VLM contributes (P6:
+questions resolved outside the built-in models, \result{--} versus \result{--}).
 
-\subsection{E6 --- Imagination}
+\subsection{E6: Imagination}
 \label{sec:experiments:e6}
 
 While demand remains low, the machine engages in imagination. It rehearses the next legs of the running mission and
@@ -144,29 +192,51 @@ corresponding observation arrives, which measures how well calibrated imaginatio
 (\result{--}). A surprise is then seeded in the middle of a mission, and we measure the latency until a validated new
 plan is available, with and without the contingency plans prepared during the periods of low demand (L4, P5:
 \result{--}~s versus \result{--}~s), together with the number of views needed to confirm an expected object
-(\result{--} versus \result{--}).
+(\result{--} versus \result{--}). For L5, the two-tier kitchen model is re-created without its tall tier, and we
+report whether counterfactual and structural replay propose the missing tier, and after how many replay episodes
+(\result{--}).
 
-\subsection{E7 --- The scaffold withdrawn}
+\subsection{E7: The scaffold withdrawn}
 \label{sec:experiments:e7}
 
-The last experiment tests the claim expressed in the name of the machine. The robot lives in the same apartment over
-repeated sessions and is given a mix of recurring and novel tasks. If the machine internalises what it receives, three
-effects should appear together. First, the weight of the VLM's priors is overtaken by the robot's own counts, and the
-calibration $\beta_f$ improves. Second, the number of VLM calls per hour falls while task success is maintained (L6:
-from \result{--} to \result{--} calls per hour, success \result{--}). Third, VLM use rises again when tasks are made
-harder or new, in the same way as children's private speech does (P8, Figure~\result{--}). Finally, a non-Vygotskian
-control condition replaces the culture supplied by the VLM with a library learned only from the robot's own experience
-(Section~\ref{sec:inner_speech:library}). Prediction P7 holds if the control matches the machine supplied with culture
-on recurring tasks and falls behind it in proportion to how far a task departs from what the robot has seen
-(Figure~\result{--}). If such a gap appears, it measures the contribution of culture.
+The last experiment tests the claim expressed in the name of the machine. The robot lives in the set of apartments
+over repeated sessions and is given a mix of recurring and novel tasks, whose novelty is measured as defined in
+Section~\ref{sec:experiments:setting}. If the machine internalises what it receives, three effects should appear
+together. First, the effective weight of the VLM's priors falls as confirmed rooms accumulate, and the estimate of its
+reliability $\beta_f$ converges. Second, the number of VLM calls per hour falls while task success is maintained (L6:
+from \result{--} to \result{--} calls per hour, success \result{--}). We report calls made to understand the person
+separately from calls made to plan, because only the second kind should fall. Third, VLM use rises again when tasks
+are made harder or new, in the same way as children's private speech does (P8, Figure~\result{--}). Because these
+three effects would also appear in a system that only caches the VLM's answers, we also measure the length of the
+robot's inner questions and missions for each recurring task across sessions. Prediction P9 holds if this length
+decreases before the calls stop, keeping only the components still in doubt (\result{--} tokens in the first session,
+\result{--} in the last before silence). Across the same sessions, the detectors are retrained on the examples
+labelled by resolved questions, and P3 holds if their false-negative rate falls (\result{--} to \result{--}).
+
+To test whether culture is what does the work (P7), the machine is compared with four controls on the same seeds.
+The non-Vygotskian control is the same VLM with every class and function name replaced by a consistent nonsense
+token, so that it keeps the format of language but loses the culture attached to the words. The second control lets
+the VLM write labels and beliefs directly, without the test by perception, which measures what the grounding
+constraint contributes. The third freezes the counts and habits, which measures what internalisation contributes. The
+fourth replaces the elicited priors by the hand-written ones and by uniform ones. Prediction P7 holds if the
+non-Vygotskian control matches the machine on recurring tasks and falls behind it in proportion to novelty
+(Figure~\result{--}), and the main comparison is repeated with a second VLM. Finally, a stale habit is created by
+changing an apartment after a habit has been compiled, moving the dining set to another room or locking a door that
+the habit relies on. We report how often the monitored assumptions of the habit detect the change before the habit
+fails, and how long the robot takes to return to deliberation (\result{--}). This tests the claim that internalised
+habits keep a way back to inference.
 
 \subsection{What would count against the machine}
 \label{sec:experiments:against}
 
 Each experiment can fail in a way that would change the design. If E2 or E3 fails, culture does not belong at level 4
-in its present form, and none of the later components is coupled to it. If E4 finds no divergence earlier than a
-failed step, the demand signal has no early input, and the inner voice is recruited only after a failure has occurred.
-If E6 shows no gain in latency or in the number of views, imagination does not justify its computational cost, and the
-robot should simply remain idle when the automatic level suffices. Finally, if in E7 the control without culture keeps
-up with the machine supplied with culture on novel tasks, the machine works but is not Vygotskian, because its gains
-would then come from having a language rather than from having a culture.
+in its present form, and none of the later components is coupled to it. If the VLM shown an image of a room labels it
+as well as the function agent does in E2, the belief hierarchy adds nothing to room labelling, and its value must be
+shown elsewhere. If E4 finds no divergence earlier than a failed step, the demand signal has no early input, and the
+inner voice is recruited only after a failure has occurred. If the matched look policy in E5 resolves as much as the
+inner voice, the questions add nothing beyond looking more. If E6 shows no gain in latency or in the number of views,
+imagination does not justify its computational cost, and the robot should simply remain idle when the automatic level
+suffices. Finally, if in E7 the non-Vygotskian control keeps up with the machine on novel tasks, the machine works but
+is not Vygotskian, because its gains would then come from having a language rather than from having a culture. If the
+length of the inner voice does not decrease before it falls silent, the machine behaves as a cache, and the claim of
+internalisation reduces to the claim of caching.

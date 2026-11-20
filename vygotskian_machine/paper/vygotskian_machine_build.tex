@@ -36,10 +36,25 @@
 \date{\today}
 \begin{document}
 \maketitle
+\begin{abstract}
+We propose a robot architecture that follows Vygotsky's account of how higher mental functions develop, first
+between people and then within the individual. The robot is built on \cortex{}, an existing architecture in which
+Active Inference agents maintain a probabilistic hierarchy of beliefs about the robot, its rooms, the objects in them
+and aggregates of objects, and in which a language agent already plans and talks with a person. We add two things.
+The first is an inner voice, a loop in which a vision-language model (VLM) proposes questions and tests and only the
+robot's perception changes the answers, called on by a demand signal built from the surprise that the agents report.
+The second is a cultural plane, in which the VLM supplies a level-4 hypothesis about what each room is for, writes
+missions whose steps predict their own belief outcomes, and imagines on the robot's own models while demand is low.
+The VLM's knowledge enters as pseudo-counts and stored missions that the robot's own experience progressively
+replaces. We relate the proposal to Sutton's bitter lesson and to the argument that intelligence cannot be fully
+amortised, and we design seven experiments, not yet run, that would show whether culture rather than the format of
+language is what the machine uses.
+\end{abstract}
 \input{vygotskian_machine}
 \input{vygotskian_cortex}
 \input{vygotskian_internalisation}
 \input{vygotskian_cultural_plane}
 \input{vygotskian_experiments}
+\input{vygotskian_conclusion}
 \printbibliography
 \end{document}

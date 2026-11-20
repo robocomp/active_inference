@@ -15,11 +15,12 @@
 \label{sec:vygotskian}
 
 According to Vygotsky, higher mental functions develop in accordance with one central law: each function first
-emerges in interactions between people, and then within the individual \cite{vygotsky1978mind}. A child plans aloud
-together with an adult before planning aloud alone, plans aloud alone before planning silently, and plans silently
-before the plan is carried out without any words at all. Language is what carries the child through this sequence. It
-is the means by which knowledge held by other people becomes the learner's own, and it is also the tool with which the
-learner regulates its own actions while that knowledge is still new.
+emerges in interactions between people, and then within the individual \cite{vygotsky1978mind}. A child first plans aloud
+together with an adult, then plans aloud alone in what is called private speech, and finally plans in inner speech,
+which is silent, abbreviated and reduced largely to predicates \cite{vygotsky1986thought}. Language is what carries
+the child through this sequence. It is the means by which knowledge held by other people becomes the learner's own,
+and it is also the tool with which the learner regulates its own actions while that knowledge is still new
+\cite{luria1961role}.
 
 We propose to build a robot that follows this law, and we call it a \emph{Vygotskian machine}. The robot's higher
 functions, such as its goals, its plans, the meaning it gives to a scene and what it expects to find in a room, are
@@ -27,7 +28,10 @@ first provided from outside. They come from the person who lives with the robot 
 a neural network trained on images and text that carries a large share of human culture. The robot then internalises
 these functions, first as an inner voice that asks questions, makes plans and imagines outcomes
 (Section~\ref{sec:inner_speech}), and eventually as prior beliefs, accumulated counts of experience and habits that
-need no language at all. The robot's automatic level consists of the Active Inference agents that build its hierarchy
+need no language at all. This last stage goes beyond Vygotsky, for whom inner speech is the end of the sequence. It
+corresponds instead to the automatisation of skill \cite{fitts1967human} and to the compilation of repeated
+deliberation into rules in cognitive architectures such as Soar and ACT-R
+\cite{laird1986chunking, anderson1982acquisition}. The robot's automatic level consists of the Active Inference agents that build its hierarchy
 of beliefs and control its movement. This automatic level is what the internalised knowledge ultimately shapes, and
 it is also the level that language is called upon to assist whenever the situation exceeds its competence.
 
@@ -40,15 +44,17 @@ it is also the level that language is called upon to assist whenever the situati
         Every higher function emerges first between people, and then within the individual
             & goals, plans and scene meaning arrive as a person's words and the VLM's culture, then become priors,
               plans and habits (Sections~\ref{sec:lang_hierarchy:culture}--\ref{sec:lang_hierarchy:sequencing}) \\ \hline
-        Outer speech $\to$ private speech $\to$ inner speech $\to$ no speech
-            & the VLM writes a mission; the inner voice rehearses and monitors it; the compiled habit runs without
-              language (Eq.~\ref{eq:lh_habit}) \\ \hline
-        Private speech rises with task difficulty and fades with mastery \cite{berk1992children}
+        Social speech $\to$ private speech $\to$ inner speech
+            & the person or the VLM states a mission; the inner voice rehearses and monitors it in an abbreviated
+              form; beyond Vygotsky, the compiled habit runs without language (Eq.~\ref{eq:lh_habit}) \\ \hline
+        Private speech rises with task difficulty and becomes internal with mastery \cite{berk1992children}
             & the demand signal recruits the voice on surprise and leaves it idle when the automatic level copes
               (Section~\ref{sec:inner_speech:modes}) \\ \hline
-        Scaffolding by a more knowledgeable other, withdrawn as competence grows \cite{wood1976role}
-            & the VLM's prior weight is overtaken by the robot's own counts (Eq.~\ref{eq:lh_beta_prior}); the person
-              is asked less as experience accumulates \\ \hline
+        Scaffolding by a more knowledgeable other, adjusted to the learner and withdrawn as competence grows
+        \cite{wood1976role}
+            & the person answers, confirms and approves, and is asked less as experience accumulates; the VLM does
+              not adapt to the learner and is therefore a source of culture rather than a tutor, whose prior weight
+              is overtaken by the robot's own counts (Eq.~\ref{eq:lh_beta_prior}) \\ \hline
         The zone of proximal development: what the learner can do only with help
             & situations outside the automatic level's competence but within reach with the VLM or the person;
               learning moves them inside \\ \hline
@@ -78,18 +84,21 @@ develops internalisation. It treats the inner voice as an epistemic action, that
 information, and describes the attention modes that call on the voice and release it, as well as the learning that the
 voice drives. Section~\ref{sec:lang_hierarchy} develops the cultural plane. It explains how the VLM is connected to the
 belief hierarchy in three roles, namely culture, sequencing and imagination, under the rule that the language model
-proposes and the generative models dispose.
+proposes and the generative models dispose. Section~\ref{sec:experiments} describes the experiments that will test
+the proposal, and Section~\ref{sec:conclusion} states what remains open.
 
 \paragraph{The internalist contrast.}
 According to the opposing, internalist view, language evolved first as an internal system for thought and was only
 later used to communicate \cite{berwick2016why}. We use this view as a contrast rather than as a rival, because the
 distinction it draws between the faculty of language and the content that language carries
-(Section~\ref{sec:inner_speech:why_lm}) is what makes the Vygotskian claim testable. A machine that has a
-compositional inner language but no culture serves as the \emph{non-Vygotskian control}. Its inner language is built
-by library learning, the gradual collection of reusable sub-programmes, from the robot's own experience alone
-(Section~\ref{sec:inner_speech:library}). If this control machine performs as well as the machine fed with culture in
-situations far from anything the robot has seen, then culture is not doing the work that the name of the machine
-claims for it.
+(Section~\ref{sec:inner_speech:why_lm}) is what makes the Vygotskian claim testable. The test requires a machine that has the format of language
+but not its culture, and we call it the \emph{non-Vygotskian control}. In the experiments of this paper, the control
+is the same VLM with every class and function name replaced by a consistent nonsense token, so that it keeps its
+architecture, its compute and its ability to compose but loses the cultural knowledge attached to the words. If this
+control performs as well as the machine fed with culture in situations far from anything the robot has seen, then
+culture is not doing the work that the name of the machine claims for it. A stronger control, whose inner language is
+built by library learning from the robot's own experience alone (Section~\ref{sec:inner_speech:library}), is left for
+later work, because building it is a project in its own right.
 
 \paragraph{Prior uses of the idea.}
 Mirolli and Parisi argued for a Vygotskian cognitive robotics in which language serves as a cognitive tool as well as
@@ -98,8 +107,24 @@ internalise language and culture to imagine and pursue their own goals \cite{col
 shares their premise but differs from them in three respects. First, internalisation is formalised within Active
 Inference, as culture that enters priors and policies and gradually settles into counts and habits. Second, the
 internalised knowledge acts on a probabilistic belief hierarchy whose evidence rules and cavity messages, which exclude
-a belief's own contribution from the evidence it receives, prevent the hierarchy from confirming itself. Third, an
+a belief's own contribution from the evidence it receives, prevent the hierarchy from confirming itself, and whose
+counts admit only experience that the VLM's own priors did not produce. Third, an
 attention mechanism decides, from moment to moment, whether language is needed at all.
+
+\paragraph{How far the machine is Vygotskian.}
+Several of the machine's components are known ideas in other forms. A language model that proposes and a separate
+system that verifies is the pattern of SayCan \cite{ahn2022saycan}, the compilation of repeated deliberation into
+rules is chunking in Soar \cite{laird1986chunking} and production compilation in ACT-R
+\cite{anderson1982acquisition}, and the view of large language models as stores of transmitted culture rather than
+as agents is due to Yiu, Kosoy and Gopnik \cite{yiu2024transmission}. We therefore present the machine as inspired
+by Vygotsky, and its contribution as the integration of these ideas into a probabilistic belief hierarchy under a
+single rule of evidence. Two qualifications follow from this. First, the VLM does not adapt its help to the robot, so
+it is a source of culture and not a tutor, and only the person scaffolds the robot in the sense of Wood, Bruner and
+Ross. Second, a decrease in the use of language as competence grows does not by itself distinguish the machine from
+any system that caches the answers of an expensive solver and calls it only when the cache fails. The claim that the
+machine is Vygotskian therefore rests on predictions that such a cache does not make, namely that culture, rather
+than language as a format, explains the advantage on novel situations, and that the inner voice becomes abbreviated
+before it falls silent.
 
 \paragraph{Two bitter lessons.}
 Any proposal that builds knowledge into a robot has to respond to what Sutton called the bitter lesson. According to
@@ -132,20 +157,22 @@ combination is what the Vygotskian machine proposes. Its novelty lies in four as
     inference against evidence, including evidence that something is absent, and they enter the generative model as
     pseudo-counts, imaginary prior observations that the robot's own experience gradually outweighs
     (Eq.~\eqref{eq:lh_beta_prior}).
-    \item \emph{Internalisation is amortisation by the robot, with a way back.} The robot amortises its own
-    ongoing inference, in the sense that what the inner voice works out in focused mode settles into priors, counts
-    and habits that no longer need language. This process is the internalisation described by Vygotsky's law, and it
-    is also the amortisation of the second lesson, carried out by the agent itself, on its own data, while it acts.
+    \item \emph{Internalisation as the robot's own amortisation, with a way back.} What the inner voice works
+    out in focused mode settles into priors, counts and stored missions that no longer need language. This is a
+    simple form of amortisation, closer to caching validated results than to learning a recognition model
+    \cite{gershman2014amortized}, but it is carried out by the agent itself, on its own data, while it acts.
     Each compiled habit carries with it the assumptions under which it was learned
     (Section~\ref{sec:lang_hierarchy:sequencing}). When the probability of those assumptions falls, the habit is set
     aside and ongoing inference takes over again.
     \item \emph{A signal that decides when amortisation is enough.} The new bitter lesson states that
     amortisation fails when the situation is novel, but it does not say how an agent notices that this has happened.
-    In the machine, this decision is made continuously by a demand signal, which is a prediction error weighted by
-    its precision, that is, by the confidence placed in it (Section~\ref{sec:inner_speech:modes}). While the amortised
-    levels predict well, the inner voice either remains silent or imagines, and a surprise calls on ongoing inference
-    mediated by language. Private speech in children behaves in the same way, increasing with task difficulty and
-    fading as the child gains mastery.
+    In the machine, this decision is made continuously by a demand signal, which sums the surprise that each
+    agent reports about its own predictions, so that a confident prediction that fails counts for more than an
+    uncertain one (Section~\ref{sec:inner_speech:modes}). While the amortised levels predict well, the inner voice
+    either remains silent or imagines, and a surprise calls on ongoing inference mediated by language. The signal
+    notices novelty only when novelty produces surprise, and a model that is confidently wrong remains silent until
+    its errors have consequences. Private speech in children behaves in a similar way, increasing with task difficulty and
+    becoming internal as the child gains mastery.
     \item \emph{The three missing properties, each with its own mechanism.} Online learning consists of the
     gradual replacement of the VLM's pseudo-counts by experience and the growth of the habit prior with experience.
     Active exploration takes the form of the inner question, treated as an epistemic action and scored by its
@@ -158,12 +185,15 @@ combination is what the Vygotskian machine proposes. Its novelty lies in four as
 The machine thus interprets the first lesson as a reason to take culture from a learned model instead of writing it
 by hand, and the second as a reason to keep that culture outside the belief state, where ongoing inference can correct
 it. Vygotsky's account supplies the developmental sequence that connects the two lessons, in which knowledge is first
-borrowed from others, then used through speech, and finally internalised until it no longer needs speech.
+borrowed from others, then used through speech, and finally internalised as inner speech. The machine adds one
+further step, in which what has been internalised is compiled into habits that need no speech at all.
 
 \paragraph{What would demonstrate that the paper's goal has been achieved?}
-The central claim rests on three predictions. First, the non-Vygotskian control falls behind the machine fed with
-culture in proportion to the novelty of a situation (P7 in Section~\ref{sec:inner_speech:predictions}). Second, the
-machine's use of language behaves as private speech does, increasing with difficulty and decreasing with mastery
-(P8). Third, the scaffold provided by the VLM is withdrawn, so that as confirmed rooms and successful missions
-accumulate, the number of calls to the VLM falls while task success is maintained (L6 in
-Section~\ref{sec:lang_hierarchy:predictions}).
+The central claim rests on two predictions that a system which merely caches the answers of the VLM would not
+satisfy. First, the non-Vygotskian control falls behind the machine fed with culture in proportion to the novelty of
+a situation (P7 in Section~\ref{sec:inner_speech:predictions}). Second, before the inner voice falls silent on a
+recurring task, its questions and missions for that task become shorter, retaining only the part that is still in
+doubt, as Vygotsky described for inner speech (P9). Two further predictions are necessary but not sufficient. The
+machine's use of language should behave as private speech does, increasing with difficulty and decreasing with
+mastery (P8), and as confirmed rooms and successful missions accumulate, the number of calls to the VLM should fall
+while task success is maintained (L6 in Section~\ref{sec:lang_hierarchy:predictions}).
