@@ -175,4 +175,5 @@ add_test(NAME tick_memo_test COMMAND tick_memo_test)
 add_executable(beam_ray_test beam_ray_test.cpp)
 target_include_directories(beam_ray_test PRIVATE ../../common)
 target_compile_options(beam_ray_test PRIVATE -O2)
+target_link_libraries(beam_ray_test PRIVATE Eigen3::Eigen)   # Task 17: oriented-box parts, 6x6 curvature
 add_test(NAME beam_ray_test COMMAND beam_ray_test)

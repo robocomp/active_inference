@@ -20,7 +20,9 @@
  *
  * AI2 note (no thresholds): membership is decided by GEOMETRY, not a distance gate — a ray only contributes
  * if the model's SDF is actually crossed along it (sphere-trace hit); a ray that misses the model carries no
- * term at all. Returns that don't sit on the surface fade out through a continuous Cauchy responsibility, and
+ * term at all — except on the countable persistent path, `beam_ray.h` (spec 2026-11-15 lidar-measures §7c.8, R6-M8),
+ * where a miss is evidence and the published Σ on w and cx shrinks accordingly. Returns that don't sit on the
+ * surface fade out through a continuous Cauchy responsibility, and
  * the grazing-incidence ill-conditioning is absorbed as a growing 1/(n̂·u) in the Jacobian (→ low information
  * after weighting), never a grazing cutoff.
  */

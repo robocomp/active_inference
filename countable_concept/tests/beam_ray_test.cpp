@@ -1,6 +1,8 @@
 // beam_ray_test — the smooth beam likelihood in one dimension (spec 2026-11-15 lidar-measures §7c.8 a): the Student-t range
 // density and its CDF, Φ⁻¹ (AS241), the conditional-quantile nodes, the per-ray energy at the spec's numbers, and its
 // derivatives in the node crossings and in π. Header-only under test (common/ai_belief/beam_ray.h). Run: ./beam_ray_test
+// Task 17 (§7c.8 a, b, c): ray geometry on oriented-box parts (closest approach, crossings, panels), the ray-set energy, its
+// exact gradient and PSD curvature, on ray-cast true scenes (test_scene.h) and constructed rays. Run: ./beam_ray_test [quick]
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,7 +10,12 @@
 #include <limits>
 #include <numbers>
 #include <vector>
+#include <chrono>
+#include <cstring>
+#include <span>
+#include <Eigen/Eigenvalues>
 #include "ai_belief/beam_ray.h"
+#include "test_scene.h"
 
 namespace bm = rc::ai::beam;
 static int bad = 0;
@@ -344,8 +351,748 @@ static void z_form_matches_b_form()
     CHECK(std::abs(sw - 1.0) < 1e-14);
 }
 
-int main()
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  Task 17: geometry on oriented-box parts, ray-set energy, gradient, curvature
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+using Vec6 = Eigen::Matrix<double, 6, 1>;
+using Mat6 = Eigen::Matrix<double, 6, 6>;
+namespace ts = rc::test;
+static constexpr double kMOn = 0.9, kMOff = 0.02;   // hand labels: 0.9 on the object, ε_px off it
+
+// The countable model's parts from θ = (cx, cy, H, w, h, yaw) with the analytic J (CountableBelief::sdf_box/sdf_headboard
+// convention: floor-anchored box z ∈ [0, H], w along the yaw axis, h across; headboard at local y ∈ [h/2 − t, h/2],
+// t = min(t_hb, h), z ∈ [0, H_hb]). Rows of J: ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ.
+struct BedSpec { double t_hb = 0.0, H_hb = 0.0; };   // H_hb = 0: no headboard (one part)
+static std::vector<bm::BeamPart> parts_of(const Vec6& th, const BedSpec& b = {})
 {
+    std::vector<bm::BeamPart> P;
+    const double cx = th(0), cy = th(1), H = th(2), w = th(3), h = th(4), yaw = th(5);
+    bm::BeamPart box;
+    box.c = {cx, cy, 0.5 * H}; box.yaw = yaw; box.half = {0.5 * w, 0.5 * h, 0.5 * H};
+    box.J.setZero();
+    box.J(0, 0) = 1; box.J(1, 1) = 1; box.J(2, 2) = 0.5; box.J(3, 5) = 1; box.J(4, 3) = 0.5; box.J(5, 4) = 0.5; box.J(6, 2) = 0.5;
+    P.push_back(box);
+    if (b.H_hb > 0.0)
+    {
+        const bool thin = b.t_hb < h;   // t = t_hb (const) ⇒ yc = (h − t_hb)/2; else t = h ⇒ yc = 0 (one-sided where t_hb > h)
+        const double t = thin ? b.t_hb : h, yc = 0.5 * h - 0.5 * t, dyc = thin ? 0.5 : 0.0, dhalf_t = thin ? 0.0 : 0.5;
+        const double c = std::cos(yaw), s = std::sin(yaw);
+        bm::BeamPart hb;
+        hb.c = {cx - s * yc, cy + c * yc, 0.5 * b.H_hb}; hb.yaw = yaw; hb.half = {0.5 * w, 0.5 * t, 0.5 * b.H_hb};
+        hb.J.setZero();
+        hb.J(0, 0) = 1; hb.J(0, 4) = -s * dyc; hb.J(0, 5) = -c * yc;
+        hb.J(1, 1) = 1; hb.J(1, 4) =  c * dyc; hb.J(1, 5) = -s * yc;
+        hb.J(3, 5) = 1; hb.J(4, 3) = 0.5; hb.J(5, 4) = dhalf_t;
+        P.push_back(hb);
+    }
+    return P;
+}
+static std::vector<ts::SceneBox> scene_of(const Vec6& th, const BedSpec& b = {})
+{
+    std::vector<ts::SceneBox> S;
+    S.push_back({Eigen::Vector2f(float(th(0)), float(th(1))), float(th(5)), float(th(3)), float(th(4)), float(th(2))});
+    if (b.H_hb > 0.0)
+    {
+        const double t = std::min(b.t_hb, th(4)), yc = 0.5 * th(4) - 0.5 * t, c = std::cos(th(5)), s = std::sin(th(5));
+        S.push_back({Eigen::Vector2f(float(th(0) - s * yc), float(th(1) + c * yc)), float(th(5)), float(th(3)), float(t), float(b.H_hb)});
+    }
+    return S;
+}
+static double part_sdf(const bm::BeamPart& p, const Eigen::Vector3d& x)
+{
+    const double c = std::cos(p.yaw), s = std::sin(p.yaw), dx = x.x() - p.c.x(), dy = x.y() - p.c.y();
+    const Eigen::Vector3d a(std::abs(c * dx + s * dy) - p.half.x(), std::abs(-s * dx + c * dy) - p.half.y(), std::abs(x.z() - p.c.z()) - p.half.z());
+    return a.cwiseMax(0.0).norm() + std::min(a.maxCoeff(), 0.0);
+}
+
+// Ray-cast the true scene (boxes + back wall + floor), keep the rays whose line passes within `near` of the truth model,
+// label them by hand (0.9 if the return is on the truth object, ε_px otherwise), clamp nothing (ranges < ρ_max here).
+static bm::BeamRays scene_rays(const Vec6& truth, const BedSpec& b, const Eigen::Vector3d& origin, std::span<const float> rings,
+                               float az_step, double near, const std::vector<ts::SceneWall>& walls)
+{
+    const auto boxes = scene_of(truth, b);
+    const auto pts = ts::raycast_scene(origin.cast<float>(), boxes, walls, true, az_step, rings, float(kRhoMax));
+    const auto P = parts_of(truth, b);
+    bm::BeamRays R;
+    R.origin = origin; R.kappa = 1.0; R.rho_max = kRhoMax; R.sigma_s = kSigmaS;
+    for (const auto& pf : pts)
+    {
+        const Eigen::Vector3d e = pf.cast<double>(), du = e - origin;
+        double dmin = 1e9, smin = 1e9;
+        for (const auto& p : P)
+        {
+            dmin = std::min(dmin, bm::closest_approach(p, origin, du.normalized(), kRhoMax, nullptr));
+            smin = std::min(smin, part_sdf(p, e));
+        }
+        if (dmin > near) continue;
+        R.endpoints.push_back(e);
+        R.m.push_back(smin < 2e-3 ? kMOn : kMOff);
+    }
+    return R;
+}
+
+static bm::BeamConfig make_cfg(int K)
+{
+    bm::BeamConfig c;
+    c.st = *bm::StudentT::make(kP0, kC);
+    c.gl = bm::GaussLegendre01::make(K);
+    return c;
+}
+
+static double E_of(const Vec6& th, const BedSpec& b, const bm::BeamRays& R, const bm::BeamConfig& cfg)
+{
+    const auto P = parts_of(th, b);
+    return bm::beam_rays_energy(P, R, cfg);
+}
+static void build_of(const Vec6& th, const BedSpec& b, const bm::BeamRays& R, const bm::BeamConfig& cfg, Mat6& W, Vec6& g, double& E)
+{
+    const auto P = parts_of(th, b);
+    W.setZero(); g.setZero(); E = 0.0;
+    bm::accumulate_beam_rays<6>(P, R, cfg, W, g, &E);
+}
+// The concatenated per-ray structure (sign of d, crease pairs, panel limits and their kinds, each node's first-hit part
+// and entering piece): it changes exactly where the discretised energy has a stated kink.
+static std::vector<long> signature(const Vec6& th, const BedSpec& b, const bm::BeamRays& R, const bm::BeamConfig& cfg)
+{
+    const auto P = parts_of(th, b);
+    std::vector<double> cs, sn;
+    bm::detail::part_trig(P, cs, sn);
+    bm::detail::BeamScratch S;
+    bm::detail::BeamRayOut o;
+    std::vector<long> sig;
+    for (std::size_t i = 0; i < R.endpoints.size(); ++i)
+    {
+        sig.push_back(-1000000 - long(i));
+        bm::detail::beam_ray_term<false>(P, cs, sn, R, i, cfg, false, S, o, &sig);
+    }
+    return sig;
+}
+
+static bool quick = false;
+
+// ─── closest approach: exact d outside a corner, ∇d by differences; corner-cutting chords ────────────────────────────
+static void closest_approach_corner()
+{
+    const Vec6 th(2.5, 0.3, 0.6, 0.5, 0.4, 0.3);
+    const auto parts = parts_of(th);
+    const auto& box = parts[0];
+    const double c = std::cos(th(5)), s = std::sin(th(5));
+    const auto world = [&](const Eigen::Vector3d& l) { return Eigen::Vector3d(box.c.x() + c * l.x() - s * l.y(), box.c.y() + s * l.x() + c * l.y(), box.c.z() + l.z()); };
+    const auto wdir  = [&](const Eigen::Vector3d& l) { return Eigen::Vector3d(c * l.x() - s * l.y(), s * l.x() + c * l.y(), l.z()); };
+    double worst_d = 0.0, worst_g = 0.0;
+    int n = 0;
+    const auto fd_grad = [&](const Eigen::Vector3d& o, const Eigen::Vector3d& u, double h, int side)
+    {
+        Vec6 g;
+        for (int k = 0; k < 6; ++k)
+        {
+            Vec6 tp = th, tm = th;
+            tp(k) += h; tm(k) -= h;
+            const double d0 = bm::closest_approach(parts_of(th)[0], o, u, kRhoMax, nullptr);
+            const double dp = bm::closest_approach(parts_of(tp)[0], o, u, kRhoMax, nullptr);
+            const double dm = bm::closest_approach(parts_of(tm)[0], o, u, kRhoMax, nullptr);
+            g(k) = side == 0 ? (dp - dm) / (2 * h) : side > 0 ? (dp - d0) / h : (d0 - dm) / h;
+        }
+        return g;
+    };
+    const auto gap = [](const Vec6& an, const Vec6& fd) { double w = 0; for (int k = 0; k < 6; ++k) w = std::max(w, std::abs(an(k) - fd(k)) / std::max(std::abs(fd(k)), 1e-3)); return w; };
+    // (1) vertical edge (2-D corner), horizontal rays: the outward bisector cone between the two face normals (+x, +y)
+    for (double q : {0.05e-3, 0.1e-3, 0.2e-3, 0.5e-3, 1e-3})
+        for (double ang : {0.15, 0.45, 0.785, 1.1, 1.4})   // n = (cos ang, sin ang) in the corner's normal cone
+        {
+            const Eigen::Vector3d nl(std::cos(ang), std::sin(ang), 0.0), ul(-std::sin(ang), std::cos(ang), 0.0);
+            const Eigen::Vector3d corner(0.25, 0.2, 0.05);
+            const Eigen::Vector3d P0 = world(corner + q * nl), u = wdir(ul), o = P0 - 2.0 * u;
+            Vec6 g;
+            const double d = bm::closest_approach(box, o, u, kRhoMax, &g);
+            worst_d = std::max(worst_d, std::abs(d - q));
+            worst_g = std::max(worst_g, gap(g, fd_grad(o, u, 1e-7, 0)));
+            ++n;
+        }
+    // (2) a 3-D corner (vertex): u ⊥ n with n in the vertex's outward octant
+    for (double q : {0.05e-3, 0.2e-3, 1e-3})
+    {
+        const Eigen::Vector3d nl = Eigen::Vector3d(1, 1, 1).normalized(), ul = Eigen::Vector3d(1, -1, 0).normalized();
+        const Eigen::Vector3d corner(0.25, 0.2, 0.3);
+        const Eigen::Vector3d P0 = world(corner + q * nl), u = wdir(ul), o = P0 - 2.0 * u;
+        Vec6 g;
+        const double d = bm::closest_approach(box, o, u, kRhoMax, &g);
+        worst_d = std::max(worst_d, std::abs(d - q));
+        worst_g = std::max(worst_g, gap(g, fd_grad(o, u, 1e-7, 0)));
+        ++n;
+    }
+    std::printf("closest_approach_corner  %d rays 0.05-1 mm outside an edge/vertex: max |d - exact| = %.3e m, max grad gap %.3e\n", n, worst_d, worst_g);
+    CHECK(worst_d < 1e-9);
+    CHECK(worst_g < 0.01);
+    // (3) chords cutting the vertical edge at n̂·u far from 45°: ∇d against one-sided differences on each side
+    double worst_l = 0.0, worst_r = 0.0;
+    int nc = 0;
+    for (double nu_front : {0.97, 0.9, 0.3, 0.15})   // incidence on the +x face; the +y face sees √(1 − nu²)
+        for (double q : {-0.5e-3, -2e-3, -10e-3})
+        {
+            const double a = std::acos(nu_front);
+            const Eigen::Vector3d ul(-std::cos(a), -std::sin(a), 0.0);          // entering the +x face from outside
+            const Eigen::Vector3d nl = Eigen::Vector3d(std::sin(a), -std::cos(a), 0.0);
+            const Eigen::Vector3d corner(0.25, 0.2, 0.0);
+            // a line through corner + q·n̂ with n̂ the normal on the corner's outward side (q < 0: the line cuts the corner)
+            const Eigen::Vector3d nout = (nl.dot(Eigen::Vector3d(1, 1, 0)) > 0 ? nl : Eigen::Vector3d(-nl));
+            const Eigen::Vector3d P0 = world(corner + q * nout), u = wdir(ul), o = P0 - 2.0 * u;
+            Vec6 g;
+            const double d = bm::closest_approach(box, o, u, kRhoMax, &g);
+            CHECK(d < 0.0);
+            worst_l = std::max(worst_l, gap(g, fd_grad(o, u, 1e-7, -1)));
+            worst_r = std::max(worst_r, gap(g, fd_grad(o, u, 1e-7, +1)));
+            ++nc;
+        }
+    std::printf("closest_approach_corner  %d corner-cutting chords: grad vs one-sided differences, worst left %.3e right %.3e\n", nc, worst_l, worst_r);
+    CHECK(worst_l < 0.01 and worst_r < 0.01);
+}
+
+// ─── fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────────
+static const Vec6 kBoxTruth(2.5, 0.2, 0.6, 0.5, 0.4, 0.3);
+static const Eigen::Vector3d kHelios(0.0, 0.0, 0.95);
+static bm::BeamRays box_fixture()
+{
+    const auto rings = ts::helios_ring_elev_deg();
+    const std::vector<ts::SceneWall> walls{{Eigen::Vector2f(4.0f, -3.0f), Eigen::Vector2f(4.0f, 3.0f), 2.5f}};
+    return scene_rays(kBoxTruth, {}, kHelios, rings, ts::kHeliosAzStepDeg, 0.03, walls);
+}
+// Bed: yaw −π/2 puts the headboard (local +y) at the far side (+x); sensor just above the mattress top, rings −1°…+1°.
+static const BedSpec kBed{0.08, 1.0};
+static const Vec6 kBedTruth(3.0, 0.0, 0.5, 1.4, 2.0, -std::numbers::pi / 2);
+static const Eigen::Vector3d kBedSensor(0.6, 0.1, 0.52);
+static bm::BeamRays bed_fixture()
+{
+    const std::array<float, 9> rings{-1.0f, -0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
+    const std::vector<ts::SceneWall> walls{{Eigen::Vector2f(5.0f, -4.0f), Eigen::Vector2f(5.0f, 4.0f), 2.5f}};
+    return scene_rays(kBedTruth, kBed, kBedSensor, rings, 0.4f, 0.03, walls);
+}
+
+// ─── continuity: the second difference of the total energy along a 2 cm sweep in 0.05 mm steps ────────────────────
+// The Pass bound (< 0.01 nats at every step) is the spec's jump detector. A step that exceeds it is then tested for a
+// JUMP directly (CHECKED): the stencil [x − h, x + h] is sampled at 50 sub-steps and the largest first difference is
+// refined 3 times by a factor 50; a continuous E shrinks it ~50x per level, a jump keeps it. A level that does not shrink
+// it at least 5x is a jump. The Pass bound itself is printed as a Pass item.
+template <class F>
+static bool has_jump(const F& at, double x, double h, double* shrink)
+{
+    double lo = x - h, len = 2.0 * h, prev = -1.0;
+    *shrink = 0.0;
+    for (int level = 0; level < 4; ++level)
+    {
+        const double s = len / 50.0;
+        double best = -1.0, best_lo = lo, e_prev = at(lo);
+        for (int j = 1; j <= 50; ++j)
+        {
+            const double e = at(lo + j * s);
+            if (std::abs(e - e_prev) > best) { best = std::abs(e - e_prev); best_lo = lo + (j - 1) * s; }
+            e_prev = e;
+        }
+        if (prev > 0.0)
+        {
+            *shrink = std::max(*shrink, best / prev);
+            if (best > 0.2 * prev and best > 1e-9) return true;
+        }
+        prev = best; lo = best_lo; len = s;
+    }
+    return false;
+}
+static int pass_misses = 0;
+static void pass_item(bool ok, const char* what)
+{
+    if (ok) return;
+    ++pass_misses;
+    std::printf("PASS-ITEM MISS (printed, not tuned): %s\n", what);
+}
+static void sweep_second_diff(const char* name, const Vec6& truth, const BedSpec& b, int comp, const bm::BeamRays& R, const bm::BeamConfig& cfg)
+{
+    const double h = 5e-5;
+    const int N = 400;
+    std::vector<double> E(N + 1);
+    const auto at = [&](double off) { Vec6 th = truth; th(comp) += off; return E_of(th, b, R, cfg); };
+    for (int k = 0; k <= N; ++k) E[k] = at(-0.01 + k * h);
+    double worst = 0.0, worst_ratio = 0.0;
+    int where = 0, n_over = 0, n_jump = 0;
+    for (int k = 1; k < N; ++k)
+    {
+        const double sd = std::abs(E[k + 1] - 2.0 * E[k] + E[k - 1]);
+        if (sd > worst) { worst = sd; where = k; }
+        if (sd < 0.01) continue;
+        ++n_over;
+        double shrink = 0.0;
+        if (has_jump(at, -0.01 + k * h, h, &shrink)) ++n_jump;
+        worst_ratio = std::max(worst_ratio, shrink);
+    }
+    std::printf("%s  comp %d: %zu rays, E range [%.3f, %.3f], max |2nd diff| = %.3e nats at offset %+.3f mm; steps over 0.01: %d, "
+                "of which a jump (first difference not shrinking 5x per 50x refinement): %d (largest per-level ratio %.3f)\n", name, comp,
+                R.endpoints.size(), *std::ranges::min_element(E), *std::ranges::max_element(E), worst, (-0.01 + where * h) * 1e3,
+                n_over, n_jump, worst_ratio);
+    CHECK(n_jump == 0);
+    pass_item(worst < 0.01, name);
+}
+static void continuity_box()
+{
+    const auto R = box_fixture();
+    const auto cfg = make_cfg(bm::kBeamK);
+    sweep_second_diff("continuity_box", kBoxTruth, {}, 0, R, cfg);
+}
+static void headboard_continuity()
+{
+    const auto R = bed_fixture();
+    const auto cfg = make_cfg(bm::kBeamK);
+    for (int comp : {2, 0, 1}) sweep_second_diff("headboard_continuity", kBedTruth, kBed, comp, R, cfg);
+}
+
+// ─── gradient: analytic vs central differences (h = 0.1 mm / 0.1 mrad) at every step of the sweep ────────────────────
+// Pass item (printed): every component within 1 % or 1e-3 nats/m of the central difference, or, where the structure
+// changes inside the stencil (a stated kink), of the one-sided difference on one side. A component that misses it is
+// then CHECKED against the same differences at h = 1e-7 (the gradient of the discretised energy must be exact; a miss
+// at 0.1 mm that is exact at 1e-7 is the difference's truncation error on a fast-varying energy, not a gradient error).
+static void sweep_gradient(const char* name, const Vec6& truth, const BedSpec& b, int comp, const bm::BeamRays& R, const bm::BeamConfig& cfg)
+{
+    const double step = quick ? 5e-4 : 5e-5;
+    const int N = static_cast<int>(std::lround(0.02 / step));
+    int n_central = 0, n_onesided = 0, n_miss = 0, n_exact_small = 0, n_fail = 0;
+    double worst = 0.0, worst_small = 0.0;
+    const auto ok = [](double an, double fd) { return std::abs(an - fd) <= std::max(0.01 * std::abs(fd), 1e-3); };
+    for (int s = 0; s <= N; ++s)
+    {
+        Vec6 th = truth;
+        th(comp) += -0.01 + s * step;
+        Mat6 W; Vec6 g; double E;
+        build_of(th, b, R, cfg, W, g, E);
+        const double E0 = E_of(th, b, R, cfg);
+        CHECK(E == E0);   // the build's energy is the energy's, bit for bit
+        std::vector<long> s0;
+        for (int k = 0; k < 6; ++k)
+        {
+            const auto at = [&](double o) { Vec6 t = th; t(k) += o; return E_of(t, b, R, cfg); };
+            // returns 0 = central ok, 1 = one-sided ok at a structural event, 2 = neither
+            const auto judge = [&](double h, double& central, double& left, double& right)
+            {
+                const double Ep = at(h), Em = at(-h);
+                central = (Ep - Em) / (2 * h);
+                if (ok(g(k), central)) return 0;
+                if (s0.empty()) s0 = signature(th, b, R, cfg);
+                Vec6 tp = th, tm = th;
+                tp(k) += h; tm(k) -= h;
+                const bool event = signature(tp, b, R, cfg) != s0 or signature(tm, b, R, cfg) != s0;
+                left  = (3 * E0 - 4 * Em + at(-2 * h)) / (2 * h);
+                right = (-3 * E0 + 4 * Ep - at(2 * h)) / (2 * h);
+                return (event and (ok(g(k), left) or ok(g(k), right))) ? 1 : 2;
+            };
+            double c1 = 0, l1 = 0, r1 = 0;
+            const int j1 = judge(1e-4, c1, l1, r1);
+            if (j1 == 0) { ++n_central; worst = std::max(worst, std::abs(g(k) - c1) / std::max(std::abs(c1), 0.1)); continue; }
+            if (j1 == 1) { ++n_onesided; continue; }
+            ++n_miss;
+            double c7 = 0, l7 = 0, r7 = 0;
+            const int j7 = judge(1e-7, c7, l7, r7);
+            const double gap7 = std::abs(g(k) - c7) / std::max(std::abs(c7), 0.1);
+            if (j7 != 2) { ++n_exact_small; worst_small = std::max(worst_small, j7 == 0 ? gap7 : 0.0); continue; }
+            if (n_fail < 8)
+                std::printf("  %s GRADIENT FAIL step %d comp %d: an %.8e  h=1e-4: %.8e  h=1e-7: central %.8e left %.8e right %.8e\n",
+                            name, s, k, g(k), c1, c7, l7, r7);
+            ++n_fail;
+        }
+    }
+    std::printf("%s  sweep comp %d (%d steps x 6 components): central ok %d, one-sided at a kink %d, missed at h = 0.1 mm %d "
+                "(exact at h = 1e-7: %d, worst rel gap there %.2e; not exact: %d); worst rel gap at 0.1 mm %.3e\n",
+                name, comp, N + 1, n_central, n_onesided, n_miss, n_exact_small, worst_small, n_fail, worst);
+    CHECK(n_fail == 0);
+    pass_item(n_miss == 0, name);
+}
+static void gradient_box()
+{
+    const auto R = box_fixture();
+    const auto cfg = make_cfg(bm::kBeamK);
+    sweep_gradient("gradient_box", kBoxTruth, {}, 0, R, cfg);
+}
+static void headboard_gradient()
+{
+    const auto R = bed_fixture();
+    const auto cfg = make_cfg(bm::kBeamK);
+    for (int comp : {2, 0, 1}) sweep_gradient("headboard_gradient", kBedTruth, kBed, comp, R, cfg);
+}
+
+// ─── quadrature: |E_K − E_64| per ray; the face minimum ────────────────────────────────────────────────────────────
+struct QRay { std::vector<bm::BeamPart> parts; bm::BeamRays R; };
+static double ray_E(const QRay& q, const bm::BeamConfig& cfg)
+{
+    std::vector<double> cs, sn;
+    bm::detail::part_trig(q.parts, cs, sn);
+    bm::detail::BeamScratch S;
+    bm::detail::BeamRayOut o;
+    return bm::detail::beam_ray_term<false>(q.parts, cs, sn, q.R, 0, cfg, false, S, o) ? o.E : 0.0;
+}
+// The range of the first crossing of the δ = 0 surface (or, for a miss, the closest approach).
+static double t_surface(const std::vector<bm::BeamPart>& P, const Eigen::Vector3d& o, const Eigen::Vector3d& u)
+{
+    double t = 1e9, dmin = 1e9, tmin = 0.0;
+    for (const auto& p : P)
+    {
+        bm::detail::PartRay r;
+        bm::detail::make_part_ray(r, p, std::cos(p.yaw), std::sin(p.yaw), o, u, kRhoMax);
+        const auto A = bm::detail::approach<false>(r, 1e-4);
+        if (A.d < 0.0) t = std::min(t, bm::detail::cross<false>(r, 0.0).t);
+        if (A.d < dmin) { dmin = A.d; tmin = A.t; }
+    }
+    return t < 1e9 ? t : tmin;
+}
+static std::vector<QRay> quadrature_rays(bool bed)
+{
+    std::vector<QRay> out;
+    const std::array<double, 9> es{-0.3, -0.1, -0.03, -0.01, 0.0, 0.01, 0.03, 0.1, 0.3};
+    const auto add = [&](const std::vector<bm::BeamPart>& P, const Eigen::Vector3d& o, const Eigen::Vector3d& u, double d_sel)
+    {
+        if (std::abs(d_sel) > 4.0 * kSigmaS) return;
+        const double t0 = t_surface(P, o, u);
+        for (double e : es)
+            for (double m : {0.9, 0.05})
+            {
+                QRay q;
+                q.parts = P;
+                q.R.origin = o; q.R.kappa = 1.0; q.R.rho_max = kRhoMax; q.R.sigma_s = kSigmaS;
+                q.R.endpoints = {o + (t0 - e) * u};
+                q.R.m = {m};
+                out.push_back(std::move(q));
+            }
+    };
+    if (not bed)
+    {   // box axis-aligned, rays in the x–z plane past the top-front edge, incidence n̂·u on the front face
+        const Vec6 th(2.5, 0.0, 0.6, 0.5, 0.4, 0.0);
+        const auto P = parts_of(th);
+        for (double nu : {0.1, 0.25, 0.5, 0.75, 0.9, 1.0})
+            for (int qi = -12; qi <= 8; ++qi)
+            {
+                const double a = std::acos(nu), q = 0.5 * qi * kSigmaS;
+                const Eigen::Vector3d u(std::cos(a), 0.0, std::sin(a)), n(-std::sin(a), 0.0, std::cos(a));
+                const Eigen::Vector3d P0 = Eigen::Vector3d(2.25, 0.0, 0.6) + q * n, o = P0 - 2.0 * u;
+                add(P, o, u, bm::closest_approach(P[0], o, u, kRhoMax, nullptr));
+            }
+    }
+    else
+    {   // bed: rays over the mattress top toward the headboard, elevations −1…+1°, azimuth sets n̂·u on the headboard
+        const auto P = parts_of(kBedTruth, kBed);
+        for (double az : {0.0, 0.45, 1.05, 1.32, 1.47})   // cos az ≈ 1, 0.9, 0.5, 0.25, 0.1
+            for (double el_deg : {-1.0, -0.5, 0.0, 0.5, 1.0})
+                for (int qi = -12; qi <= 8; ++qi)
+                {
+                    const double el = el_deg * std::numbers::pi / 180.0, q = 0.5 * qi * kSigmaS;
+                    const Eigen::Vector3d u(std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el));
+                    const Eigen::Vector3d X(3.5, 0.0, 0.5 + q), o = X - 1.5 * u;
+                    add(P, o, u, bm::closest_approach(P[0], o, u, kRhoMax, nullptr));   // the mattress top's d
+                }
+    }
+    return out;
+}
+static void quadrature_K()
+{
+    const auto box = quadrature_rays(false), bed = quadrature_rays(true);
+    const auto ref = make_cfg(64);
+    std::vector<double> Eb64, Ed64;
+    for (const auto& q : box) Eb64.push_back(ray_E(q, ref));
+    for (const auto& q : bed) Ed64.push_back(ray_E(q, ref));
+    int smallest = -1;
+    for (int K = 2; K <= 16; ++K)
+    {
+        const auto cfg = make_cfg(K);
+        double wb = 0.0, wd = 0.0;
+        for (std::size_t i = 0; i < box.size(); ++i) wb = std::max(wb, std::abs(ray_E(box[i], cfg) - Eb64[i]));
+        for (std::size_t i = 0; i < bed.size(); ++i) wd = std::max(wd, std::abs(ray_E(bed[i], cfg) - Ed64[i]));
+        std::printf("quadrature_K  K = %2d: max |E_K - E_64| box %.3e (%zu rays)  headboard %.3e (%zu rays)\n", K, wb, box.size(), wd, bed.size());
+        if (smallest < 0 and wb < 0.01 and wd < 0.01) smallest = K;
+    }
+    std::printf("quadrature_K  smallest passing K = %d  (-1: none up to 16; BeamConfig default kBeamK = %d)\n", smallest, bm::kBeamK);
+    pass_item(smallest > 0 and smallest == bm::kBeamK, "quadrature_K: |E_K - E_64| < 0.01 over the whole set");
+    // where the error sits: the box set by incidence, worst |E_K − E_64| at K = 8, 16, 32 and the smallest K that passes
+    {
+        std::vector<bm::BeamConfig> cf;
+        for (int K = 1; K <= 32; ++K) cf.push_back(make_cfg(K));
+        for (double nu : {0.1, 0.25, 0.5, 0.75, 0.9, 1.0})
+        {
+            std::vector<double> w(33, 0.0);
+            for (std::size_t i = 0; i < box.size(); ++i)
+            {
+                const Eigen::Vector3d u = (box[i].R.endpoints[0] - box[i].R.origin).normalized();
+                if (std::abs(u.x() - nu) > 1e-9) continue;
+                for (int K = 2; K <= 32; ++K) w[K] = std::max(w[K], std::abs(ray_E(box[i], cf[K - 1]) - Eb64[i]));
+            }
+            int kp = -1;
+            for (int K = 2; K <= 32; ++K) if (w[K] < 0.01) { kp = K; break; }
+            std::printf("quadrature_K  box n.u = %.2f: worst |E_K - E_64| K=8 %.4f  K=16 %.4f  K=32 %.4f  smallest passing K %d\n",
+                        nu, w[8], w[16], w[32], kp);
+        }
+    }
+
+    // On a face (n̂·u = 1, deep inside): E_K(e) decreasing toward its minimum from each side; the minimum sits at e > 0.
+    const auto cfg = make_cfg(bm::kBeamK);
+    const auto P = parts_of(Vec6(2.5, 0.0, 0.6, 0.5, 0.4, 0.0));
+    const Eigen::Vector3d o(0.0, 0.0, 0.3), u(1.0, 0.0, 0.0);
+    const double t0 = 2.25;
+    for (double m : {0.9, 0.05})
+    {
+        const auto Ee = [&](double e)
+        {
+            QRay q;
+            q.parts = P;
+            q.R.origin = o; q.R.kappa = 1.0; q.R.rho_max = kRhoMax; q.R.sigma_s = kSigmaS;
+            q.R.endpoints = {o + (t0 - e) * u}; q.R.m = {m};
+            return ray_E(q, cfg);
+        };
+        int sign_changes = 0, prev = 0;
+        double emin = 0.0, Emin = 1e9;
+        for (int k = -3000; k <= 3000; ++k)
+        {
+            const double e = k * 1e-4, d = Ee(e + 1e-4) - Ee(e);
+            const int sg = d < 0 ? -1 : d > 0 ? 1 : 0;
+            if (sg != 0 and prev != 0 and sg != prev) ++sign_changes;
+            if (sg != 0) prev = sg;
+            if (Ee(e) < Emin) { Emin = Ee(e); emin = e; }
+        }
+        double lo = emin - 2e-4, hi = emin + 2e-4;   // golden section on the bracket
+        for (int it = 0; it < 80; ++it)
+        {
+            const double a = lo + 0.382 * (hi - lo), b = lo + 0.618 * (hi - lo);
+            if (Ee(a) < Ee(b)) hi = b; else lo = a;
+        }
+        const double e_star = 0.5 * (lo + hi);
+        std::printf("quadrature_K  face m = %.2f: E(e) on [-0.3, 0.3] m changes direction %d time(s); minimum at e = %+.4f mm "
+                    "(spec %s), E_min = %+.4f\n", m, sign_changes, e_star * 1e3, m > 0.5 ? "0.007 mm" : "1.3 mm", Ee(e_star));
+        CHECK(sign_changes == 1);
+        CHECK(e_star > 0.0);
+        const auto c64 = make_cfg(64);
+        QRay q64; q64.parts = P; q64.R.origin = o; q64.R.kappa = 1.0; q64.R.endpoints = {o + (t0 - e_star) * u}; q64.R.m = {m};
+        double l2 = e_star - 1e-3, h2 = e_star + 1e-3;
+        const auto E64 = [&](double e) { q64.R.endpoints = {o + (t0 - e) * u}; return ray_E(q64, c64); };
+        for (int it = 0; it < 80; ++it) { const double a = l2 + 0.382 * (h2 - l2), b = l2 + 0.618 * (h2 - l2); if (E64(a) < E64(b)) h2 = b; else l2 = a; }
+        std::printf("quadrature_K  face m = %.2f: the same minimum at K = 64: e = %+.4f mm\n", m, 0.5 * (l2 + h2) * 1e3);
+    }
+}
+
+// ─── the panel code on a one-part model equals the one-part code ───────────────────────────────────────────────────
+static void several_parts_equals_one()
+{
+    const auto R = box_fixture();
+    const auto cfg = make_cfg(bm::kBeamK);
+    double worst_E = 0.0, worst_g = 0.0, worst_W = 0.0;
+    int n = 0;
+    for (double off : {-0.01, -0.003, 0.0, 0.004, 0.01})
+    {
+        Vec6 th = kBoxTruth;
+        th(0) += off; th(3) -= off;
+        const auto P = parts_of(th);
+        std::vector<double> cs, sn;
+        bm::detail::part_trig(P, cs, sn);
+        bm::detail::BeamScratch S1, S2;
+        bm::detail::BeamRayOut a, b;
+        for (std::size_t i = 0; i < R.endpoints.size(); ++i)
+        {
+            const bool ca = bm::detail::beam_ray_term<true>(P, cs, sn, R, i, cfg, false, S1, a);
+            const bool cb = bm::detail::beam_ray_term<true>(P, cs, sn, R, i, cfg, true, S2, b);
+            CHECK(ca == cb);
+            if (not ca) continue;
+            ++n;
+            worst_E = std::max(worst_E, std::abs(a.E - b.E));
+            worst_g = std::max(worst_g, (a.g - b.g).cwiseAbs().maxCoeff() / std::max(1.0, a.g.cwiseAbs().maxCoeff()));
+            worst_W = std::max(worst_W, (a.W - b.W).cwiseAbs().maxCoeff() / std::max(1.0, a.W.cwiseAbs().maxCoeff()));
+        }
+    }
+    std::printf("several_parts_equals_one  %d ray terms: max |dE| = %.3e, max |dg|/max(1,|g|) = %.3e, max |dW|/max(1,|W|) = %.3e\n", n, worst_E, worst_g, worst_W);
+    CHECK(worst_E < 1e-12 and worst_g < 1e-12);
+}
+
+// ─── far rays contribute exactly 0 ────────────────────────────────────────────────────────────────────────────────
+static void far_rays_exact_zero()
+{
+    const auto P = parts_of(Vec6(2.5, 0.0, 0.6, 0.5, 0.4, 0.0));
+    bm::BeamRays R;
+    R.origin = {0.0, 0.0, 0.3}; R.kappa = 1.0;
+    int n_far = 0;
+    for (double dz : {8.0001, 8.5, 12.0, 100.0})   // a horizontal ray dz·σ_s above the top, past the box
+    {
+        const Eigen::Vector3d u(1.0, 0.0, 0.0);
+        R.origin = {0.0, 0.0, 0.6 + dz * kSigmaS};
+        const double d = bm::closest_approach(P[0], R.origin, u, kRhoMax, nullptr);
+        CHECK(d > 8.0 * kSigmaS);
+        R.endpoints.push_back(R.origin + 3.0 * u); R.m.push_back(0.9);
+        ++n_far;
+    }
+    // all from one origin is not needed: each ray is evaluated against its own origin through separate sets
+    double Etot = 0.0;
+    Mat6 Wt = Mat6::Zero();
+    Vec6 gt = Vec6::Zero();
+    for (int i = 0; i < n_far; ++i)
+    {
+        bm::BeamRays one;
+        one.kappa = 1.0;
+        one.origin = R.endpoints[i] - 3.0 * Eigen::Vector3d(1, 0, 0);
+        one.endpoints = {R.endpoints[i]}; one.m = {0.9};
+        Mat6 W = Mat6::Zero(); Vec6 g = Vec6::Zero(); double E = 0.0;
+        bm::accumulate_beam_rays<6>(P, one, make_cfg(bm::kBeamK), W, g, &E);
+        Etot += std::abs(E); Wt += W.cwiseAbs(); gt += g.cwiseAbs();
+        CHECK(bm::beam_rays_energy(P, one, make_cfg(bm::kBeamK)) == 0.0);
+    }
+    std::printf("far_rays_exact_zero  %d rays with d > 8 sigma_s: sum|E| = %g, sum|g| = %g, sum|W| = %g\n", n_far, Etot, gt.sum(), Wt.sum());
+    CHECK(Etot == 0.0 and gt.sum() == 0.0 and Wt.sum() == 0.0);
+}
+
+// ─── reduction to 7c.6 deep in a face ──────────────────────────────────────────────────────────────────────────────
+static void reduction_to_7c6()
+{
+    const Vec6 th(2.5, 0.0, 0.6, 1.0, 2.0, 0.0);   // front face x = 2.0, half (0.5, 1.0, 0.3)
+    const auto P = parts_of(th);
+    const auto cfg = make_cfg(bm::kBeamK);
+    for (double nu : {1.0, 0.25})
+    {
+        const double a = std::acos(nu);
+        const Eigen::Vector3d hit(2.0, -0.8, 0.3), u(std::cos(a), std::sin(a), 0.0), o = hit - 2.0 * u;
+        bm::BeamRays R;
+        R.origin = o; R.kappa = 1.0; R.endpoints = {hit}; R.m = {1.0 - 1e-6};
+        Mat6 W = Mat6::Zero(); Vec6 g = Vec6::Zero(); double E = 0.0;
+        bm::accumulate_beam_rays<6>(P, R, cfg, W, g, &E);
+        bm::detail::PartRay r;
+        bm::detail::make_part_ray(r, P[0], 1.0, 0.0, o, u, kRhoMax);
+        const auto A = bm::detail::approach<false>(r, 1e-4);
+        const auto c = bm::detail::cross<true>(r, 0.0);
+        const Vec6 as = P[0].J.transpose() * c.dphi;   // ∂s/∂θ at the face hit
+        const Mat6 W7 = as * as.transpose() / (nu * nu / kP0 + kSigmaS * kSigmaS);
+        const double rel = (W - W7).norm() / W7.norm();
+        std::printf("reduction_to_7c6  n.u = %.2f: pi = 1 - %.1e, |W - a a^T/((n.u)^2 R + s^2)| / |.| = %.3e  (W_cxcx %.4e vs %.4e)\n",
+                    nu, bm::Phi(A.d / kSigmaS), rel, W(0, 0), W7(0, 0));
+        CHECK(bm::Phi_upper(A.d / kSigmaS) > 1.0 - 1e-6);
+        Mat6 W64 = Mat6::Zero(); Vec6 g64 = Vec6::Zero(); double E64 = 0.0;
+        bm::accumulate_beam_rays<6>(P, R, make_cfg(64), W64, g64, &E64);
+        std::printf("reduction_to_7c6  n.u = %.2f: the same at K = 64: rel %.3e (the K-node variance of the truncated normal)\n",
+                    nu, (W64 - W7).norm() / W7.norm());
+        CHECK((W64 - W7).norm() / W7.norm() < 0.01);
+        pass_item(rel < 0.01, "reduction_to_7c6 at the default K");
+    }
+}
+
+// ─── finite and PSD in the degenerate geometries ───────────────────────────────────────────────────────────────────
+static bool finite_psd(const std::vector<bm::BeamPart>& P, const bm::BeamRays& R, const char* what)
+{
+    Mat6 W = Mat6::Zero(); Vec6 g = Vec6::Zero(); double E = 0.0;
+    bm::accumulate_beam_rays<6>(P, R, make_cfg(bm::kBeamK), W, g, &E);
+    const Eigen::SelfAdjointEigenSolver<Mat6> es(W);
+    const double lmin = es.eigenvalues().minCoeff(), lmax = es.eigenvalues().maxCoeff();
+    const bool ok = std::isfinite(E) and g.allFinite() and W.allFinite() and lmin >= -1e-9 * std::max(1.0, lmax);
+    std::printf("%s  %zu rays: E = %+.4f, |g| = %.3e, eig(W) in [%.3e, %.3e]  %s\n", what, R.endpoints.size(), E, g.norm(), lmin, lmax, ok ? "ok" : "BAD");
+    return ok;
+}
+static void sensor_inside_part_is_finite()
+{
+    const auto P = parts_of(Vec6(2.5, 0.0, 0.6, 0.5, 0.4, 0.3), kBed);
+    bm::BeamRays R;
+    R.origin = {2.5, 0.05, 0.3}; R.kappa = 1.0;   // inside the box
+    for (int k = 0; k < 24; ++k)
+    {
+        const double az = k * 2 * std::numbers::pi / 24, el = (k % 3 - 1) * 0.3;
+        const Eigen::Vector3d u(std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el));
+        for (double rho : {0.05, 0.4, 2.0, kRhoMax}) { R.endpoints.push_back(R.origin + rho * u); R.m.push_back(k % 2 ? 0.9 : 0.02); }
+    }
+    CHECK(finite_psd(P, R, "sensor_inside_part_is_finite"));
+    R.origin = {2.5, 0.25 + 0.5 * kSigmaS, 0.3};   // inside the dilated part only
+    CHECK(finite_psd(P, R, "sensor_inside_part_is_finite (in the dilation band)"));
+}
+static void parallel_ray_is_finite()
+{
+    const auto P = parts_of(Vec6(2.5, 0.0, 0.6, 0.5, 0.4, 0.0), kBed);
+    bm::BeamRays R;
+    R.kappa = 1.0;
+    // rays parallel to the top face exactly at, just above and just below it; through a vertical edge; along a face plane
+    for (double z : {0.6, 0.6 + 1e-12, 0.6 - 1e-12, 0.6 + 0.5 * kSigmaS, 0.6 - 0.5 * kSigmaS})
+        for (double y : {0.0, 0.2, -0.2, 0.2 + 1e-9})
+        {
+            R.origin = {0.0, y, z};
+            bm::BeamRays one = R;
+            one.endpoints = {R.origin + Eigen::Vector3d(2.25, 0, 0), R.origin + Eigen::Vector3d(3.5, 0, 0)};
+            one.m = {0.9, 0.02};
+            CHECK(finite_psd(P, one, "parallel_ray_is_finite"));
+        }
+    // a ray along the edge line x = 2.25, y = 0.2 (vertical), and along the face plane y = 0.2 at a slant
+    bm::BeamRays v;
+    v.kappa = 1.0; v.origin = {2.25, 0.2, 2.0};
+    v.endpoints = {Eigen::Vector3d(2.25, 0.2, 0.6), Eigen::Vector3d(2.25, 0.2, 0.0)}; v.m = {0.9, 0.02};
+    CHECK(finite_psd(P, v, "parallel_ray_is_finite (along an edge)"));
+}
+
+// ─── the largest per-ray curvature along ∇d (R6-M3), printed ──────────────────────────────────────────────────────────
+static void largest_curvature_printed()
+{
+    const Vec6 th(2.5, 0.0, 0.6, 0.5, 0.4, 0.3);
+    const auto P = parts_of(th);
+    const auto cfg = make_cfg(bm::kBeamK);
+    const double c = std::cos(th(5)), s = std::sin(th(5));
+    double best = 0.0, best_off = 0.0, best_ang = 0.0;
+    for (double off = 1.5; off <= 3.0001; off += 0.1)
+        for (double ang : {0.2, 0.5, 0.785, 1.1, 1.37})
+        {
+            const Eigen::Vector3d nl(std::cos(ang), std::sin(ang), 0.0), ul(-std::sin(ang), std::cos(ang), 0.0);
+            const Eigen::Vector3d cl = Eigen::Vector3d(0.25, 0.2, 0.0) + off * kSigmaS * nl;
+            const Eigen::Vector3d P0(2.5 + c * cl.x() - s * cl.y(), s * cl.x() + c * cl.y(), 0.3 + cl.z());
+            const Eigen::Vector3d u(c * ul.x() - s * ul.y(), s * ul.x() + c * ul.y(), 0.0), o = P0 - 2.0 * u;
+            Vec6 gd;
+            const double d = bm::closest_approach(P[0], o, u, kRhoMax, &gd);
+            bm::BeamRays R;
+            R.origin = o; R.kappa = 1.0; R.endpoints = {P0}; R.m = {0.9};   // a claimed return at the closest approach
+            Mat6 W = Mat6::Zero(); Vec6 g = Vec6::Zero(); double E = 0.0;
+            bm::accumulate_beam_rays<6>(P, R, cfg, W, g, &E);
+            const double alpha = gd.dot(W * gd) / std::pow(gd.squaredNorm(), 2);   // curvature in d units (nats/m²)
+            if (alpha > best) { best = alpha; best_off = d / kSigmaS; best_ang = ang; }
+        }
+    std::printf("largest_curvature_printed  claimed rays 1.5-3 sigma_s outside a corner: largest curvature along grad d = "
+                "%.3f / sigma_s^2 (at d = %.2f sigma_s, normal angle %.2f rad)  [spec R6-M3: about 2/sigma_s^2]\n",
+                best * kSigmaS * kSigmaS, best_off, best_ang);
+    CHECK(std::isfinite(best));
+}
+
+// ─── cost ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+static void cost_one(const char* name, const Vec6& th, const BedSpec& b, bm::BeamRays R)
+{
+    const auto P = parts_of(th, b);
+    // keep the contributing (near) rays, cycled up to 256
+    bm::BeamRays N = R;
+    N.endpoints.clear(); N.m.clear();
+    std::vector<std::size_t> near;
+    for (std::size_t i = 0; i < R.endpoints.size(); ++i)
+    {
+        const Eigen::Vector3d u = (R.endpoints[i] - R.origin).normalized();
+        double d = 1e9;
+        for (const auto& p : P) d = std::min(d, bm::closest_approach(p, R.origin, u, kRhoMax, nullptr));
+        if (d <= 8.0 * kSigmaS) near.push_back(i);
+    }
+    for (std::size_t k = 0; k < 256 and not near.empty(); ++k) { N.endpoints.push_back(R.endpoints[near[k % near.size()]]); N.m.push_back(R.m[near[k % near.size()]]); }
+    const auto cfg = make_cfg(bm::kBeamK);
+    std::vector<double> tb, te;
+    double sink = 0.0;
+    for (int rep = 0; rep < 41; ++rep)
+    {
+        Mat6 W = Mat6::Zero(); Vec6 g = Vec6::Zero(); double E = 0.0;
+        auto t0 = std::chrono::steady_clock::now();
+        bm::accumulate_beam_rays<6>(P, N, cfg, W, g, &E);
+        auto t1 = std::chrono::steady_clock::now();
+        sink += bm::beam_rays_energy(P, N, cfg);
+        auto t2 = std::chrono::steady_clock::now();
+        sink += E + W(0, 0);
+        tb.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        te.push_back(std::chrono::duration<double, std::milli>(t2 - t1).count());
+    }
+    std::ranges::sort(tb); std::ranges::sort(te);
+    std::printf("cost  %s: %zu rays (%zu distinct near rays): median %.3f ms per build, %.3f ms per energy  (sink %.1f)\n",
+                name, N.endpoints.size(), near.size(), tb[tb.size() / 2], te[te.size() / 2], sink);
+}
+static void cost()
+{
+    cost_one("box", kBoxTruth, {}, box_fixture());
+    cost_one("bed (2 parts)", kBedTruth, kBed, bed_fixture());
+}
+
+
+int main(int argc, char** argv)
+{
+    quick = argc > 1 and std::strcmp(argv[1], "quick") == 0;
     student_t_constants();
     phi_inv_accuracy();
     nodes_fixed_deep_inside();
@@ -354,6 +1101,20 @@ int main()
     dE_matches_fd();
     tail_band_is_finite();
     z_form_matches_b_form();
+    closest_approach_corner();
+    continuity_box();
+    headboard_continuity();
+    gradient_box();
+    headboard_gradient();
+    quadrature_K();
+    several_parts_equals_one();
+    far_rays_exact_zero();
+    reduction_to_7c6();
+    sensor_inside_part_is_finite();
+    parallel_ray_is_finite();
+    largest_curvature_printed();
+    cost();
+    if (pass_misses) std::printf("beam_ray_test: %d Pass item(s) MISSED (printed above, reported, not tuned)\n", pass_misses);
     std::printf(bad ? "beam_ray_test: %d FAILED\n" : "beam_ray_test: all passed\n", bad);
     return bad ? 1 : 0;
 }
