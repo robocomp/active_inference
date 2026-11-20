@@ -772,7 +772,7 @@ SDF − δ.
   continuous in θ; it is C¹ except where two parts tie at the minimum (d_ip = d_iq) and at the kinks listed below. A
   double switch between two neighbouring nodes is not found; the accuracy test bounds what that costs.
 
-Numbers at the configured values, approximate (the unconvolved peak; the δ integral makes them about 0.07 nats
+Numbers at the configured values, approximate (the unconvolved peak; the δ integral makes them about 0.11 nats (measured 0.107 at K = 8, Task 16; rev 3.3.3 said 0.07)
 smaller in magnitude face-on, so a fixture is compared with the computed value, not with these; R6-M6): a claimed
 return on the surface has E ≈ −6.85 nats at m = 0.9 and −4.66 at m = 0.5, and 0 if the model misses it. A foreign
 return (m = 0.05) 40 cm behind a model that fully blocks its ray costs ≈ +11 nats, growing as 3.1·log(1 + e²/c²). A
