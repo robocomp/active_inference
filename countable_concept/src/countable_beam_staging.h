@@ -5,9 +5,10 @@
  *
  * What it does, in order:
  *   - no fresh Helios sweep          ⇒ nothing staged, logged as nomem_cycle = kNoSweep (not counted);
- *   - no mask cloud (no anchor)      ⇒ nothing staged (no select box exists);
  *   - no membership (an empty label: no RGB frame staged, camera unbound, no focal length, empty slice; owner 11-18)
- *                                    ⇒ nothing staged, nomem_cycle = kNoMembership and the cumulative counter counts it;
+ *                                    ⇒ nothing staged, nomem_cycle = kNoMembership and the cumulative counter counts it,
+ *                                      whether or not a mask cloud exists (an empty slice has none);
+ *   - a membership but no mask cloud ⇒ nothing staged (no select box exists);
  *   - otherwise select_rays_beam stages every return whose RAY crosses the select box (ray geometry, not endpoint-in-box), each
  *     with its persistent label m (a return with no camera information is left out and counted as nolabel), κ = coverage·ca from
  *     the endpoint-in-box returns; σ_s = model σ (set here, BeamRays' own default is not used); p_f per ray against the room's
@@ -89,8 +90,9 @@ inline void stage_beam_cycle(const std::vector<Eigen::Vector3f>* sweep, const Ei
     out.rho_max = cfg.rho_max;
     out.sigma_s = cfg.sigma_s;
     if (sweep == nullptr or sweep->empty()) { log.nomem_cycle = BeamLog::kNoSweep; return; }
-    if (anchor_cloud.empty()) return;
+    // No membership is checked before the mask cloud: an empty slice has neither, and it is a no-membership cycle (spec a0).
     if (not label) { log.nomem_cycle = BeamLog::kNoMembership; ++log.nomem_cycles; return; }
+    if (anchor_cloud.empty()) return;
     Eigen::Vector2f c = Eigen::Vector2f::Zero();
     for (const auto& p : anchor_cloud) c += p.head<2>();
     c /= static_cast<float>(anchor_cloud.size());

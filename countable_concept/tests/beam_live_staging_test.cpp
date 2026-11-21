@@ -247,6 +247,51 @@ static void silhouette_live()
             }
         }
     }
+    // PRINTED (review I2): the 5 cm background with the back wall NOT a known room surface (floor only in p_f), the setting the
+    // spec's "Near background" prediction was made in (rev 3.3.3, before rev 3.3.7's known surfaces): the wall's returns are then
+    // foreign at p_pass, and a model that covers them is paid. Correct seed, 10 LiDAR-only frames. No bound.
+    {
+        const std::vector<ts::SceneWall> walls{back_wall(0.05f)};
+        const Eigen::Vector3f o(kRobot.x(), kRobot.y(), kSilZ);
+        BeamLog lg;
+        const bm::BeamRays r = stage(helios_sweep(o, boxes, walls), o, anchor, L.label, {}, &lg);
+        CountableBelief b = belief({tx, ty, tH, tw, tw, 0.0f});
+        for (int k = 0; k < 10; ++k) b.update(lidar_frame(r));
+        const double ew = b.state().w - tw, ecx = b.state().cx - tx;
+        const double right = ecx + 0.5 * ew, left = -ecx + 0.5 * ew;
+        std::printf("  silhouette live bg 0.05 m, wall NOT a known surface (PRINTED): staged %d kappa %.3f ; dw %+.4f dcx %+.4f ; per-edge "
+                    "shift left %+.4f right %+.4f against predicted +0.019/+0.037/+0.053/+0.069 at sigma_px 1/2/3/4 cm (interpolated "
+                    "%+.4f at this fixture's %.4f m; spec at eps_px 2 %%, live eps_px %.3f)\n", lg.staged, lg.kappa, ew, ecx, left, right,
+                    predicted_shift_m(sig_m), sig_m, kEpsLive);
+    }
+    // PRINTED (review I2, the prediction's own geometry): the spec's b is the depth behind the FACE PLANE the silhouette ray
+    // would enter if the model widened — for this front sweep the FRONT face. back_wall(gap) sits `gap` behind the BACK face,
+    // i.e. tw + gap behind the front face plane, so the runs above never have b = 5 cm. Here a background surface 5 cm behind
+    // the front face plane on both sides of the box (two 1.5 m segments starting at its edges; not a known surface), the back
+    // wall 1 m (known), correct seed, 10 LiDAR-only frames. No bound.
+    {
+        const float yb = ty - 0.5f * tw + 0.05f;
+        const std::vector<ts::SceneWall> room{back_wall(1.0f)};
+        const std::vector<ts::SceneWall> scene{back_wall(1.0f),
+                                               {Eigen::Vector2f(tx - 0.5f * tw - 1.5f, yb), Eigen::Vector2f(tx - 0.5f * tw, yb), 2.5f},
+                                               {Eigen::Vector2f(tx + 0.5f * tw, yb), Eigen::Vector2f(tx + 0.5f * tw + 1.5f, yb), 2.5f}};
+        const Eigen::Vector3f o(kRobot.x(), kRobot.y(), kSilZ);
+        const auto sweep5 = helios_sweep(o, boxes, scene);
+        // at the live ε_px, and at the spec prediction's ε_px = 2 % (labels only; the beam config is the live one)
+        const Live L2 = make_live(cam, truth_box(), {}, 0.0f, 0.02);
+        for (const Live* Lx : {&L, &L2})
+        {
+            BeamLog lg;
+            const bm::BeamRays r = stage(sweep5, o, anchor, Lx->label, room, &lg);
+            CountableBelief b = belief({tx, ty, tH, tw, tw, 0.0f});
+            for (int k = 0; k < 10; ++k) b.update(lidar_frame(r));
+            const double ew = b.state().w - tw, ecx = b.state().cx - tx;
+            const double right = ecx + 0.5 * ew, left = -ecx + 0.5 * ew;
+            std::printf("  silhouette live, background 5 cm behind the FRONT face plane, eps_px %.3f (PRINTED): staged %d kappa %.3f ; dw "
+                        "%+.4f dcx %+.4f ; per-edge shift left %+.4f right %+.4f against predicted %+.4f at sigma_px %.4f m (spec at "
+                        "eps_px 2 %%)\n", Lx->eps, lg.staged, lg.kappa, ew, ecx, left, right, predicted_shift_m(sig_m), sig_m);
+        }
+    }
     // PRINTED beside the CHECK: the correct seed's w at other Helios sampling phases (azimuth offset 0.1 / 0.2 / 0.3° of the
     // 0.4° step) and at a dense 0.05° sweep, background 1 m — what the 0.4° grid's phase does to w (the full ray spacing at the
     // front face is s = z·0.4°; spec rev 3.3.9 states the w bounds of creep and of the w optimum in s).
@@ -465,6 +510,9 @@ static void no_membership_cycle_skips_rays()
     const long c2 = log.nomem_cycles;
     log.begin_cycle(); stage_beam_cycle(nullptr, o, pts, cfg, L.label, r1, log);
     const int code_nosweep = log.nomem_cycle; const long c3 = log.nomem_cycles;
+    // An empty slice: no membership AND no mask cloud — still a no-membership cycle, counted (review I1).
+    log.begin_cycle(); stage_beam_cycle(&sweep, o, std::span<const Eigen::Vector3f>{}, cfg, BeamLabel{}, r1, log);
+    const int code_empty = log.nomem_cycle; const long c4 = log.nomem_cycles;
     log.begin_cycle(); stage_beam_cycle(&sweep, o, pts, cfg, L.label, rl, log);
     const int code_ok = log.nomem_cycle;
     CountableBelief a = belief({tx, ty, tH, tw + 0.01f, tw, 0.0f}), c = a, d = a;
@@ -474,11 +522,12 @@ static void no_membership_cycle_skips_rays()
     const bool same = a.state().vec() == c.state().vec() and a.covariance() == c.covariance();
     const float dP = (d.covariance() - c.covariance()).norm();
     std::printf("  no membership: staged %zu (code %d, counter %ld -> %ld) ; no sweep code %d counter %ld ; with a label staged %zu (code %d) ; "
-                "camera update identical to camera-only %d ; |P_rays - P_cam| %.3e\n", r0.endpoints.size(), code1, c1, c2, code_nosweep,
-                c3, rl.endpoints.size(), code_ok, int(same), dP);
+                "camera update identical to camera-only %d ; |P_rays - P_cam| %.3e ; empty slice code %d counter %ld\n", r0.endpoints.size(), code1,
+                c1, c2, code_nosweep, c3, rl.endpoints.size(), code_ok, int(same), dP, code_empty, c4);
     CHECK(r0.endpoints.empty() and r0.kappa == 0.0);
     CHECK(code1 == BeamLog::kNoMembership and c1 == 1 and c2 == 2);
     CHECK(code_nosweep == BeamLog::kNoSweep and c3 == 2 and r1.endpoints.empty());
+    CHECK(code_empty == BeamLog::kNoMembership and c4 == 3 and r1.endpoints.empty());
     CHECK(code_ok == BeamLog::kMembership and not rl.endpoints.empty());
     CHECK(not a.lidar_measured(camera_frame(pts, &r0)));
     CHECK(same);
