@@ -276,7 +276,8 @@ static void no_cross_pushes_back_persistent()
     for (const bool camera : {true, false})
     {
         CountableFrame f = camera ? fcam : flid; set_latents(f, 1.0f);
-        float g[2], th = 0.0f, last_step = 0.0f;
+        float g[2], th = 0.0f;
+        Eigen::Matrix<double, 6, 1> last_step = Eigen::Matrix<double, 6, 1>::Zero(), sig = Eigen::Matrix<double, 6, 1>::Zero();
         float g_off = 0.0f;
         {   // diagnostic: the flag-off path on the same update
             CountableBeliefParams p = params(); p.persistent = false; p.depth_unobs_precision = 0.0f;
@@ -302,21 +303,35 @@ static void no_cross_pushes_back_persistent()
                 std::printf("    iterates (gap):");
                 for (const auto& v : its) std::printf(" %+.5f", 0.0f - (v(1) + 0.5f * v(4)));
                 std::printf("\n");
-                last_step = its.size() >= 2 ? (its.back() - its[its.size() - 2]).cwiseAbs().maxCoeff() : 0.0f;
+                if (its.size() >= 2) last_step = (its.back() - its[its.size() - 2]).cast<double>();
+                for (int k = 0; k < 6; ++k) sig(k) = std::sqrt(std::max(0.0, double(b.covariance()(k, k))));
             }
         }
         std::printf("  no_cross (%s, %zu data): start gap -0.03000 ; after one update gap %.5f with (2c), %.5f without ; |Id_th| %.3e ; "
-                    "last GN step %.2e m ; flag-off path %.5f\n",
-                    camera ? "camera" : "LiDAR-only", camera ? f.points.size() : f.lidar.endpoints.size(), g[0], g[1], th, last_step, g_off);
+                    "flag-off path %.5f\n",
+                    camera ? "camera" : "LiDAR-only", camera ? f.points.size() : f.lidar.endpoints.size(), g[0], g[1], th, g_off);
+        // spec 7c.8 rev 3.3.9 "No-cross contact": penetration ≤ ½σ_wall (σ_wall = the staged wall's sigma_m)
+        const float half_sw = 0.5f * f.wall.sigma_m;
+        std::printf("    penetration %.5f m (gap %+.5f) ; bound %.5f m (half sigma_wall %.3f)\n", std::max(0.0f, -g[0]), g[0], half_sw,
+                    f.wall.sigma_m);
+        // rev 3.3.8 stop rule, per component: |last step_k| < 0.1·σ_k, σ_k = √P_kk of the returned posterior
+        std::printf("    last GN step / sigma per DOF (cx cy H w h yaw):");
+        bool step_small = true;
+        for (int k = 0; k < 6; ++k)
+        {
+            std::printf(" %+.3e/%.3e", last_step(k), sig(k));
+            step_small = step_small and std::abs(last_step(k)) < 0.1 * sig(k);
+        }
+        std::printf("  (bound 0.1 sigma)\n");
         // camera: the view says nothing about depth, so the whole move is (2c)'s and it is toward the legal side. LiDAR-only:
         // this sweep's rays (left face + top, belief 3 cm off) themselves push the box deeper; (2c) must counter that push.
         if (camera) CHECK(g[0] > -0.03f + 0.005f);
         CHECK(g[0] - g[1] > 0.005f);          // the (2c)-attributable move toward the legal side
         CHECK(th > 0.0f);
-        // (spec 7c.6) fixed-precision (2c) + first-crossing rays: the iterates converge (no half-Hessian overshoot, no wall ray
-        // switching on and off) and land at the wall
-        CHECK(last_step < 0.001f);
-        CHECK(g[0] > -0.005f);
+        // (spec 7c.6, bounds by rev 3.3.9) the iterates converge (no half-Hessian overshoot, no wall ray switching on and off):
+        // the last step per component below 0.1σ_k; and they land at the wall: penetration ≤ ½σ_wall
+        CHECK(step_small);
+        CHECK(-g[0] <= half_sw);
     }
 }
 
