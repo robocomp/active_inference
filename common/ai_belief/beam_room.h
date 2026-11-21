@@ -75,18 +75,17 @@ inline double room_foreign_density(double rho, const RoomCrossing& c, double rho
     return (rho < c.t ? p_pass : 0.0) + (1.0 - p_pass * c.t) * smeared(st, c.sigma_r).pdf(rho - c.t);
 }
 
-// Stage BeamRays::p_f, t_r and sigma_r for every ray of `rays` against `room` (after the endpoints are staged and ρ clamped).
+// Stage BeamRays::p_f for every ray of `rays` against `room` (after the endpoints are staged and ρ clamped).
 inline void stage_room_foreign_density(BeamRays& rays, const RoomSurfaces& room, const StudentT& st)
 {
     const std::size_t n = rays.endpoints.size();
-    rays.p_f.resize(n); rays.t_r.resize(n); rays.sigma_r.resize(n);
+    rays.p_f.resize(n);
     for (std::size_t i = 0; i < n; ++i)
     {
         const Eigen::Vector3d du = rays.endpoints[i] - rays.origin;
         const double rho = du.norm();
         const RoomCrossing c = rho > 0.0 ? first_room_crossing(rays.origin, du / rho, rays.rho_max, room) : RoomCrossing{};
         rays.p_f[i] = rho > 0.0 ? room_foreign_density(rho, c, rays.rho_max, st) : 1.0 / rays.rho_max;
-        rays.t_r[i] = c.t; rays.sigma_r[i] = c.sigma_r;
     }
 }
 

@@ -156,7 +156,7 @@ static void kappa_zero_is_prediction()
     double worst = 0.0;
     for (const double kap : {k5, 0.5})
     {
-        const bm::BeamRays one = ts::subset(r5, {ih});   // each ray keeps its own p_f, t_r, σ_r (review D2)
+        const bm::BeamRays one = ts::subset(r5, {ih});   // each ray keeps its own p_f (review D2)
         bm::BeamRays oneK = one; oneK.kappa = kap;
         bm::BeamRays one1 = one; one1.kappa = 1.0;
         const CountableBeliefState hit = truth_state(), miss{tx + 1.0f, ty, tH, tw, tw, 0.0f};
@@ -432,8 +432,9 @@ static double largest_ray_curvature(const CountableBelief& b, const bm::BeamRays
 //     review's per-ring statement), against the bounds below; the rings that only pass over the top or under the front edge
 //     carry a w dependence of hundredths of a nat and are printed. Without the surfaces (p_f = p_pass, rev 3.3.6) the ring that meets the
 //     front face 4 mm above the floor (−14.59°) is monotone in w — printed as the control.
-//     Bounds (spec 7c.8 rev 3.3.8): ½ the Helios ray spacing at the object along w (range 1.5 m × the 0.4° azimuth step, not the
-//     fixture's finer 0.05° sampling) on the sum and on every ring meeting the box; the floor-contact ring (its lowest return on
+//     Bounds (spec 7c.8 rev 3.3.8, corrected by rev 3.3.9): the FULL Helios ray spacing s at the object along w (range 1.5 m ×
+//     the 0.4° azimuth step, not the fixture's finer sampling) on the sum and on every ring meeting the box — w spans two
+//     independently sampled edges; the floor-contact ring (its lowest return on
 //     the box within 2 cm of the floor: π ≈ 0.54 from the box's own blurred bottom edge, stated limit) 5 mm. ───
 static void silhouette_w_optimum_with_floor()
 {
@@ -462,7 +463,7 @@ static void silhouette_w_optimum_with_floor()
     };
     bm::BeamRays all_room, all_plain;
     double worst = 0.0, floor_ring = 0.0;
-    const double bound_w = 0.5 * 1.5 * double(ts::kHeliosAzStepDeg) * std::numbers::pi / 180.0, bound_floor = 0.005;
+    const double bound_w = 1.5 * double(ts::kHeliosAzStepDeg) * std::numbers::pi / 180.0, bound_floor = 0.005;
     std::printf("  silhouette w optimum per ring (mm; with room surfaces / without):");
     for (const float el : ts::helios_ring_elev_deg())
     {
@@ -483,7 +484,7 @@ static void silhouette_w_optimum_with_floor()
         ts::append(all_plain, rp);
     }
     const double tot = argmin(all_room), tot_plain = argmin(all_plain);
-    std::printf("\n  silhouette w optimum, all rings (%zu rays): %+.2f mm with the room surfaces (bound %.2f mm, half the ray spacing) ; "
+    std::printf("\n  silhouette w optimum, all rings (%zu rays): %+.2f mm with the room surfaces (bound %.2f mm, the ray spacing) ; "
                 "%+.2f mm without (rev 3.3.6, printed) ; worst ring meeting the box %.2f mm (bound %.2f) ; floor-contact ring %.2f mm "
                 "(bound %.1f)\n", all_room.endpoints.size(), 1e3 * tot, 1e3 * bound_w, 1e3 * tot_plain, 1e3 * worst, 1e3 * bound_w,
                 1e3 * floor_ring, 1e3 * bound_floor);

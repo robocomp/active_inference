@@ -403,12 +403,16 @@ static void physical_lidar_only_sigma_bounded()
     CountableFrame f = lidar_frame(front_rays()); set_latents(f, 1.0f);
     const float back0 = b.state().cy + 0.5f * b.state().h, w0 = b.state().w;
     for (int k = 0; k < 2000; ++k) b.update(f);
+    // spec 7c.8 rev 3.3.9: w spans two independently sampled edges, so its bound is the full Helios azimuth spacing at the
+    // front face (1.5 m), the creep set's rule (was a 2 mm test-side bound)
+    const float bw = 1.5f * rc::test::kHeliosAzStepDeg * 0.017453293f;
     const float sh = std::sqrt(b.covariance()(4, 4)), back = b.state().cy + 0.5f * b.state().h;
     std::printf("  sigma bounded: sigma_h after 2000 LiDAR-only sweeps (front, %zu returns) %.4f m (class std %.4f) ; back face moved %.5f m ; "
-                "w moved %.5f m\n", f.lidar.endpoints.size(), sh, params().prior_footprint_std, back - back0, b.state().w - w0);
+                "w moved %.5f m (bound %.5f m, the ray spacing)\n", f.lidar.endpoints.size(), sh, params().prior_footprint_std,
+                back - back0, b.state().w - w0, bw);
     CHECK(sh <= 1.01f * params().prior_footprint_std);
     CHECK(std::abs(back - back0) < 0.001f);
-    CHECK(std::abs(b.state().w - w0) < 0.002f);
+    CHECK(std::abs(b.state().w - w0) <= bw);
 }
 
 static void parked_camera_is_one_look()

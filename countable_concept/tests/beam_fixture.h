@@ -68,16 +68,15 @@ inline rc::ai::beam::RoomSurfaces room_of(std::span<const SceneWall> walls, bool
     return r;
 }
 
-// A ray-set holding the rays `idx` of `r`, with every per-ray vector (m, p_f, t_r, sigma_r) kept aligned (review D2).
+// A ray-set holding the rays `idx` of `r`, with every per-ray vector (m, p_f) kept aligned (review D2).
 inline rc::ai::beam::BeamRays subset(const rc::ai::beam::BeamRays& r, const std::vector<std::size_t>& idx)
 {
     rc::ai::beam::BeamRays o = r;
-    o.endpoints.clear(); o.m.clear(); o.p_f.clear(); o.t_r.clear(); o.sigma_r.clear();
+    o.endpoints.clear(); o.m.clear(); o.p_f.clear();
     for (const std::size_t i : idx)
     {
         o.endpoints.push_back(r.endpoints[i]); o.m.push_back(r.m[i]);
         if (not r.p_f.empty()) o.p_f.push_back(r.p_f[i]);
-        if (not r.t_r.empty()) { o.t_r.push_back(r.t_r[i]); o.sigma_r.push_back(r.sigma_r[i]); }
     }
     return o;
 }
@@ -88,8 +87,6 @@ inline void append(rc::ai::beam::BeamRays& dst, const rc::ai::beam::BeamRays& sr
     dst.endpoints.insert(dst.endpoints.end(), src.endpoints.begin(), src.endpoints.end());
     dst.m.insert(dst.m.end(), src.m.begin(), src.m.end());
     dst.p_f.insert(dst.p_f.end(), src.p_f.begin(), src.p_f.end());
-    dst.t_r.insert(dst.t_r.end(), src.t_r.begin(), src.t_r.end());
-    dst.sigma_r.insert(dst.sigma_r.end(), src.sigma_r.begin(), src.sigma_r.end());
 }
 
 inline rc::ai::beam::BeamRays stage_beam(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& sweep,

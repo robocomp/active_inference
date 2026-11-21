@@ -413,7 +413,8 @@ inline void quantile_nodes_z(double sigma_s, std::span<const double> z, const Ga
 // A zero-width subinterval keeps its motion term dL·h(b); a breakpoint at an exact tangency (∂_ts = 0) adds none.
 // Breakpoints that appear, clip or reorder are the stated kink (iv).
 //
-// Curvature (spec (b)), PSD, × κ: r·J̄J̄ᵀ/V + (1 − o)·I_d·∇d∇dᵀ, r = m·A/p, o = (1 − m)p_pass·B/(m·A + (1 − m)p_pass·π).
+// Curvature (spec (b)), PSD, × κ: r·J̄J̄ᵀ/V + (1 − o)·I_d·∇d∇dᵀ, r = m·A/p, o = (1 − m)p_pass·B/(m·A + (1 − m)p_pass·π),
+// I_d = (φ(z_d)/σ_s)²·[1/π + 1/(1 − π)] — the Fisher information of the fully observed hit/miss outcome (spec 7c.8 rev 3.3.9).
 // J̄, t̄ and Var t are moments on the δ-quantile nodes (K_m) at fixed δ; Var t is scaled by
 // Var_exact(δ | δ > d)/Var_nodes(δ), Var_exact = σ_s²(1 + αλ − λ²), α = d/σ_s, λ the Mills ratio.
 //
@@ -447,9 +448,6 @@ struct BeamRays
     // p_pass = 1/ρ_max in every formula of the ray (p, r, o, the normaliser (1 − m)p_f, the atom, the gradient) as a constant
     // per ray. EMPTY ⇒ p_pass for every ray, bit for bit (the Task 17/18 fixtures).
     std::vector<double> p_f;
-    // The room crossing of each ray (spec 7c.8 rev 3.3.8; beam_room.h stages them with p_f): t_r (+inf: none in (0, ρ_max]) and
-    // σ_r = σ_surface/|n̂·u| at t_r. They enter the miss mass Q_f(t̄) of I_d. Empty with p_f (or empty alone: no room term).
-    std::vector<double> t_r, sigma_r;
 };
 
 // Build with BeamConfig::make (the quantile levels of G are tabulated once, ν is fixed at load).
@@ -909,8 +907,7 @@ inline bool p_f_consistent(const BeamRays& rays)
 {
     const std::size_t n = rays.endpoints.size();
     const auto one_per_ray = [n](const std::vector<double>& v) { return v.empty() or v.size() == n; };
-    return one_per_ray(rays.p_f) and one_per_ray(rays.t_r) and rays.t_r.size() == rays.sigma_r.size()
-           and rays.m.size() == n;   // N2: m too
+    return one_per_ray(rays.p_f) and rays.m.size() == n;   // N2: m too
 }
 
 // The term of ray i: E_i, its gradient and curvature (unscaled by κ). false ⇔ the ray contributes exactly 0 (d > 8σ_s).
@@ -1216,19 +1213,12 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
         const double eb = tbar - rho, c2 = st.c * st.c;
         const double V = (1.0 + eb * eb / c2) / st.p0 + var_t;
         const double p = a_ref * pa;
-        // the miss mass: the foreign return's probability of lying beyond t̄ (spec 7c.8 rev 3.3.8, gap S1). No room crossing:
-        // 1 − t̄/ρ_max (the historic expression, bit-exact); with one at t_r: the p_f tail
-        // Q_f(t̄) = 1 − p_pass·min(t̄, t_r) − (1 − p_pass·t_r)·G_r(t̄ − t_r), G_r the CDF of the smeared Student-t.
-        double Q_f = 1.0 - tbar / rho_max;
-        if (not rays.t_r.empty() and std::isfinite(rays.t_r[i]))
-        {
-            const double tr = rays.t_r[i], pp = 1.0 / rho_max;
-            Q_f = 1.0 - pp * std::min(tbar, tr) - (1.0 - pp * tr) * smeared(st, rays.sigma_r[i]).cdf(tbar - tr);
-        }
         const double r_member = m * A / p, o_front = a_ref * B / (m * A + a_ref * pi);
+        // the edge information, fully observed form (spec 7c.8 rev 3.3.9): I_d = (φ(z_d)/σ_s)²·[1/π + 1/(1 − π)], the Fisher
+        // information of the hit/miss outcome. π = Φ̄(z_d) and 1 − π = Φ̄(−z_d), both from the log upper tail, so neither
+        // 1/π nor 1/(1 − π) is formed by cancellation (π near 0 or 1).
         const double lphn = log_phi(zd);
-        const double Id = (m * std::exp(2.0 * lphn - log_Phi_upper(zd))
-                           + (1.0 - m) * Q_f * std::exp(2.0 * lphn - log_Phi_upper(-zd))) / (sigma * sigma);
+        const double Id = (std::exp(2.0 * lphn - log_Phi_upper(zd)) + std::exp(2.0 * lphn - log_Phi_upper(-zd))) / (sigma * sigma);
         out.W = (V > 0.0 ? r_member / V : 0.0) * (Jbar * Jbar.transpose())
                 + ((1.0 - o_front) * Id) * (S.dd[i0] * S.dd[i0].transpose());
     }

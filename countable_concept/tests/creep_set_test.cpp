@@ -161,13 +161,14 @@ static void creep_set(int N)
 {
     const float dcxs[] = {0.0f, 0.0005f, 0.001f, 0.002f};
     const float dws[]  = {0.0f, 0.001f};
-    // spec 7c.8 rev 3.3.8 "Bounds against ray sampling": Δw and Δh against ½ the Helios ray spacing at the object — along w the
-    // azimuth step × range, along h the ring spacing × range (the front face is 1.5 m from the sensor). The 7c.6 face bounds
-    // (back 1 mm, front 2 mm) stay.
+    // spec 7c.8 rev 3.3.8 "Bounds against ray sampling", corrected by rev 3.3.9: w and h are distances between two
+    // independently sampled edges, so Δw and Δh are bounded by the FULL Helios ray spacing s at the object (one centre, cx or
+    // cy, would take ½s) — along w the azimuth step × range, along h the ring spacing × range (the front face is 1.5 m from the
+    // sensor). The 7c.6 face bounds (back 1 mm, front 2 mm) stay.
     constexpr float d2r = 0.017453293f, range = 1.5f;
-    const float bw = 0.5f * range * rc::test::kHeliosAzStepDeg * d2r;
-    const float bh = 0.5f * range * (110.0f / 49.0f) * d2r;
-    std::printf("  creep bounds: |dw| <= %.4f m (half the azimuth spacing at %.1f m), |dh| <= %.4f m (half the ring spacing)\n", bw, range, bh);
+    const float bw = range * rc::test::kHeliosAzStepDeg * d2r;
+    const float bh = range * (110.0f / 49.0f) * d2r;
+    std::printf("  creep bounds: |dw| <= %.4f m (the azimuth spacing at %.1f m), |dh| <= %.4f m (the ring spacing)\n", bw, range, bh);
     int fails = 0;
     for (const bool wall : {true, false})
     {
@@ -205,7 +206,7 @@ static void creep_set(int N)
             }
     }
     std::printf("  creep set, %d sweeps: %d / 16 fail\n", N, fails);
-    CHECK(fails == 0);   // spec 7c.8 rev 3.3.8: 0/16 with Δw, Δh within half the ray spacing
+    CHECK(fails == 0);   // spec 7c.8 rev 3.3.9: 0/16 with Δw, Δh within the ray spacing s
 }
 
 int main(int argc, char** argv)

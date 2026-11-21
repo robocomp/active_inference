@@ -152,6 +152,10 @@ static SeqOut live9_sequence(const Eigen::Vector2f& seed_c, const Eigen::Vector2
 // spec 7c.8 rev 3.3.8 "Known surfaces with their own σ": this is the FLUSH-WALL fixture — the stand flush on the back wall, the
 // wall (σ 0.02 m, the WallRef's) and the floor (σ 0.005 m, Model.FloorSigmaM) known surfaces in p_f. Pass: one basin — the
 // seed run and the lever-only control settle at the same θ and e (dth, de ≤ σ_ψ·|seed − truth|, the first two CHECKs).
+// spec 7c.8 rev 3.3.9 "Flush against a known wall" (stated limit): with e modelled, a box flush against a known wall has at
+// least two energy basins (w against e_x, h against e_y), so the full truth-seeded control (ii) may settle in the other one.
+// Its numbers (θ against the full control, |e|/σ, yaw) are PRINTED, not checked; the lever-only control stays the CHECK, and
+// live11 watches the two flush nightstands for an h or w error.
 static void lever_arm_sensitivity()
 {
     const float cam_dx = 0.12f;
@@ -172,8 +176,8 @@ static void lever_arm_sensitivity()
     CHECK(dth <= tol);
     CHECK(de <= tol);
     CHECK(lev.worst_z < 3.0 and ctl.worst_z < 3.0);
-    // (ii) T13-1: the full truth-seeded control. CHECKED: |e| ≤ 0.1σ per component on both runs, the yaw within σ_ψ of the
-    // control, and (spec 7c.8) θ's position components within σ_ψ·|seed − truth|.
+    // (ii) T13-1: the full truth-seeded control. PRINTED (spec 7c.8 rev 3.3.9 stated limit, see above): |e| ≤ 0.1σ per
+    // component on both runs, the yaw within σ_ψ of the control, and θ's position components within σ_ψ·|seed − truth|.
     std::printf("    full control, per component dtheta (cx cy H w h in m, bound %.5f; yaw in rad, bound %.5f):", tol, kSigPose(2));
     for (int i = 0; i < 6; ++i) std::printf(" %+.5f", lev.th(i) - all.th(i));
     std::printf("  (sigma_psi*|seed-truth| = %.5f m for reference)\n", tol);
@@ -181,9 +185,13 @@ static void lever_arm_sensitivity()
                 lev.e(0) - all.e(0), lev.e(1) - all.e(1), lev.e(2) - all.e(2),
                 std::abs(lev.e(0)) / kSigPose(0), std::abs(lev.e(1)) / kSigPose(1), std::abs(lev.e(2)) / kSigPose(2),
                 std::abs(all.e(0)) / kSigPose(0), std::abs(all.e(1)) / kSigPose(1), std::abs(all.e(2)) / kSigPose(2));
-    for (int i = 0; i < 3; ++i) CHECK(std::abs(lev.e(i)) <= 0.1 * kSigPose(i) and std::abs(all.e(i)) <= 0.1 * kSigPose(i));
-    CHECK(std::abs(std::remainder(double(lev.th(5)) - double(all.th(5)), 2.0 * M_PI)) <= kSigPose(2));
-    for (int i = 0; i < 5; ++i) CHECK(std::abs(double(lev.th(i)) - double(all.th(i))) <= tol);
+    bool e_small = true, pos_within = true;
+    for (int i = 0; i < 3; ++i) e_small = e_small and std::abs(lev.e(i)) <= 0.1 * kSigPose(i) and std::abs(all.e(i)) <= 0.1 * kSigPose(i);
+    for (int i = 0; i < 5; ++i) pos_within = pos_within and std::abs(double(lev.th(i)) - double(all.th(i))) <= tol;
+    const double dyaw = std::abs(std::remainder(double(lev.th(5)) - double(all.th(5)), 2.0 * M_PI));
+    std::printf("    full control (printed, rev 3.3.9 stated limit): |e| <= 0.1 sigma %s ; position within %.5f %s ; "
+                "yaw %.5f rad (sigma_psi %.5f) %s\n", e_small ? "yes" : "NO", tol, pos_within ? "yes" : "NO",
+                dyaw, kSigPose(2), dyaw <= kSigPose(2) ? "yes" : "NO");
 }
 
 // (2) The mechanism alone, in common/ai_belief/persistent_update.h with the live9 numbers: one DOF θ = cx, latents

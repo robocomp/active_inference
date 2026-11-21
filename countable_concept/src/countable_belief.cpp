@@ -872,11 +872,10 @@ bool CountableBelief::lidar_measured(const CountableFrame& f) const
     }
     if (not (f.beam.kappa > 0.0) or f.beam.endpoints.empty()) return false;   // κ = 0 is not a measurement (spec 7c.8 a0)
     if (not rc::ai::beam::detail::p_f_consistent(f.beam))
-    {   // a staging error (m / p_f / t_r / σ_r not one per ray): refused, loudly, once (Task 19 review D2; own flag, N3)
+    {   // a staging error (m / p_f not one per ray): refused, loudly, once (Task 19 review D2; own flag, N3)
         if (not beam_inconsistent_logged_)
-            std::printf("CountableBelief: beam ray-set refused — m (%zu) / p_f (%zu) / t_r (%zu) / sigma_r (%zu) do not match the %zu "
-                        "staged rays\n", f.beam.m.size(), f.beam.p_f.size(), f.beam.t_r.size(), f.beam.sigma_r.size(),
-                        f.beam.endpoints.size());
+            std::printf("CountableBelief: beam ray-set refused — m (%zu) / p_f (%zu) do not match the %zu staged rays\n",
+                        f.beam.m.size(), f.beam.p_f.size(), f.beam.endpoints.size());
         beam_inconsistent_logged_ = true;
         return false;
     }
