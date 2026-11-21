@@ -1,0 +1,6 @@
+node,cls,authored,elicited,is_kitchen_unit,n,a_in,e_in,flips_in,flips_out,a_ok,e_ok,saturated
+cabinet_w13_base,cabinet,0.2,1.8458,1,27915,24921,25265,344,0,24921,25265,837
+cabinet_w14_base,cabinet,0.2,1.8458,1,27915,27281,27401,120,0,27281,27401,0
+cabinet_w14_up,cabinet,0.2,1.8458,1,6222,6222,6222,0,0,6222,6222,0
+hood_3,hood,3.0,4.0431,1,27915,27449,27449,0,0,27449,27449,0
+refrigerator_1,refrigerator,2.0,2.1972,1,27915,27915,27915,0,0,27915,27915,0
