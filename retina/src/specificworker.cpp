@@ -375,7 +375,8 @@ void SpecificWorker::initialize()
                                  params.DOOR_APPROACH_LOG);
     zed_frame_dump_.configure(params.ZED_DUMP_ENABLED, params.ZED_DUMP_DIR, params.ZED_DUMP_JPEG_QUALITY,
                               params.ZED_DUMP_MIN_MOVE_M,
-                              params.ZED_DUMP_MIN_TURN_DEG * std::numbers::pi_v<float> / 180.0f);
+                              params.ZED_DUMP_MIN_TURN_DEG * std::numbers::pi_v<float> / 180.0f,
+                              params.ZED_DUMP_MASKS);
 
     // Same table for the panorama popup's posterior readout — it names ADE20K ids, so it is the ZED
     // stage's list when that one exists and the 360 stage's otherwise (they are the same 150 names).
@@ -583,6 +584,8 @@ void SpecificWorker::initialize()
         G, params, [this]() { trigger_graph_layout_twopi(); });
 
     graph_publisher_->cleanup_semantic_grid_nodes();
+    // Mask dump: the publisher copies what it publishes ONLY when the ZedDump will write it.
+    graph_publisher_->set_capture_zed_masks(zed_frame_dump_.wants_masks());
 
     // Decoupled render timer: only worth running when the 3D viewer exists. 50 ms (20 Hz) matches the
     // viewer's repaint throttle, giving a stable 20 Hz refresh without re-running perception faster.
@@ -1792,6 +1795,11 @@ void SpecificWorker::compute()
         }
         graph_publisher_->publish(zed_res->frame.rgbd, zed_res->frame.room_T_sensor,
                                   *masks_src, zed_res->frame.stamp);
+        // Masks of the frame the ZedDump kept above (same stamp ⇒ 1:1 with <stamp>.jpg). A record for any
+        // other stamp — a frame not kept, or a stale record from a skipped upload — is ignored inside.
+        if (zed_frame_dump_.wants_masks())
+            if (const auto& rec = graph_publisher_->last_zed_mask_record(); rec)
+                zed_frame_dump_.maybe_save_masks(*rec);
         // Hover snapshot of exactly what was just published (immutable, own buffers, same thread).
         if (yolo_viewer_)
             yolo_viewer_->set_mask_hover(yolo_overlay_enabled_ ? graph_publisher_->zed_hover_snapshot() : nullptr);

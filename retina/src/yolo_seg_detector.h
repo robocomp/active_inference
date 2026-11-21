@@ -5,6 +5,7 @@
 // is the thin façade that owns one of these and adds label filtering / tray suppression / 360 tiling.
 
 #include <onnxruntime_cxx_api.h>
+#include "mask_segmenter.h"
 #include <opencv2/opencv.hpp>
 
 #include <memory>
@@ -28,6 +29,9 @@ struct SegDetection
     float second_confidence = 0.f;
     // The model's own label before normalisation (tv->monitor, dining table->table, ...). Display only.
     std::string raw_label;
+    // Which segmenter made this mask (yolo unless SemanticMaskStage built it). Retina-internal: read only
+    // by the diagnostic mask dump, never published. Last member so positional aggregate inits still work.
+    rc::MaskSegmenter segmenter = rc::MaskSegmenter::yolo;
 };
 
 class YoloSegDetector

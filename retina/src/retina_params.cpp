@@ -286,6 +286,8 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
     cfgr.opt("ZedDump.jpeg_quality", params.ZED_DUMP_JPEG_QUALITY, "ZedDump.jpeg_quality");
     cfgr.opt<float, double>("ZedDump.min_move_m", params.ZED_DUMP_MIN_MOVE_M, "ZedDump.min_move_m");
     cfgr.opt<float, double>("ZedDump.min_turn_deg", params.ZED_DUMP_MIN_TURN_DEG, "ZedDump.min_turn_deg");
+    cfgr.opt("ZedDump.dump_masks", params.ZED_DUMP_MASKS,
+            "Also write the published ZED masks of every kept frame (<stamp>.masks*.csv) — see mask_dump_csv.h");
     cfgr.opt("DoorSpecialist.enabled", params.DOOR_SPECIALIST_ENABLED,
             "A model trained on doors, run only on frames where the ADE20K path produced no door mask");
     cfgr.opt("DoorSpecialist.model_path", params.DOOR_SPECIALIST_MODEL,

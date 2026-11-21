@@ -530,6 +530,11 @@ dir          = "etc/zed_frames"
 jpeg_quality = 92
 min_move_m   = 0.05
 min_turn_deg = 3.0
+# Also write, for every KEPT frame, the ZED masks published for that same stamp: <stamp>.masks.csv (one
+# row per mask: label, id, confidence, segmenter yolo|semantic), .masks.pix.csv (silhouette pixels) and
+# .masks.pts.csv (camera-frame support points). Layout in src/mask_dump_csv.h. Needs enabled = true.
+# OFF by default; for paper figures (tools/mask_figure.py).
+dump_masks   = false
 
 # ── Door SECOND OPINION → a model trained on doors, asked only when the cheap channel is silent ────
 # WHY: the ADE20K path's posterior collapses as the robot closes on a door — median P(door) 0.995 at

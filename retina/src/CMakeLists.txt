@@ -30,6 +30,7 @@ LIST(APPEND SOURCES
   ../src/graph_publisher.cpp
   ../src/door_approach_log.cpp
   ../src/zed_frame_dump.cpp
+  ../src/mask_dump_csv.cpp
   ../../common/contour_edge/contour_edge_check.cpp
   ../src/door_specialist.cpp
   ../src/door_specialist_stage.cpp
