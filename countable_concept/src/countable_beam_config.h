@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <cmath>
 #include <expected>
 #include <format>
 #include <optional>
@@ -36,6 +37,16 @@ inline std::optional<std::string> beam_config_problem(double eps_px, double lida
         return std::format("Model.LidarPrecision {} with Model.LidarRobustCM {} (sigma_sensor {} m) gives p0*c^2 = {} <= 1: the "
                            "Student-t range density of the beam model does not exist (nu = p0*c^2 - 1 must be > 0)",
                            lidar_precision, robust_c_m, sigma_sensor_m, p0c2);
+    return std::nullopt;
+}
+
+// The floor's known-surface σ (spec 7c.8 rev 3.3.8, Model.FloorSigmaM): no default when the flag is on; it must be > 0 (a σ of
+// 0 makes the floor's smear the sensor's alone, which the rule does not claim) and finite.
+inline std::optional<std::string> floor_sigma_problem(double floor_sigma_m)
+{
+    if (not (floor_sigma_m > 0.0 and std::isfinite(floor_sigma_m)))
+        return std::format("Model.FloorSigmaM = {} must be > 0 when Model.LidarMeasuresOnGated is on (the floor's known-surface sigma, "
+                           "spec 7c.8 rev 3.3.8; it has no default)", floor_sigma_m);
     return std::nullopt;
 }
 

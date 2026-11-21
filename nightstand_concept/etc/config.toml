@@ -76,6 +76,7 @@ LidarMeasuresOnGated = true  # camera attributes, LiDAR measures: persistent sha
 LabelDumpEnabled = false      # measurement only (spec 7c.8 a0, plan Task 15b): true writes label_dump.csv next to ai2_log.csv; controller turns off afterwards
 LabelDumpMarginM = 0.6       # measurement only: dump region = select box grown by this many metres (far tail of eps_px); controller turns off afterwards
 MaskPixelErrorRate = 0.094     # eps_px (spec 7c.8 a0): camera mask pixel-error rate, measured for this class (owner-decided); required in (0, 1/2) with LidarMeasuresOnGated
+FloorSigmaM = 0.005           # the floor as a known surface in the beam foreign density p_f (spec 7c.8 rev 3.3.8): its sigma (m); required > 0 with LidarMeasuresOnGated
 DepthTiltStd = 0.020        # shared per-frame depth TILT prior std (m/rad) — the azimuth-odd mode that aliases into yaw
 DepthBiasStd = 0.015        # shared per-frame depth bias prior std (m)   — extent/pos nuisance (future)
 DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) — extent nuisance (future)

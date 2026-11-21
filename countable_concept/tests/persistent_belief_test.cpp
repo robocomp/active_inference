@@ -1068,8 +1068,8 @@ static void energy_gradient_consistent()
                 params().model_sigma_m, one_sided);
 }
 
-// The first update from the birth on priors: J is non-increasing over accepted steps, and θ and √diag P equal the same solver
-// run for 200 steps (tolerance 0: it never stops early). Two fixtures, camera only and camera + rays; both must report
+// The first update from the birth on priors: J is non-increasing over accepted steps, θ is within 0.1σ per component of the
+// same solver run for 200 steps (tolerances 0: it never stops early; spec 7c.8 rev 3.3.8) and √diag P within 5 %. Two fixtures, camera only and camera + rays; both must report
 // gn_conv = 1 within gn_iters_max (spec 7c.8: the smooth beam energy has no ray edge, so T14-7's exemption is withdrawn).
 static void first_update_converges_on(const char* nm, const CountableFrame& f, bool rays)
 {
@@ -1086,11 +1086,23 @@ static void first_update_converges_on(const char* nm, const CountableFrame& f, b
     for (const auto& v : b.dbg_iterates())
         std::printf("    iterate cx %.5f cy %.5f H %.5f w %.5f h %.5f yaw %+.5f\n", v(0), v(1), v(2), v(3), v(4), v(5));
     CountableBeliefParams q = shifted_params();
-    q.gn_iters_max = 200; q.gn_tol_m = 0.0; q.gn_tol_rad = 0.0;
+    q.gn_iters_max = 200; q.gn_tol_m = 0.0; q.gn_tol_rad = 0.0; q.gn_tol_sigma = 0.0;
     CountableBelief r = born_on_priors(q);
     r.update(f);
     double dyaw = 0.0;
     const double dpos = max_theta_step(b.state().vec(), r.state().vec(), dyaw);
+    // spec 7c.8 rev 3.3.8: "θ equals the 200-step run" is within 0.1σ per component (σ of the converged run's posterior)
+    double worst_z = 0.0;
+    std::printf("    |theta - theta_200| / sigma per DOF:");
+    for (int i = 0; i < 6; ++i)
+    {
+        const double di = (i == 5) ? std::abs(std::remainder(double(b.state().vec()(i)) - double(r.state().vec()(i)), 2.0 * M_PI))
+                                   : std::abs(double(b.state().vec()(i)) - double(r.state().vec()(i)));
+        const double z = di / std::sqrt(double(r.covariance()(i, i)));
+        worst_z = std::max(worst_z, z);
+        std::printf(" %.4f", z);
+    }
+    std::printf("  (bound 0.1)\n");
     double worst_sd = 0.0;
     std::printf("    sqrt diag P (12 / 200):");
     for (int i = 0; i < 6; ++i)
@@ -1106,7 +1118,7 @@ static void first_update_converges_on(const char* nm, const CountableFrame& f, b
     // update must return gn_conv = 1 too (T14-7's piecewise-edge reading no longer applies).
     (void)rays;
     CHECK(b.last_gn_converged());
-    CHECK(dpos <= 1e-3 and dyaw <= 1e-3);
+    CHECK(worst_z <= 0.1);
     CHECK(worst_sd <= 0.05);
     CHECK(b.last_gn_iters() <= b.params().gn_iters_max);   // 25 (spec 7c.8 rev 3.3.7)
     CHECK(mono);

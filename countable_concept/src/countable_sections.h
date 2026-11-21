@@ -63,6 +63,8 @@ inline void refuse_bad_beam_config(const ConfigLoader& cfg)
     if (const auto why = beam_config_problem(get("Model.MaskPixelErrorRate", 0.0), get("Model.LidarPrecision", 0.0),
                                              get("Model.LidarRobustCM", 0.05)))
         throw CountableConfigError(std::format("config: {} — refusing to start\n", *why));
+    if (const auto why = floor_sigma_problem(get("Model.FloorSigmaM", 0.0)))   // missing ⇒ 0 ⇒ refused (no default)
+        throw CountableConfigError(std::format("config: {} — refusing to start\n", *why));
 }
 
 }  // namespace rc

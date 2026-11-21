@@ -149,6 +149,9 @@ static SeqOut live9_sequence(const Eigen::Vector2f& seed_c, const Eigen::Vector2
 // converges (spec 7c.7 d): the full truth-seeded control (seed AND lever at the truth): |e| ≤ 0.1σ per component and yaw
 // within σ_ψ (rad) are checked, and (spec 7c.8 Pass, the deferred item back as a CHECK) θ's position equals the full control
 // within σ_ψ·|seed − truth| per component.
+// spec 7c.8 rev 3.3.8 "Known surfaces with their own σ": this is the FLUSH-WALL fixture — the stand flush on the back wall, the
+// wall (σ 0.02 m, the WallRef's) and the floor (σ 0.005 m, Model.FloorSigmaM) known surfaces in p_f. Pass: one basin — the
+// seed run and the lever-only control settle at the same θ and e (dth, de ≤ σ_ψ·|seed − truth|, the first two CHECKs).
 static void lever_arm_sensitivity()
 {
     const float cam_dx = 0.12f;

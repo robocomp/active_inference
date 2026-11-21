@@ -14,6 +14,7 @@
 #include <functional>
 #include <cstring>
 #include <span>
+#include <random>
 #include <Eigen/Eigenvalues>
 #include "ai_belief/beam_ray.h"
 #include "test_scene.h"
@@ -1199,6 +1200,52 @@ static void cost()
 }
 
 
+// ─── Tie rule (spec 7c.8 rev 3.3.8; round-2 re-review N1): a lattice-ray fuzz against a SQUARE part at yaw 0. Rays from
+//     lattice origins to lattice targets cross the box through its centre axes, edges and corners, where 3+ envelope lines meet
+//     at one vertex. CHECK: 0 rays whose analytic ∂d/∂w or ∂d/∂h lies outside the subdifferential, i.e. outside [min, max] of
+//     the two one-sided differences (h = 1e-6, slack 1e-3). (The /tmp/claude-1000/fz/fz6.cpp harness of the review.) ───
+static void tie_rule_lattice_fuzz()
+{
+    std::mt19937_64 g(1);
+    std::uniform_real_distribution<double> U(-1, 1);
+    int n = 0, outside = 0, at_zero = 0;
+    for (int it = 0; it < 200000; ++it)
+    {
+        const double w = 0.1 * (1 + int(4 * (U(g) + 1))), H = 0.8;
+        bm::BeamPart P;
+        P.c = Eigen::Vector3d(0, 0, 0.4); P.yaw = 0;
+        P.J.setZero(); P.J(0, 0) = 1; P.J(1, 1) = 1; P.J(4, 3) = 0.5; P.J(5, 4) = 0.5; P.J(6, 2) = 0.5; P.J(2, 2) = 0.5; P.J(3, 5) = 1;
+        const auto mk = [&](double ww, double hh) { bm::BeamPart Q = P; Q.half = Eigen::Vector3d(ww / 2, hh / 2, H / 2); return Q; };
+        const Eigen::Vector3d o(0.25 * int(8 * U(g)), 0.25 * int(8 * U(g)), 0.25 * (1 + int(3 * (U(g) + 1))));
+        const Eigen::Vector3d tgt(0.05 * int(6 * U(g)), 0.05 * int(6 * U(g)), 0.4 + 0.05 * int(4 * U(g)));
+        if ((tgt - o).norm() < 1e-9) continue;
+        const Eigen::Vector3d u = (tgt - o).normalized();
+        Eigen::Matrix<double, 6, 1> gr;
+        const double d = bm::closest_approach(mk(w, w), o, u, 10, &gr);
+        if (d > 0.0) continue;
+        ++n;
+        at_zero += (d > -1e-9);
+        const double e = 1e-6, d0 = bm::closest_approach(mk(w, w), o, u, 10, nullptr);
+        bool ok = true;
+        for (const int k : {3, 4})
+        {
+            const double dp = bm::closest_approach(mk(w + (k == 3 ? e : 0), w + (k == 4 ? e : 0)), o, u, 10, nullptr);
+            const double dm = bm::closest_approach(mk(w - (k == 3 ? e : 0), w - (k == 4 ? e : 0)), o, u, 10, nullptr);
+            const double fr = (dp - d0) / e, fl = (d0 - dm) / e;
+            ok = ok and gr(k) >= std::min(fl, fr) - 1e-3 and gr(k) <= std::max(fl, fr) + 1e-3;
+        }
+        if (not ok)
+        {
+            if (outside < 5) std::printf("  tie fuzz outside: o (%g %g %g) u (%g %g %g) w %g d %g\n", o.x(), o.y(), o.z(), u.x(), u.y(), u.z(), w, d);
+            ++outside;
+        }
+    }
+    std::printf("tie_rule_lattice_fuzz  %d crossing rays (%d with d = 0 to 1e-9), square part, yaw 0: %d gradients outside the "
+                "subdifferential\n", n, at_zero, outside);
+    CHECK(n > 100000);
+    CHECK(outside == 0);
+}
+
 int main(int argc, char** argv)
 {
     quick = argc > 1 and std::strcmp(argv[1], "quick") == 0;
@@ -1211,6 +1258,7 @@ int main(int argc, char** argv)
     tail_band_is_finite();
     z_form_matches_b_form();
     closest_approach_corner();
+    tie_rule_lattice_fuzz();
     quadrature_and_mass();
     atom_fixtures();
     face_minima();

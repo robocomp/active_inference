@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <numbers>
 #include <span>
 #include <vector>
 #include <Eigen/Eigenvalues>
@@ -155,8 +156,7 @@ static void kappa_zero_is_prediction()
     double worst = 0.0;
     for (const double kap : {k5, 0.5})
     {
-        bm::BeamRays one = r5; one.endpoints = {r5.endpoints[ih]}; one.m = {r5.m[ih]};
-        if (not r5.p_f.empty()) one.p_f = {r5.p_f[ih]};   // the subset keeps each ray's own p_f (review D2)
+        const bm::BeamRays one = ts::subset(r5, {ih});   // each ray keeps its own p_f, t_r, σ_r (review D2)
         bm::BeamRays oneK = one; oneK.kappa = kap;
         bm::BeamRays one1 = one; one1.kappa = 1.0;
         const CountableBeliefState hit = truth_state(), miss{tx + 1.0f, ty, tH, tw, tw, 0.0f};
@@ -243,7 +243,7 @@ static void reduction_update()
             worst_sd = std::max(worst_sd, r);
             std::printf(" %.5f/%.5f (%+.2e)", sa(i), sc(i), double(sa(i)) / double(sc(i)) - 1.0);
         }
-        std::printf("\n  reduction n.u %.2f: worst |dtheta|/sigma %.4f on cx..h, %.4f on yaw (bound 0.1) ; worst sqrt diag P rel %.4f (bound 0.03) ; "
+        std::printf("\n  reduction n.u %.2f: worst |dtheta|/sigma %.4f on cx..h, %.4f on yaw (bounds 0.1 / yaw 0.3, rev 3.3.8) ; worst sqrt diag P rel %.4f (bound 0.03) ; "
                     "theta moved %.4f (beam) %.4f (7c.7)\n", nu, worst_th, r_yaw, worst_sd, (a.state().vec() - seed.vec()).norm(),
                     (c.state().vec() - seed.vec()).norm());
         CHECK(R.endpoints.size() >= 6);
@@ -251,7 +251,7 @@ static void reduction_update()
         CHECK(worst_sd <= 0.03);
         // yaw: the beam's p(ρ) ∝ V^−½ with V = 1/p₀ + σ_s²/(n̂·u)² turns a grazing face toward the sensor (a sharper prediction);
         // the 7c.6 factor holds n̂·u fixed in its variance and has no such term. Measured 0.28σ at n̂·u ≈ 0.25 (0.0005σ face-on).
-        CHECK(r_yaw <= 0.1);
+        CHECK(r_yaw <= 0.3);   // spec 7c.8 rev 3.3.8 stated limit (the convolved density's V^−½ term): 0.3σ
     }
 }
 
@@ -271,14 +271,14 @@ static void occluder_in_front()
             return ts::kEpsPx;
         };
         const bm::BeamRays all = front_beam(walls, 1.0, {occ}, lab);
-        bm::BeamRays kept = all; kept.endpoints.clear(); kept.m.clear(); kept.p_f.clear();
+        std::vector<std::size_t> keep;
         int n_occ = 0;
         for (std::size_t i = 0; i < all.endpoints.size(); ++i)
         {
             if (ts::on_object(std::vector<ts::SceneBox>{occ}, all.endpoints[i].cast<float>())) { ++n_occ; continue; }
-            kept.endpoints.push_back(all.endpoints[i]); kept.m.push_back(all.m[i]);
-            if (not all.p_f.empty()) kept.p_f.push_back(all.p_f[i]);
+            keep.push_back(i);
         }
+        const bm::BeamRays kept = ts::subset(all, keep);
         CountableBelief a = belief(seed), b = belief(seed);
         a.set_first_update_done(true); b.set_first_update_done(true);
         a.update(lidar_frame(all));
@@ -414,8 +414,7 @@ static double largest_ray_curvature(const CountableBelief& b, const bm::BeamRays
     double best = 0.0;
     for (std::size_t i = 0; i < r.endpoints.size(); ++i)
     {
-        bm::BeamRays one = r; one.endpoints = {r.endpoints[i]}; one.m = {r.m[i]}; one.kappa = 1.0;
-        if (not r.p_f.empty()) one.p_f = {r.p_f[i]};
+        bm::BeamRays one = ts::subset(r, {i}); one.kappa = 1.0;
         Eigen::Matrix<double, 6, 6> W = Eigen::Matrix<double, 6, 6>::Zero();
         Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Zero();
         bm::accumulate_beam_rays<6>(parts, one, b.params().beam, W, g, nullptr);
@@ -425,12 +424,17 @@ static double largest_ray_curvature(const CountableBelief& b, const bm::BeamRays
 }
 
 // ─── The silhouette's w optimum with the floor present (spec 7c.8 rev 3.3.7, the review's per-ring probe as a test): the
-//     silhouette fixture (sensor 0.40 m, wall 1 m behind, hand labels, azimuth 0.05°), the beam energy of the TRUE model widened
+//     silhouette fixture (sensor 0.40 m, wall 1 m behind, hand labels, azimuth 0.0125° — fine enough that the optimum is the
+//     model's, not the sampling phase's: the round-2 re-review measured the floor ring at −4.25…−4.625 mm over five phases at
+//     this density, −5.5 mm at 0.05°), the beam energy of the TRUE model widened
 //     by dw ∈ [−8, +24] mm (0.25 mm grid), per Helios ring and summed. With the floor and the wall as known room surfaces in p_f
-//     the optimum is within 1 mm of the truth on the sum (the spec's item) and on every ring that MEETS THE BOX (stages a return
-//     on it — the review's per-ring statement); the rings that only pass over the top or under the front edge carry a w
-//     dependence of hundredths of a nat and are printed. Without the surfaces (p_f = p_pass, rev 3.3.6) the ring that meets the
-//     front face 4 mm above the floor (−14.59°) is monotone in w — printed as the control. ───
+//     the optimum is checked on the sum (the spec's item) and on every ring that MEETS THE BOX (stages a return on it — the
+//     review's per-ring statement), against the bounds below; the rings that only pass over the top or under the front edge
+//     carry a w dependence of hundredths of a nat and are printed. Without the surfaces (p_f = p_pass, rev 3.3.6) the ring that meets the
+//     front face 4 mm above the floor (−14.59°) is monotone in w — printed as the control.
+//     Bounds (spec 7c.8 rev 3.3.8): ½ the Helios ray spacing at the object along w (range 1.5 m × the 0.4° azimuth step, not the
+//     fixture's finer 0.05° sampling) on the sum and on every ring meeting the box; the floor-contact ring (its lowest return on
+//     the box within 2 cm of the floor: π ≈ 0.54 from the box's own blurred bottom edge, stated limit) 5 mm. ───
 static void silhouette_w_optimum_with_floor()
 {
     const bm::BeamConfig cfg = params().beam;
@@ -457,32 +461,35 @@ static void silhouette_w_optimum_with_floor()
         return bw;
     };
     bm::BeamRays all_room, all_plain;
-    double worst = 0.0;
+    double worst = 0.0, floor_ring = 0.0;
+    const double bound_w = 0.5 * 1.5 * double(ts::kHeliosAzStepDeg) * std::numbers::pi / 180.0, bound_floor = 0.005;
     std::printf("  silhouette w optimum per ring (mm; with room surfaces / without):");
     for (const float el : ts::helios_ring_elev_deg())
     {
         const std::array<float, 1> rings{el};
-        const auto sweep = ts::raycast_scene(o, obj, walls, true, 0.05f, rings, 12.0f);
+        const auto sweep = ts::raycast_scene(o, obj, walls, true, 0.0125f, rings, 12.0f);
         const bm::BeamRays rr = ts::stage_beam(o, sweep, box, 0.10f, ts::hand_labels(obj), 1.0, 0.01, 6.0, nullptr, &room);
         if (rr.endpoints.empty()) continue;
         const bm::BeamRays rp = ts::stage_beam(o, sweep, box, 0.10f, ts::hand_labels(obj));
         const double a = argmin(rr), b = argmin(rp);
         const bool meets = std::ranges::any_of(rr.m, [](double m) { return m == ts::kMOn; });
-        if (meets) worst = std::max(worst, std::abs(a));
-        std::printf(" [%+.2f°%s] %+.2f/%+.2f", el, meets ? "" : " no box", 1e3 * a, 1e3 * b);
-        if (all_room.endpoints.empty()) { all_room = rr; all_plain = rp; all_room.endpoints.clear(); all_room.m.clear(); all_room.p_f.clear();
-                                          all_plain.endpoints.clear(); all_plain.m.clear(); }
-        all_room.endpoints.insert(all_room.endpoints.end(), rr.endpoints.begin(), rr.endpoints.end());
-        all_room.m.insert(all_room.m.end(), rr.m.begin(), rr.m.end());
-        all_room.p_f.insert(all_room.p_f.end(), rr.p_f.begin(), rr.p_f.end());
-        all_plain.endpoints.insert(all_plain.endpoints.end(), rp.endpoints.begin(), rp.endpoints.end());
-        all_plain.m.insert(all_plain.m.end(), rp.m.begin(), rp.m.end());
+        double zlow = 1e9;
+        for (std::size_t i = 0; i < rr.endpoints.size(); ++i) if (rr.m[i] == ts::kMOn) zlow = std::min(zlow, rr.endpoints[i].z());
+        const bool floor_contact = meets and zlow < 0.02;
+        if (floor_contact) floor_ring = std::max(floor_ring, std::abs(a));
+        else if (meets) worst = std::max(worst, std::abs(a));
+        std::printf(" [%+.2f°%s] %+.2f/%+.2f", el, meets ? (floor_contact ? " floor" : "") : " no box", 1e3 * a, 1e3 * b);
+        ts::append(all_room, rr);
+        ts::append(all_plain, rp);
     }
     const double tot = argmin(all_room), tot_plain = argmin(all_plain);
-    std::printf("\n  silhouette w optimum, all rings (%zu rays): %+.2f mm with the room surfaces (bound 1 mm) ; %+.2f mm without (rev 3.3.6, "
-                "printed) ; worst ring meeting the box %.2f mm\n", all_room.endpoints.size(), 1e3 * tot, 1e3 * tot_plain, 1e3 * worst);
-    CHECK(std::abs(tot) <= 1e-3);
-    CHECK(worst <= 1e-3);
+    std::printf("\n  silhouette w optimum, all rings (%zu rays): %+.2f mm with the room surfaces (bound %.2f mm, half the ray spacing) ; "
+                "%+.2f mm without (rev 3.3.6, printed) ; worst ring meeting the box %.2f mm (bound %.2f) ; floor-contact ring %.2f mm "
+                "(bound %.1f)\n", all_room.endpoints.size(), 1e3 * tot, 1e3 * bound_w, 1e3 * tot_plain, 1e3 * worst, 1e3 * bound_w,
+                1e3 * floor_ring, 1e3 * bound_floor);
+    CHECK(std::abs(tot) <= bound_w);
+    CHECK(worst <= bound_w);
+    CHECK(floor_ring <= bound_floor);
 }
 
 // ─── Silhouette, hand labels (spec Pass, R7-M4): a front-only sweep, the seed 3 cm too narrow and 3 cm too wide, backgrounds
@@ -613,13 +620,9 @@ static void beam_cost()
             for (const auto& P : parts) d = std::min(d, bm::closest_approach(P, all.origin, u, all.rho_max, nullptr));
             if (d <= 8.0 * all.sigma_s) near.push_back(i);
         }
-        bm::BeamRays r = all; r.endpoints.clear(); r.m.clear(); r.p_f.clear();
-        for (std::size_t k = 0; k < 256 and not near.empty(); ++k)
-        {
-            const std::size_t i = near[(k * near.size()) / 256];
-            r.endpoints.push_back(all.endpoints[i]); r.m.push_back(all.m[i]);
-            if (not all.p_f.empty()) r.p_f.push_back(all.p_f[i]);
-        }
+        std::vector<std::size_t> pick;
+        for (std::size_t k = 0; k < 256 and not near.empty(); ++k) pick.push_back(near[(k * near.size()) / 256]);
+        const bm::BeamRays r = ts::subset(all, pick);
         CountableFrame f = lidar_frame(r);
         // first update: seed 3 cm off on (cx, cy, w), born on the class mean
         const CountableBeliefState seed{truth.cx + 0.03f, truth.cy - 0.03f, truth.H, truth.w + 0.03f, truth.h, 0.01f};

@@ -137,6 +137,7 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
                                       "Model.LabelDumpEnabled",            // eps_px measurement (plan Task 15b), temporary
                                       "Model.LabelDumpMarginM",            // eps_px far-tail margin (plan Task 15), temporary
                                       "Model.MaskPixelErrorRate",          // eps_px itself (spec 7c.8 a0), measured per class
+                                      "Model.FloorSigmaM",                 // the floor's known-surface sigma (spec 7c.8 rev 3.3.8)
                                       "Model.LidarMeasuresOnGated"};       // lidar-measures (spec 2026-11-15 §7c), no old key
     // keys removed by the class factor (spec 2026-11-14 countable class existence): the plaus_evidence accumulator's
     // clamp, its tanh gain into the existence log-odds, and the shape LLR's alternative footprint (class_log_evidence
@@ -259,8 +260,15 @@ int main()
         return refuse_in_child(c);
     };
     {
-        const auto ok = beam_refused("MaskPixelErrorRate = 0.094\n");
+        const auto ok = beam_refused("MaskPixelErrorRate = 0.094\nFloorSigmaM = 0.005\n");
         CHECK(ok.first == 0 and ok.second.empty());
+        for (const char* bad_fl : {"MaskPixelErrorRate = 0.094\n", "MaskPixelErrorRate = 0.094\nFloorSigmaM = 0.0\n",
+                                   "MaskPixelErrorRate = 0.094\nFloorSigmaM = -0.01\n"})
+        {   // rev 3.3.8: FloorSigmaM has no default with the flag on
+            const auto r = beam_refused(bad_fl);
+            CHECK(r.first != 0);
+            CHECK(r.second.find("FloorSigmaM") != std::string::npos);
+        }
         for (const char* bad_eps : {"MaskPixelErrorRate = 0.0\n", "MaskPixelErrorRate = 0.5\n", "MaskPixelErrorRate = 0.7\n", ""})
         {
             const auto r = beam_refused(bad_eps);
@@ -287,6 +295,7 @@ int main()
         CHECK(not rc::pre_countable_section(c).has_value());
         CHECK(not rc::beam_config_problem(c.get<double>("Model.MaskPixelErrorRate"), c.get<double>("Model.LidarPrecision"),
                                           c.get<double>("Model.LidarRobustCM")).has_value());
+        CHECK(not rc::floor_sigma_problem(c.get<double>("Model.FloorSigmaM")).has_value());
     }
 
     std::printf(bad ? "config_migration_test: %d FAILED\n" : "config_migration_test: OK\n", bad);

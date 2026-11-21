@@ -161,6 +161,13 @@ static void creep_set(int N)
 {
     const float dcxs[] = {0.0f, 0.0005f, 0.001f, 0.002f};
     const float dws[]  = {0.0f, 0.001f};
+    // spec 7c.8 rev 3.3.8 "Bounds against ray sampling": Δw and Δh against ½ the Helios ray spacing at the object — along w the
+    // azimuth step × range, along h the ring spacing × range (the front face is 1.5 m from the sensor). The 7c.6 face bounds
+    // (back 1 mm, front 2 mm) stay.
+    constexpr float d2r = 0.017453293f, range = 1.5f;
+    const float bw = 0.5f * range * rc::test::kHeliosAzStepDeg * d2r;
+    const float bh = 0.5f * range * (110.0f / 49.0f) * d2r;
+    std::printf("  creep bounds: |dw| <= %.4f m (half the azimuth spacing at %.1f m), |dh| <= %.4f m (half the ring spacing)\n", bw, range, bh);
     int fails = 0;
     for (const bool wall : {true, false})
     {
@@ -172,7 +179,7 @@ static void creep_set(int N)
                 CountableBelief b(s0, params());
                 b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
                 const float back0 = s0.cy + 0.5f * s0.h, front0 = s0.cy - 0.5f * s0.h;
-                float maxb = 0.0f, maxw = 0.0f, maxf = 0.0f;
+                float maxb = 0.0f, maxw = 0.0f, maxf = 0.0f, maxh = 0.0f;
                 bool finite = true;
                 for (int k = 0; k < N; ++k)
                 {
@@ -182,21 +189,23 @@ static void creep_set(int N)
                     maxb = std::max(maxb, std::abs(s.cy + 0.5f * s.h - back0));
                     maxf = std::max(maxf, std::abs(s.cy - 0.5f * s.h - front0));
                     maxw = std::max(maxw, std::abs(s.w - s0.w));
+                    maxh = std::max(maxh, std::abs(s.h - s0.h));
                 }
                 const auto& s = b.state();
                 const float db = s.cy + 0.5f * s.h - back0, dfr = s.cy - 0.5f * s.h - front0, dww = s.w - s0.w;
-                const bool ok = finite and std::abs(db) < 0.001f and std::abs(dww) < 0.002f and std::abs(dfr) < 0.002f
-                                and maxb < 0.001f and maxw < 0.002f and maxf < 0.002f;
+                const float dhh = s.h - s0.h;
+                const bool ok = finite and std::abs(db) < 0.001f and std::abs(dww) <= bw and std::abs(dfr) < 0.002f and std::abs(dhh) <= bh
+                                and maxb < 0.001f and maxw <= bw and maxf < 0.002f and maxh <= bh;
                 fails += not ok;
-                std::printf("  wall %-3s dcx %.4f dw %.4f | Δback %+.5f (max %.5f) Δw %+.5f (max %.5f) Δfront %+.5f (max %.5f) | "
-                            "cx %.5f H %.5f sig_h %.4f sig_cx %.4f | %zu rays %s\n",
-                            wall ? "on" : "off", dcx, dw, db, maxb, dww, maxw, dfr, maxf, s.cx, s.H,
+                std::printf("  wall %-3s dcx %.4f dw %.4f | Δback %+.5f (max %.5f) Δw %+.5f (max %.5f, bound %.4f) Δh %+.5f (bound %.4f) "
+                            "Δfront %+.5f (max %.5f) | cx %.5f H %.5f sig_h %.4f sig_cx %.4f | %zu rays %s\n",
+                            wall ? "on" : "off", dcx, dw, db, maxb, dww, maxw, bw, dhh, bh, dfr, maxf, s.cx, s.H,
                             std::sqrt(b.covariance()(4, 4)), std::sqrt(b.covariance()(0, 0)), f.beam.endpoints.size(),
                             ok ? "ok" : "FAIL");
             }
     }
     std::printf("  creep set, %d sweeps: %d / 16 fail\n", N, fails);
-    CHECK(fails == 0);   // spec 7c.8 rev 3.3.7: 0/16 with Δw ≤ 2 mm (the floor and the wall are known room surfaces)
+    CHECK(fails == 0);   // spec 7c.8 rev 3.3.8: 0/16 with Δw, Δh within half the ray spacing
 }
 
 int main(int argc, char** argv)

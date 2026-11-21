@@ -210,6 +210,15 @@ struct StudentT
     }
 };
 
+// The Student-t smeared by a known surface's σ_r along the ray (spec 7c.8 rev 3.3.8, moment match of the scale): scale² + σ_r²
+// at the SAME ν = p₀c² − 1. In (p₀, c) form: c'² = c² + ν σ_r², p₀' = (ν + 1)/c'².
+inline StudentT smeared(const StudentT& st, double sigma_r)
+{
+    if (not (sigma_r > 0.0)) return st;
+    const double c2 = st.c * st.c + st.nu * sigma_r * sigma_r;
+    return *StudentT::make((st.nu + 1.0) / c2, std::sqrt(c2));
+}
+
 // ─── Gauss–Legendre on (0, 1): nodes u (ascending) and weights w (Σw = 1) ─────────────────────────────────────────
 struct GaussLegendre01
 {
@@ -438,6 +447,9 @@ struct BeamRays
     // p_pass = 1/ρ_max in every formula of the ray (p, r, o, the normaliser (1 − m)p_f, the atom, the gradient) as a constant
     // per ray. EMPTY ⇒ p_pass for every ray, bit for bit (the Task 17/18 fixtures).
     std::vector<double> p_f;
+    // The room crossing of each ray (spec 7c.8 rev 3.3.8; beam_room.h stages them with p_f): t_r (+inf: none in (0, ρ_max]) and
+    // σ_r = σ_surface/|n̂·u| at t_r. They enter the miss mass Q_f(t̄) of I_d. Empty with p_f (or empty alone: no room term).
+    std::vector<double> t_r, sigma_r;
 };
 
 // Build with BeamConfig::make (the quantile levels of G are tabulated once, ν is fixed at load).
@@ -635,7 +647,8 @@ inline Approach approach(const PartRay& r)
 {
     Approach A;
     const double T = r.rho_max;
-    double best_t = 0.0, best = gmax(r, 0.0), best_low = -kInf;
+    double best_t = 0.0, best = gmax(r, 0.0);
+    int best_rank = -1;     // the tie rank of the kept pair (below)
     int pm = -1, pn = -1;   // the pair of pieces whose intersection is the minimum (the V's two sides)
     if (const double gT = gmax(r, T); gT < best) { best = gT; best_t = T; }
     for (int m = 0; m < 6; ++m)
@@ -645,17 +658,34 @@ inline Approach approach(const PartRay& r)
             if (db == 0.0) continue;
             const double t = (r.alpha[n] - r.alpha[m]) / db;
             if (not (t > 0.0 and t < T)) continue;
-            // the smallest minimiser: a flat bottom has two equal vertices, keep the earlier. At the SAME vertex (g and t tie
-            // exactly) keep the pair ON the upper envelope — the larger of its two pieces' lower value. Two pieces below the
-            // envelope can cross at exactly the envelope's vertex (a square part, hx == hy, puts x − hx and y − hy on the
-            // crossing of −x − hx and −y − hy), and their Jacobians are not the derivative of d (Task 19 review D1: g_w, g_h
-            // off by ±765 nats/m on the creep fixture). Exact ties only: every other choice is unchanged.
+            // The smallest minimiser: a flat bottom has two equal vertices, keep the earlier. At the SAME vertex (g and t tie
+            // exactly; spec 7c.8 rev 3.3.8 tie rule) the pair is ranked STRUCTURALLY, never by an ulp-level difference:
+            //   rank 2 = both pieces on the upper envelope AND their multipliers bracket the vertex (β_L ≤ 0 ≤ β_R: a V);
+            //   rank 1 = on the envelope, same-slope (not a V: its weights would extrapolate);
+            //   rank 0 = a piece below the envelope (a square part, hx == hy, puts x − hx and y − hy on the crossing of
+            //            −x − hx and −y − hy; their Jacobians are not the derivative of d — Task 19 review D1).
+            // "On the envelope" is equality with g up to the rounding of the two line evaluations (a numerical tolerance, not a
+            // model threshold). Among equal ranks the first pair in index order is kept (deterministic). Exact ties only:
+            // every other choice is unchanged.
             const double g = gmax(r, t);
-            const double low = std::min(piece_at(r, m, t), piece_at(r, n, t));
-            if (g < best or (g == best and (t < best_t or (t == best_t and low > best_low))))
-            { best = g; best_t = t; pm = m; pn = n; best_low = low; }
+            const double tol = 64.0 * std::numeric_limits<double>::epsilon() * (1.0 + std::abs(g) + std::abs(t));
+            const bool on_env = g - piece_at(r, m, t) <= tol and g - piece_at(r, n, t) <= tol;
+            // a V: the multipliers bracket the vertex, β_L ≤ 0 ≤ β_R (a flat side, β = 0, is a valid side: its weight takes the
+            // whole derivative); same-slope pairs (both descending or both ascending) are not
+            const bool vee = not ((r.beta[m] < 0.0 and r.beta[n] < 0.0) or (r.beta[m] > 0.0 and r.beta[n] > 0.0));
+            const int rank = on_env ? (vee ? 2 : 1) : 0;
+            // the same vertex to rounding: the line evaluations of two pairs crossing at one point differ by ulps, so "the same
+            // (g, t)" is equality up to that rounding, and the structural rank decides; otherwise the smaller g, then the earlier t
+            // (a flat bottom is the same g to rounding over an interval: the earliest vertex of it, whatever the ulps)
+            const bool same_g = std::abs(g - best) <= tol, same_vertex = pm >= 0 and same_g and std::abs(t - best_t) <= tol;
+            const bool better = same_vertex ? rank > best_rank : same_g ? t < best_t : g < best;
+            if (better) { best = g; best_t = t; pm = m; pn = n; best_rank = rank; }
         }
-    if (best <= 0.0)   // the ray crosses the part: d = the deepest point, a vertex of the max of six lines
+    // the ray crosses the part: d = the deepest point, a vertex of the max of six lines. A ray through an edge or a vertex
+    // (d = 0 to the rounding of the line evaluations) is a tie between this branch and the miss branch; it takes this one — a
+    // V of the envelope, the crossing side's one-sided derivative (stated kink (i)) — and never the miss branch's degenerate
+    // ‖max(a, 0)‖ = 0 gradient (spec 7c.8 rev 3.3.8 tie rule; the lattice fuzz in beam_ray_test).
+    if (best <= 64.0 * std::numeric_limits<double>::epsilon() * (1.0 + std::abs(best_t)))
     {
         A.d = best; A.t = best_t;
         if (pm < 0)   // one-sided at an end: d = s there, ∇d its Jacobian, t* fixed
@@ -875,7 +905,13 @@ inline void part_geometry(const PartRay& r, const Approach& A, const BeamPart& p
 
 // BeamRays::p_f is either empty (p_pass for every ray) or one value per staged ray; anything else is a staging error and the
 // ray-set is REFUSED (contributes nothing; asserts in debug). Task 19 review D2.
-inline bool p_f_consistent(const BeamRays& rays) { return rays.p_f.empty() or rays.p_f.size() == rays.endpoints.size(); }
+inline bool p_f_consistent(const BeamRays& rays)
+{
+    const std::size_t n = rays.endpoints.size();
+    const auto one_per_ray = [n](const std::vector<double>& v) { return v.empty() or v.size() == n; };
+    return one_per_ray(rays.p_f) and one_per_ray(rays.t_r) and rays.t_r.size() == rays.sigma_r.size()
+           and rays.m.size() == n;   // N2: m too
+}
 
 // The term of ray i: E_i, its gradient and curvature (unscaled by κ). false ⇔ the ray contributes exactly 0 (d > 8σ_s).
 // force_sweep: run the several-part panel sweep (switch search) even with one part present (the one-part check).
@@ -1180,10 +1216,19 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
         const double eb = tbar - rho, c2 = st.c * st.c;
         const double V = (1.0 + eb * eb / c2) / st.p0 + var_t;
         const double p = a_ref * pa;
+        // the miss mass: the foreign return's probability of lying beyond t̄ (spec 7c.8 rev 3.3.8, gap S1). No room crossing:
+        // 1 − t̄/ρ_max (the historic expression, bit-exact); with one at t_r: the p_f tail
+        // Q_f(t̄) = 1 − p_pass·min(t̄, t_r) − (1 − p_pass·t_r)·G_r(t̄ − t_r), G_r the CDF of the smeared Student-t.
+        double Q_f = 1.0 - tbar / rho_max;
+        if (not rays.t_r.empty() and std::isfinite(rays.t_r[i]))
+        {
+            const double tr = rays.t_r[i], pp = 1.0 / rho_max;
+            Q_f = 1.0 - pp * std::min(tbar, tr) - (1.0 - pp * tr) * smeared(st, rays.sigma_r[i]).cdf(tbar - tr);
+        }
         const double r_member = m * A / p, o_front = a_ref * B / (m * A + a_ref * pi);
         const double lphn = log_phi(zd);
         const double Id = (m * std::exp(2.0 * lphn - log_Phi_upper(zd))
-                           + (1.0 - m) * (1.0 - tbar / rho_max) * std::exp(2.0 * lphn - log_Phi_upper(-zd))) / (sigma * sigma);
+                           + (1.0 - m) * Q_f * std::exp(2.0 * lphn - log_Phi_upper(-zd))) / (sigma * sigma);
         out.W = (V > 0.0 ? r_member / V : 0.0) * (Jbar * Jbar.transpose())
                 + ((1.0 - o_front) * Id) * (S.dd[i0] * S.dd[i0].transpose());
     }

@@ -263,13 +263,16 @@ struct CountableBeliefParams
     // Optimiser
     int   gn_iters = 4;              // Gauss-Newton iterations per frame (the flag-off engine path)
     // Persistent path only (spec 7c.7 d + 7c.8 rev 3.3.7; solver constants, no config key): damped GN (Nielsen's λ rule, joint
-    // damping) stops converged when the UNDAMPED (λ = 0) proposal from the current θ is below gn_tol_m on cx, cy, H, w, h and
-    // gn_tol_rad on yaw — that step is applied if J does not rise (controller ruling, Task 19 fix round 2; an accepted damped step
+    // damping) stops converged when the UNDAMPED (λ = 0) proposal from the current θ is below gn_tol_sigma·σ_k on every θ
+    // component (rev 3.3.8; σ_k the posterior's at the current linearisation) — that step is applied if J does not rise (controller ruling, Task 19 fix round 2; an accepted damped step
     // below the tolerance no longer stops: under Nielsen's λ it is short however far the minimum is); else after
     // gn_iters_max = 25 (rev 3.3.7) steps (gn_conv = 0). A solver tolerance, not a modelling threshold. gn_reject_all_for_test is a TEST HOOK only (every step rejected, as if J never fell).
     int    gn_iters_max = 25;
-    double gn_tol_m     = 1e-3;
+    double gn_tol_m     = 1e-3;   // the 7c.7 test hook's tolerance (set_first_crossing_for_test)
     double gn_tol_rad   = 1e-3;
+    // spec 7c.8 rev 3.3.8 "Convergence in posterior σ": stop when the undamped step is below gn_tol_sigma·√P_kk on every θ
+    // component, P = (𝟙 + P̄W)⁻¹P̄ at the current linearisation. A solver tolerance, not a model threshold.
+    double gn_tol_sigma = 0.1;
     bool   gn_reject_all_for_test = false;
     float fd_eps   = 1e-3f;          // finite-difference step for SDF Jacobians (m / rad)
     float jac_slope_clamp = 5.0f;    // clamp per-DOF SDF slope (guards a seam-point info spike; recipe §2)
@@ -853,6 +856,7 @@ private:
     };
     mutable BeamCache beam_cache_;
     mutable bool   beam_unready_logged_ = false;        // "BeamConfig not built by make" printed once per belief
+    mutable bool   beam_inconsistent_logged_ = false;   // "ray-set refused (per-ray vectors misaligned)" printed once (N3)
 };
 
 }  // namespace rc

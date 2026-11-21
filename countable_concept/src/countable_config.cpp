@@ -450,6 +450,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "measurement only: metres the label dump's select box (XY radius and z-band) is grown by; the fit's selection is unchanged");
     out.mask_pixel_error_rate     = reader.d("Model.MaskPixelErrorRate", 0.0,
             "eps_px (spec 7c.8 a0): the camera mask's measured pixel-error rate, per class; the persistent label is m = eps_px + (1-2 eps_px) q. No default: required, in (0, 1/2), when LidarMeasuresOnGated");
+    out.floor_sigma_m             = reader.d("Model.FloorSigmaM", 0.0,
+            "the floor's known-surface sigma (spec 7c.8 rev 3.3.8): the floor in the beam model's foreign density p_f. No default: required, > 0, when LidarMeasuresOnGated");
     out.existence_removal_prob    = getf("Model.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when L < log(p/(1−p))");
     out.existence_out_of_room_gain = getf("Model.ExistenceOutOfRoomGain", 1.5f,

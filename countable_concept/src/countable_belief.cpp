@@ -871,12 +871,13 @@ bool CountableBelief::lidar_measured(const CountableFrame& f) const
         return usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);
     }
     if (not (f.beam.kappa > 0.0) or f.beam.endpoints.empty()) return false;   // κ = 0 is not a measurement (spec 7c.8 a0)
-    if (not rc::ai::beam::detail::p_f_consistent(f.beam) or f.beam.m.size() != f.beam.endpoints.size())
-    {   // a staging error (p_f / m not one per ray): refused, loudly, once (Task 19 review D2)
-        if (not beam_unready_logged_)
-            std::printf("CountableBelief: beam ray-set refused — m (%zu) / p_f (%zu) do not match the %zu staged rays\n",
-                        f.beam.m.size(), f.beam.p_f.size(), f.beam.endpoints.size());
-        beam_unready_logged_ = true;
+    if (not rc::ai::beam::detail::p_f_consistent(f.beam))
+    {   // a staging error (m / p_f / t_r / σ_r not one per ray): refused, loudly, once (Task 19 review D2; own flag, N3)
+        if (not beam_inconsistent_logged_)
+            std::printf("CountableBelief: beam ray-set refused — m (%zu) / p_f (%zu) / t_r (%zu) / sigma_r (%zu) do not match the %zu "
+                        "staged rays\n", f.beam.m.size(), f.beam.p_f.size(), f.beam.t_r.size(), f.beam.sigma_r.size(),
+                        f.beam.endpoints.size());
+        beam_inconsistent_logged_ = true;
         return false;
     }
     if (not beam_ready())
@@ -1201,16 +1202,20 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     {
         VecXd x_tilde; x_tilde << theta, (consistent ? b_post : b_);   // consistent: (θ_k, b_k); restart: (θ_k, b̄)
         if (consistent and not undamped_checked)
-        {   // The stop rule (controller ruling, Task 19 fix round 2, reading B; replaces T14-4's "accepted step below the
-            // tolerance", which Nielsen's λ fakes — a damped step at λ ≫ 1 is short however far θ is from the minimum): once per
-            // linearisation, the UNDAMPED (λ = 0) proposal from the current θ; if it is below the tolerance, APPLY it when J does
-            // not rise, and stop (gn_conv = 1).
+        {   // The stop rule (Task 19 fix round 2, reading B; spec 7c.8 rev 3.3.8 "Convergence in posterior σ"): once per
+            // linearisation, the UNDAMPED (λ = 0) proposal from the current θ; if it is below gn_tol_sigma·σ_k on every θ
+            // component — σ_k = √P_kk, P = (𝟙 + P̄W)⁻¹P̄ at this linearisation — APPLY it when J does not rise, and stop
+            // (gn_conv = 1). An accepted damped step never stops the update (Nielsen's λ makes it short however far the minimum).
             undamped_checked = true;
             VecXd x0n;
             const auto st0 = pu::joint_step_damped<N, K>(x_tilde, x_bar, P_bar, std::span<const pu::Channel<N, K>>(channels),
                                                          theta_only, 0.0);
             const Vec6d d0 = theta_step(x_tilde, x0n, st0);
-            if (d0.allFinite() and below_tol(d0) and not params_.gn_reject_all_for_test)
+            const MatJd P_lin = pu::joint_cov<N, K>(P_bar, std::span<const pu::Channel<N, K>>(channels), theta_only);
+            bool small = d0.allFinite();
+            for (int k = 0; k < N and small; ++k)
+                small = std::abs(d0(k)) < params_.gn_tol_sigma * std::sqrt(std::max(0.0, P_lin(k, k)));
+            if (small and not params_.gn_reject_all_for_test)
             {
                 const double Ep0 = pu::prior_energy<N, K>(st0, x_bar + wrapped(x0n - x_bar), x_bar);
                 const double J0 = data_energy(x0n) + Ep0;
