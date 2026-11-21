@@ -1,0 +1,34 @@
+{
+  "model": "gemma4:26b",
+  "model_digest": "001e5dafc3c77684c2307ebc6ab8e336e10c9b18eca52acf547d72fc83c3ca8c",
+  "ollama": "http://localhost:11434",
+  "levels": {
+    "almost never": 0.05,
+    "unlikely": 0.25,
+    "as likely as not": 0.5,
+    "likely": 0.75,
+    "almost always": 0.95
+  },
+  "system": "You answer questions about ordinary homes, as most people would. Answer with exactly one of these phrases: \"almost never\", \"unlikely\", \"as likely as not\", \"likely\", \"almost always\". Reply as JSON: {\"answer\": \"<phrase>\"}.",
+  "templates": {
+    "L4_POS": [
+      "In a typical home, how often does a room used as a {f} contain at least one {c}?",
+      "Think of {f}s in ordinary homes. How likely is it that a given {f} has {a_c} in it?",
+      "Someone walks into the {f} of a home. How likely are they to find {a_c} there?"
+    ],
+    "L3": [
+      "In a home, {a_c} stands against a wall. How likely is it to be part of a fitted kitchen, the run of built-in kitchen units?",
+      "You see {a_c} against a wall in a home. How likely is it that it belongs to the built-in kitchen units?",
+      "Of all the {cs} standing against walls in ordinary homes, how often is one part of a fitted kitchen run?"
+    ],
+    "L3_BASE_CLASS": "piece of furniture or appliance"
+  },
+  "spoken": {
+    "hood": "extractor hood"
+  },
+  "pi_c_notf": "uniform mean of pi_cg over the other functions",
+  "vocab_sha": "0e34f18e31d0e8e099c1e6246d70f07e4086f9a495e56078bbf26c48b8e99fbe",
+  "answered": 696,
+  "of": 696,
+  "written": "2026-11-21T20:59:49+00:00"
+}

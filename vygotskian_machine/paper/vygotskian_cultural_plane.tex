@@ -78,8 +78,8 @@ false, we take the expected log-likelihood ratio under the probability $p_c$ tha
 For a class unit, $p_i$ is the existence probability of unbound instance $i$ in $r$, the product runs over the
 unbound instances observed at least once, and $p_c = 0$ when there is none. For an aggregate unit, $\pi_{cf}$ is the
 probability that an aggregate of that schema is present given $f$, $d_c$ is approximated by the detectability of its most
-detectable member, which overstates it because an aggregate needs several members to be seen, and $p_c$ is its existence probability, given by its log Bayes factor. The prior log-odds of $f$ and the
-probabilities $\pi_{c\bar f}$ are elicited from the VLM like $\pi_{cf}$. Once rooms have been confirmed,
+detectable member, which overstates it because an aggregate needs several members to be seen, and $p_c$ is its existence probability, given by its log Bayes factor. The prior log-odds of $f$ is elicited from the VLM like
+$\pi_{cf}$, and $\pi_{c\bar f}$ is the mean of $\pi_{cg}$ over the other functions $g$, weighted by how often each occurs. Once rooms have been confirmed,
 $\pi_{c\bar f}$, like $\pi_{cf}$, is replaced by counts over rooms that a person confirmed do not serve $f$. Put simply, a unit that was found speaks for the functions that expect it, and a unit looked for and not
 found speaks against them in proportion to how thoroughly it was looked for. The sum is exact when every $p_c$ is 0 or 1 and otherwise approximates the log marginal likelihood. Because $p_i$ does not depend on the search for other
 instances, $d_c$ enters the evidence once, and the dependence that remains between units makes $\Lambda_f$ somewhat

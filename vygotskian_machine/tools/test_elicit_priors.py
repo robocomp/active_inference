@@ -16,24 +16,28 @@ def rec(kind, cls, func, neg, para, p):
 class TestElicit(unittest.TestCase):
     def test_article(self):
         self.assertEqual(ep.article("oven"), "an oven")
-        self.assertEqual(ep.article("hood"), "a hood")
+        self.assertEqual(ep.article(ep.spoken("hood")), "an extractor hood")
 
     def test_question_count(self):
         vocab = dict(functions=["kitchen", "bedroom"], classes=["bed", "oven", "sink"])
         qs = ep.build_questions(vocab, ["cabinet", "hood"])
-        # L4: 2 functions x 3 classes x 2 (f, not f) x 3 paraphrases; L3: (2 classes + base) x 3
-        self.assertEqual(sum(q["kind"] == "L4" for q in qs), 36)
+        # L4: 2 functions x 3 classes x 3 paraphrases (not-f is derived); L3: (2 classes + base) x 3
+        self.assertEqual(sum(q["kind"] == "L4" for q in qs), 18)
         self.assertEqual(sum(q["kind"] == "L3" for q in qs), 9)
         self.assertEqual(len({q["prompt"] for q in qs}), len(qs))  # every prompt distinct
 
     def test_level4_median_and_spread(self):
         rs = [rec("L4", "oven", "kitchen", False, i, p) for i, p in enumerate([0.95, 0.75, 0.95])]
-        rs += [rec("L4", "oven", "kitchen", True, i, p) for i, p in enumerate([0.05, 0.05, 0.25])]
+        rs += [rec("L4", "oven", "bedroom", False, i, 0.05) for i in range(3)]
+        rs += [rec("L4", "oven", "office", False, i, 0.25) for i in range(3)]
         l4, _ = ep.summarise(rs, {})
-        self.assertEqual(len(l4), 1)
-        self.assertAlmostEqual(l4[0]["pi_cf"], 0.95)
-        self.assertAlmostEqual(l4[0]["spread_cf"], 0.20)
-        self.assertAlmostEqual(l4[0]["pi_c_notf"], 0.05)
+        k = next(r for r in l4 if r["func"] == "kitchen")
+        self.assertAlmostEqual(k["pi_cf"], 0.95)
+        self.assertAlmostEqual(k["spread_cf"], 0.20)
+        self.assertAlmostEqual(k["pi_c_notf"], 0.15)  # uniform mean of bedroom and office
+        l4w, _ = ep.summarise(rs, {}, weights={"bedroom": 3.0, "office": 1.0})
+        kw = next(r for r in l4w if r["func"] == "kitchen")
+        self.assertAlmostEqual(kw["pi_c_notf"], (3 * 0.05 + 0.25) / 4)
 
     def test_level3_bayes_log_odds(self):
         base = ep.L3_BASE_CLASS

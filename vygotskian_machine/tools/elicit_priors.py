@@ -3,7 +3,9 @@
 
 Level 4 — room function. For every class c and function f in elicit_vocab.toml:
     pi_cf    = P(at least one c in the room | the room serves f)
-    pi_c,¬f  = P(at least one c in the room | the room does not serve f)
+    pi_c,¬f  = sum over g != f of w_g pi_cg / sum w_g   (w uniform until the corpus gives room-type frequencies)
+The not-f probability is derived, not asked: asked directly ("a room that is not the kitchen") the model lumps
+bedrooms, bathrooms and corridors together and answers inconsistently (mean paraphrase spread 0.28 vs 0.10).
 
 Level 3 — kitchen membership. kitchen_metaconcept carries, per class c, the AUTHORED log-likelihood ratio
     log P(c | kitchen unit) / P(c | not a kitchen unit).
@@ -51,16 +53,11 @@ SYSTEM = (
     + '. Reply as JSON: {"answer": "<phrase>"}.'
 )
 
-# Level 4: presence of c given f (negated=False) or given not-f (negated=True). Three paraphrases each.
+# Level 4: presence of c given f. Three paraphrases each. (pi_c,notf is derived from the other functions.)
 L4_POS = [
     "In a typical home, how often does a room used as a {f} contain at least one {c}?",
     "Think of {f}s in ordinary homes. How likely is it that a given {f} has {a_c} in it?",
     "Someone walks into the {f} of a home. How likely are they to find {a_c} there?",
-]
-L4_NEG = [
-    "In a typical home, how often does a room that is not used as a {f} contain at least one {c}?",
-    "Think of the rooms in ordinary homes other than the {f}. How likely is it that a given one of them has {a_c} in it?",
-    "Someone walks into a room of a home that is not the {f}. How likely are they to find {a_c} there?",
 ]
 # Level 3: P(kitchen unit | c against a wall); the base question uses c = "piece of furniture or appliance".
 L3 = [
@@ -69,6 +66,14 @@ L3 = [
     "Of all the {cs} standing against walls in ordinary homes, how often is one part of a fitted kitchen run?",
 ]
 L3_BASE_CLASS = "piece of furniture or appliance"
+
+
+# How a class is named in a question when its label is ambiguous ("a hood" was read as clothing).
+SPOKEN = {"hood": "extractor hood"}
+
+
+def spoken(c: str) -> str:
+    return SPOKEN.get(c, c)
 
 
 def article(noun: str) -> str:
@@ -99,14 +104,13 @@ def build_questions(vocab: dict, kitchen_classes: list[str]) -> list[dict]:
     qs = []
     for f in vocab["functions"]:
         for c in vocab["classes"]:
-            for neg, templates in ((False, L4_POS), (True, L4_NEG)):
-                for i, t in enumerate(templates):
-                    qs.append(dict(kind="L4", cls=c, func=f, negated=neg, para=i,
-                                   prompt=t.format(f=f, c=c, a_c=article(c))))
+            for i, t in enumerate(L4_POS):
+                qs.append(dict(kind="L4", cls=c, func=f, negated=False, para=i,
+                               prompt=t.format(f=f, c=spoken(c), a_c=article(spoken(c)))))
     for c in kitchen_classes + [L3_BASE_CLASS]:
         for i, t in enumerate(L3):
             qs.append(dict(kind="L3", cls=c, func="kitchen unit", negated=False, para=i,
-                           prompt=t.format(c=c, cs=plural(c), a_c=article(c))))
+                           prompt=t.format(c=spoken(c), cs=plural(spoken(c)), a_c=article(spoken(c)))))
     return qs
 
 
@@ -148,22 +152,28 @@ def load_cache(path: Path) -> dict[tuple[str, str], dict]:
     return cache
 
 
-def summarise(records: list[dict], authored: dict[str, float]) -> tuple[list[dict], list[dict]]:
-    """Medians and spreads per question; level-3 log-odds per paraphrase, then median and spread."""
+def summarise(records: list[dict], authored: dict[str, float],
+              weights: dict[str, float] | None = None) -> tuple[list[dict], list[dict]]:
+    """Medians and spreads per question; pi_c,notf as the weighted mean of pi_cg over g != f (uniform if no
+    weights); level-3 log-odds per paraphrase, then median and spread."""
     groups: dict[tuple, dict[int, float]] = {}
     for r in records:
         groups.setdefault((r["kind"], r["cls"], r["func"], r["negated"]), {})[r["para"]] = r["p"]
 
+    med: dict[tuple[str, str], float] = {}
+    spr: dict[tuple[str, str], float] = {}
+    for (kind, c, f, neg), ps in groups.items():
+        if kind == "L4" and not neg:
+            med[(c, f)] = statistics.median(ps.values())
+            spr[(c, f)] = spread(list(ps.values()))
     l4 = []
-    for (kind, c, f, neg), ps in sorted(groups.items()):
-        if kind != "L4" or neg:
+    for (c, f) in sorted(med):
+        others = [g for (cc, g) in med if cc == c and g != f]
+        if not others:
             continue
-        pos = list(ps.values())
-        negs = list(groups.get(("L4", c, f, True), {}).values())
-        if not negs:
-            continue
-        l4.append(dict(cls=c, func=f, pi_cf=statistics.median(pos), spread_cf=spread(pos),
-                       pi_c_notf=statistics.median(negs), spread_c_notf=spread(negs)))
+        w = {g: (weights or {}).get(g, 1.0) for g in others}
+        notf = sum(w[g] * med[(c, g)] for g in others) / sum(w.values())
+        l4.append(dict(cls=c, func=f, pi_cf=med[(c, f)], spread_cf=spr[(c, f)], pi_c_notf=notf))
 
     l3 = []
     base = groups.get(("L3", L3_BASE_CLASS, "kitchen unit", False), {})
@@ -241,7 +251,8 @@ def main() -> None:
     write_csv(args.out / "level3_kitchen.csv", l3)
     (args.out / "provenance.json").write_text(json.dumps(dict(
         model=args.model, model_digest=digest, ollama=url, levels=LEVEL_P, system=SYSTEM,
-        templates=dict(L4_POS=L4_POS, L4_NEG=L4_NEG, L3=L3, L3_BASE_CLASS=L3_BASE_CLASS),
+        templates=dict(L4_POS=L4_POS, L3=L3, L3_BASE_CLASS=L3_BASE_CLASS), spoken=SPOKEN,
+        pi_c_notf="uniform mean of pi_cg over the other functions",
         vocab_sha=sha(args.vocab.read_text()), answered=len(records), of=len(questions),
         written=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")), indent=2))
 
