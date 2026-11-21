@@ -635,7 +635,7 @@ inline Approach approach(const PartRay& r)
 {
     Approach A;
     const double T = r.rho_max;
-    double best_t = 0.0, best = gmax(r, 0.0);
+    double best_t = 0.0, best = gmax(r, 0.0), best_low = -kInf;
     int pm = -1, pn = -1;   // the pair of pieces whose intersection is the minimum (the V's two sides)
     if (const double gT = gmax(r, T); gT < best) { best = gT; best_t = T; }
     for (int m = 0; m < 6; ++m)
@@ -645,8 +645,15 @@ inline Approach approach(const PartRay& r)
             if (db == 0.0) continue;
             const double t = (r.alpha[n] - r.alpha[m]) / db;
             if (not (t > 0.0 and t < T)) continue;
-            // the smallest minimiser: a flat bottom has two equal vertices, keep the earlier
-            if (const double g = gmax(r, t); g < best or (g == best and t < best_t)) { best = g; best_t = t; pm = m; pn = n; }
+            // the smallest minimiser: a flat bottom has two equal vertices, keep the earlier. At the SAME vertex (g and t tie
+            // exactly) keep the pair ON the upper envelope — the larger of its two pieces' lower value. Two pieces below the
+            // envelope can cross at exactly the envelope's vertex (a square part, hx == hy, puts x − hx and y − hy on the
+            // crossing of −x − hx and −y − hy), and their Jacobians are not the derivative of d (Task 19 review D1: g_w, g_h
+            // off by ±765 nats/m on the creep fixture). Exact ties only: every other choice is unchanged.
+            const double g = gmax(r, t);
+            const double low = std::min(piece_at(r, m, t), piece_at(r, n, t));
+            if (g < best or (g == best and (t < best_t or (t == best_t and low > best_low))))
+            { best = g; best_t = t; pm = m; pn = n; best_low = low; }
         }
     if (best <= 0.0)   // the ray crosses the part: d = the deepest point, a vertex of the max of six lines
     {
@@ -866,6 +873,10 @@ inline void part_geometry(const PartRay& r, const Approach& A, const BeamPart& p
     }
 }
 
+// BeamRays::p_f is either empty (p_pass for every ray) or one value per staged ray; anything else is a staging error and the
+// ray-set is REFUSED (contributes nothing; asserts in debug). Task 19 review D2.
+inline bool p_f_consistent(const BeamRays& rays) { return rays.p_f.empty() or rays.p_f.size() == rays.endpoints.size(); }
+
 // The term of ray i: E_i, its gradient and curvature (unscaled by κ). false ⇔ the ray contributes exactly 0 (d > 8σ_s).
 // force_sweep: run the several-part panel sweep (switch search) even with one part present (the one-part check).
 template <bool Deriv>
@@ -874,6 +885,7 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
                           BeamRayOut& out, std::vector<long>* sig = nullptr, BeamRayDiag* diag = nullptr)
 {
     out = BeamRayOut{};
+    if (not p_f_consistent(rays) or i >= rays.endpoints.size()) return false;   // refused (D2): never read another ray's p_f
     const Eigen::Vector3d& o = rays.origin;
     const Eigen::Vector3d du = rays.endpoints[i] - o;
     const double rho = du.norm();
@@ -1204,6 +1216,7 @@ inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays
 {
     static_assert(N == 6, "BeamPart::J maps the 6 countable parameters (cx, cy, H, w, h, yaw)");
     assert(rays.m.size() == rays.endpoints.size());
+    assert(detail::p_f_consistent(rays));
     assert(not cfg.e_levels.empty());   // built by BeamConfig::make
     if (rays.kappa == 0.0 or parts.empty()) return;
     std::vector<double> cs, sn;
@@ -1227,6 +1240,7 @@ inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays
 inline double beam_rays_energy(std::span<const BeamPart> parts, const BeamRays& rays, const BeamConfig& cfg)
 {
     assert(not cfg.e_levels.empty());
+    assert(detail::p_f_consistent(rays));
     if (rays.kappa == 0.0 or parts.empty()) return 0.0;
     std::vector<double> cs, sn;
     detail::part_trig(parts, cs, sn);

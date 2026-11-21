@@ -156,6 +156,7 @@ static void kappa_zero_is_prediction()
     for (const double kap : {k5, 0.5})
     {
         bm::BeamRays one = r5; one.endpoints = {r5.endpoints[ih]}; one.m = {r5.m[ih]};
+        if (not r5.p_f.empty()) one.p_f = {r5.p_f[ih]};   // the subset keeps each ray's own p_f (review D2)
         bm::BeamRays oneK = one; oneK.kappa = kap;
         bm::BeamRays one1 = one; one1.kappa = 1.0;
         const CountableBeliefState hit = truth_state(), miss{tx + 1.0f, ty, tH, tw, tw, 0.0f};
@@ -270,12 +271,13 @@ static void occluder_in_front()
             return ts::kEpsPx;
         };
         const bm::BeamRays all = front_beam(walls, 1.0, {occ}, lab);
-        bm::BeamRays kept = all; kept.endpoints.clear(); kept.m.clear();
+        bm::BeamRays kept = all; kept.endpoints.clear(); kept.m.clear(); kept.p_f.clear();
         int n_occ = 0;
         for (std::size_t i = 0; i < all.endpoints.size(); ++i)
         {
             if (ts::on_object(std::vector<ts::SceneBox>{occ}, all.endpoints[i].cast<float>())) { ++n_occ; continue; }
             kept.endpoints.push_back(all.endpoints[i]); kept.m.push_back(all.m[i]);
+            if (not all.p_f.empty()) kept.p_f.push_back(all.p_f[i]);
         }
         CountableBelief a = belief(seed), b = belief(seed);
         a.set_first_update_done(true); b.set_first_update_done(true);
@@ -413,6 +415,7 @@ static double largest_ray_curvature(const CountableBelief& b, const bm::BeamRays
     for (std::size_t i = 0; i < r.endpoints.size(); ++i)
     {
         bm::BeamRays one = r; one.endpoints = {r.endpoints[i]}; one.m = {r.m[i]}; one.kappa = 1.0;
+        if (not r.p_f.empty()) one.p_f = {r.p_f[i]};
         Eigen::Matrix<double, 6, 6> W = Eigen::Matrix<double, 6, 6>::Zero();
         Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Zero();
         bm::accumulate_beam_rays<6>(parts, one, b.params().beam, W, g, nullptr);
@@ -610,11 +613,12 @@ static void beam_cost()
             for (const auto& P : parts) d = std::min(d, bm::closest_approach(P, all.origin, u, all.rho_max, nullptr));
             if (d <= 8.0 * all.sigma_s) near.push_back(i);
         }
-        bm::BeamRays r = all; r.endpoints.clear(); r.m.clear();
+        bm::BeamRays r = all; r.endpoints.clear(); r.m.clear(); r.p_f.clear();
         for (std::size_t k = 0; k < 256 and not near.empty(); ++k)
         {
             const std::size_t i = near[(k * near.size()) / 256];
             r.endpoints.push_back(all.endpoints[i]); r.m.push_back(all.m[i]);
+            if (not all.p_f.empty()) r.p_f.push_back(all.p_f[i]);
         }
         CountableFrame f = lidar_frame(r);
         // first update: seed 3 cm off on (cx, cy, w), born on the class mean

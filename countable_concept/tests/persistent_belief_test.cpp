@@ -1012,16 +1012,28 @@ static double max_theta_step(const Vec6& a, const Vec6& b, double& dyaw)
 static void energy_gradient_consistent()
 {
     const CountableFrame f = converge_frame();
-    const std::array<Vec6, 3> thetas{(Vec6() << tx + 0.03f, ty - 0.02f, tH + 0.02f, tw + 0.03f, tw - 0.02f, 0.02f).finished(),
+    // The fourth and fifth states are SQUARE (w == h) at yaw 0 exactly — the truth and a birth on the class mean (Task 19 review
+    // D1: at hx == hy two pieces below the envelope cross at the envelope's vertex, and the vertex pair chosen there gave
+    // g_w, g_h off by ±765 nats/m on the creep fixture).
+    const std::array<Vec6, 5> thetas{(Vec6() << tx + 0.03f, ty - 0.02f, tH + 0.02f, tw + 0.03f, tw - 0.02f, 0.02f).finished(),
                                      (Vec6() << tx - 0.01f, ty + 0.02f, tH - 0.01f, tw, tw + 0.01f, -0.015f).finished(),
-                                     (Vec6() << tx + 0.01f, ty - 0.01f, 0.35f, tw, tw, 0.01f).finished()};
-    const Vec6 ocam = (Vec6() << 0.004f, -0.003f, 0.002f, 0.001f, -0.002f, 0.003f).finished();
-    const Vec6 oL   = (Vec6() << -0.002f, 0.003f, -0.001f, 0.002f, 0.001f, -0.002f).finished();
+                                     (Vec6() << tx + 0.01f, ty - 0.01f, 0.35f, tw, tw, 0.01f).finished(),
+                                     (Vec6() << tx, ty, tH, tw, tw, 0.0f).finished(),
+                                     (Vec6() << tx + 0.004f, ty - 0.003f, tH, tw + 0.01f, tw + 0.01f, 0.0f).finished()};
+    const Vec6 ocam_g = (Vec6() << 0.004f, -0.003f, 0.002f, 0.001f, -0.002f, 0.003f).finished();
+    const Vec6 oL_g   = (Vec6() << -0.002f, 0.003f, -0.001f, 0.002f, 0.001f, -0.002f).finished();
     const float h = 1e-4f;
     double worst = 0.0;
     int one_sided = 0;
-    for (const auto& th : thetas)
+    // the square states keep each channel's state square at yaw 0 (equal w, h offsets, no yaw offset)
+    const Vec6 ocam_sq = (Vec6() << 0.004f, -0.003f, 0.002f, 0.0015f, 0.0015f, 0.0f).finished();
+    const Vec6 oL_sq   = (Vec6() << -0.002f, 0.003f, -0.001f, 0.0015f, 0.0015f, 0.0f).finished();
+    for (std::size_t k = 0; k < thetas.size(); ++k)
     {
+        const Vec6& th = thetas[k];
+        const bool sq = k >= 3;
+        const Vec6& ocam = sq ? ocam_sq : ocam_g;
+        const Vec6& oL   = sq ? oL_sq : oL_g;
         CountableBelief b = make_belief(0.0f, 0.0f, 0.0f);
         b.set_frame_wall_for_test(f.wall);
         const auto S = [](const Vec6& v) { return CountableBeliefState::from_vec(v); };

@@ -263,10 +263,10 @@ struct CountableBeliefParams
     // Optimiser
     int   gn_iters = 4;              // Gauss-Newton iterations per frame (the flag-off engine path)
     // Persistent path only (spec 7c.7 d + 7c.8 rev 3.3.7; solver constants, no config key): damped GN (Nielsen's λ rule, joint
-    // damping) stops converged (ruling T14-4) when an ACCEPTED θ step is below gn_tol_m on cx, cy, H, w, h and gn_tol_rad on yaw,
-    // or when a damped proposal is rejected below that tolerance and the UNDAMPED (λ = 0) proposal from the same θ is below it
-    // too; else after gn_iters_max = 25 (rev 3.3.7) accepted-or-rejected steps (gn_conv = 0). A solver tolerance, not a modelling
-    // threshold. gn_reject_all_for_test is a TEST HOOK only (every step rejected, as if J never fell).
+    // damping) stops converged when the UNDAMPED (λ = 0) proposal from the current θ is below gn_tol_m on cx, cy, H, w, h and
+    // gn_tol_rad on yaw — that step is applied if J does not rise (controller ruling, Task 19 fix round 2; an accepted damped step
+    // below the tolerance no longer stops: under Nielsen's λ it is short however far the minimum is); else after
+    // gn_iters_max = 25 (rev 3.3.7) steps (gn_conv = 0). A solver tolerance, not a modelling threshold. gn_reject_all_for_test is a TEST HOOK only (every step rejected, as if J never fell).
     int    gn_iters_max = 25;
     double gn_tol_m     = 1e-3;
     double gn_tol_rad   = 1e-3;
@@ -543,8 +543,8 @@ public:
     const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return dbg_iterates_; }   // ACCEPTED θ iterates
     // J = persistent_data_energy + prior_energy at θ₀ and after every accepted step of the last persistent update (spec 7c.7 d).
     const std::vector<double>& dbg_gn_energy() const { return dbg_gn_energy_; }
-    // The last persistent update's damped GN (spec 7c.7 d): steps taken (accepted + rejected), whether it converged (ruling
-    // T14-4: an accepted θ step below the tolerance, or a rejected one whose undamped proposal is below it), and the final λ.
+    // The last persistent update's damped GN (spec 7c.7 d): steps taken (accepted + rejected), whether it converged (
+    // the undamped (λ = 0) proposal from the current θ is below the tolerance, Task 19 fix round 2), and the final λ.
     // Logged (gn_it, gn_conv, gn_lambda); no gate reads them.
     int    last_gn_iters()     const { return last_gn_iters_; }
     bool   last_gn_converged() const { return last_gn_converged_; }
