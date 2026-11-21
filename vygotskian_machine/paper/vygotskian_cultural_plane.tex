@@ -185,16 +185,16 @@ habit term $E$ with the expected free energy $G$, weighted by a precision $\gamm
 \cite{friston2017process, parr2022active},
 \begin{equation}
     \begin{aligned}
-    p(\pi \mid g, x) &= \sigma\big(\ln E(\pi \mid g, x) - \gamma\, G(\pi \mid g, x)\big),
+    p(\pi \mid g, z) &= \sigma\big(\ln E(\pi \mid g, z) - \gamma\, G(\pi \mid g, z)\big),
     \qquad
-    E(\pi \mid g, x) = \frac{\epsilon + n_{g,x}(\pi)}{\sum_{\pi'} \big(\epsilon + n_{g,x}(\pi')\big)},\\
-    G(\pi \mid g, x) &= -\sum_k \mathbb{E}\big[I(s_k; o_k \mid \pi)\big]
-    \;-\; \mathbb{E}\big[\ln P(g \text{ and the norms of } x \text{ hold} \mid \pi)\big].
+    E(\pi \mid g, z) = \frac{\epsilon + n_{g,z}(\pi)}{\sum_{\pi'} \big(\epsilon + n_{g,z}(\pi')\big)},\\
+    G(\pi \mid g, z) &= -\sum_k \mathbb{E}\big[I(s_k; o_k \mid \pi)\big]
+    \;-\; \mathbb{E}\big[\ln P(g \text{ and the norms of } z \text{ hold} \mid \pi)\big].
     \end{aligned}
     \label{eq:lh_habit}
 \end{equation}
-Here $g$ is the goal type, $x$ the context (the function and arrangement hypotheses of the current room), $\sigma$
-the softmax over candidate missions, $n_{g,x}(\pi)$ the number of successes of $\pi$ for that goal in that context,
+Here $g$ is the goal type, $z$ the context (the function and arrangement hypotheses of the current room), $\sigma$
+the softmax over candidate missions, $n_{g,z}(\pi)$ the number of successes of $\pi$ for that goal in that context,
 and $\epsilon > 0$ a base count that keeps a new mission eligible. In $G$, $s_k$ are the hidden states that step $k$
 observes and $o_k$ its observations, and $G$ is evaluated with the imagination tools of
 Section~\ref{sec:lang_hierarchy:imagination}. A mission is therefore preferred when it has worked before in similar

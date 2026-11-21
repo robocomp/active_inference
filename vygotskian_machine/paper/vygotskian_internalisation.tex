@@ -28,12 +28,12 @@ reduction of uncertainty about hidden states \cite{friston2017process, parr2022a
 variable whose value is uncertain and whose resolution is expected to matter, so it can be regarded as the
 linguistic expression of this term. We therefore model an inner question as a persistent object
 \begin{equation}
-    \mathcal{Q} = \big\langle\, e,\; \mathcal{H},\; q(h),\; \mathcal{P},\; b,\; s \,\big\rangle .
+    \mathcal{Q} = \big\langle\, e,\; \mathcal{H},\; q(h),\; \mathcal{O},\; b,\; s \,\big\rangle .
     \label{eq:inner_question}
 \end{equation}
 Here $e$ is the triggering event (for example an obstacle that no concept agent explains), $\mathcal{H}$ is a finite
 set of named hypotheses (``a chair'', ``a box'', ``unknown''), $q(h)$ is the current posterior over them,
-$\mathcal{P}$ is the set of pending predictions, $b$ is a budget in time and motion, and $s$ is the status (open,
+$\mathcal{O}$ is the set of pending predictions, $b$ is a budget in time and motion, and $s$ is the status (open,
 resolved or abandoned). Questions are organised as a stack of questions under discussion
 \cite{roberts2012information}, so that ``is it a chair?'' is a sub-question of ``what is this?''. The question
 object, and not the language model's context window, carries the state of the reasoning from one step to the next.
@@ -54,7 +54,7 @@ Given $\mathcal{Q}$, the language model proposes a test, which consists of an ep
 towards the anomaly or approaching it, together with the outcome that each hypothesis predicts. The value of the test
 is its expected information gain minus its cost,
 \begin{equation}
-    V(a) \;=\; \underbrace{H\!\left[q(h)\right] \;-\; \mathbb{E}_{p(o \mid a)}\!\left[ H\!\left[q(h \mid o, a)\right]
+    V(a) \;=\; \underbrace{\mathbb{H}\!\left[q(h)\right] \;-\; \mathbb{E}_{p(o \mid a)}\!\left[ \mathbb{H}\!\left[q(h \mid o, a)\right]
     \right]}_{I(h;\,o \mid a)} \;-\; c(a),
     \label{eq:inner_value}
 \end{equation}
@@ -68,7 +68,7 @@ likelihoods,
 \end{equation}
 and the loop continues, spawns a sub-question, or terminates when
 \begin{equation}
-    H\!\left[q(h)\right] < \eta \quad\lor\quad \max_a V(a) \le 0 \quad\lor\quad b \text{ exhausted}.
+    \mathbb{H}\!\left[q(h)\right] < \eta \quad\lor\quad \max_a V(a) \le 0 \quad\lor\quad b \text{ exhausted}.
     \label{eq:inner_stop}
 \end{equation}
 The loop thus stops when the answer is clear, when no test is worth its cost, or when the budget is spent. A loop
