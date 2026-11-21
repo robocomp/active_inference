@@ -43,7 +43,7 @@ PY
   # the agents' launcher must NOT inherit the tee pipe: ltom_agent outlives the fleet (it does not exit on peer loss), and while
   # its launcher holds the pipe tee never sees EOF and the test hangs after the tour (ltom_recall_countable1, 11-14: 12 h)
   # the fleet may run from a worktree (WT for warm_start_tour); the concept agents come from CONCEPT_WT (default: main), never from $WT
-  ON_FLEET_UP="WT=${CONCEPT_WT:-$B} LTOM=1 bash $S/concept_agents.sh start $E/crossing/$RUN < /dev/null >> $E/crossing/$NAME/agents_p$pass.txt 2>&1" bash $S/warm_start_tour.sh $RUN $FIX 2>&1 | tee crossing/$NAME/tour_p$pass.txt
+  ON_FLEET_UP="CONCEPT_WT=${CONCEPT_WT:-$B} LTOM=1 bash $S/concept_agents.sh start $E/crossing/$RUN < /dev/null >> $E/crossing/$NAME/agents_p$pass.txt 2>&1" bash $S/warm_start_tour.sh $RUN $FIX 2>&1 | tee crossing/$NAME/tour_p$pass.txt
   LTOM=1 bash $S/concept_agents.sh stop
   cp $REP crossing/$NAME/repertory_after_p$pass.json 2>/dev/null
 done
