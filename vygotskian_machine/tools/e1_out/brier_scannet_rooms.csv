@@ -1,0 +1,193 @@
+func,cls,corpus_freq,vlm,gap,brier_vlm,brier_constant
+office,lamp,0.1324,0.95,0.8176,0.7834,0.4963
+kitchen,oven,0.1509,0.95,0.7991,0.7667,0.487
+corridor,mirror,0.0,0.75,0.75,0.5625,0.5625
+corridor,rug,0.0,0.75,0.75,0.5625,0.5625
+corridor,coat rack,0.0,0.75,0.75,0.5625,0.5625
+bedroom,rug,0.0085,0.75,0.7415,0.5583,0.5583
+living room,rug,0.0093,0.75,0.7407,0.5579,0.5579
+living room,chest of drawers,0.0185,0.75,0.7315,0.5532,0.5532
+bathroom,rug,0.022,0.75,0.728,0.5515,0.5515
+kitchen,hood,0.2264,0.95,0.7236,0.6987,0.4493
+living room,mirror,0.0278,0.75,0.7222,0.5486,0.5486
+office,chest of drawers,0.0294,0.75,0.7206,0.5478,0.5478
+living room,television,0.2315,0.95,0.7185,0.6942,0.4468
+living room,lamp,0.2315,0.95,0.7185,0.6942,0.4468
+living room,computer monitor,0.037,0.75,0.713,0.544,0.544
+living room,bookshelf,0.0648,0.75,0.6852,0.5301,0.5301
+bathroom,cabinet,0.2747,0.95,0.6753,0.6552,0.4251
+bedroom,computer monitor,0.0763,0.75,0.6737,0.5244,0.5244
+office,office chair,0.2794,0.95,0.6706,0.651,0.4228
+kitchen,dining table,0.0943,0.75,0.6557,0.5153,0.5153
+bathroom,countertop,0.1429,0.75,0.6071,0.4911,0.4911
+bedroom,wardrobe,0.1864,0.75,0.5636,0.4693,0.4693
+bedroom,television,0.2288,0.75,0.5212,0.4481,0.4481
+living room,cabinet,0.2315,0.75,0.5185,0.4468,0.4468
+office,plant,0.2353,0.75,0.5147,0.4449,0.4449
+bedroom,office chair,0.2373,0.75,0.5127,0.4439,0.4439
+office,mirror,0.0,0.5,0.5,0.25,0.5625
+office,rug,0.0,0.5,0.5,0.25,0.5625
+bedroom,mirror,0.2627,0.75,0.4873,0.4311,0.4311
+kitchen,dishwasher,0.2642,0.75,0.4858,0.4304,0.4304
+living room,dining table,0.0185,0.5,0.4815,0.25,0.5532
+kitchen,stove,0.4717,0.95,0.4783,0.478,0.3267
+bedroom,lamp,0.4746,0.95,0.4754,0.4754,0.3252
+office,armchair,0.0294,0.5,0.4706,0.25,0.5478
+bedroom,plant,0.0508,0.5,0.4492,0.25,0.5371
+corridor,plant,0.0526,0.5,0.4474,0.25,0.5362
+living room,desk,0.0648,0.5,0.4352,0.25,0.5301
+kitchen,plant,0.0755,0.5,0.4245,0.25,0.5248
+bedroom,cabinet,0.3559,0.75,0.3941,0.3845,0.3845
+kitchen,chair,0.3585,0.75,0.3915,0.3833,0.3833
+living room,armchair,0.3796,0.75,0.3704,0.3727,0.3727
+bathroom,shower,0.5824,0.95,0.3676,0.3783,0.2713
+kitchen,microwave,0.6226,0.95,0.3274,0.3421,0.2512
+bedroom,bookshelf,0.178,0.5,0.322,0.25,0.4735
+living room,coffee table,0.4352,0.75,0.3148,0.3449,0.3449
+living room,plant,0.1944,0.5,0.3056,0.25,0.4653
+living room,chair,0.6481,0.95,0.3019,0.3192,0.2384
+living room,sofa,0.6667,0.95,0.2833,0.3025,0.2292
+office,bookshelf,0.4706,0.75,0.2794,0.3272,0.3272
+bathroom,television,0.0,0.25,0.25,0.0625,0.5625
+bathroom,bookshelf,0.0,0.25,0.25,0.0625,0.5625
+bathroom,lamp,0.0,0.25,0.25,0.0625,0.5625
+bedroom,chest of drawers,0.5,0.75,0.25,0.3125,0.3125
+corridor,wardrobe,0.0,0.25,0.25,0.0625,0.5625
+corridor,chest of drawers,0.0,0.25,0.25,0.0625,0.5625
+corridor,office chair,0.0,0.25,0.25,0.0625,0.5625
+corridor,toilet,0.0,0.25,0.25,0.0625,0.5625
+kitchen,chest of drawers,0.0,0.25,0.25,0.0625,0.5625
+kitchen,desk,0.0,0.25,0.25,0.0625,0.5625
+kitchen,computer monitor,0.0,0.25,0.25,0.0625,0.5625
+kitchen,mirror,0.0,0.25,0.25,0.0625,0.5625
+kitchen,rug,0.0,0.25,0.25,0.0625,0.5625
+kitchen,coat rack,0.0,0.25,0.25,0.0625,0.5625
+living room,wardrobe,0.0,0.25,0.25,0.0625,0.5625
+living room,coat rack,0.0,0.25,0.25,0.0625,0.5625
+office,bed,0.0,0.25,0.25,0.0625,0.5625
+office,wardrobe,0.0,0.25,0.25,0.0625,0.5625
+office,dining table,0.0,0.25,0.25,0.0625,0.5625
+office,toilet,0.0,0.25,0.25,0.0625,0.5625
+office,sink,0.0,0.25,0.25,0.0625,0.5625
+office,microwave,0.0,0.25,0.25,0.0625,0.5625
+office,coat rack,0.0,0.25,0.25,0.0625,0.5625
+bathroom,bathtub,0.5055,0.75,0.2445,0.3098,0.3098
+living room,bed,0.0093,0.25,0.2407,0.0671,0.5579
+bathroom,hood,0.011,0.25,0.239,0.068,0.557
+bathroom,washing machine,0.011,0.25,0.239,0.068,0.557
+bathroom,coat rack,0.011,0.25,0.239,0.068,0.557
+living room,countertop,0.0185,0.25,0.2315,0.0718,0.5532
+kitchen,bookshelf,0.0189,0.25,0.2311,0.0719,0.5531
+kitchen,office chair,0.0189,0.25,0.2311,0.0719,0.5531
+kitchen,washing machine,0.0189,0.25,0.2311,0.0719,0.5531
+bedroom,countertop,0.0254,0.25,0.2246,0.0752,0.5498
+corridor,chair,0.4737,0.25,-0.2237,0.2993,0.3257
+living room,office chair,0.0278,0.25,0.2222,0.0764,0.5486
+office,television,0.0294,0.25,0.2206,0.0772,0.5478
+bedroom,coffee table,0.0339,0.25,0.2161,0.0794,0.5456
+living room,microwave,0.037,0.25,0.213,0.081,0.544
+kitchen,lamp,0.0377,0.25,0.2123,0.0814,0.5436
+bedroom,nightstand,0.5424,0.75,0.2076,0.2913,0.2913
+bedroom,coat rack,0.0424,0.25,0.2076,0.0837,0.5413
+office,coffee table,0.0441,0.25,0.2059,0.0846,0.5404
+office,refrigerator,0.0441,0.25,0.2059,0.0846,0.5404
+office,countertop,0.0441,0.25,0.2059,0.0846,0.5404
+bedroom,shower,0.0508,0.25,0.1992,0.0879,0.5371
+corridor,armchair,0.0526,0.25,0.1974,0.0888,0.5362
+corridor,bookshelf,0.0526,0.25,0.1974,0.0888,0.5362
+corridor,computer monitor,0.0526,0.25,0.1974,0.0888,0.5362
+corridor,lamp,0.0526,0.25,0.1974,0.0888,0.5362
+kitchen,armchair,0.0566,0.25,0.1934,0.0908,0.5342
+bathroom,plant,0.0659,0.25,0.1841,0.0955,0.5295
+bedroom,toilet,0.0678,0.25,0.1822,0.0964,0.5286
+kitchen,television,0.0755,0.25,0.1745,0.1002,0.5248
+office,computer monitor,0.7941,0.95,0.1559,0.1878,0.1654
+corridor,desk,0.1053,0.25,0.1447,0.1151,0.5099
+office,desk,0.8088,0.95,0.1412,0.1746,0.1581
+bedroom,chair,0.6102,0.75,0.1398,0.2574,0.2574
+bedroom,refrigerator,0.1864,0.05,-0.1364,0.1703,0.4693
+office,cabinet,0.6176,0.75,0.1324,0.2537,0.2537
+bedroom,desk,0.6271,0.5,-0.1271,0.25,0.2489
+bedroom,sofa,0.1271,0.25,0.1229,0.1261,0.4989
+bedroom,sink,0.1271,0.25,0.1229,0.1261,0.4989
+corridor,coffee table,0.1579,0.05,-0.1079,0.1446,0.4836
+office,chair,0.8529,0.95,0.0971,0.1349,0.136
+bathroom,mirror,0.8571,0.95,0.0929,0.1311,0.1339
+corridor,cabinet,0.1579,0.25,0.0921,0.1414,0.4836
+bedroom,armchair,0.161,0.25,0.089,0.143,0.482
+kitchen,sofa,0.1132,0.05,-0.0632,0.1044,0.5059
+corridor,sofa,0.1053,0.05,-0.0553,0.0972,0.5099
+bathroom,bed,0.0,0.05,0.05,0.0025,0.5625
+bathroom,nightstand,0.0,0.05,0.05,0.0025,0.5625
+bathroom,wardrobe,0.0,0.05,0.05,0.0025,0.5625
+bathroom,armchair,0.0,0.05,0.05,0.0025,0.5625
+bathroom,coffee table,0.0,0.05,0.05,0.0025,0.5625
+bathroom,dining table,0.0,0.05,0.05,0.0025,0.5625
+bathroom,desk,0.0,0.05,0.05,0.0025,0.5625
+bathroom,office chair,0.0,0.05,0.05,0.0025,0.5625
+bathroom,computer monitor,0.0,0.05,0.05,0.0025,0.5625
+bathroom,oven,0.0,0.05,0.05,0.0025,0.5625
+bedroom,dining table,0.0,0.05,0.05,0.0025,0.5625
+bedroom,oven,0.0,0.05,0.05,0.0025,0.5625
+bedroom,hood,0.0,0.05,0.05,0.0025,0.5625
+bedroom,washing machine,0.0,0.05,0.05,0.0025,0.5625
+corridor,bed,0.0,0.05,0.05,0.0025,0.5625
+corridor,nightstand,0.0,0.05,0.05,0.0025,0.5625
+corridor,television,0.0,0.05,0.05,0.0025,0.5625
+corridor,dining table,0.0,0.05,0.05,0.0025,0.5625
+corridor,sink,0.0,0.05,0.05,0.0025,0.5625
+corridor,bathtub,0.0,0.05,0.05,0.0025,0.5625
+corridor,shower,0.0,0.05,0.05,0.0025,0.5625
+corridor,refrigerator,0.0,0.05,0.05,0.0025,0.5625
+corridor,oven,0.0,0.05,0.05,0.0025,0.5625
+corridor,stove,0.0,0.05,0.05,0.0025,0.5625
+corridor,microwave,0.0,0.05,0.05,0.0025,0.5625
+corridor,dishwasher,0.0,0.05,0.05,0.0025,0.5625
+corridor,hood,0.0,0.05,0.05,0.0025,0.5625
+corridor,countertop,0.0,0.05,0.05,0.0025,0.5625
+corridor,washing machine,0.0,0.05,0.05,0.0025,0.5625
+kitchen,bed,0.0,0.05,0.05,0.0025,0.5625
+kitchen,nightstand,0.0,0.05,0.05,0.0025,0.5625
+kitchen,wardrobe,0.0,0.05,0.05,0.0025,0.5625
+kitchen,toilet,0.0,0.05,0.05,0.0025,0.5625
+kitchen,bathtub,0.0,0.05,0.05,0.0025,0.5625
+kitchen,shower,0.0,0.05,0.05,0.0025,0.5625
+living room,toilet,0.0,0.05,0.05,0.0025,0.5625
+living room,bathtub,0.0,0.05,0.05,0.0025,0.5625
+living room,shower,0.0,0.05,0.05,0.0025,0.5625
+living room,oven,0.0,0.05,0.05,0.0025,0.5625
+living room,hood,0.0,0.05,0.05,0.0025,0.5625
+living room,washing machine,0.0,0.05,0.05,0.0025,0.5625
+office,nightstand,0.0,0.05,0.05,0.0025,0.5625
+office,bathtub,0.0,0.05,0.05,0.0025,0.5625
+office,shower,0.0,0.05,0.05,0.0025,0.5625
+office,oven,0.0,0.05,0.05,0.0025,0.5625
+office,stove,0.0,0.05,0.05,0.0025,0.5625
+office,dishwasher,0.0,0.05,0.05,0.0025,0.5625
+office,hood,0.0,0.05,0.05,0.0025,0.5625
+office,washing machine,0.0,0.05,0.05,0.0025,0.5625
+kitchen,refrigerator,0.9057,0.95,0.0443,0.0874,0.1097
+bedroom,stove,0.0085,0.05,0.0415,0.0101,0.5583
+bedroom,dishwasher,0.0085,0.05,0.0415,0.0101,0.5583
+living room,stove,0.0093,0.05,0.0407,0.0108,0.5579
+living room,dishwasher,0.0093,0.05,0.0407,0.0108,0.5579
+bathroom,chest of drawers,0.011,0.05,0.039,0.0124,0.557
+bathroom,sofa,0.011,0.05,0.039,0.0124,0.557
+bathroom,refrigerator,0.011,0.05,0.039,0.0124,0.557
+bathroom,stove,0.011,0.05,0.039,0.0124,0.557
+bathroom,microwave,0.011,0.05,0.039,0.0124,0.557
+bathroom,dishwasher,0.011,0.05,0.039,0.0124,0.557
+bathroom,sink,0.9121,0.95,0.0379,0.0816,0.1065
+living room,sink,0.0185,0.05,0.0315,0.0192,0.5532
+kitchen,cabinet,0.9811,0.95,-0.0311,0.0195,0.0719
+bathroom,chair,0.022,0.05,0.028,0.0223,0.5515
+bathroom,toilet,0.9231,0.95,0.0269,0.0717,0.101
+bedroom,bed,0.9746,0.95,-0.0246,0.0254,0.0752
+living room,nightstand,0.0278,0.05,0.0222,0.0275,0.5486
+kitchen,coffee table,0.0377,0.05,0.0123,0.0365,0.5436
+kitchen,countertop,0.9623,0.95,-0.0123,0.0365,0.0814
+bedroom,bathtub,0.0424,0.05,0.0076,0.0406,0.5413
+kitchen,sink,0.9434,0.95,0.0066,0.0534,0.0908
+living room,refrigerator,0.0463,0.05,0.0037,0.0442,0.5394
+bedroom,microwave,0.0508,0.05,-0.0008,0.0483,0.5371
+office,sofa,0.25,0.25,0.0,0.1875,0.4375
