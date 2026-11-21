@@ -355,54 +355,53 @@ inline void quantile_nodes_z(double sigma_s, std::span<const double> z, const Ga
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
-//  RAY GEOMETRY ON ORIENTED-BOX PARTS, THE RAY-SET ENERGY, ITS GRADIENT AND CURVATURE (Task 17; spec §7c.8 a, b, c)
+//  RAY GEOMETRY ON ORIENTED-BOX PARTS, THE RAY-SET ENERGY, ITS GRADIENT AND CURVATURE
+//  (Task 17; spec §7c.8 a, b, c as amended by rev 3.3.6 "the likelihood is integrated in t on a composite rule")
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// Every convex part of a countable model is an oriented box (plan rev 5, "parts are oriented boxes"): the main box and
-// the bed's headboard panel. The model SDF along a ray is the minimum over parts; nothing here calls a model SDF, every
-// Jacobian is the part's analytic J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ (no fd_eps, no jac_slope_clamp on this path).
+// Every convex part of a countable model is an oriented box (plan rev 5): the main box and the bed's headboard panel.
+// Nothing here calls a model SDF; every Jacobian is the part's analytic J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ.
 //
-// Along a ray o + t·u, in a part's frame q(t) = q0 + t·v, a_i(t) = |q_i(t)| − h_i, and the box SDF is
-//     s(t) = ‖max(a, 0)‖ + min(max_i a_i, 0).
-// Inside (s ≤ 0) it is the max of six LINEAR pieces ±q_i(t) − h_i; outside it is the norm of the positive a_i, a
-// piecewise quadratic under the root whose breakpoints are the t where some |q_i| = h_i. Both are used in closed form:
-//  - closest approach d = min_{t∈[0,ρ_max]} s(t). Crossing (d ≤ 0): the minimum of the max of six lines, found exactly by
-//    enumerating the 15 pairwise intersections and the two ends; ∇d = (s₊J₋ + s₋J₊)/(s₋ + s₊) with J₋, J₊ the two pieces
-//    whose intersection IS the minimum (the spec's two tangents, taken exactly: on a max of lines the tangents are the
-//    pieces, so d has no staircase; taking them at t* ∓ ε instead picks a wrong piece when a third face lies within ε of
-//    the vertex, which grazing faces make common), Jacobians at t* (the exact derivative of the vertex of the V).
-//    One-sided at t = 0 / ρ_max. Miss (d > 0):
-//    the minimum of the piecewise quadratic, interval by interval (the closed-form segment–box distance), and
-//    ∇d = ∂s/∂θ at t* (envelope theorem; s is C¹ outside the box).
-//  - first crossing of the level δ: for δ ≤ 0 the slab entry of the box shrunk by |δ| (max over the entering pieces);
-//    for δ > 0 the first root of ‖max(a,0)‖² = δ² walking the breakpoints from t = 0 (one quadratic per interval).
-//    ∂t/∂θ = −(∂s/∂θ)/(∂s/∂t), ∂t/∂δ = 1/(∂s/∂t). t = 0 (sensor inside the dilated part) is a constant, no special case.
-//    This replaces the spec's "one monotone march per part" (c) by its closed form: no march, no bisection, so the 1e-4 m
-//    bracket is not needed for crossings (BeamConfig::bracket_m is kept for the interface, unused).
+// Along a ray o + t·u, in a part's frame q(t) = q0 + t·v, a_i(t) = |q_i(t)| − h_i, s(t) = ‖max(a,0)‖ + min(max_i a_i, 0):
+// inside the max of six LINEAR pieces ±q_i − h_i, outside the root of a piecewise quadratic whose breakpoints are the t
+// where some |q_i| = h_i. Everything below is closed form on that structure.
 //
-// Panels (spec "Quadrature"): levels are d, each part's own minimum d_p > d, and every switch level where the first-hit
-// part changes (t_p(δ) = t_q(δ)), found from the sign of t_p − t_q at the provisional panel ends and nodes and then
-// bisected TO MACHINE PRECISION in δ (the discretised energy depends on the switch level through the node placement, so a
-// root found to 1e-4 m would leave a 1e-4 m-scale noise in E that a finite-difference gradient check sees). Nodes and
-// weights come from detail::quantile_nodes_log with the levels as z-scores (no limit cancels).
+// Closest approach d_p = min_t s_p (t ∈ [0, ρ_max]); t*_p is the SMALLEST minimiser. Crossing (d ≤ 0): the vertex of
+// the max of the six lines, found exactly; ∇d = (s₊J₋ + s₋J₊)/(s₋ + s₊) on the exact pair of faces meeting there.
+// Miss: the minimum of the piecewise quadratic, ∇d = ∂s/∂θ at t* (envelope). One-sided at t = 0 / ρ_max.
 //
-// The gradient is that of the DISCRETISED κ·Σ E_i: through π (via d), every node level (each node δ_k moves with the two
-// limits of its panel: dδ_k = [(1 − u_k)φ(z_{j−1})dλ_{j−1} + u_k φ(z_j)dλ_j]/φ(z_k)), every weight
-// (w_k = (b_j − b_{j−1})/π·ω_k), and every crossing (∂t/∂θ at fixed δ plus ∂t/∂δ·dδ_k). A limit's dλ/dθ is ∇d_p for a part
-// minimum and, for a switch, the implicit derivative dλ = −(∂_θt_p − ∂_θt_q)/(∂_δt_p − ∂_δt_q). Ratios of φ and of the
-// tail probabilities are formed in log space.
+// The likelihood, unconditional, in t (rev 3.3.6). δ ~ N(0, σ_s²) is pushed forward through the running minimum
+// M(t) = min_p s_p(min(t, t*_p)): every δ ≥ s(0) = min over ALL parts of s_p(0) maps to t = 0 (an atom of mass F(s(0)),
+// F the upper tail), and on a panel where part p is first hit (descending and equal to M) the density is
+// φ_σ(s_p(t))·|∂_t s_p|. With St and G the range density and its CDF:
+//     A = St(−ρ)F(s(0)) + Σ_panels ∫ St(t − ρ) φ_σ(s_p)|∂_t s_p| dt,   B = the same with G,
+//     p = (1 − π)(1 − m)p_pass + m·A + (1 − m)p_pass·B,   E = −log[p/((1 − m)p_pass)].
+// Panels come from a sweep in t: a part is first hit from t = 0, from a plateau start (s_p(t) = the level reached by
+// the part before it, or s(0)), or from a switch root (s_p = s_q, bisected to machine precision); it stays first hit
+// until its own t*_p or the next switch.
+// Each panel is integrated by a composite Gauss–Legendre rule, n nodes per subinterval, between the breakpoints
+// (clipped to the panel): t = ρ + G⁻¹(Φ(z_j)) and the crossings t_p(δ_j), δ_j = −σ_s z_j, z_j = −z_max … +z_max at
+// spacing 0.6; the face-change points inside the part (for a face value > −8σ_s) and the region boundaries outside.
 //
-// Curvature (spec (b)), PSD, × κ: r·J̄J̄ᵀ/V + (1 − o)·I_d·∇d∇dᵀ with J̄ the weighted mean of ∂t/∂θ at fixed δ (the range
-// score; the dependence of the nodes on d is the edge score's), V = (1 + ē²/c²)/p₀ + Var t, and I_d with the Mills ratio
-// in both tails. The cross term is dropped.
+// The gradient is that of the DISCRETISED energy: through s and ∂_t s at every node (∂²s/∂t∂θ analytic), the atom, π,
+// and every θ-dependent breakpoint, which moves its subinterval's nodes (∂_t of the integrand): level crossings
+// (−∂_θs/∂_ts), t*_p (tangent: −∂_θ(∂_ts)/∂²_ts; crease: the intersection of the two face lines), plateau starts
+// ((∇level − ∂_θs_p)/∂_ts_p), switch roots (−(∂_θs_p − ∂_θs_q)/(∂_ts_p − ∂_ts_q)), face changes and region boundaries.
+// A zero-width subinterval keeps its motion term dL·h(b); a breakpoint at an exact tangency (∂_ts = 0) adds none.
+// Breakpoints that appear, clip or reorder are the stated kink (iv).
 //
-// Numerical floor (spec (c), flagged, not a model gate): a ray with d > 8σ_s stops after the closest approach and adds
-// exactly 0; a PART with d_p > 8σ_s is left out of the ray's panels for the same reason (its panel has upper-tail mass
-// below Φ̄(8) = 6e-16, so it moves E by less than the rounding of the sum).
+// Curvature (spec (b)), PSD, × κ: r·J̄J̄ᵀ/V + (1 − o)·I_d·∇d∇dᵀ, r = m·A/p, o = (1 − m)p_pass·B/(m·A + (1 − m)p_pass·π).
+// J̄, t̄ and Var t are moments on the δ-quantile nodes (K_m) at fixed δ; Var t is scaled by
+// Var_exact(δ | δ > d)/Var_nodes(δ), Var_exact = σ_s²(1 + αλ − λ²), α = d/σ_s, λ the Mills ratio.
+//
+// Numerical floor (not a model gate): a ray with d > 8σ_s adds exactly 0; a part with d_p > 8σ_s opens no panel (its
+// s_p(0) still enters s(0)).
 
-inline constexpr int    kBeamK          = 8;      // K, chosen by beam_ray_test quadrature_K (the smallest K that passes)
-inline constexpr double kBeamEpsTangent = 1e-4;   // ε of the one-sided tangents at a crease (m)
-inline constexpr double kBeamFarSigmas  = 8.0;    // the 8σ_s numerical floor
+inline constexpr int    kBeamN         = 4;     // Gauss–Legendre nodes per subinterval (the Quadrature item: n = 3 misses, 4 passes)
+inline constexpr double kBeamZMax      = 3.0;   // extent of the quantile levels (set by the Quadrature item)
+inline constexpr double kBeamZStep     = 0.6;   // spacing of the quantile levels
+inline constexpr int    kBeamKm        = 8;     // δ-quantile nodes of the curvature's moments (set by the Reduction item)
+inline constexpr double kBeamFarSigmas = 8.0;   // the 8σ_s numerical floor (ray and part)
 
 struct BeamPart
 {
@@ -423,11 +422,37 @@ struct BeamRays
     double sigma_s = 0.01;
 };
 
+// Build with BeamConfig::make (the quantile levels of G are tabulated once, ν is fixed at load).
 struct BeamConfig
 {
     StudentT st;
-    GaussLegendre01 gl = GaussLegendre01::make(kBeamK);
-    double eps_tangent = kBeamEpsTangent, bracket_m = 1e-4;   // both unused (exact crease pair, closed-form crossings)
+    GaussLegendre01 gl   = GaussLegendre01::make(kBeamKm);   // the moments' δ-quantile nodes (K_m)
+    GaussLegendre01 gl_t = GaussLegendre01::make(kBeamN);    // the composite rule in t (n per subinterval)
+    std::vector<double> z_levels;                            // z_j = −z_max … +z_max, spacing 0.6
+    std::vector<double> e_levels;                            // G⁻¹(Φ(z_j)): the member/foreign density's quantiles in e
+
+    static BeamConfig make(const StudentT& st, int n = kBeamN, double z_max = kBeamZMax, int K_m = kBeamKm)
+    {
+        BeamConfig c;
+        c.st = st;
+        c.gl = GaussLegendre01::make(K_m);
+        c.gl_t = GaussLegendre01::make(n);
+        const int L = static_cast<int>(std::lround(2.0 * z_max / kBeamZStep)) + 1;
+        for (int j = 0; j < L; ++j)
+        {
+            const double z = -z_max + j * kBeamZStep, q = Phi(z);
+            double lo = -100.0, hi = 100.0;   // G⁻¹(q) by bisection to machine precision (G strictly increasing)
+            for (int it = 0; it < 400; ++it)
+            {
+                const double mid = 0.5 * (lo + hi);
+                if (not (mid > lo and mid < hi)) break;
+                if (st.cdf(mid) < q) lo = mid; else hi = mid;
+            }
+            c.z_levels.push_back(z);
+            c.e_levels.push_back(0.5 * (lo + hi));
+        }
+        return c;
+    }
 };
 
 namespace detail
@@ -445,7 +470,9 @@ struct PartRay
     double cy = 1.0, sy = 0.0, rho_max = 0.0;
     double q0[3]{}, v[3]{}, h[3]{};
     double alpha[6]{}, beta[6]{};   // piece m: axis m/2, sign + for even m: σq_i − h_i
-    double bk[6]{};
+    double bk[6]{};                 // sorted t ∈ (0, ρ_max) where some |q_i| = h_i
+    int    bk_axis[6]{};            // its axis i and sign (bk_sign) of q_i there
+    double bk_sign[6]{};
     int    nbk = 0;
     double s0  = 0.0;               // s(0)
 };
@@ -486,10 +513,14 @@ inline void make_part_ray(PartRay& r, const BeamPart& p, double cy, double sy, c
             for (const double sgn : {1.0, -1.0})
             {
                 const double t = (sgn * r.h[i] - r.q0[i]) / r.v[i];
-                if (t > 0.0 and t < rho_max) r.bk[r.nbk++] = t;
+                if (t > 0.0 and t < rho_max) { r.bk[r.nbk] = t; r.bk_axis[r.nbk] = i; r.bk_sign[r.nbk] = sgn; ++r.nbk; }
             }
     }
-    std::sort(r.bk, r.bk + r.nbk);
+    for (int a = 1; a < r.nbk; ++a)   // insertion sort, carrying the axis/sign
+        for (int b = a; b > 0 and r.bk[b] < r.bk[b - 1]; --b)
+        {
+            std::swap(r.bk[b], r.bk[b - 1]); std::swap(r.bk_axis[b], r.bk_axis[b - 1]); std::swap(r.bk_sign[b], r.bk_sign[b - 1]);
+        }
     r.s0 = sdf_at(r, 0.0);
 }
 
@@ -506,47 +537,83 @@ inline void add_piece_grad(const PartRay& r, int m, double t, double scale, Vec7
 {
     add_axis_grad(r, m / 2, (m % 2 == 0) ? 1.0 : -1.0, t, scale, g);
 }
-
-// Outside (s > 0): returns ∂s/∂t at t and, if dphi, adds ∂s/∂φ.
-inline double outside_grad(const PartRay& r, double t, Vec7* dphi)
+// scale · ∂(σ v_i)/∂φ: only the yaw moves the local direction (∂v_x/∂yaw = v_y, ∂v_y/∂yaw = −v_x).
+inline void add_axis_slope_grad(const PartRay& r, int i, double sigma, double scale, Vec7& g)
 {
-    double a[3], sg[3], s2 = 0.0;
+    if (i == 0) g(3) += scale * sigma * r.v[1];
+    else if (i == 1) g(3) -= scale * sigma * r.v[0];
+}
+
+// s, ∂_t s, ∂²_t s at t and (if D) ∂s/∂φ, ∂(∂_t s)/∂φ. Inside: the largest piece; outside: the norm of the positive a_i.
+struct SEval
+{
+    double s = 0.0, st = 0.0, stt = 0.0;
+    Vec7 ds = Vec7::Zero(), dst = Vec7::Zero();
+    int piece = -1;   // inside piece 0..5, 6 = outside
+};
+template <bool D>
+inline SEval seval(const PartRay& r, double t)
+{
+    SEval e;
+    double a[3], sg[3], out2 = 0.0;
     for (int i = 0; i < 3; ++i)
     {
         const double q = r.q0[i] + r.v[i] * t;
         sg[i] = (q >= 0.0) ? 1.0 : -1.0;
         a[i]  = sg[i] * q - r.h[i];
-        if (a[i] > 0.0) s2 += a[i] * a[i];
+        if (a[i] > 0.0) out2 += a[i] * a[i];
     }
-    const double s = std::sqrt(s2);
-    if (not (s > 0.0))
-    {   // on the surface to rounding (a level δ within a few ulp of 0): the limit δ → 0⁺ is the face crossing, i.e. the
-        // entering piece, the largest at t with the most negative slope
-        int k = -1;
-        for (int m = 0; m < 6; ++m)
-            if (k < 0 or piece_at(r, m, t) > piece_at(r, k, t) or (piece_at(r, m, t) == piece_at(r, k, t) and r.beta[m] < r.beta[k])) k = m;
-        if (dphi) add_piece_grad(r, k, t, 1.0, *dphi);
-        return r.beta[k];
-    }
-    double ds_dt = 0.0;
-    for (int i = 0; i < 3; ++i)
-        if (a[i] > 0.0)
+    if (out2 > 0.0)
+    {
+        e.s = std::sqrt(out2);
+        e.piece = 6;
+        double vv = 0.0;
+        for (int i = 0; i < 3; ++i)
+            if (a[i] > 0.0) { e.st += a[i] * sg[i] * r.v[i] / e.s; vv += r.v[i] * r.v[i]; }
+        e.stt = (vv - e.st * e.st) / e.s;
+        if constexpr (D)
         {
-            ds_dt += a[i] * sg[i] * r.v[i] / s;
-            if (dphi) add_axis_grad(r, i, sg[i], t, a[i] / s, *dphi);
+            for (int i = 0; i < 3; ++i)
+                if (a[i] > 0.0)
+                {
+                    add_axis_grad(r, i, sg[i], t, a[i] / e.s, e.ds);
+                    add_axis_grad(r, i, sg[i], t, sg[i] * r.v[i] / e.s, e.dst);
+                    add_axis_slope_grad(r, i, sg[i], a[i] / e.s, e.dst);
+                }
+            e.dst -= (e.st / e.s) * e.ds;
         }
-    return ds_dt;
+        return e;
+    }
+    int k = 0;
+    for (int m = 1; m < 6; ++m) if (piece_at(r, m, t) > piece_at(r, k, t) or (piece_at(r, m, t) == piece_at(r, k, t) and r.beta[m] < r.beta[k])) k = m;
+    e.s = piece_at(r, k, t); e.st = r.beta[k]; e.stt = 0.0; e.piece = k;
+    if constexpr (D)
+    {
+        add_piece_grad(r, k, t, 1.0, e.ds);
+        add_axis_slope_grad(r, k / 2, (k % 2 == 0) ? 1.0 : -1.0, 1.0, e.dst);
+    }
+    return e;
 }
 
 struct Approach
 {
     double d = kInf, t = 0.0;
-    Vec7 dphi = Vec7::Zero();
-    int code = -1;   // −1 miss; L·6 + R interior crease; 36 + piece one-sided at an end (a diagnostic signature)
+    Vec7 dphi = Vec7::Zero();    // ∂d/∂φ
+    Vec7 dtphi = Vec7::Zero();   // ∂t*/∂φ
+    int code = -1;               // −1 miss; L·6 + R interior crease; 36 + piece one-sided at an end (a signature)
 };
 
+// The derivative of the intersection of two lines ℓ_a(t) = ℓ_b(t) (a face pair): dt = −(∂ℓ_a − ∂ℓ_b)/(β_a − β_b).
+inline void add_pair_root_grad(const PartRay& r, int ma, int mb, double t, Vec7& g)
+{
+    const double den = r.beta[ma] - r.beta[mb];
+    if (den == 0.0) return;
+    add_piece_grad(r, ma, t, -1.0 / den, g);
+    add_piece_grad(r, mb, t, 1.0 / den, g);
+}
+
 template <bool Grad>
-inline Approach approach(const PartRay& r, double eps)
+inline Approach approach(const PartRay& r)
 {
     Approach A;
     const double T = r.rho_max;
@@ -560,34 +627,26 @@ inline Approach approach(const PartRay& r, double eps)
             if (db == 0.0) continue;
             const double t = (r.alpha[n] - r.alpha[m]) / db;
             if (not (t > 0.0 and t < T)) continue;
-            if (const double g = gmax(r, t); g < best) { best = g; best_t = t; pm = m; pn = n; }
+            // the smallest minimiser: a flat bottom has two equal vertices, keep the earlier
+            if (const double g = gmax(r, t); g < best or (g == best and t < best_t)) { best = g; best_t = t; pm = m; pn = n; }
         }
     if (best <= 0.0)   // the ray crosses the part: d = the deepest point, a vertex of the max of six lines
     {
         A.d = best; A.t = best_t;
-        // the piece active at t, ties broken toward the side the ray continues on (larger slope going right)
-        const auto arg_at = [&](double t, bool right)
+        if (pm < 0)   // one-sided at an end: d = s there, ∇d its Jacobian, t* fixed
         {
             int k = 0;
-            double vk = piece_at(r, 0, t);
+            const bool right = best_t == 0.0;
             for (int m = 1; m < 6; ++m)
             {
-                const double vm = piece_at(r, m, t);
-                if (vm > vk or (vm == vk and (right ? r.beta[m] > r.beta[k] : r.beta[m] < r.beta[k]))) { k = m; vk = vm; }
+                const double vm = piece_at(r, m, best_t), vk = piece_at(r, k, best_t);
+                if (vm > vk or (vm == vk and (right ? r.beta[m] > r.beta[k] : r.beta[m] < r.beta[k]))) k = m;
             }
-            return k;
-        };
-        if (best_t == 0.0 or best_t == T)   // one-sided: d = s there, ∇d its Jacobian
-        {
-            const int k = arg_at(best_t, best_t == 0.0);
             A.code = 36 + k;
             if constexpr (Grad) add_piece_grad(r, k, best_t, 1.0, A.dphi);
             return A;
         }
-        // The two sides of the V are the pair that produced the minimum (exact: no ε). The spec's tangents at t* ∓ ε pick
-        // the same pieces unless a third face lies within ε of the vertex, which a grazing face (slope ≪ 1) makes common:
-        // measured on the bed fixture (a ray at −1° over the mattress top), the ε rule gave ∂d/∂cy = 0.64 against 0.034.
-        (void)eps;
+        // the exact pair that meets at the minimum (spec rev 3.3.6 "The crease": no t* ± ε tangents)
         const int L = (r.beta[pm] < r.beta[pn]) ? pm : pn, R = (L == pm) ? pn : pm;
         A.code = L * 6 + R;
         if constexpr (Grad)
@@ -598,12 +657,14 @@ inline Approach approach(const PartRay& r, double eps)
                 add_piece_grad(r, L, best_t, sp / (sm + sp), A.dphi);
                 add_piece_grad(r, R, best_t, sm / (sm + sp), A.dphi);
             }
-            else add_piece_grad(r, L, best_t, 1.0, A.dphi);   // flat bottom (ray parallel to the deepest face)
+            else add_piece_grad(r, L, best_t, 1.0, A.dphi);
+            add_pair_root_grad(r, L, R, best_t, A.dtphi);
         }
         return A;
     }
     // A miss: minimise ‖max(a,0)‖² interval by interval (a quadratic on each), evaluate s exactly at the minimiser.
     double ta = 0.0, bd = kInf, bt = 0.0;
+    int bt_bk = -1;   // t* sits on breakpoint bk[bt_bk] (a flat bottom starting at a region boundary)
     for (int j = 0; j <= r.nbk; ++j)
     {
         const double tb = (j < r.nbk) ? r.bk[j] : T, tm = 0.5 * (ta + tb);
@@ -614,24 +675,37 @@ inline Approach approach(const PartRay& r, double eps)
             if (sg * qm - r.h[i] > 0.0) { A2 += r.v[i] * r.v[i]; B += 2.0 * sg * r.v[i] * (sg * r.q0[i] - r.h[i]); }
         }
         const double ts = (A2 > 0.0) ? std::clamp(-B / (2.0 * A2), ta, tb) : ta;
-        if (const double s = sdf_at(r, ts); s < bd) { bd = s; bt = ts; }
+        if (const double s = sdf_at(r, ts); s < bd)
+        {
+            bd = s; bt = ts;
+            bt_bk = (ts == ta and j > 0) ? j - 1 : (ts == tb and j < r.nbk) ? j : -1;
+        }
         ta = tb;
     }
     A.d = bd; A.t = bt; A.code = -1;
-    if constexpr (Grad) outside_grad(r, bt, &A.dphi);
+    if constexpr (Grad)
+    {
+        const SEval e = seval<true>(r, bt);
+        A.dphi = e.ds;
+        if (bt == 0.0 or bt == T) {}
+        else if (bt_bk >= 0)   // a region boundary: |q_i(t)| = h_i  ⇒  dt = −∂a_i/∂φ / (σ v_i)
+        {
+            const int i = r.bk_axis[bt_bk];
+            const double sg = r.bk_sign[bt_bk];
+            add_axis_grad(r, i, sg, bt, -1.0 / (sg * r.v[i]), A.dtphi);
+        }
+        else if (e.stt > 0.0) A.dtphi = -e.dst / e.stt;   // tangent: ∂_t s(t*) = 0  ⇒  dt* = −∂_θ(∂_t s)/∂²_t s
+    }
     return A;
 }
 
 struct Crossing
 {
-    double t = 0.0, ds_dt = 0.0;
-    Vec7 dphi = Vec7::Zero();
-    int  piece   = -1;     // entering piece (0..5), 6 = the rounded outside, −1 = clamped at t = 0
-    bool clamped = true;   // t = 0: the sensor is inside the dilated part (t constant in θ and δ)
+    double t = 0.0;
+    bool clamped = true;   // t = 0: the level is at or above s(0)
 };
 
-// First crossing of the level δ (δ > d of this part).
-template <bool Grad>
+// First crossing of the level δ (δ > d of this part) on the part's descending branch, closed form.
 inline Crossing cross(const PartRay& r, double delta)
 {
     Crossing c;
@@ -649,13 +723,12 @@ inline Crossing cross(const PartRay& r, double delta)
             if (te > tin) { tin = te; pc = m; }
         }
         if (pc < 0) return c;
-        c.t = tin; c.clamped = false; c.piece = pc; c.ds_dt = r.beta[pc];
-        if constexpr (Grad) add_piece_grad(r, pc, tin, 1.0, c.dphi);
+        c.t = tin; c.clamped = false;
         return c;
     }
     if (r.s0 <= delta) return c;
-    // Walk the intervals between breakpoints from t = 0. On each, ‖max(a,0)‖² = Σ(α_i + β_i τ)² over the axes outside
-    // their slab (τ = t − ta); the level is first reached in the first interval whose minimum is ≤ δ², at the smaller root.
+    // Walk the intervals between breakpoints from t = 0: the level is first reached in the first interval whose
+    // minimum of ‖max(a,0)‖² = Σ(α_i + β_i τ)² is ≤ δ², at the smaller root.
     double ta = 0.0;
     for (int j = 0; j <= r.nbk; ++j)
     {
@@ -673,70 +746,113 @@ inline Crossing cross(const PartRay& r, double delta)
             }
         }
         double tau;
-        if (nact == 0) tau = 0.0;   // the interval lies inside the box: s ≤ 0 < δ from its start
+        if (nact == 0) tau = 0.0;
         else
         {
             const double tmin = (A2 > 0.0) ? std::clamp(-B / (2.0 * A2), 0.0, len) : 0.0;
             if ((A2 * tmin + B) * tmin + C > 0.0 and j < r.nbk) { ta = tb; continue; }
-            const double den = -B + std::sqrt(std::max(B * B - 4.0 * A2 * C, 0.0));   // the smaller root, no cancellation
+            const double den = -B + std::sqrt(std::max(B * B - 4.0 * A2 * C, 0.0));
             tau = (den > 0.0) ? std::clamp(2.0 * C / den, 0.0, tmin) : tmin;
         }
-        c.t = ta + tau;
-        c.clamped = false; c.piece = 6;
-        c.ds_dt = outside_grad(r, c.t, Grad ? &c.dphi : nullptr);
+        c.t = ta + tau; c.clamped = false;
         return c;
     }
     return c;
 }
 
+// A breakpoint of the composite rule: its t and dt/dθ (kind: 0 panel end, 1 ρ + G⁻¹(q_j), 2 crossing of δ_j,
+// 3 region boundary, 4 face change; j its index, for the structure signature).
+struct BeamBP
+{
+    double t;
+    int kind, j;
+    Vec6 dt;
+};
+struct BeamPanel
+{
+    int p;                 // the first-hit part
+    double t0, t1;
+    Vec6 dt0, dt1;
+    int kind0, kind1;      // 0 t = 0, 1 plateau start, 2 switch root, 3 t*_p
+};
 struct BeamRayOut
 {
     double E = 0.0;
     Vec6 g = Vec6::Zero();
     Mat6 W = Mat6::Zero();
 };
-
-// kind 0: d; 1: a part's own minimum d_p; 2: switch p↔q (the first-hit part changes)
-struct BeamLevel { double lam; int kind, p, q; };
-
+// Per-ray diagnostics for the tests (mass of each panel by the rule and exactly, the atom, π).
+struct BeamRayDiag
+{
+    double pi = 0.0, atom = 0.0, A = 0.0, B = 0.0;
+    Vec6 dA = Vec6::Zero(), dB = Vec6::Zero();   // filled on the derivative path
+    std::vector<double> panel_mass_rule, panel_mass_exact;
+};
 struct BeamScratch
 {
     std::vector<PartRay> pr;
     std::vector<Approach> ap;
-    std::vector<Vec6> dd;
-    std::vector<int> present, pj, owner;
-    std::vector<BeamLevel> lev;
-    std::vector<double> z, lphz, log_b, b_c, delta, w, t, dEdt, dEdw, tau, tp, pts, clam;
-    std::vector<Vec6> T, dlam;
+    std::vector<Vec6> dd, dts;
+    std::vector<int> present;
+    std::vector<std::vector<BeamBP>> geo;   // per part: region boundaries and face changes on [0, t*_p]
+    std::vector<BeamPanel> panels;
+    std::vector<BeamBP> bps;
+    std::vector<double> samp, PA, QA, PB, QB;
 };
 
-inline void levels_to_nodes(const std::vector<BeamLevel>& lev, double sigma_s, const GaussLegendre01& gl, BeamScratch& S)
+// Geometric breakpoints of part p on its descending branch (0, t*_p): region boundaries outside, face changes inside.
+template <bool D>
+inline void part_geometry(const PartRay& r, const Approach& A, const BeamPart& part, double sigma, std::vector<BeamBP>& out)
 {
-    const std::size_t n = lev.size();
-    S.z.resize(n + 1); S.log_b.resize(n + 1); S.b_c.resize(n + 1);
-    S.z[0] = kInf; S.log_b[0] = -kInf; S.b_c[0] = 1.0;
-    for (std::size_t j = 1; j <= n; ++j)
+    out.clear();
+    const auto add = [&](double t, int kind, int j, const Vec7& dphi)
     {
-        S.z[j]     = lev[n - j].lam / sigma_s;
-        S.log_b[j] = log_Phi_upper(S.z[j]);
-        S.b_c[j]   = Phi(S.z[j]);
+        BeamBP b{t, kind, j, Vec6::Zero()};
+        if constexpr (D) b.dt = part.J.transpose() * dphi;
+        out.push_back(b);
+    };
+    for (int k = 0; k < r.nbk; ++k)
+        if (r.bk[k] < A.t)
+        {
+            Vec7 g = Vec7::Zero();
+            if constexpr (D)
+            {
+                const int i = r.bk_axis[k];
+                const double sg = r.bk_sign[k];
+                add_axis_grad(r, i, sg, r.bk[k], -1.0 / (sg * r.v[i]), g);
+            }
+            add(r.bk[k], 3, k, g);
+        }
+    if (not (A.d < 0.0)) return;
+    // inside: walk the upper envelope of the six lines from the entry (s = 0) to t*
+    double t = cross(r, 0.0).t;
+    int cur = 0;
+    for (int m = 1; m < 6; ++m)
+        if (piece_at(r, m, t) > piece_at(r, cur, t) or (piece_at(r, m, t) == piece_at(r, cur, t) and r.beta[m] > r.beta[cur])) cur = m;
+    for (int guard = 0; guard < 6; ++guard)
+    {
+        int nxt = -1;
+        double tx_best = kInf;
+        for (int m = 0; m < 6; ++m)
+        {
+            if (not (r.beta[m] > r.beta[cur])) continue;
+            const double tx = (r.alpha[m] - r.alpha[cur]) / (r.beta[cur] - r.beta[m]);
+            if (tx > t and tx < tx_best) { tx_best = tx; nxt = m; }
+        }
+        if (nxt < 0 or not (tx_best < A.t) or not (piece_at(r, cur, tx_best) > -kBeamFarSigmas * sigma)) break;
+        Vec7 g = Vec7::Zero();
+        if constexpr (D) add_pair_root_grad(r, cur, nxt, tx_best, g);
+        add(tx_best, 4, cur * 6 + nxt, g);
+        t = tx_best; cur = nxt;
     }
-    quantile_nodes_log(sigma_s, S.log_b, S.b_c, gl, S.delta, S.w);
-}
-
-inline void sort_levels(std::vector<BeamLevel>& lev)
-{
-    std::ranges::sort(lev, [](const BeamLevel& a, const BeamLevel& b) { return a.lam < b.lam or (a.lam == b.lam and a.kind < b.kind); });
-    auto last = std::unique(lev.begin(), lev.end(), [](const BeamLevel& a, const BeamLevel& b) { return a.lam == b.lam; });
-    lev.erase(last, lev.end());
 }
 
 // The term of ray i: E_i, its gradient and curvature (unscaled by κ). false ⇔ the ray contributes exactly 0 (d > 8σ_s).
-// force_panels: run the several-part (panel) code even when one part is present (the R7-I2 check).
+// force_sweep: run the several-part panel sweep (switch search) even with one part present (the one-part check).
 template <bool Deriv>
 inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const double> cs, std::span<const double> sn,
-                          const BeamRays& rays, std::size_t i, const BeamConfig& cfg, bool force_panels, BeamScratch& S,
-                          BeamRayOut& out, std::vector<long>* sig = nullptr)
+                          const BeamRays& rays, std::size_t i, const BeamConfig& cfg, bool force_sweep, BeamScratch& S,
+                          BeamRayOut& out, std::vector<long>* sig = nullptr, BeamRayDiag* diag = nullptr)
 {
     out = BeamRayOut{};
     const Eigen::Vector3d& o = rays.origin;
@@ -745,194 +861,298 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
     if (not (rho > 0.0)) return false;
     const Eigen::Vector3d u = du / rho;
     const double sigma = rays.sigma_s, rho_max = rays.rho_max, m = rays.m[i];
-    const std::size_t P = parts.size(), K = cfg.gl.u.size();
-    S.pr.resize(P); S.ap.resize(P); S.dd.resize(P);
-    std::size_t i0 = 0;
+    const double a_ref = (1.0 - m) / rho_max;   // (1 − m)·p_pass: E = 0 when p equals it
+    const StudentT& st = cfg.st;
+    const std::size_t P = parts.size();
+    S.pr.resize(P); S.ap.resize(P); S.dd.resize(P); S.dts.resize(P); S.geo.resize(P);
+    std::size_t i0 = 0, ps0 = 0;
     for (std::size_t p = 0; p < P; ++p)
     {
         make_part_ray(S.pr[p], parts[p], cs[p], sn[p], o, u, rho_max);
-        S.ap[p] = approach<Deriv>(S.pr[p], cfg.eps_tangent);
+        S.ap[p] = approach<Deriv>(S.pr[p]);
         if (S.ap[p].d < S.ap[i0].d) i0 = p;
+        if (S.pr[p].s0 < S.pr[ps0].s0) ps0 = p;
     }
-    const double d = S.ap[i0].d, floor = kBeamFarSigmas * sigma;
+    const double d = S.ap[i0].d, floor = kBeamFarSigmas * sigma, s0 = S.pr[ps0].s0;
     if (not (d <= floor)) return false;   // the 8σ_s numerical floor: exactly 0
     S.present.clear();
     for (std::size_t p = 0; p < P; ++p)
         if (S.ap[p].d <= floor)
         {
             S.present.push_back(static_cast<int>(p));
-            if constexpr (Deriv) S.dd[p] = parts[p].J.transpose() * S.ap[p].dphi;
+            if constexpr (Deriv)
+            {
+                S.dd[p]  = parts[p].J.transpose() * S.ap[p].dphi;
+                S.dts[p] = parts[p].J.transpose() * S.ap[p].dtphi;
+            }
+            part_geometry<Deriv>(S.pr[p], S.ap[p], parts[p], sigma, S.geo[p]);
         }
     if (sig)
     {
         sig->push_back(static_cast<long>(i0) * 2 + (d > 0.0));
         for (int p : S.present) sig->push_back(S.ap[p].code);
     }
-    const double zn = d / sigma, pi = Phi_upper(zn), log_pi = log_Phi_upper(zn), lphn = log_phi(zn);
-    const auto cross_T = [&](std::size_t p, const Crossing& c, Vec6& Tk, double& tk)
+    const auto phi_s = [&](double x) { return std::exp(log_phi(x / sigma)) / sigma; };   // N(0, σ_s²) density
+    const auto dt_of_level = [&](int p, double t) -> Vec6   // a level crossing moves by −∂_θs/∂_ts (0 at a tangency)
     {
-        // t constant (clamped at 0), or a level crossed at an exact tangency (ds/dt = 0, which happens only at δ = d_p to
-        // rounding, i.e. inside a zero-width panel whose weight is 0): no derivative term.
-        if (c.clamped or c.ds_dt == 0.0) { Tk.setZero(); tk = 0.0; return; }
-        tk = 1.0 / c.ds_dt;
-        Tk = parts[p].J.transpose() * (-c.dphi * tk);
+        const SEval e = seval<true>(S.pr[p], t);
+        if (e.st == 0.0) return Vec6::Zero();
+        return parts[p].J.transpose() * (-e.ds / e.st);
     };
-    S.lev.clear();
-    for (int p : S.present) S.lev.push_back({S.ap[p].d, p == static_cast<int>(i0) ? 0 : 1, p, -1});
-    sort_levels(S.lev);
-    const bool one = S.lev.size() == 1 and not force_panels;   // one part, one panel: Task 16's one-part node set
-    if (one)
-    {   // one part: δ_k = −σ_s Φ⁻¹(π u_k), weights ω_k (Task 16's one-part node set)
-        const std::array<double, 2> lb{-kInf, log_pi}, bc{1.0, Phi(zn)};
-        quantile_nodes_log(sigma, lb, bc, cfg.gl, S.delta, S.w);
-    }
-    else
+
+    // ── the atom: every δ ≥ s(0) maps to t = 0 ──
+    const double zd = d / sigma, pi = Phi_upper(zd), F0 = Phi_upper(s0 / sigma);
+    const double St0 = st.pdf(-rho), G0 = st.cdf(-rho);
+    double A = St0 * F0, B = G0 * F0;
+    Vec6 dA = Vec6::Zero(), dB = Vec6::Zero();
+    if constexpr (Deriv)
     {
-        levels_to_nodes(S.lev, sigma, cfg.gl, S);
-        // switch detection: the sign of t_p − t_q at each panel's ends and nodes, then bisection to machine precision
-        if (S.present.size() >= 2)
+        const Vec6 ds0 = parts[ps0].J.transpose() * seval<true>(S.pr[ps0], 0.0).ds;
+        dA -= phi_s(s0) * St0 * ds0;
+        dB -= phi_s(s0) * G0 * ds0;
+    }
+    if (diag) { *diag = BeamRayDiag{}; diag->pi = pi; diag->atom = F0; }
+
+    // ── the panels: a sweep in t over the running minimum ──
+    S.panels.clear();
+    {
+        double t = 0.0, level = s0;
+        Vec6 level_grad = Vec6::Zero(), dt_start = Vec6::Zero();
+        if constexpr (Deriv) level_grad = parts[ps0].J.transpose() * seval<true>(S.pr[ps0], 0.0).ds;
+        int active = -1, kind_start = 0;
+        for (int p : S.present)   // first hit from t = 0: the present part with s_p(0) = s(0), still descending
+            if (S.pr[p].s0 == s0 and S.ap[p].t > 0.0)
+                if (active < 0 or seval<false>(S.pr[p], 0.0).st < seval<false>(S.pr[active], 0.0).st) active = p;
+        const bool search = S.present.size() >= 2 or force_sweep;
+        for (int guard = 0; guard < 8 * static_cast<int>(P) + 8; ++guard)
         {
-            const std::size_t n = S.lev.size();
-            const std::size_t nlev0 = n;
-            for (std::size_t j = 1; j <= n; ++j)
-            {
-                const double lam_lo = S.lev[n - j].lam, lam_hi = (j == 1) ? kInf : S.lev[n - j + 1].lam;
-                S.pj.clear();
-                for (int p : S.present) if (S.ap[p].d <= lam_lo) S.pj.push_back(p);
-                if (S.pj.size() < 2) continue;
-                S.pts.clear();
-                S.pts.push_back(lam_lo);
-                for (std::size_t k = K; k-- > 0;) S.pts.push_back(S.delta[(j - 1) * K + k]);
-                if (std::isfinite(lam_hi)) S.pts.push_back(lam_hi);
-                const std::size_t np = S.pj.size(), nq = S.pts.size();
-                S.tp.resize(np * nq);
-                for (std::size_t a = 0; a < nq; ++a)
-                    for (std::size_t b = 0; b < np; ++b)
+            if (active < 0)
+            {   // plateau at `level`: the next part to reach it on its descending branch
+                double best = kInf;
+                for (int q : S.present)
+                {
+                    if (not (S.ap[q].d < level) or not (S.ap[q].t > t)) continue;
+                    const double tr = std::max(cross(S.pr[q], level).t, t);
+                    if (tr < best) { best = tr; active = q; }
+                }
+                if (active < 0) break;
+                t = best; kind_start = 1;
+                if constexpr (Deriv)
+                {
+                    const SEval e = seval<true>(S.pr[active], t);
+                    dt_start = (e.st == 0.0) ? Vec6::Zero() : Vec6((level_grad - parts[active].J.transpose() * e.ds) / e.st);
+                }
+            }
+            const int a = active;
+            double t_end = S.ap[a].t;
+            int next = -1;
+            if (search)
+                for (int q : S.present)
+                {
+                    if (q == a or not (S.ap[q].t > t)) continue;
+                    const double tm = std::min(t_end, S.ap[q].t);
+                    if (not (tm > t)) continue;
+                    // sample t_q − t_a's sign at both parts' breakpoints in (t, tm], then bisect the first change
+                    S.samp.clear();
+                    for (int pp : {a, q})
                     {
-                        const int p = S.pj[b];
-                        S.tp[a * np + b] = (S.pts[a] == S.ap[p].d) ? S.ap[p].t : cross<false>(S.pr[p], S.pts[a]).t;
-                    }
-                for (std::size_t b1 = 0; b1 < np; ++b1)
-                    for (std::size_t b2 = b1 + 1; b2 < np; ++b2)
-                        for (std::size_t a = 0; a + 1 < nq; ++a)
+                        for (const BeamBP& b : S.geo[pp]) if (b.t > t and b.t < tm) S.samp.push_back(b.t);
+                        for (double z : cfg.z_levels)
                         {
-                            const double D1 = S.tp[a * np + b1] - S.tp[a * np + b2], D2 = S.tp[(a + 1) * np + b1] - S.tp[(a + 1) * np + b2];
-                            if (not ((D1 < 0.0 and D2 > 0.0) or (D1 > 0.0 and D2 < 0.0))) continue;
-                            const PartRay &r1 = S.pr[S.pj[b1]], &r2 = S.pr[S.pj[b2]];
-                            double lo = S.pts[a], hi = S.pts[a + 1];
-                            const bool neg_lo = D1 < 0.0;
+                            const double dl = -sigma * z;
+                            if (dl > S.ap[pp].d and dl < S.pr[pp].s0)
+                                if (const double tc = cross(S.pr[pp], dl).t; tc > t and tc < tm) S.samp.push_back(tc);
+                        }
+                    }
+                    for (double e : cfg.e_levels) if (rho + e > t and rho + e < tm) S.samp.push_back(rho + e);
+                    S.samp.push_back(tm);
+                    std::ranges::sort(S.samp);
+                    double prev = t;
+                    for (double ts : S.samp)
+                    {
+                        if (not (ts > prev)) continue;
+                        if (sdf_at(S.pr[q], ts) - sdf_at(S.pr[a], ts) < 0.0)
+                        {
+                            double lo = prev, hi = ts;
                             for (int it = 0; it < 200; ++it)
                             {
                                 const double mid = 0.5 * (lo + hi);
                                 if (not (mid > lo and mid < hi)) break;
-                                const double Dm = cross<false>(r1, mid).t - cross<false>(r2, mid).t;
-                                if (Dm == 0.0) { lo = hi = mid; break; }
-                                if ((Dm < 0.0) == neg_lo) lo = mid; else hi = mid;
+                                if (sdf_at(S.pr[q], mid) - sdf_at(S.pr[a], mid) < 0.0) hi = mid; else lo = mid;
                             }
-                            S.lev.push_back({0.5 * (lo + hi), 2, S.pj[b1], S.pj[b2]});
+                            if (hi < t_end) { t_end = hi; next = q; }
+                            break;
                         }
-            }
-            if (S.lev.size() != nlev0)
+                        prev = ts;
+                    }
+                }
+            BeamPanel pan{a, t, t_end, dt_start, Vec6::Zero(), kind_start, next >= 0 ? 2 : 3};
+            if constexpr (Deriv)
             {
-                sort_levels(S.lev);
-                levels_to_nodes(S.lev, sigma, cfg.gl, S);
+                if (next >= 0)
+                {   // switch root: dt = −(∂_θs_q − ∂_θs_a)/(∂_ts_q − ∂_ts_a)
+                    const SEval ea = seval<true>(S.pr[a], t_end), eq = seval<true>(S.pr[next], t_end);
+                    const double den = eq.st - ea.st;
+                    if (den != 0.0) pan.dt1 = -(parts[next].J.transpose() * eq.ds - parts[a].J.transpose() * ea.ds) / den;
+                }
+                else pan.dt1 = S.dts[a];
+            }
+            if (t_end > t) S.panels.push_back(pan);
+            if (next >= 0) { active = next; t = t_end; dt_start = pan.dt1; kind_start = 2; }
+            else
+            {
+                level = S.ap[a].d; t = S.ap[a].t; active = -1;
+                if constexpr (Deriv) level_grad = S.dd[a];
             }
         }
     }
+    if (sig) sig->push_back(1000 + static_cast<long>(S.panels.size()));
 
-    // The node crossings: the first-hit part among those present in the node's panel.
-    const std::size_t n = one ? 1 : S.lev.size(), NK = n * K;
-    S.t.resize(NK); S.dEdt.resize(NK); S.dEdw.resize(NK); S.tau.resize(NK); S.T.resize(NK); S.owner.resize(NK);
-    if (sig) sig->push_back(static_cast<long>(n) * 1000 + (one ? 0 : 1));
-    if (sig and not one) for (const auto& L : S.lev) sig->push_back(L.kind * 100 + L.p * 10 + L.q + 1);
-    for (std::size_t j = 1; j <= n; ++j)
+    // ── each panel on the composite Gauss–Legendre rule in t ──
+    const std::size_t n = cfg.gl_t.u.size();
+    for (const BeamPanel& pan : S.panels)
     {
-        const double lam_lo = one ? d : S.lev[n - j].lam;
-        for (std::size_t k = 0; k < K; ++k)
+        const int a = pan.p;
+        const PartRay& r = S.pr[a];
+        const double s_hi = sdf_at(r, pan.t0), s_lo = sdf_at(r, pan.t1);
+        S.bps.clear();
+        S.bps.push_back({pan.t0, 0, pan.kind0, pan.dt0});
+        S.bps.push_back({pan.t1, 0, 10 + pan.kind1, pan.dt1});
+        for (std::size_t j = 0; j < cfg.e_levels.size(); ++j)
+            if (const double tb = rho + cfg.e_levels[j]; tb > pan.t0 and tb < pan.t1) S.bps.push_back({tb, 1, static_cast<int>(j), Vec6::Zero()});
+        for (std::size_t j = 0; j < cfg.z_levels.size(); ++j)
         {
-            const std::size_t idx = (j - 1) * K + k;
-            Crossing best;
-            int bp = -1;
-            for (int p : S.present)
+            const double dl = -sigma * cfg.z_levels[j];
+            if (not (dl < s_hi and dl > s_lo)) continue;
+            const double tc = cross(r, dl).t;
+            if (not (tc > pan.t0 and tc < pan.t1)) continue;
+            BeamBP b{tc, 2, static_cast<int>(j), Vec6::Zero()};
+            if constexpr (Deriv) b.dt = dt_of_level(a, tc);
+            S.bps.push_back(b);
+        }
+        for (const BeamBP& b : S.geo[a]) if (b.t > pan.t0 and b.t < pan.t1) S.bps.push_back(b);
+        std::ranges::sort(S.bps, [](const BeamBP& x, const BeamBP& y) { return x.t < y.t; });
+        if (sig) { sig->push_back(-a - 1); for (const BeamBP& b : S.bps) sig->push_back(b.kind * 100 + b.j); }
+        // The rule on the subintervals between consecutive breakpoints. The motion of breakpoint b enters linearly:
+        // d(A) ∋ dt_b·(P_prev + Q_next), with P_k = Σ_q w_q[h_q + L_k ∂_th_q u_q] (b is subinterval k's right end) and
+        // Q_k = Σ_q w_q[−h_q + L_k ∂_th_q (1 − u_q)] (its left end). A zero-width subinterval (two breakpoints coincide)
+        // adds nothing to A, B but has P = h(b), Q = −h(b): its motion term dL·h(b) is kept (skipping it gave ∂E/∂H
+        // 2.9e5 for 3.6e3 on bed rays whose return sits exactly on the surface).
+        double mass = 0.0;
+        const std::size_t nb = S.bps.size();
+        S.PA.assign(nb, 0.0); S.QA.assign(nb, 0.0); S.PB.assign(nb, 0.0); S.QB.assign(nb, 0.0);
+        for (std::size_t k = 0; k + 1 < nb; ++k)
+        {
+            const double b0 = S.bps[k].t, L = S.bps[k + 1].t - b0;
+            for (std::size_t q = 0; q < n; ++q)
             {
-                if (not (S.ap[p].d <= lam_lo)) continue;
-                const Crossing c = cross<Deriv>(S.pr[p], S.delta[idx]);
-                if (bp < 0 or c.t < best.t) { best = c; bp = p; }
+                const double uq = cfg.gl_t.u[q], wq = cfg.gl_t.w[q], t = b0 + L * uq;
+                const SEval e = seval<Deriv>(r, t);
+                const double ph = phi_s(e.s);
+                if (sig) sig->push_back(e.piece);
+                if (ph == 0.0) continue;   // underflow: the term and all its derivatives are exactly 0
+                const double mu = -e.st, x = t - rho, fS = st.pdf(x), fG = st.cdf(x);
+                const double hM = ph * mu, hS = fS * hM, hG = fG * hM;
+                A += L * wq * hS; B += L * wq * hG; mass += L * wq * hM;
+                if constexpr (Deriv)
+                {
+                    const Vec6 dsT = parts[a].J.transpose() * e.ds, dstT = parts[a].J.transpose() * e.dst;
+                    const double dph = -e.s / (sigma * sigma) * ph;            // φ_σ′(s)
+                    const Vec6 dM_th = dph * mu * dsT - ph * dstT;             // ∂_θ(φ_σ(s)·|∂_ts|) at fixed t
+                    const double dM_t = dph * e.st * mu - ph * e.stt;          // ∂_t(φ_σ(s)·|∂_ts|)
+                    const double dhS_t = fS * st.dlogpdf(x) * hM + fS * dM_t, dhG_t = fS * hM + fG * dM_t;
+                    dA += (wq * L * fS) * dM_th;
+                    dB += (wq * L * fG) * dM_th;
+                    S.PA[k] += wq * (hS + L * dhS_t * uq);  S.QA[k] += wq * (-hS + L * dhS_t * (1.0 - uq));
+                    S.PB[k] += wq * (hG + L * dhG_t * uq);  S.QB[k] += wq * (-hG + L * dhG_t * (1.0 - uq));
+                }
             }
-            S.t[idx] = best.t; S.owner[idx] = bp;
-            if constexpr (Deriv) cross_T(static_cast<std::size_t>(bp), best, S.T[idx], S.tau[idx]);
-            if (sig) sig->push_back(bp * 16 + best.piece + 1);
+        }
+        if constexpr (Deriv)
+        {   // Breakpoint motion, group by group. Coincident breakpoints (stated kink iv) give the same energy in either
+            // order but not the same gradient: per component the group is ordered by its motion in that component, so
+            // the value is that component's right-hand derivative. Inside a group the zero-width coefficients telescope:
+            // only the first (smallest dt) and the last (largest dt) breakpoint carry the neighbours' P and Q.
+            for (std::size_t g0 = 0; g0 < nb;)
+            {
+                std::size_t g1 = g0;
+                while (g1 + 1 < nb and S.bps[g1 + 1].t == S.bps[g0].t) ++g1;
+                const double PA_l = g0 > 0 ? S.PA[g0 - 1] : 0.0, PB_l = g0 > 0 ? S.PB[g0 - 1] : 0.0;
+                const double QA_r = g1 + 1 < nb ? S.QA[g1] : 0.0, QB_r = g1 + 1 < nb ? S.QB[g1] : 0.0;
+                if (g1 == g0) { dA += (PA_l + QA_r) * S.bps[g0].dt; dB += (PB_l + QB_r) * S.bps[g0].dt; }
+                else
+                {
+                    const double hA = S.PA[g0], hB = S.PB[g0];   // a zero-width subinterval: P = h(b)
+                    for (int c = 0; c < 6; ++c)
+                    {
+                        double lo = kInf, hi = -kInf;
+                        for (std::size_t k = g0; k <= g1; ++k) { lo = std::min(lo, S.bps[k].dt(c)); hi = std::max(hi, S.bps[k].dt(c)); }
+                        dA(c) += (PA_l - hA) * lo + (hA + QA_r) * hi;
+                        dB(c) += (PB_l - hB) * lo + (hB + QB_r) * hi;
+                    }
+                }
+                g0 = g1 + 1;
+            }
+        }
+        if (diag)
+        {
+            diag->panel_mass_rule.push_back(mass);
+            diag->panel_mass_exact.push_back(Phi_upper(s_lo / sigma) - Phi_upper(s_hi / sigma));
         }
     }
-    double dEdpi = 0.0;
-    const RayLik L = ray_likelihood(cfg.st, rho, m, pi, rho_max, std::span<const double>(S.t.data(), NK),
-                                    std::span<const double>(S.w.data(), NK), std::span<double>(S.dEdt.data(), NK),
-                                    Deriv ? &dEdpi : nullptr,
-                                    (Deriv and not one) ? std::span<double>(S.dEdw.data(), NK) : std::span<double>());
-    out.E = L.E;
+    if (diag) { diag->A = A; diag->B = B; diag->dA = dA; diag->dB = dB; }
+
+    // ── the energy: p/((1 − m)p_pass) = (1 − π) + (m/((1 − m)p_pass))·A + B ──
+    const double pa = Phi(zd) + (m / a_ref) * A + B;
+    out.E = (pi < 0.5) ? 0.0 - std::log1p(-pi + (m / a_ref) * A + B) : -std::log(pa);
     if constexpr (not Deriv) return true;
 
-    // ── gradient of the discretised E ──
-    Vec6& g = out.g;
-    if (one)
+    // ── gradient: −d(p/a)/(p/a), d(1 − π) = φ(z_d)/σ_s·∇d ──
+    const Vec6 dpa = (std::exp(log_phi(zd)) / sigma) * S.dd[i0] + (m / a_ref) * dA + dB;
+    out.g = -dpa / pa;
+
+    // ── curvature: moments on the δ-quantile nodes (K_m), Var t scaled by the truncated normal's exact variance ──
     {
-        double cd = -dEdpi * std::exp(lphn) / sigma;   // dπ = −φ(z_n)/σ_s · ∇d
+        const std::size_t K = cfg.gl.u.size();
+        const std::array<double, 2> lb{-kInf, log_Phi_upper(zd)}, bc{1.0, Phi(zd)};
+        std::vector<double> delta, w;
+        quantile_nodes_log(sigma, lb, bc, cfg.gl, delta, w);
+        double tbar = 0.0, dbar = 0.0;
+        Vec6 Jbar = Vec6::Zero();
+        std::vector<double> tks(K);
         for (std::size_t k = 0; k < K; ++k)
         {
-            g += S.dEdt[k] * S.T[k];
-            cd += S.dEdt[k] * S.tau[k] * cfg.gl.u[k] * std::exp(lphn - log_phi(S.delta[k] / sigma));
-        }
-        g += cd * S.dd[i0];
-    }
-    else
-    {
-        S.lphz.resize(n + 1); S.clam.assign(n + 1, 0.0); S.dlam.resize(n + 1);
-        S.lphz[0] = -kInf; S.dlam[0].setZero();
-        for (std::size_t j = 1; j <= n; ++j)
-        {
-            S.lphz[j] = log_phi(S.z[j]);
-            const BeamLevel& Lv = S.lev[n - j];
-            if (Lv.kind < 2) S.dlam[j] = S.dd[Lv.p];
-            else
-            {   // switch level: t_p(λ) = t_q(λ)  ⇒  dλ = −(∂_θt_p − ∂_θt_q)/(∂_δt_p − ∂_δt_q)
-                Vec6 Tp, Tq;
-                double tp, tq;
-                cross_T(Lv.p, cross<true>(S.pr[Lv.p], Lv.lam), Tp, tp);
-                cross_T(Lv.q, cross<true>(S.pr[Lv.q], Lv.lam), Tq, tq);
-                S.dlam[j] = -(Tp - Tq) / (tp - tq);
-                if (not S.dlam[j].allFinite()) S.dlam[j].setZero();   // a tangent switch: its panel has zero width
-            }
-        }
-        double sum_wdw = 0.0;
-        for (std::size_t j = 1; j <= n; ++j)
-            for (std::size_t k = 0; k < K; ++k)
+            double tb = 0.0;
+            Vec6 Tk = Vec6::Zero();
+            if (delta[k] < s0)
             {
-                const std::size_t idx = (j - 1) * K + k;
-                const double lzk = log_phi(S.delta[idx] / sigma), uk = cfg.gl.u[k], ok = cfg.gl.w[k];
-                g += S.dEdt[idx] * S.T[idx];
-                const double c = S.dEdt[idx] * S.tau[idx];
-                if (j > 1)
+                int bp = -1;
+                for (int p : S.present)
                 {
-                    S.clam[j - 1] += c * (1.0 - uk) * std::exp(S.lphz[j - 1] - lzk);
-                    S.clam[j - 1] += S.dEdw[idx] * ok * std::exp(S.lphz[j - 1] - log_pi) / sigma;
+                    if (not (S.ap[p].d < delta[k])) continue;
+                    const double tc = cross(S.pr[p], delta[k]).t;
+                    if (bp < 0 or tc < tb) { tb = tc; bp = p; }
                 }
-                S.clam[j] += c * uk * std::exp(S.lphz[j] - lzk);
-                S.clam[j] -= S.dEdw[idx] * ok * std::exp(S.lphz[j] - log_pi) / sigma;
-                sum_wdw += S.dEdw[idx] * S.w[idx];
+                if (bp >= 0 and tb > 0.0) Tk = dt_of_level(bp, tb);
             }
-        S.clam[n] += -dEdpi * std::exp(lphn) / sigma + sum_wdw * std::exp(lphn - log_pi) / sigma;
-        for (std::size_t j = 1; j <= n; ++j) g += S.clam[j] * S.dlam[j];
+            tks[k] = tb;
+            tbar += w[k] * tb; dbar += w[k] * delta[k]; Jbar += w[k] * Tk;
+        }
+        double vt = 0.0, vd = 0.0;
+        for (std::size_t k = 0; k < K; ++k) { vt += w[k] * (tks[k] - tbar) * (tks[k] - tbar); vd += w[k] * (delta[k] - dbar) * (delta[k] - dbar); }
+        const double lam = std::exp(log_phi(zd) - log_Phi_upper(zd));   // Mills ratio, log space
+        const double v_exact = sigma * sigma * (1.0 + zd * lam - lam * lam);
+        const double var_t = (vd > 0.0) ? vt * v_exact / vd : vt;
+        const double eb = tbar - rho, c2 = st.c * st.c;
+        const double V = (1.0 + eb * eb / c2) / st.p0 + var_t;
+        const double p = a_ref * pa;
+        const double r_member = m * A / p, o_front = a_ref * B / (m * A + a_ref * pi);
+        const double lphn = log_phi(zd);
+        const double Id = (m * std::exp(2.0 * lphn - log_Phi_upper(zd))
+                           + (1.0 - m) * (1.0 - tbar / rho_max) * std::exp(2.0 * lphn - log_Phi_upper(-zd))) / (sigma * sigma);
+        out.W = (V > 0.0 ? r_member / V : 0.0) * (Jbar * Jbar.transpose())
+                + ((1.0 - o_front) * Id) * (S.dd[i0] * S.dd[i0].transpose());
     }
-
-    // ── curvature: range part r·J̄J̄ᵀ/V + edge part (1 − o)·I_d·∇d∇dᵀ ──
-    Vec6 Jbar = Vec6::Zero();
-    for (std::size_t k = 0; k < NK; ++k) Jbar += S.w[k] * S.T[k];
-    const double eb = L.t_bar - rho, c2 = cfg.st.c * cfg.st.c;
-    const double V  = (1.0 + eb * eb / c2) / cfg.st.p0 + L.var_t;
-    // I_d = (φ(z)/σ)²·[m/π + (1 − m)(1 − t̄/ρ_max)/(1 − π)], both ratios in log space (Mills ratio in either tail)
-    const double Id = (m * std::exp(2.0 * lphn - log_pi)
-                       + (1.0 - m) * (1.0 - L.t_bar / rho_max) * std::exp(2.0 * lphn - log_Phi_upper(-zn))) / (sigma * sigma);
-    out.W = (L.r_member / V) * (Jbar * Jbar.transpose()) + ((1.0 - L.o_front) * Id) * (S.dd[i0] * S.dd[i0].transpose());
     return true;
 }
 
@@ -949,8 +1169,8 @@ inline double closest_approach(const BeamPart& part, const Eigen::Vector3d& o, c
 {
     detail::PartRay r;
     detail::make_part_ray(r, part, std::cos(part.yaw), std::sin(part.yaw), o, u, rho_max);
-    if (not grad) return detail::approach<false>(r, kBeamEpsTangent).d;
-    const detail::Approach A = detail::approach<true>(r, kBeamEpsTangent);
+    if (not grad) return detail::approach<false>(r).d;
+    const detail::Approach A = detail::approach<true>(r);
     *grad = part.J.transpose() * A.dphi;
     return A.d;
 }
@@ -962,6 +1182,7 @@ inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays
 {
     static_assert(N == 6, "BeamPart::J maps the 6 countable parameters (cx, cy, H, w, h, yaw)");
     assert(rays.m.size() == rays.endpoints.size());
+    assert(not cfg.e_levels.empty());   // built by BeamConfig::make
     if (rays.kappa == 0.0 or parts.empty()) return;
     std::vector<double> cs, sn;
     detail::part_trig(parts, cs, sn);   // cos/sin of each part's yaw, once per build
@@ -983,6 +1204,7 @@ inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays
 // The same κ·Σ_i E_i, no derivatives (the damped step's trial energy).
 inline double beam_rays_energy(std::span<const BeamPart> parts, const BeamRays& rays, const BeamConfig& cfg)
 {
+    assert(not cfg.e_levels.empty());
     if (rays.kappa == 0.0 or parts.empty()) return 0.0;
     std::vector<double> cs, sn;
     detail::part_trig(parts, cs, sn);
@@ -993,6 +1215,5 @@ inline double beam_rays_energy(std::span<const BeamPart> parts, const BeamRays& 
         if (detail::beam_ray_term<false>(parts, cs, sn, rays, i, cfg, false, S, ro)) Esum += ro.E;
     return rays.kappa * Esum;
 }
-
 
 }  // namespace rc::ai::beam
