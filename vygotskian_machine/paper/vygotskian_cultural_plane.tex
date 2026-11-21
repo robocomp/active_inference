@@ -22,8 +22,7 @@ person living with the robot is the second source of culture, and their answers 
 robot receives, entering the counts of \eqref{eq:lh_beta_prior} and the habits of \eqref{eq:lh_habit}. We connect the
 VLM to the belief hierarchy in three roles, which we call culture, sequencing and imagination
 (Table~\ref{tab:lh_roles}), and in each of them the robot's own models test what the VLM supplies. The attention
-modes of Section~\ref{sec:inner_speech:modes} decide when each role runs. The VLM is consulted for culture offline and
-when a new room is entered, for sequencing in focused mode, and for imagination in wandering mode.
+modes of Section~\ref{sec:inner_speech:modes} decide when each role runs. The VLM is consulted for culture offline, for sequencing in focused mode, and for imagination in wandering mode.
 
 \begin{table}[ht]
     \centering
@@ -103,7 +102,7 @@ each of them a Beta prior whose strength must be earned through measured reliabi
 Here $\alpha > 0$ is a small base count, $\kappa$ a pseudo-count worth a few observed rooms, $n_f$ the number of
 distinct rooms confirmed as serving $f$ (a room counts once, however often it is visited), and $n_{cf}$ the number of
 those that contained $c$. As in \eqref{eq:inner_prior}, $\beta_f \in [0,1]$ is the robot's estimate of the VLM's
-reliability for $f$, the posterior mean of a $\mathrm{Beta}(1,1)$ over the probability that the VLM-seeded hypothesis
+reliability for $f$, the posterior mean, under a $\mathrm{Beta}(1,1)$ prior, of the probability that the VLM-seeded hypothesis
 agrees with a person who has stated the room's function. It is updated only on such rooms, so the VLM's reliability is
 never scored against labels its own priors produced. The effective weight of the VLM, $\kappa\beta_f/(\kappa\beta_f +
 n_f)$, decreases as experience accumulates.
@@ -119,7 +118,7 @@ by hand, such as the kitchen membership log-odds tested in Section~\ref{sec:expe
 In the first stage a function hypothesis sends nothing to its members. In the second it sends only exploration
 targets, expected but unseen classes with a coarse placement, which the planners use to value viewpoints and never as
 evidence. This biases where the robot looks but not the evidence, provided that $d_c$ is computed from the viewpoints
-actually occupied. Only at a later stage, and only if its record justifies it, would a function seed level-3 births,
+actually occupied. Only at a later stage, and only if its record justifies it, would a function seed the creation of level-3 objects,
 and in that case the cavity rule \eqref{eq:lh_cavity} would apply to the members it seeded, so that an object born
 because ``kitchen'' predicted it is not counted as evidence for ``kitchen''. The cavity rule covers only this route.
 It does not prevent self-confirmation through the counts of \eqref{eq:lh_beta_prior}, which is prevented instead by
@@ -130,7 +129,7 @@ about every room, which only rooms confirmed by a person can reveal.
 Each function also carries norms supplied by the VLM, such as never blocking a doorway, which are preferences
 rather than evidence. Levels 2--3 can also report that their \emph{model} is wrong. The kitchen model describes one
 tier of base units under a worktop, so a refrigerator, which belongs to a tall tier of full-height units, scored
-$0.00$ as a member. The VLM then proposes a revision in focused mode, and a person accepts it.
+$0.00$ as a member. Structural replay in wandering mode (Section~\ref{sec:lang_hierarchy:imagination}) then proposes a revision, and a person accepts it.
 
 \paragraph{Cultural affordances.}
 What the robot can do with an object is also partly cultural knowledge, such as that a door left ajar can be pushed
@@ -271,7 +270,7 @@ hypothesis whose VLM prior is replaced by confirmed counts and weighed against e
 
 Vygotskian robotics \cite{mirolli2011towards} and autotelic agents, which set their own goals \cite{colas2022language}, use language as a tool for
 thought, and Pipitone and Chella's robot speaks its reasoning aloud, which made its decisions more transparent to its
-partner \cite{pipitone2021robots}. Here inner speech is instead an epistemic action recruited on surprise, whose
+partner \cite{pipitone2021robots}, and developmental robotics stages competence through interaction \cite{cangelosi2015developmental}. Here inner speech is instead an epistemic action recruited on surprise, whose
 conclusions perception must confirm. Active Inference
 has been applied to robot perception and control \cite{lanillos2021active}, and Pezzulo et al.\ argue that passively
 trained models such as large language models lack the grounding that action provides \cite{pezzulo2024generating},
@@ -285,14 +284,14 @@ count-based form of the same idea, and its trigger for returning to deliberation
 
 Section~\ref{sec:experiments} assigns each prediction to an experiment.
 \begin{enumerate}[label=\textbf{L\arabic*}, start=0]
-    \item Elicited priors rank-correlate with the hand-written ones and beat a constant ``likely'' on a corpus.
-    \item The function hypothesis beats other priors on a corpus, survives a missing refrigerator, and a wrong prior is
+    \item Elicited priors beat a constant and a uniform prior on a corpus, and replacing the hand-written ones changes no correct membership decision.
+    \item The function hypothesis with VLM priors beats the uniform and hand-written priors on a corpus, survives a missing refrigerator, and a wrong prior is
     overridden by the counts.
     \item Goals at levels 3--4 make search shorter than the exploration drive.
-    \item Expected outcomes catch more seeded divergences before a step fails than completion alone.
+    \item Expected outcomes catch at least 70\% of seeded divergences before a step fails, with under one false alarm an hour.
     \item Rehearsal and scene completion shorten replanning latency and views to confirm an object.
     \item Structural replay proposes the missing tall tier when the single-tier kitchen model is re-created.
-    \item As confirmed rooms and missions accumulate, the effective weight of the VLM falls, and VLM calls per hour
+    \item As confirmed rooms and missions accumulate, the effective weight of the VLM falls (a sanity check of Eq.~\eqref{eq:lh_beta_prior}), and VLM calls per hour
     outside wandering fall at matched task success.
     \item A proposed affordance of a known class is decided by trial, a false proposal is chosen at most a third as
     often as when proposals are accepted without trial, and a confirmed one is then used without the VLM.

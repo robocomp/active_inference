@@ -53,7 +53,10 @@ number of object classes, mission operations and rooms in a reference solution t
 already performed. In simulation, a scripted person states room functions, approves missions and answers
 questions from the simulator's ground truth. Unless a prediction states its own number, it holds when the 95\%
 interval of the paired difference excludes zero in the predicted direction, and ``match'' means that the interval lies
-within $\pm 10\%$ of the machine's value. We report the power of each ``match'' on 10 paired seeds (\result{--}\%). These criteria are fixed before any run.
+within $\pm 10\%$ of the reference value, the machine's or, for P2, P4 and P8, the earlier one. We report the power of
+each ``match'' on 10 paired seeds (\result{--}\%), and a failed match at low power is inconclusive, not a refutation.
+A VLM call is one request to the model, counted by mode, with requests to understand the person counted apart. The
+real-robot sessions are descriptive. These criteria are fixed before any run.
 
 \subsection{E1: Culture elicited from the VLM}
 \label{sec:experiments:e1}
@@ -64,10 +67,8 @@ for seven functions (kitchen, dining room, living room, bedroom, bathroom, offic
 and hypothesis at temperature zero, answered on five levels mapped to 0.05, 0.25, 0.5, 0.75 and 0.95, in three
 paraphrases of which we keep the median and the spread. The main test is the Brier score of the elicited $\pi_{cf}$
 against class frequencies per function in the corpus, compared with a constant ``likely'' prior and a uniform prior.
-We also report the rank correlation with the hand-written values (Table~\ref{tab:exp_e1}), a weak test over seven
-values, and the correct membership decisions that change when logged kitchen fits are replayed. L0 holds if the
-elicited priors beat both baselines and no correct decision changes. Even the corpus measures agreement with the
-culture it records rather than with homes in general.
+We also report the correct membership decisions that change when logged kitchen fits are replayed
+(Table~\ref{tab:exp_e1}), and L0 holds if the elicited priors beat both baselines and no correct decision changes.
 
 \begin{table}[!htb]
     \centering
@@ -80,7 +81,7 @@ culture it records rather than with homes in general.
         Spread   & \result{--} & \result{--} & \result{--} & \result{--} & \result{--} & \result{--} & \result{--} \\ \hline
     \end{tabular}
     \caption{Kitchen membership log-odds written by hand and elicited from the VLM (E1). Brier score on the corpus:
-    \result{--}, against \result{--} (constant) and \result{--} (uniform). Rank correlation: \result{--}. Decisions
+    \result{--}, against \result{--} (constant) and \result{--} (uniform). Decisions
     changed on replay: \result{--} of \result{--}.}
     \label{tab:exp_e1}
 \end{table}
@@ -91,7 +92,8 @@ culture it records rather than with homes in general.
 On the corpus, with each annotated object a certain detection and each unannotated class searched, we compare four
 sources of $\pi_{cf}$ (the VLM, a uniform prior, the hand-written table, and co-occurrence frequencies measured on
 half of the corpus and tested on the other half) and a fifth baseline, the VLM asked for the function from an image of
-the room. We report precision and recall of the functions with positive evidence (\result{--}). Co-occurrence bounds
+the room. We report precision and recall of the functions with positive evidence (\result{--}), paired over rooms,
+and L1 holds on the corpus if the VLM source beats the uniform and hand-written sources. Co-occurrence bounds
 what any prior can achieve, and the image baseline, which needs no belief hierarchy, is what the machine must justify.
 The corpus assumes perfect detection, so the robot's recorded tours test the evidence under its own perception, where
 each $\Lambda_f$ should leave its prior log-odds only as the room is explored (Figure~\result{--}).
@@ -128,11 +130,11 @@ With the voice enabled, known objects are moved and unfamiliar ones introduced. 
 alone and with \cortex{} plus a language-free look policy choosing views by expected information gain under the same
 motion and time budget, which separates asking from looking more. We report the unexplained residual mass per room
 (P1: \result{--}, \result{--} and \result{--}), the proposer's effective weight as confirmed answers accumulate (P2),
-inner questions per hour over repeated visits with habituation to repeated surprise disabled (P4: \result{--} to \result{--}), and
+inner questions per hour over repeated visits with the refractory period disabled (P4: \result{--} to \result{--}), and
 questions outside the built-in models answered in agreement with ground truth, against the fixed hypothesis set (P6:
 \result{--} versus \result{--}). For L7 the apartment gains a door left ajar that can be pushed open and a glass panel
-that looks like one but does not move, which seeds a false proposal (simulation only). We report trials to a decision, false choices against a machine that
-accepts proposals untried, and later use without the VLM (\result{--} trials, \result{--} versus \result{--}).
+that looks like one but does not move, a false proposal (simulation only). We report trials to a decision, false choices against untried acceptance, and
+later use without the VLM (\result{--} trials, \result{--} versus \result{--}).
 
 \subsection{E6: Imagination}
 \label{sec:experiments:e6}
@@ -148,7 +150,7 @@ tier, and L5 holds if the tier is proposed in at least 8 of 10 seeds (\result{--
 \label{sec:experiments:e7}
 
 The robot lives in the procedural apartments over repeated sessions with recurring and novel tasks. We report the
-VLM's effective weight, VLM calls for planning made outside wandering, separately from calls to understand the person, at matched success
+VLM's effective weight, VLM calls for planning made outside wandering and questions put to the person per session, at matched success
 (L6: \result{--} to \result{--} per hour), and the rise of VLM use when doors usually open are shut, unfamiliar
 objects appear and goals are given in fewer words (P8). For P9, requests of equal size are assembled by the robot's
 uncertainty, by input matching (the most similar past request of the same goal type, by overlap of classes, rooms and steps)
@@ -160,10 +162,9 @@ success (\result{--} versus \result{--} and \result{--}), settled items are wron
 
 For P7 the format-only and permuted-names controls of Section~\ref{sec:inner_speech:library} run on the same
 seeds, with images withheld and the person's words passed through the same substitution. P7 holds if both controls
-match the machine, also run without images, on
-recurring tasks and the slope of their success gap on novelty has a 95\% interval above zero for both
-(Figure~\result{--}), permuted names doing worse than
-nonsense tokens on novel tasks until the counts override them. A VLM writing beliefs directly should leave more wrong
+match the machine, also run without images, on recurring tasks, and the slope of their success gap on novelty,
+regressed over tasks with seeds as repeated measures, has a 95\% interval above zero for both (Figure~\result{--}).
+That permuted names do worse than nonsense tokens until the counts override them is a secondary prediction. A VLM writing beliefs directly should leave more wrong
 beliefs after a wrong proposal, counts and $\beta$ held fixed should leave the VLM's weight unchanged (a sanity check), and
 hand-written or uniform priors should label rooms more slowly on first visits. Finally, the dining set is moved or a door
 locked after a habit is compiled, and the habit's monitored assumptions should catch it before it fails in at least 8 of 10

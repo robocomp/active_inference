@@ -41,7 +41,7 @@ object, and not the language model's context window, carries the state of the re
 \paragraph{Requests that contain only what is in doubt.}
 Every request sent to the language model, whether a question or a mission to be written, is assembled from the
 question object and from the robot's current beliefs and habits. A hypothesis or a fact whose posterior entropy is
-below $\eta$ is not posed as open but stated as settled, and a mission step that a habit covers, with all its
+below the threshold $\eta$ of Eq.~\eqref{eq:inner_stop} is not posed as open but stated as settled, and a mission step that a habit covers, with all its
 monitored assumptions still probable, is stated as already planned rather than asked for. The request therefore
 contains only what the robot is still uncertain about, and it becomes smaller as counts and habits accumulate. We
 measure its size as the number of open hypotheses plus the number of mission steps left to the language model. This
@@ -85,7 +85,7 @@ When $h$ is a class that some concept agent represents, $p(o \mid h, a)$ is that
 the rule holds exactly. When $h$ lies outside every model, such as a bag or a robot vacuum, no agent can evaluate it,
 and we do not allow the language model to supply the likelihood in its place. Instead, the language model must
 state its prediction in quantities that existing agents already measure with their own noise models, namely extent,
-height, occupancy, motion, the residual of a shape fit, and the label distribution of the retina's segmentation
+height, occupancy, motion, the residual of a shape fit, and the label distribution of the robot's segmentation
 network, whose confusion matrix is measured on labelled data. The quantities are treated as independent. For a
 measured quantity $o$ with measurement variance $\sigma_o^2$, the language model's description gives a range with
 centre $\mu_h$ and spread $s_h$, and $p(o \mid h) = \mathcal{N}\big(o;\, \mu_h,\, \max(s_h^2, \sigma_o^2) +
@@ -110,8 +110,8 @@ of confirmed answers in that context that were $h$, and $N_x = \sum_h n_x(h)$. T
 \end{equation}
 Here $\alpha > 0$ is a small symmetric base count that keeps the prior defined before any evidence exists, $\kappa$
 is the number of confirmed answers that the proposer is worth at most, and $\beta_x \in [0,1]$ is the robot's
-estimate of the proposer's reliability in that context. We take $\beta_x$ to be the posterior mean of a
-$\mathrm{Beta}(1,1)$ distribution over the probability that the proposer's most probable hypothesis turns out to be
+estimate of the proposer's reliability in that context. We take $\beta_x$ to be the posterior mean, under a
+$\mathrm{Beta}(1,1)$ prior, of the probability that the proposer's most probable hypothesis turns out to be
 the answer. It is updated only on answers confirmed by a person, by a built-in concept model or, in simulation, by
 ground truth, so that the proposer is never scored against answers that its own descriptions shaped. The language
 model does not change, so $\beta_x$ measures the robot's knowledge of how far the model can be trusted, not an
@@ -166,7 +166,7 @@ depend on the arbitration, because the controller's reflexes act below the voice
 
 \paragraph{The three modes.}
 Focused mode runs the question loop on the triggering event, and monitoring mode makes no calls to the language
-model. In wandering mode the voice is seeded with a salient recent experience, such as an unresolved episode or an
+model. A mission event that wakes the language agent (Section~\ref{sec:cortex}) enters focused mode as a surprise does. In wandering mode the voice is seeded with a salient recent experience, such as an unresolved episode or an
 upcoming goal, and drifts associatively through episodic memory \cite{christoff2016mind}, using only memory queries
 and the imagination tools. It produces counterfactuals, hypotheses and prospective plans, as the default network
 and offline replay do \cite{buckner2008brain, mattar2018prioritized}. Because humans sometimes misremember imagined
@@ -196,8 +196,8 @@ reasoning is its hypotheses, predictions, observations and updates, not the text
 The question loop reduces uncertainty where surprise occurred, so the robot's own data become a biased sample that a
 decaying novelty term \cite{schwartenbeck2019curiosity} must correct. Every confirmed answer is also a labelled example. Over days it updates the priors of the long-term
 memories, over weeks it retrains detector and concept likelihoods, and more slowly, recurrent ``unknown'' answers are
-named by the voice and proposed as a new concept. Loops that resolve the same way are compiled into habits, so the
-number of language-model calls per hour made outside wandering should fall.
+named by the voice and proposed as a new concept. Loops that resolve the same way are compiled into habits, so
+calls per hour outside wandering should fall.
 
 \subsection{Why a language model: generation versus evaluation}
 \label{sec:inner_speech:why_lm}
@@ -220,7 +220,7 @@ internalist view that language evolved first for thought \cite{berwick2016why, h
 the language faculty and not its content. In the terms of \cite{spelke2007core, tomasello1999cultural}, the concept
 agents' models are core knowledge, the counts $n_x(h)$ are individual experience, and the language model is
 culture. Because faculty and content can be separated, a model that keeps the first and loses the second can be
-built, which makes the contribution of culture an experimental question.
+built and tested.
 
 \paragraph{Controls for culture.}
 \label{sec:inner_speech:library}
@@ -229,8 +229,8 @@ the format and lose or corrupt the culture. Section~\ref{sec:experiments} uses t
 control, in which every class and function name is replaced by a nonsense token, and the permuted-names control, in
 which real names are exchanged consistently. A stronger control would build its language from the robot's
 experience alone, by library learning as in DreamCoder \cite{ellis2021dreamcoder}, and we leave it to later work
-because it is a substantial system in its own right. A control can also fail only because nonsense tokens make an
-unfamiliar prompt, and the permuted-names control, whose prompts are well formed, guards against that reading.
+because it is a substantial system in its own right. Nonsense tokens may fail only as an unfamiliar prompt, which the well-formed permuted-names
+control rules out.
 
 \subsection{Testable predictions}
 \label{sec:inner_speech:predictions}
@@ -239,8 +239,8 @@ Each prediction below
 compares policies inside one closed loop with the body, sensors and environment held fixed.
 \begin{enumerate}[label=\textbf{P\arabic*}]
     \item The unexplained residual mass per room decreases faster with the focused loop than without it.
-    \item The proposer's effective weight in \eqref{eq:inner_prior} falls as confirmed answers accumulate, while
-    answer accuracy matches its earlier value.
+    \item The proposer's effective weight in \eqref{eq:inner_prior} falls as confirmed answers accumulate, at
+    matched answer accuracy.
     \item Detector false-negative rates fall after retraining on confirmed answers.
     \item Inner questions per hour decrease over repeated exposure to the same environment while answer accuracy
     matches its earlier value.
@@ -248,8 +248,8 @@ compares policies inside one closed loop with the body, sensors and environment 
     \item With the proposer replaced by a fixed hypothesis set (the existing classes and ``unknown''), fewer
     questions outside the built-in models are resolved.
     \item \emph{Culture against format.} The format-only and permuted-names controls match the machine without
-    images on recurring goals and fall further behind the more novel a goal is, with novelty fixed in advance. The
-    permuted-names control does worse than the format-only control on novel goals until the counts override it.
+    images on recurring goals and fall further behind the more novel a goal is, with novelty fixed in advance. Permuted
+    names do worse than nonsense tokens on novel goals until the counts override them.
     \item \emph{Private speech.} Language-model calls outside wandering rise when tasks are made harder or novel and
     fall with repetition, while task success matches its earlier value \cite{berk1992children}.
     \item \emph{Plan reuse selected by uncertainty.} At equal request size, requests chosen by the robot's
@@ -257,7 +257,8 @@ compares policies inside one closed loop with the body, sensors and environment 
     random. Items stated as settled are wrong in fewer than 5\% of cases, and when an assumption is silently broken,
     the affected step re-enters the request before the step fails.
 \end{enumerate}
-P7 separates culture from the format of language. P8 would also hold for a cache of the VLM's answers. P9 does not
+P7 separates culture from the format of language. P8, like L6, would also hold for a cache of the VLM's answers,
+and P2 follows from Eq.~\eqref{eq:inner_prior}, so it is a sanity check. P9 does not
 claim that the machine is not a cache, only that the robot's uncertainty is a better selector of what to reuse than
 input matching, which is the sense in which its requests become abbreviated like Vygotsky's inner speech
 \cite{vygotsky1986thought}.

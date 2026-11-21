@@ -25,16 +25,15 @@ Our aim is not to model this theory. We want to extend \cortex{} with a pretrain
 runs on the robot, which has no budget to retrain it and needs a proposer that stays fixed so that its reliability can
 be measured. The culture the model carries therefore stays outside the robot, and we choose to make it the robot's own
 only through the robot's experience. Vygotsky's account fits this situation, and we follow it because it says what
-such a system should do and predicts how it should fail without culture (P7). We propose a robot architecture organised by this law, which we call a \emph{Vygotskian machine}. The robot's goals,
+such a system should do and predicts how it should fail without culture (P7). We propose a robot architecture organised by Vygotsky's law, which we call a \emph{Vygotskian machine}. The robot's goals,
 plans, the meaning it gives to a scene and what it expects to find in a room are first provided from outside, by the
 person who lives with it and by the VLM, a neural network trained on images and text that
 carries a large share of human culture. The robot internalises these functions first as an inner voice that asks
 questions, makes plans and imagines outcomes (Section~\ref{sec:inner_speech}), and eventually as prior beliefs,
 counts of experience and habits that need no language. This last stage goes beyond Vygotsky, for whom inner speech
 ends the sequence, and corresponds to the automatisation of skill \cite{fitts1967human} and to the compilation of
-deliberation into rules in Soar and ACT-R \cite{laird1986chunking, taatgen2002production}. What the internalised
-knowledge shapes is the robot's automatic level, the Active Inference agents that build its beliefs and control its
-movement, and language is called on when a situation exceeds it.
+deliberation into rules in Soar and ACT-R \cite{laird1986chunking, taatgen2002production}. The internalised
+knowledge shapes the robot's automatic level, the Active Inference agents that build its beliefs and move it, and language is called on when a situation exceeds it.
 
 \begin{table}[ht]
     \centering
@@ -101,7 +100,7 @@ cannot be fully amortised'' and a system also needs online learning, active expl
 
 \paragraph{Where the Vygotskian machine stands.}
 The first lesson advises using what large-scale training has learned, and the second warns that it is not enough.
-The machine combines the two, and its novelty lies in four aspects.
+The machine combines the two in four ways.
 \begin{enumerate}[(i)]
     \item \emph{Amortised culture as a proposal, never as a belief.} The VLM replaces two hand-written parts of the
     system, the kitchen log-odds and the meaning of rooms, while the models of levels 1 to 3 remain authored and open
@@ -112,7 +111,7 @@ The machine combines the two, and its novelty lies in four aspects.
     \cite{gershman2014amortized}. Each habit carries its assumptions, and when they weaken, inference takes over
     again (Section~\ref{sec:lang_hierarchy:sequencing}).
     \item \emph{A signal that decides when amortisation is enough.} A demand signal averages the surprise the agents
-    report (Section~\ref{sec:inner_speech:modes}) and calls on deliberation only on surprise, leaving idle periods to
+    report (Section~\ref{sec:inner_speech:modes}) and calls on deliberation only on surprise or when a person speaks, leaving idle periods to
     imagination, so a confidently wrong
     model stays silent until its errors have consequences.
     \item \emph{The three missing properties, each with a mechanism.} Online learning is the replacement of
@@ -128,4 +127,5 @@ controls fall behind the machine, run without images, in proportion to the novel
 voice's requests keep only what is still in doubt, and at equal size they do better when chosen by the robot's
 uncertainty than when chosen by matching past requests (P9), a property that classical plan reuse with monitored
 preconditions shares \cite{fikes1972learning}. Language use rises with difficulty (P8), and VLM calls fall with
-experience at matched success (L6 in Section~\ref{sec:lang_hierarchy:predictions}).
+experience at matched success (L6 in Section~\ref{sec:lang_hierarchy:predictions}), but a cache of the VLM's answers
+would show both, so neither carries the claim.
