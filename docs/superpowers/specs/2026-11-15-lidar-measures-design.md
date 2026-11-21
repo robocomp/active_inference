@@ -1102,6 +1102,35 @@ plan matters, settled here.
   for items this spec itself marks printed (and the Cost ms above). A miss goes to the owner as a failing test, never
   as a silenced print.
 
+**Amendment 11-21b (rev 3.3.8; owner rulings after Task 19 fix rounds 1–2).** Rounds 1–2 fixed the code defects
+(square-box gradient, p_f subsets, undamped stop); what remained is settled here.
+
+- **Convergence in posterior σ (owner: "Tolerance in posterior σ").** (d)'s stop tolerance (1 mm / 1 mrad) becomes
+  0.1·σ_k per component, σ_k = √P_kk of the posterior at the current linearisation (P = (𝟙 + P̄W)⁻¹P̄, one solve):
+  the update stops when the undamped (λ = 0) step is below 0.1σ_k on every θ component (reading B of round 2: applied
+  if J does not rise). "θ equals the 200-step run" becomes "within 0.1σ per component". Rationale: the first update's
+  residual lay along a direction with 0.03 nats over 4 mm against σ_cx ≈ 4 cm — information the data does not hold.
+- **Bounds against ray sampling (owner: "Bound in ray spacing").** Helios rays are ≈ 1 cm apart at the fixtures'
+  ranges, comparable to σ_s, and identical sweeps lock one sampling phase (a parked robot does so live too). The creep
+  bound on Δw/Δh and the silhouette w-optimum bound become ½ the ray spacing at the object along that axis
+  (s = range × the SensorModel's azimuth step for w, ring spacing for h), printed beside the measured value.
+- **Known surfaces with their own σ (owner: "Walls with their σ").** Each known surface carries its published σ:
+  the walls the room polygon's (the layout σ room_concept publishes), the floor `Model.FloorSigmaM` (no default when
+  the flag is on; the configs carry 0.005 m, the controller's call from the review's 5 mm floor-error scale). Along a
+  ray the surface σ projects as σ_r,i = σ_surface/|n̂·u| at t_r, and the smear St(ρ − t_r) takes scale² + σ_r,i² at the
+  same ν (moment match of the scale; ν stays p₀c² − 1). Still θ-independent per ray. Pass adds the flush-wall bchain
+  fixture: one basin (the lever-only control within its bound).
+- **Miss mass with p_f (spec gap S1, controller's definition).** In I_d the foreign return's probability of lying
+  beyond t̄, (1 − t̄/ρ_max), becomes the p_f tail Q_f(t̄) = 1 − p_pass·min(t̄, t_r) − (1 − p_pass·t_r)·G_r(t̄ − t_r),
+  G_r the CDF of the smeared St; with no room crossing it is 1 − t̄/ρ_max exactly.
+- **Stated limits (owner: "Accept both").** (1) Reduction yaw: at n̂·u = 0.25 the beam's θ differs from 7c.7's by
+  0.28σ in yaw (the convolved density's normaliser depends on n̂·u; 7c.6's factor has no such term); bound 0.3σ.
+  (2) Floor contact: a floor-standing box's face returns on the ring just above the floor have π ≈ 0.54 (the box's
+  own blurred bottom edge), so that ring's w optimum is −4.4 mm; bound 5 mm on that ring.
+- **Tie rule (round-2 re-review N1).** At an exact (g, t) tie among envelope pairs, approach() keeps the pair whose
+  multipliers bracket the vertex (β_L < 0 < β_R), never one chosen by ulp-level differences; a lattice-ray fuzz
+  against a square yaw-0 box is a CHECK (0 gradient mismatches outside the subdifferential).
+
 ## 8. Pass
 
 - **Unit:** a LiDAR-only frame whose memberships all vanish leaves the belief at the prediction (state, Σ and ω);
