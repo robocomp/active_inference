@@ -109,8 +109,35 @@ static void pi_mask_scales()
     CHECK(std::abs(f(Eigen::Vector3f::Zero()) - 0.6f) < 1e-3f);
 }
 
+static void persistent_label_bounds()
+{
+    const auto mm = MaskMembership::build(rect(100, 50, 40, 30));
+    const double eps = 0.094;
+    // inside the mask, pi_mask = 1 (the worst case for the upper bound), far outside, and outside the image
+    const auto lab_in  = make_persistent_label(fixed(120, 65, 2.f), mm, 900.f, 0.001f, 0.f, 0.f, 1.0f, eps);
+    const auto lab_out = make_persistent_label(fixed(10, 5, 2.f), mm, 900.f, 0.001f, 0.f, 0.f, 1.0f, eps);
+    const auto a = lab_in(Eigen::Vector3f::Zero());
+    const auto b = lab_out(Eigen::Vector3f::Zero());
+    CHECK(a.has_value() and b.has_value());
+    CHECK(std::isfinite(a->m) and a->m <= 1.0 - eps and a->m >= eps);
+    CHECK(std::isfinite(b->m) and b->m >= eps and b->m < eps + 1e-3);
+    CHECK(std::abs(a->m - (eps + (1.0 - 2.0 * eps) * a->q)) < 1e-15);
+    const auto half = make_persistent_label(fixed(139.5f, 65, 2.f), mm, 900.f, 0.001f, 0.f, 0.f, 0.6f, eps);
+    const auto h = half(Eigen::Vector3f::Zero());
+    CHECK(h.has_value() and h->m > eps and h->m < 1.0 - eps);
+    // outside the image (projector returns nothing) => nullopt
+    const Projector none = [](const Eigen::Vector3f&) -> std::optional<Eigen::Vector3f> { return std::nullopt; };
+    CHECK(not make_persistent_label(none, mm, 900.f, 0.001f, 0.f, 0.f, 1.0f, eps)(Eigen::Vector3f::Zero()).has_value());
+    // make_membership is unchanged on the same inputs: bit-exact against q
+    const auto f = make_membership(fixed(139.5f, 65, 2.f), mm, 900.f, 0.001f, 0.f, 0.f, 0.6f);
+    CHECK(f(Eigen::Vector3f::Zero()) == h->q);
+    const auto f2 = make_membership(fixed(120, 65, 2.f), mm, 900.f, 0.001f, 0.f, 0.f, 1.0f);
+    CHECK(f2(Eigen::Vector3f::Zero()) == a->q);
+}
+
 int main()
 {
+    persistent_label_bounds();
     inside_one_boundary_half_outside_zero();
     symmetric_in_s();
     sigma_grows_as_z_shrinks();

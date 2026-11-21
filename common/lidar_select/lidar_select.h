@@ -30,10 +30,13 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
 
+#include "../ai_belief/beam_ray.h"          // rc::ai::beam::BeamRays
 #include "../ai_belief/lidar_ray_factor.h"   // rc::ai::LidarRays
 
 namespace rc::lidar_select
@@ -149,6 +152,112 @@ inline int select_into_weighted(const std::vector<Eigen::Vector3f>& sweep, const
     if (cov_ang) *cov_ang = ca;
     if (m_sum)   *m_sum   = static_cast<float>(msum);
     return n;
+}
+
+// What one beam-staging pass counted (spec 7c.8). staged = rays handed to the beam model; no_label = returns whose ray
+// crosses the select box but whose camera label was unavailable (nullopt: behind / outside the image) so they are not
+// staged; in_box = returns whose ENDPOINT lies in the select box (the set kappa is computed over); q_sum = their sum of q.
+struct BeamStageStats
+{
+    int   staged = 0, no_label = 0, in_box = 0;
+    float kappa = 0.0f, q_sum = 0.0f;
+};
+
+// Ray staging for the smooth beam model (spec 2026-11-15 lidar-measures 7c.8, ray staging). Stages EVERY return whose
+// ray (origin -> return, continued to rho_max) crosses the select cylinder (radius_xy about centroid_xy) within the box's
+// z-band, whether the return stops short of the box, lands in it or goes through (a miss is information). The label gives
+// per return {m, q}: m = eps_px + (1 - 2 eps_px) q goes to out.m (the persistent label), q is the mask membership proper;
+// nullopt => the return is not staged (it has no camera evidence) and is counted in stats->no_label. A return farther than
+// rho_max is staged AT rho_max (a beam that saw nothing inside the sensor's useful range).
+//
+// kappa is select_into_weighted's `precision / base` (coverage * ca) computed by that very function, on the SAME sweep and
+// box, over the endpoint-in-box returns weighted by q: reused, not re-derived, so the two cannot drift. No floor: q = 0
+// everywhere gives kappa = 0.
+inline int select_rays_beam(const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
+                            const Eigen::Vector2f& centroid_xy, const Box& box, const Weights& w, double rho_max,
+                            const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label,
+                            rc::ai::beam::BeamRays& out, BeamStageStats* stats = nullptr)
+{
+    out.origin = origin.cast<double>();
+    out.endpoints.clear();
+    out.m.clear();
+    out.rho_max = rho_max;
+    out.kappa   = 0.0;
+    BeamStageStats st;
+
+    const double r2 = static_cast<double>(box.radius_xy) * box.radius_xy;
+    const double cx = centroid_xy.x(), cy = centroid_xy.y();
+    const Eigen::Vector3d o = origin.cast<double>();
+    std::vector<std::optional<std::pair<double, float>>> lab(sweep.size());
+    std::vector<char> have(sweep.size(), 0);
+    const auto label_of = [&](std::size_t i) -> const std::optional<std::pair<double, float>>&
+    {
+        if (not have[i]) { lab[i] = label(sweep[i]); have[i] = 1; }
+        return lab[i];
+    };
+    // Does the segment o + t d, t in [0, rho_max], d a unit vector, meet the cylinder ∩ z-band?
+    const auto crosses = [&](const Eigen::Vector3d& d) -> bool
+    {
+        double t0 = 0.0, t1 = rho_max;
+        const double ox = o.x() - cx, oy = o.y() - cy;
+        const double a = d.x() * d.x() + d.y() * d.y();
+        const double c = ox * ox + oy * oy - r2;
+        if (a > 0.0)
+        {
+            const double b = ox * d.x() + oy * d.y();
+            const double disc = b * b - a * c;
+            if (disc < 0.0) return false;
+            const double sq = std::sqrt(disc);
+            t0 = std::max(t0, (-b - sq) / a);
+            t1 = std::min(t1, (-b + sq) / a);
+        }
+        else if (c > 0.0) return false;                   // vertical ray outside the cylinder
+        if (d.z() != 0.0)
+        {
+            double za = (box.z_lo - o.z()) / d.z(), zb = (box.z_hi - o.z()) / d.z();
+            if (za > zb) std::swap(za, zb);
+            t0 = std::max(t0, za);
+            t1 = std::min(t1, zb);
+        }
+        else if (o.z() < box.z_lo or o.z() > box.z_hi) return false;
+        return t0 <= t1;
+    };
+
+    const float r2f = box.radius_xy * box.radius_xy;
+    for (std::size_t i = 0; i < sweep.size(); ++i)
+    {
+        const Eigen::Vector3f& p = sweep[i];
+        const float dx = p.x() - centroid_xy.x(), dy = p.y() - centroid_xy.y();
+        const bool endpoint_in = dx * dx + dy * dy <= r2f and p.z() >= box.z_lo and p.z() <= box.z_hi;
+        const Eigen::Vector3d v = p.cast<double>() - o;
+        const double rho = v.norm();
+        const bool hit = rho > 0.0 and crosses(v / rho);
+        if (not (hit or endpoint_in)) continue;
+        const auto& lb = label_of(i);
+        if (endpoint_in) ++st.in_box;
+        if (not hit) continue;                            // an endpoint in the box on a degenerate ray: kappa only
+        if (not lb.has_value()) { ++st.no_label; continue; }
+        const double r = std::min(rho, rho_max);
+        out.endpoints.push_back(o + (v / rho) * r);
+        out.m.push_back(lb->first);
+    }
+    st.staged = static_cast<int>(out.endpoints.size());
+
+    // kappa: select_into_weighted over the endpoint-in-box returns, weight q, base 1 => out.precision IS coverage * ca.
+    rc::ai::LidarRays kr;
+    float msum = 0.0f;
+    const Eigen::Vector3f* base = sweep.data();
+    select_into_weighted(sweep, origin, centroid_xy, box, 1.0f, w,
+                         [&](const Eigen::Vector3f& p) -> float
+                         {
+                             const auto& lb = label_of(static_cast<std::size_t>(&p - base));
+                             return lb.has_value() ? lb->second : 0.0f;
+                         }, kr, nullptr, &msum);
+    st.kappa = kr.precision;
+    st.q_sum = msum;
+    out.kappa = static_cast<double>(st.kappa);
+    if (stats) *stats = st;
+    return st.staged;
 }
 
 // A generous "is anything near this object at all?" count — a diagnostic, deliberately wider than the

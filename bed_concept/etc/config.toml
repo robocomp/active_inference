@@ -75,6 +75,7 @@ QuotientChart = false       # C2v symmetry-quotient chart [s,a1,a2] (Stage 3): k
 LidarMeasuresOnGated = true  # camera attributes, LiDAR measures: persistent shared errors + mask-attributed LiDAR-only updates (spec docs/superpowers/specs/2026-11-15-lidar-measures-design.md §7c)
 LabelDumpEnabled = false      # measurement only (spec 7c.8 a0, plan Task 15b): true writes label_dump.csv next to ai2_log.csv; controller turns off afterwards
 LabelDumpMarginM = 0.6       # measurement only: dump region = select box grown by this many metres (far tail of eps_px); controller turns off afterwards
+MaskPixelErrorRate = 0.085     # eps_px (spec 7c.8 a0): camera mask pixel-error rate, measured for this class (owner-decided); required in (0, 1/2) with LidarMeasuresOnGated
 DepthTiltStd = 0.020        # shared per-frame depth TILT prior std (m/rad) — the azimuth-odd mode that aliases into yaw
 DepthBiasStd = 0.015        # shared per-frame depth bias prior std (m)   — extent/pos nuisance (future)
 DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) — extent nuisance (future)

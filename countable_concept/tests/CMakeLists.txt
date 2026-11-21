@@ -177,3 +177,10 @@ target_include_directories(beam_ray_test PRIVATE ../../common)
 target_compile_options(beam_ray_test PRIVATE -O2)
 target_link_libraries(beam_ray_test PRIVATE Eigen3::Eigen)   # Task 17: oriented-box parts, 6x6 curvature
 add_test(NAME beam_ray_test COMMAND beam_ray_test)
+
+# Ray staging for the smooth beam model + the persistent label (spec 2026-11-15 lidar-measures §7c.8): header-only lidar_select.h.
+add_executable(beam_staging_test beam_staging_test.cpp)
+target_include_directories(beam_staging_test PRIVATE ../../common)
+target_compile_options(beam_staging_test PRIVATE -O2)
+target_link_libraries(beam_staging_test PRIVATE Eigen3::Eigen)
+add_test(NAME beam_staging_test COMMAND beam_staging_test)

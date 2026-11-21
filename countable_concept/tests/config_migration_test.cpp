@@ -136,6 +136,7 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
                                       "Model.ExistenceCarveParts",         // carve-parts (2026-11-15), no old key
                                       "Model.LabelDumpEnabled",            // eps_px measurement (plan Task 15b), temporary
                                       "Model.LabelDumpMarginM",            // eps_px far-tail margin (plan Task 15), temporary
+                                      "Model.MaskPixelErrorRate",          // eps_px itself (spec 7c.8 a0), measured per class
                                       "Model.LidarMeasuresOnGated"};       // lidar-measures (spec 2026-11-15 §7c), no old key
     // keys removed by the class factor (spec 2026-11-14 countable class existence): the plaus_evidence accumulator's
     // clamp, its tanh gain into the existence log-odds, and the shape LLR's alternative footprint (class_log_evidence
@@ -201,7 +202,7 @@ std::pair<int, std::string> refuse_in_child(const ConfigLoader& cfg)
     if (pid == 0)
     {
         ::close(fd[0]); ::dup2(fd[1], 2);
-        try { rc::refuse_pre_countable_config(cfg); }
+        try { rc::refuse_pre_countable_config(cfg); rc::refuse_bad_beam_config(cfg); }
         catch (const rc::CountableConfigError& e) { std::fputs(e.what(), stderr); std::fflush(stderr); std::_Exit(EXIT_FAILURE); }
         std::_Exit(0);
     }
@@ -251,12 +252,41 @@ int main()
     CHECK(err.find("config uses pre-countable section [BedModel] — see countable_concept/KEYMAP.md") != std::string::npos);
     const auto [st_ok, err_ok] = refuse_in_child(good);
     CHECK(st_ok == 0 and err_ok.empty());
+    // Smooth-beam config validation (spec 7c.8): eps_px in (0, 1/2), p0 c^2 > 1; only checked with LidarMeasuresOnGated.
+    const std::string on = "[Agent]\nname = \"n\"\n[Model]\nLidarMeasuresOnGated = true\nLidarPrecision = 2500.0\nLidarRobustCM = 0.05\n";
+    const auto beam_refused = [&](const std::string& extra) {
+        const ConfigLoader c = load_text(on + extra);
+        return refuse_in_child(c);
+    };
+    {
+        const auto ok = beam_refused("MaskPixelErrorRate = 0.094\n");
+        CHECK(ok.first == 0 and ok.second.empty());
+        for (const char* bad_eps : {"MaskPixelErrorRate = 0.0\n", "MaskPixelErrorRate = 0.5\n", "MaskPixelErrorRate = 0.7\n", ""})
+        {
+            const auto r = beam_refused(bad_eps);
+            CHECK(r.first != 0);
+            CHECK(r.second.find("MaskPixelErrorRate") != std::string::npos);
+        }
+        const ConfigLoader weak = load_text("[Agent]\nname = \"n\"\n[Model]\nLidarMeasuresOnGated = true\nLidarPrecision = 300.0\n"
+                                            "LidarRobustCM = 0.05\nMaskPixelErrorRate = 0.094\n");
+        const auto r = refuse_in_child(weak);
+        CHECK(r.first != 0 and r.second.find("p0*c^2") != std::string::npos);
+        // flag off: nothing is checked
+        const ConfigLoader off = load_text("[Agent]\nname = \"n\"\n[Model]\nLidarMeasuresOnGated = false\nLidarPrecision = 300.0\n");
+        const auto r_off = refuse_in_child(off);
+        CHECK(r_off.first == 0);
+        // the sensor's own sigma lowers p0: 2500 with sigma_sensor 0.03 m => 1/p0 = 4e-4 + 9e-4, p0 c^2 = 1.92 > 1 still ok; 0.06 m is not
+        CHECK(not rc::beam_config_problem(0.094, 2500.0, 0.05, 0.03).has_value());
+        CHECK(rc::beam_config_problem(0.094, 2500.0, 0.05, 0.06).has_value());
+    }
     // Each migrated class config passes the check.
     for (const std::string obj : {"nightstand", "bed", "toilet"})
     {
         ConfigLoader c;
         c.load(std::string(REPO_DIR) + "/" + obj + "_concept/etc/config.toml");
         CHECK(not rc::pre_countable_section(c).has_value());
+        CHECK(not rc::beam_config_problem(c.get<double>("Model.MaskPixelErrorRate"), c.get<double>("Model.LidarPrecision"),
+                                          c.get<double>("Model.LidarRobustCM")).has_value());
     }
 
     std::printf(bad ? "config_migration_test: %d FAILED\n" : "config_migration_test: OK\n", bad);

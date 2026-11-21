@@ -335,6 +335,9 @@ struct CountableConfig
     // Measurement only: grow the DUMP's select region (XY radius and z-band) by this many metres to expose the far tail;
     // the fit's LiDAR selection is untouched.
     float label_dump_margin_m       = 0.0f;
+    // eps_px (spec 7c.8 a0): the camera mask's pixel-error rate, MEASURED per class (countable_concept/tools/eps_px_measure.py).
+    // No default; with LidarMeasuresOnGated the loader refuses a value outside (0, 1/2) (refuse_bad_beam_config).
+    double mask_pixel_error_rate    = 0.0;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
     float existence_out_of_room_gain = 1.5f;  // |ΔL| per evidence cycle while the centre is outside the room (chair's value)
     // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and

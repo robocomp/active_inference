@@ -32,6 +32,7 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     // ── A config written for a pre-countable clone ([BedModel], [NightstandConcept], …) is refused before anything is
     // read: every key here is optional, so it would otherwise start on code defaults with every tuned value ignored.
     rc::refuse_pre_countable_config(cfg);
+    rc::refuse_bad_beam_config(cfg);   // eps_px in (0,1/2) and p0 c^2 > 1 when LidarMeasuresOnGated is on
 
     // ── Identity first: the object class is a run-time string (Concept.Class), and everything below that
     // names the class — the manifest path, the registry/log label — derives from it. Agent.name is read raw
@@ -447,6 +448,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "measurement only (spec 7c.8 a0): with LidarMeasuresOnGated write label_dump.csv, the camera label inputs of every Helios return in the select box");
     out.label_dump_margin_m       = getf("Model.LabelDumpMarginM", 0.0f,
             "measurement only: metres the label dump's select box (XY radius and z-band) is grown by; the fit's selection is unchanged");
+    out.mask_pixel_error_rate     = reader.d("Model.MaskPixelErrorRate", 0.0,
+            "eps_px (spec 7c.8 a0): the camera mask's measured pixel-error rate, per class; the persistent label is m = eps_px + (1-2 eps_px) q. No default: required, in (0, 1/2), when LidarMeasuresOnGated");
     out.existence_removal_prob    = getf("Model.ExistenceRemovalProb", 0.12f,
             "decision boundary: remove when L < log(p/(1−p))");
     out.existence_out_of_room_gain = getf("Model.ExistenceOutOfRoomGain", 1.5f,

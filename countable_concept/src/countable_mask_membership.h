@@ -69,4 +69,17 @@ std::function<MembershipComponents(const Eigen::Vector3f&)> make_membership_comp
     Projector proj, const MaskMembership& mm, float f_px, float sigma_range_m, float sigma_chain_m,
     float mot_pos_var_m2, float pi_mask);
 
+// The persistent label of a LiDAR return (spec 7c.8 a0): q = pi_mask * Phi(s/sigma_px) is today's membership, and
+// m = eps_px + (1 - 2 eps_px) q keeps it inside [eps_px, 1 - eps_px] so that neither a certain member nor a certain
+// non-member exists (the camera's mask edge is wrong by a measured pixel-error rate eps_px). nullopt = no camera evidence
+// (the projector returned nothing: behind / outside the image).
+struct PersistentLabel
+{
+    double m = 0.0;
+    float  q = 0.f;
+};
+std::function<std::optional<PersistentLabel>(const Eigen::Vector3f&)> make_persistent_label(
+    Projector proj, const MaskMembership& mm, float f_px, float sigma_range_m, float sigma_chain_m,
+    float mot_pos_var_m2, float pi_mask, double eps_px);
+
 }  // namespace rc
