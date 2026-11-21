@@ -116,6 +116,13 @@ void information(std::span<const Channel<N, K>> channels, const FreshInfo<N>& th
 
 // One damped inverse-free Gauss-Newton step (spec 7c.7 d): (𝟙 + P̄(W + λM)) δ = P̄G − (x̃ − x̄), M = blockdiag(diag W_θθ, 0).
 // y = G − (W + λM)δ is the prior's pull in information form (P̄⁻¹(x_new − x̄) when P̄ is invertible).
+// damp_latents (the smooth beam model, spec 7c.8; Task 19): M = diag W over θ AND b (Levenberg–Marquardt on the whole joint
+// state). The countable belief uses it with the CONSISTENT linearisation (x̃_k = (θ_k, b_k), each channel linearised at
+// θ_k + B b_k; spec 7c.7 d's caveat): with M on θ only, λ → ∞ leaves the latents' undamped step, which on a non-quadratic
+// channel (a ray refuted by a foreign return behind the model, whose curvature the beam's W does not carry) overshoots at
+// every λ, so no proposal is ever accepted. The fixed point is unchanged (δ = 0 solves the system for every λ and M),
+// x_new − x̄ = P̄y still holds (prior_energy unchanged), a zero-variance latent keeps δ = 0 (its row of P̄ is zero), and
+// λ = 0 is the same step either way. false: M = blockdiag(diag W_θθ, 0), the 7c.7 (d) step bit for bit.
 template <int N, int K>
 struct DampedStep { Eigen::Matrix<double, N + K, 1> delta, y; };
 
@@ -124,14 +131,15 @@ DampedStep<N, K> joint_step_damped(const Eigen::Matrix<double, N + K, 1>& x_tild
                                    const Eigen::Matrix<double, N + K, 1>& x_bar,
                                    const Eigen::Matrix<double, N + K, N + K>& P_bar,
                                    std::span<const Channel<N, K>> channels,
-                                   const FreshInfo<N>& theta_only, double lambda)
+                                   const FreshInfo<N>& theta_only, double lambda, bool damp_latents = false)
 {
     using MatD = Eigen::Matrix<double, N + K, N + K>;
     using VecD = Eigen::Matrix<double, N + K, 1>;
     MatD W; VecD G;
     detail::information<N, K>(channels, theta_only, W, G);
     MatD Wl = W;
-    for (int i = 0; i < N; ++i) Wl(i, i) += lambda * W(i, i);
+    const int nd = damp_latents ? N + K : N;
+    for (int i = 0; i < nd; ++i) Wl(i, i) += lambda * W(i, i);
     const MatD A = MatD::Identity() + P_bar * Wl;
     DampedStep<N, K> s;
     s.delta = A.partialPivLu().solve(P_bar * G - (x_tilde - x_bar));

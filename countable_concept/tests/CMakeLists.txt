@@ -27,6 +27,7 @@ add_executable(config_migration_test config_migration_test.cpp $ENV{ROBOCOMP}/cl
 target_include_directories(config_migration_test PRIVATE ../src ../../common/concept_manifest $ENV{ROBOCOMP}/classes)
 target_compile_definitions(config_migration_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../.." BASE_REV="476000a8")
 target_compile_options(config_migration_test PRIVATE -O2)
+target_link_libraries(config_migration_test PRIVATE Eigen3::Eigen)   # countable_beam_config.h (beam_config_problem) includes beam_ray.h
 add_test(NAME config_migration_test COMMAND config_migration_test)
 set_tests_properties(config_migration_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
 
@@ -184,3 +185,11 @@ target_include_directories(beam_staging_test PRIVATE ../../common)
 target_compile_options(beam_staging_test PRIVATE -O2)
 target_link_libraries(beam_staging_test PRIVATE Eigen3::Eigen)
 add_test(NAME beam_staging_test COMMAND beam_staging_test)
+
+# The countable belief on the smooth beam model (spec 2026-11-15 lidar-measures §7c.8 a, b; flag on): kappa, reduction to
+# 7c.7, occlusion, depth basin, silhouettes, parked floors, cost. Run: ./beam_belief_test
+add_executable(beam_belief_test beam_belief_test.cpp ../src/countable_belief.cpp ../src/countable_viewpoint.cpp)
+target_include_directories(beam_belief_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(beam_belief_test PRIVATE -O2)
+target_link_libraries(beam_belief_test PRIVATE Eigen3::Eigen)
+add_test(NAME beam_belief_test COMMAND beam_belief_test)

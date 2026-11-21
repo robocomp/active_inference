@@ -9,6 +9,7 @@
 #include <Eigen/Eigenvalues>
 #include "countable_belief.h"
 #include "test_scene.h"
+#include "beam_fixture.h"
 
 using namespace rc;
 using Mat6 = Eigen::Matrix<float, 6, 6>;
@@ -337,6 +338,87 @@ static void sigma_h_after_2000_sweeps()
     CHECK(std::isfinite(sh));
 }
 
+// spec 7c.5's over_deep_belief_is_not_held documented the choice 7c.8 reverses (a ray the model blocks while its return lies
+// beyond the surface carried no term, so an over-deep belief was held by Σ only); spec 7c.8 Pass: re-run, print, rewrite the
+// expectation from the number. (The 7c.3 test of that name was planned with the ownership mixture, Task 8, which was never
+// built; this is its fixture on the persistent beam path.) Truth: the golden box with its back face 10 cm in front of the wall
+// y = 0; belief: the same front face, depth 10 cm too deep, back face ON the wall. Helios 1.5 m in front, staged by ray
+// geometry through the select box about the belief (+10 cm), hand labels (0.9 on the box, ε_px on wall / floor), κ = 1,
+// LiDAR-only, parked, the recursion from the belief (first update done). The rays over the top that land on the floor in the
+// 10 cm gap or on the wall cross the belief's extra depth and return beyond its surface: foreign returns refuting the model.
+static void over_deep_belief_is_not_held()
+{
+    CountableBeliefParams p = params();
+    p.persistent = true;
+    p.beam = rc::test::test_beam_config();
+    const float cy_t = -(0.5f * tw + 0.10f), h_b = tw + 0.10f, cy_b = -0.5f * h_b;
+    const rc::test::SceneBox truth{Eigen::Vector2f(tx, cy_t), 0.0f, tw, tw, tH};
+    const rc::test::SceneBox bel{Eigen::Vector2f(tx, cy_b), 0.0f, tw, h_b, tH};
+    const std::vector<rc::test::SceneBox> boxes{truth};
+    const std::vector<rc::test::SceneWall> walls{kWall};
+    const Eigen::Vector3f o(tx, cy_t - 0.5f * tw - 1.5f, 1.1075f);
+    const auto r = rc::test::helios_beam(o, boxes, walls, bel, 0.10f, rc::test::hand_labels(boxes));
+    CountableBelief b(CountableBeliefState{tx, cy_b, tH, tw, h_b, 0.0f}, p);
+    b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+    b.set_first_update_done(true);
+    CountableFrame f = lidar_frame({});
+    f.lidar = {}; f.beam = r;
+    const float pp = p.common_mode_pos_std * p.common_mode_pos_std, ss = p.common_mode_size_std * p.common_mode_size_std,
+                yy = p.common_mode_yaw_std * p.common_mode_yaw_std;
+    f.sig2_cam = {pp, pp, ss, ss, ss, yy}; f.sig2_L = {pp, pp, ss, ss, ss, yy};
+    f.sigma_pose = Eigen::Vector3d(1e-4, 1e-4, 0.0).asDiagonal();
+    f.rho_cam.fill(1.0f); f.rho_L.fill(1.0f); f.rho_chain = 1.0f;
+    f.robot_xy = o.head<2>();
+    // the returns beyond the truth's back face that cross the belief (floor in the gap, wall): count at the start
+    int beyond = 0;
+    for (const auto& e : r.endpoints) beyond += e.y() > cy_t + 0.5 * tw + 1e-3 and e.y() < 0.5;
+    const float h0 = b.state().h - tw, back0 = b.state().cy + 0.5f * b.state().h;
+    std::printf("  over_deep: %zu staged, %d returning beyond the true back face ; start depth error %+.4f m (back face %+.4f, wall 0)\n",
+                r.endpoints.size(), beyond, h0, back0);
+    float h_err[4] = {0, 0, 0, 0};
+    int idx = 0;
+    for (int k = 1; k <= 50; ++k)
+    {
+        b.update(f);
+        if (k == 1 or k == 5 or k == 10 or k == 50)
+        {
+            const auto& s = b.state();
+            h_err[idx++] = s.h - tw;
+            const auto& lm = b.latent_mean();
+            const double hL = s.h + lm(CountableBelief::kL + 4), cyL = s.cy + lm(CountableBelief::kL + 1) + lm(1);
+            std::printf("    sweep %2d: depth error %+.4f m (sigma_h %.4f) back face %+.4f front face %+.4f (true %+.4f) ; gn %d/%d ; gap rays %d ; "
+                        "what the rays measure (theta + B e + b_L): depth error %+.4f back face %+.4f front face %+.4f\n",
+                        k, s.h - tw, std::sqrt(b.covariance()(4, 4)), s.cy + 0.5f * s.h, s.cy - 0.5f * s.h, cy_t - 0.5f * tw,
+                        b.last_gn_iters(), int(b.last_gn_converged()), b.last_gap_rays(), hL - tw, cyL + 0.5 * hL, cyL - 0.5 * hL);
+        }
+    }
+    // The expectation, rewritten from the number (Task 19 run, spec 7c.8 Pass): the over-deep belief is STILL HELD — measured
+    // depth error +0.100 → +0.149 m after 10 sweeps (+0.158 after 50), the back face pinned at the wall by (2c), the front face
+    // drifting forward. Why (printed by the depth profile below): from a front Helios the extra 10 cm is seen only by the one
+    // band of rays that clears the true back edge and lands on the wall within ~3 cm under the top plane, and those saturate
+    // at −log(1 − π + B). The profile printed below (persistent_data_energy, (2c) included since the wall is staged): flat to
+    // 0.03 nats over −5 … +7.5 cm of depth, then FALLING by 0.3–0.55 nats at +10 … +12.5 cm, where the model's top face reaches
+    // past the wall and the wall returns just above the top plane sit within the flush depth b* of it (stated limit 4, "near
+    // background", ε_px = 0.02 ⇒ b* ≈ 3 cm); beyond, (2c) on θ rises it. (2c) acts on θ only, so the latents carry what the rays
+    // measure (θ + B e + b_L) 9 cm through the wall. CHECKED: held (the error does not fall below its start) and bounded (below
+    // 0.20 m) at 10 sweeps; finite at 50.
+    {
+        CountableFrame g = f;
+        const float front = cy_t - 0.5f * tw;
+        std::printf("    data energy along the depth (front face fixed at the truth):");
+        for (float dh = -0.05f; dh <= 0.2001f; dh += 0.025f)
+        {
+            const float h = tw + dh;
+            const CountableBeliefState s{tx, front + 0.5f * h, tH, tw, h, 0.0f};
+            std::printf(" %+.3f:%.4f", dh, b.persistent_data_energy(s, s, s, g));
+        }
+        std::printf("\n");
+    }
+    CHECK(beyond > 0);
+    CHECK(std::isfinite(h_err[3]));
+    CHECK(h_err[2] >= h0 - 1e-3f and h_err[2] < 0.20f);
+}
+
 int main()
 {
     empty_frame_is_predict_only();
@@ -348,6 +430,7 @@ int main()
     scene_first_hit_only();
     wall_behind_legacy_pull_recorded();
     sigma_h_after_2000_sweeps();
+    over_deep_belief_is_not_held();
     std::printf("lidar_only_update_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }

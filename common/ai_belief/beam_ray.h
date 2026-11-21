@@ -70,7 +70,19 @@ namespace detail
         return h;
     }
 
-    // Regularised incomplete beta I_x(a, b), with y = 1 − x passed in separately so neither end cancels.
+    // log Γ(a + b) − log Γ(a) − log Γ(b), in the association inc_beta has always used (bit-identical when cached).
+    inline double lbeta_neg(double a, double b) { return std::lgamma(a + b) - std::lgamma(a) - std::lgamma(b); }
+    // Regularised incomplete beta I_x(a, b), with y = 1 − x passed in separately so neither end cancels. lgab = lbeta_neg(a, b)
+    // when the caller has it (the Student-t's a, b are fixed at load: its three lgamma calls were 12 % of a beam build).
+    inline double inc_beta(double a, double b, double x, double y, double lgab)
+    {
+        if (x <= 0.0) return 0.0;
+        if (y <= 0.0) return 1.0;
+        const double lbt = lgab + a * std::log(x) + b * std::log(y);
+        const double bt  = std::exp(lbt);
+        if (x < (a + 1.0) / (a + b + 2.0)) return bt * betacf(a, b, x) / a;
+        return 1.0 - bt * betacf(b, a, y) / b;
+    }
     inline double inc_beta(double a, double b, double x, double y)
     {
         if (x <= 0.0) return 0.0;
@@ -163,6 +175,7 @@ struct StudentT
     double p0 = 0.0, c = 0.0, nu = 0.0, scale2 = 0.0;
     double half_p0c2 = 0.0;   // ½p₀c² = (ν + 1)/2
     double log_norm  = 0.0;   // log pdf(0)
+    double lgab      = 0.0;   // lbeta_neg(ν/2, ½), the cdf's constant (cached: it does not change after make)
 
     // nullopt when p₀c² ≤ 1: the density does not exist (ν ≤ 0). The agent refuses to start on that (load check).
     static std::optional<StudentT> make(double p0, double c)
@@ -176,6 +189,7 @@ struct StudentT
         s.half_p0c2 = 0.5 * p0c2;
         // pdf(0) = Γ((ν+1)/2) / (Γ(ν/2) √(νπ) scale), and √ν·scale = c.
         s.log_norm  = std::lgamma(0.5 * (s.nu + 1.0)) - std::lgamma(0.5 * s.nu) - 0.5 * std::log(std::numbers::pi) - std::log(c);
+        s.lgab      = detail::lbeta_neg(0.5 * s.nu, 0.5);
         return s;
     }
     double logpdf(double e) const { return log_norm - half_p0c2 * std::log1p(e * e / (c * c)); }
@@ -191,7 +205,7 @@ struct StudentT
         const double z2 = e * e / scale2;
         const double x  = nu / (nu + z2);          // 0 at |e| = inf
         const double y  = 1.0 / (1.0 + nu / z2);   // z²/(ν + z²): 0 at e = 0, 1 at |e| = inf, never inf/inf
-        const double half_tail = 0.5 * detail::inc_beta(0.5 * nu, 0.5, x, y);
+        const double half_tail = 0.5 * detail::inc_beta(0.5 * nu, 0.5, x, y, lgab);
         return (e < 0.0) ? half_tail : 1.0 - half_tail;
     }
 };
@@ -798,6 +812,7 @@ struct BeamScratch
     std::vector<BeamPanel> panels;
     std::vector<BeamBP> bps;
     std::vector<double> samp, PA, QA, PB, QB;
+    std::vector<double> mdelta, mw, mtks;   // the curvature's moment nodes (reused across rays: no allocation per ray)
 };
 
 // Geometric breakpoints of part p on its descending branch (0, t*_p): region boundaries outside, face changes inside.
@@ -1115,11 +1130,13 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
     {
         const std::size_t K = cfg.gl.u.size();
         const std::array<double, 2> lb{-kInf, log_Phi_upper(zd)}, bc{1.0, Phi(zd)};
-        std::vector<double> delta, w;
+        std::vector<double>& delta = S.mdelta;
+        std::vector<double>& w = S.mw;
         quantile_nodes_log(sigma, lb, bc, cfg.gl, delta, w);
         double tbar = 0.0, dbar = 0.0;
         Vec6 Jbar = Vec6::Zero();
-        std::vector<double> tks(K);
+        std::vector<double>& tks = S.mtks;
+        tks.assign(K, 0.0);
         for (std::size_t k = 0; k < K; ++k)
         {
             double tb = 0.0;

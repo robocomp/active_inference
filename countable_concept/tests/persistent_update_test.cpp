@@ -300,6 +300,35 @@ static void damped_large_lambda_freezes_theta()
     CHECK((d.delta.tail<2>() - db).norm() < 1e-6);
 }
 
+// damp_latents (spec 7c.8, Task 19): M = diag W over θ AND b. λ → ∞ freezes the WHOLE step (with θ-only damping the latents'
+// undamped step survives, damped_large_lambda_freezes_theta); λ = 0 is the joint step; a zero-variance latent keeps δ = 0;
+// the prior-energy identity x_new − x̄ = P̄y holds.
+static void damped_latents()
+{
+    Damped2 f;
+    const auto sp = std::span<const pu::Channel<2, 2>>(f.ch);
+    const auto d = pu::joint_step_damped<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none, 1e8, true);
+    // the prior pull −(x̃ − x̄) is not damped (P̄ multiplies only W + λM), so δ → the part (1 + P̄λM)⁻¹ leaves: O(1/λ)
+    CHECK(d.delta.norm() < 1e-5);
+    const auto js = pu::joint_step<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none);
+    const auto d0 = pu::joint_step_damped<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none, 0.0, true);
+    CHECK((f.xt + d0.delta - js).norm() < 1e-12);
+    Damped2 z;
+    z.Pbar.row(3).setZero(); z.Pbar.col(3).setZero(); z.xt(3) = z.xb(3);
+    const auto spz = std::span<const pu::Channel<2, 2>>(z.ch);
+    for (double l : {1e-3, 10.0})
+    {
+        const double d3 = pu::joint_step_damped<2, 2>(z.xt, z.xb, z.Pbar, spz, z.none, l, true).delta(3);
+        CHECK(d3 == 0.0);
+    }
+    const auto d1 = pu::joint_step_damped<2, 2>(f.xt, f.xb, f.Pbar, sp, f.none, 0.1, true);
+    const Eigen::Matrix<double, 4, 1> xn = f.xt + d1.delta, e = xn - f.xb;
+    const double lhs = pu::prior_energy<2, 2>(d1, xn, f.xb), rhs = 0.5 * e.dot(f.Pbar.inverse() * e);
+    CHECK(std::abs(lhs - rhs) < 1e-9 * std::max(1.0, std::abs(rhs)));
+    std::printf("  damped_latents: |delta| at lambda 1e8 %.3e ; lambda 0 vs joint_step %.1e ; prior identity %.1e\n", d.delta.norm(),
+                (f.xt + d0.delta - js).norm(), std::abs(lhs - rhs));
+}
+
 static void prior_energy_identity()
 {
     Damped2 f;
@@ -405,6 +434,7 @@ int main()
     damped_lambda_zero_is_joint_step();
     damped_zero_variance_latent();
     damped_large_lambda_freezes_theta();
+    damped_latents();
     prior_energy_identity();
     rho1_n_sweeps_equal_one_with_n_id();
     shared_latent_position_information();

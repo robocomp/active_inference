@@ -27,6 +27,7 @@
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
 #include "../../common/ai_belief/persistent_update.h"    // persistent shared-error latents (lidar-measures §7c.2)
+#include "../../common/ai_belief/beam_ray.h"             // the smooth beam model of the persistent rays (lidar-measures §7c.8)
 #include "countable_viewpoint.h"                          // ChainLever, chain_B, chain_transport (lidar-measures §7c.7 b)
 
 namespace rc
@@ -253,6 +254,11 @@ struct CountableBeliefParams
     // at the first admissible camera update; the footprint (2) and height (2a) anchors never (Σ₀ = the class P carries them);
     // predict clamps Σθθ to the class P (the engine's clamp_to_prior congruence). Set from Model.LidarMeasuresOnGated (Task 9).
     bool  persistent = false;
+    // The smooth beam model of the persistent path's rays (spec 7c.8 a, b): the Student-t at the sensor's precision and the
+    // composite rule. Set by the fitter through rc::make_beam_config (countable_beam_config.h), never default-constructed: a
+    // BeamConfig{} has no quantile levels and would integrate on the geometric breakpoints only, so the belief does not use
+    // one (beam_ready() false ⇒ the rays are not a measurement, logged once per belief). Read only when persistent.
+    rc::ai::beam::BeamConfig beam;
 
     // Optimiser
     int   gn_iters = 4;              // Gauss-Newton iterations per frame (the flag-off engine path)
@@ -265,6 +271,9 @@ struct CountableBeliefParams
     double gn_tol_m     = 1e-3;
     double gn_tol_rad   = 1e-3;
     bool   gn_reject_all_for_test = false;
+    // TEST HOOK only (spec 7c.8 Pass, "Reduction"): the persistent LiDAR channel reads f.lidar through the 7c.6 first-crossing
+    // factor (the pre-7c.8 update, "7c.7's update") instead of the beam set, so a test can compare the two on one frame.
+    bool   first_crossing_for_test = false;
     float fd_eps   = 1e-3f;          // finite-difference step for SDF Jacobians (m / rad)
     float jac_slope_clamp = 5.0f;    // clamp per-DOF SDF slope (guards a seam-point info spike; recipe §2)
 
@@ -343,6 +352,11 @@ struct CountableFrame
     // Per-frame FRESH (ego-motion) variances of each channel, marginalised inside the channel (ρ = 0 by construction).
     std::array<float, 6> fresh_cam{};
     std::array<float, 6> fresh_L{};
+    // The persistent path's ray-set (spec 7c.8 a0): every return whose ray crosses the select box, with its persistent label m
+    // and the sweep weight κ (rc::lidar_select::select_rays_beam; the caller sets sigma_s = model_sigma_m). READ ONLY WHEN
+    // params.persistent, in place of `lidar` / `lidar_extra` (which the flag-off path and the instruments keep reading). The
+    // LiDAR channel measured ⇔ κ > 0 and the set is not empty (CountableBelief::lidar_measured).
+    rc::ai::beam::BeamRays beam;
 };
 
 // The bed generative model wired onto the shared rc::ai recursive-Laplace engine. Supplies only the
@@ -431,6 +445,25 @@ public:
         if (usable(f.lidar)) return true;
         return std::ranges::any_of(f.lidar_extra, usable);
     }
+    // "The LiDAR channel measured" (spec 7c.8 a0, R6-I4). Flag off: today's rule, a ray-set with endpoints and precision > 0
+    // (f.lidar or an extra set). Flag on: the beam set, κ > 0 and staged non-empty (f.lidar is not read), AND a BeamConfig
+    // built by make (beam_ready; else logged once and not a measurement). frame_has_lidar, the b_L predict and the fitter's
+    // rays_usable / record_channels read this; a sweep with κ = 0 is not a measurement (the belief stays at the prediction).
+    bool lidar_measured(const CountableFrame& f) const;
+    // The beam config was built by BeamConfig::make (it carries the quantile levels of the composite rule).
+    bool beam_ready() const { return not params_.beam.e_levels.empty(); }
+    // The model's convex parts for the beam path (spec 7c.8 a, R6-I1): 1 (the box), or 2 with a headboard. beam_part(s, 0) is the
+    // floor-anchored box z ∈ [0, H]; beam_part(s, 1) the headboard panel as sdf_headboard (local y ∈ [h/2 − t, h/2],
+    // t = min(headboard_t_m, h), z ∈ [0, headboard_h_m]). J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ, analytic.
+    int n_beam_parts() const { return params_.headboard_h_m > 0.0f ? 2 : 1; }
+    rc::ai::beam::BeamPart beam_part(const CountableBeliefState& s, int k) const;
+    std::vector<rc::ai::beam::BeamPart> beam_parts_for_test(const CountableBeliefState& s) const { return beam_parts(s); }
+    // The last persistent update's beam log (spec 7c.8 stated limit 1): the staged ray count of the frame (0 when the LiDAR
+    // channel did not measure), and the count of rays with π_i > 0.99 and e_i < −5c at the returned θ (e at the model's
+    // nominal surface; a LOG counter, nothing reads it). last_beam_ms: wall time spent in the beam terms of that update.
+    int    last_beam_staged() const { return last_beam_staged_; }
+    int    last_gap_rays()    const { return last_gap_rays_; }
+    double last_beam_ms()     const { return last_beam_ms_; }
     // What the DATA alone says about the size (H, w, h): the posterior already contains the class size prior (blocks 2 and
     // 2a of accumulate_extra) every frame, so scoring it against the class would count that prior twice. Zero info until
     // the first frame with points. Spec 2026-11-14 countable class existence §9.
@@ -499,7 +532,8 @@ public:
     bool first_update_done() const { return first_update_done_; }
     void set_first_update_done(bool v) { first_update_done_ = v; }
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
-    // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the ray-sets; θ-only = (2b), (2c) and,
+    // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the beam set f.beam (spec 7c.8; f.lidar is
+    // the flag-off path's and is not read here); θ-only = (2b), (2c) and,
     // on an admissible camera update whose anchor is not yet in (per-anchor flags), wall flush/parallel (1) / the room axis. Each channel
     // is linearised at its own state: s_th = θ_k, s_cam = θ_k + B_chain ē + b̄_cam, s_L = θ_k + B_chain ē + b̄_L.
     void accumulate_channels(const CountableBeliefState& s_th, const CountableBeliefState& s_cam,
@@ -521,8 +555,8 @@ public:
     // δ_last, the last ACCEPTED θ step (zero if none; ruling T14-1, kept by T14-4): P_θθ carries δ_last δ_lastᵀ on top of the joint posterior.
     const Eigen::Matrix<double, 6, 1>& last_gn_step() const { return last_gn_step_; }
     // The data energy whose gradients accumulate_channels builds: camera (the points' mixture −log likelihood, (2d) top, the
-    // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the first-crossing rays,
-    // rc::ai::lidar_rays_first_crossing_energy) at s_L, θ-only ((1) flush/parallel and the room axis when they enter, (2b),
+    // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the smooth beam model of f.beam, spec 7c.8: κ·Σ E_i,
+    // whose gradient accumulate_channels uses exactly) at s_L, θ-only ((1) flush/parallel and the room axis when they enter, (2b),
     // (2c)) at s_th — each term's own energy at its own linearisation point, with the per-frame gates of accumulate_channels.
     // ∇E = −(bd_cam + bd_L + bd_th) up to the state dependence of the blocks' mixture weights (flush posterior, two-sidedness,
     // the rays' n̂·u), which the GN information also holds fixed. The channels' FRESH-covariance marginalisation is NOT in
@@ -537,7 +571,7 @@ public:
     MatJd&  joint_covariance_for_test() { ensure_joint(); return P_; }
     void    set_latent_mean_for_test(const VecKd& b) { ensure_joint(); b_ = b; }
     // The latent predict of one persistent update alone (e with its lever, and the latents of the channels f measures).
-    void    predict_latents_for_test(const CountableFrame& f) { ensure_joint(); predict_latents_persistent(f, frame_has_camera(f), frame_has_lidar(f)); }
+    void    predict_latents_for_test(const CountableFrame& f) { ensure_joint(); predict_latents_persistent(f, frame_has_camera(f), lidar_measured(f)); }
     void    apply_mode_rotation_for_test(int k) { apply_mode_rotation(k); }
 
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
@@ -676,8 +710,8 @@ private:
     void accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision = false,
                              double* E = nullptr) const;
-    // first_crossing (the persistent LiDAR channel, spec §7c.6): every ray-set with LidarRays::first_crossing = true and
-    // surface_sigma_m = model_sigma_m; false: the ray-sets as staged (the historic sphere-trace).
+    // first_crossing (the 7c.6 persistent LiDAR channel; since 7c.8 only the first_crossing_for_test hook): every ray-set with
+    // LidarRays::first_crossing = true and surface_sigma_m = model_sigma_m; false: the ray-sets as staged (the historic sphere-trace).
     void accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool first_crossing = false) const;
     // The camera points' GN information, exactly as ai::update's accumulate lambda.
@@ -693,7 +727,13 @@ private:
     // b_cam / b_L when their channel measures (F = I, diagonal Σ_now, σ_prev = 0 ⇒ new source).
     void  predict_latents_persistent(const CountableFrame& f, bool camera, bool lidar);
     static bool frame_has_camera(const CountableFrame& f) { return not f.points.empty(); }
-    static bool frame_has_lidar(const CountableFrame& f);
+    bool frame_has_lidar(const CountableFrame& f) const { return lidar_measured(f); }
+    // The persistent LiDAR channel (spec 7c.8): κ·Σ E_i of f.beam on the model's parts at s, its exact gradient (bd −= ∇E) and
+    // the PSD curvature (Id += W), or with Id == nullptr its energy only. Nothing unless lidar_measured(f).
+    double accumulate_beam(const CountableBeliefState& s, const CountableFrame& f, Eigen::Matrix<float, 6, 6>* Id,
+                           Eigen::Matrix<float, 6, 1>* bd) const;
+    std::vector<rc::ai::beam::BeamPart> beam_parts(const CountableBeliefState& s) const;
+    int  count_gap_rays(const CountableBeliefState& s, const CountableFrame& f) const;   // the stated-limit-1 log counter
     Eigen::Matrix<double, N, K> chain_selector(bool camera) const;   // [B_chain(ℓ) | 𝟙 on the channel's own latent]
     float update_persistent_cycle(const CountableFrame& frame);   // update() under persistent (size summary, ω as today)
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
@@ -787,6 +827,30 @@ private:
     Eigen::Matrix<float, 6, 6> dbg_Id_th_   = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_cam_  = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_L_    = Eigen::Matrix<float, 6, 6>::Zero();
+    int    last_beam_staged_ = 0;
+    int    last_gap_rays_    = 0;
+    mutable double last_beam_ms_ = 0.0;                 // accumulated by accumulate_beam over one update
+    // One persistent update's beam evaluations (on only inside update_persistent, where the frame is fixed): every beam call
+    // there builds the energy WITH its gradient and curvature and keeps the last one, keyed by the exact float state. The GN
+    // evaluates J at a candidate and, if it is accepted, linearises at that same point next: one build instead of an energy
+    // plus a build (and J₀ / the final P reuse theirs). Off (outside an update) every call computes afresh.
+    struct BeamCache
+    {
+        struct Slot
+        {
+            bool valid = false;
+            std::array<float, 6> s{};
+            double E = 0.0;
+            Eigen::Matrix<double, 6, 6> W = Eigen::Matrix<double, 6, 6>::Zero();
+            Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Zero();
+        };
+        bool on = false;
+        std::array<Slot, 2> slot{};   // two states: the accepted iterate survives the rejected trials after it
+        int last = 0;                 // the slot used last (the other one is overwritten next)
+        void clear() { slot[0].valid = slot[1].valid = false; }
+    };
+    mutable BeamCache beam_cache_;
+    mutable bool   beam_unready_logged_ = false;        // "BeamConfig not built by make" printed once per belief
 };
 
 }  // namespace rc

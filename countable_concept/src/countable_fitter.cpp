@@ -1264,11 +1264,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         li.fresh    = {mot_pos_var, mot_pos_var, mot_size_var, mot_size_var, mot_size_var, mot_yaw_var};
         return li;
     };
-    const auto rays_usable = [](const CountableFrame& f)
-    {
-        const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
-        return usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);
-    };
+    // "The LiDAR channel measured" (spec 7c.8 a0): the belief's rule — flag off, a ray-set with precision > 0 (unchanged); flag
+    // on, the beam set with κ > 0 and staged non-empty (Task 20 stages frame.beam).
+    const auto rays_usable = [&](const CountableFrame& f) { return inst.ai2_belief.lidar_measured(f); };
     const auto ray_count = [](const CountableFrame& f)
     {
         int n = static_cast<int>(f.lidar.endpoints.size());
