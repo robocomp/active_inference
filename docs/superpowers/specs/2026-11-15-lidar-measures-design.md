@@ -1021,6 +1021,13 @@ over σ_s.
   motion counts. Roots at machine precision (Task 17: 1e-4 m was not enough). Stated kink (iv) of the discretised
   energy (R9-I1): a breakpoint that appears, is clipped to a panel limit, or changes order with another is a small
   kink of the gradient (about 1e-3 nats/m per ray); the Gradient item applies its one-sided rule there.
+  *Erratum 11-21 (Task 17, review-confirmed; the energy is unchanged, only its derivative is stated correctly):*
+  (a) a zero-width subinterval (two breakpoints that coincide, e.g. a return exactly on a face) adds no energy but
+  keeps its motion term h(b)·(∂_θb₂ − ∂_θb₁); dropping it gave ∂E/∂cx −44.4 against −1.85e-2 (finite difference) on
+  a face-on box ray. (b) The kink (iv) size depends on the fixture: 1e-6 … 1e-4 nats/m on box face ties (n̂·u 1 …
+  0.01), up to ≈ 0.6 nats/m reported on a grazing bed ray (unverified by the reviewer); on ray-cast fixtures at the
+  truth it is systematic, not measure-zero (the z = 0 crossing and ρ + G⁻¹(½) coincide on every face ray). Tied
+  breakpoints are ordered per component, so the analytic value is a one-sided derivative; the one-sided rule covers it.
 - **The crease (Task 17).** For d_ip < 0 the minimum is on the crease of the two faces of the part that meet there,
   found exactly from the box geometry; the t* ± ε tangents are withdrawn (near a grazing face they picked the wrong
   face: one bed ray gave ∂d/∂cy 0.638 against 0.034). ∇d = (s₊J₋ + s₋J₊)/(s₋ + s₊) on that pair.
