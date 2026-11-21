@@ -34,6 +34,7 @@
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 #include "../../common/room_resolve/room_follow.h"        // rc::room::drop_left_behind
+#include "cabinet_kitchen_room.h"                         // rc::kitchen_room::release_if_left_behind
 
 #include "../../common/obj/convergence.h"   // rc::converge::step (SHARED)
 
@@ -373,6 +374,35 @@ void SpecificWorker::compute()
     room_node_id_ = rc::room::follow_current_room(room_node_id_, rc::room::current_room(*G));
     if (room_node_id_ == 0) return;
 
+    // ★THE ROBOT LEFT A ROOM ⇒ RELEASE WHAT THIS AGENT HUNG UNDER IT (CONCEPT_AGENT_LIFECYCLE.md, REMOVE: left behind).
+    // Both pipelines, before anything fits or publishes this cycle. Was classic-only, so the mode the agent runs in
+    // (KitchenModel = true) never released: live c3a_1 its kitchen runs held room_1 and room_2 un-reapable.
+    // (a) the kitchen model is a model of the room it was built over: delete its runs, reset it, rebuild over the
+    //     new room's walls once that room has a usable outline.
+    if (const auto n = rc::kitchen_room::release_if_left_behind(kitchen_room_, room_node_id_, kitchen_nodes_,
+            [this](const std::string& cell, std::uint64_t id)
+            {
+                kitchen_cov_trace_.erase(cell);
+                G->delete_node(id);
+            },
+            [this] { kitchen_mgr_ = rc::KitchenManager{}; });
+        n.has_value())
+        std::print("cabinet_concept: [room] kitchen model left behind: {} run(s) dropped, cells rebuilt for room {}\n",
+                   *n, room_node_id_);
+    // (b) the shared release: any `cabinet*` object whose parent names another room (classic instances; also the
+    //     backstop for a kitchen node the map no longer knows). The robot left it: fitting it here would corrupt the
+    //     pose ltom remembers; ltom offers it back.
+    rc::room::drop_left_behind(*G, "cabinet", room_node_id_, [this](std::uint64_t id)
+    {
+        if (fitter_)
+        {
+            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+                it->second.affordance.remove();
+            fitter_->forget_node(id);
+        }
+        std::erase_if(kitchen_nodes_, [id](const auto& kv) { return kv.second == id; });
+    });
+
     // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
     // pushed by update_node_attr_signal — see the connect block in initialize().
     poll_affordance_protocol();
@@ -425,14 +455,7 @@ void SpecificWorker::compute()
     }
 
     // `object` nodes named "cabinet_*" are ours (see CabinetSceneGraph: cortex has no `cabinet` type;
-    // the class lives in the `object_subtype` attr).
-    // The robot left a cabinet's room: fitting it here would corrupt the pose ltom remembers; ltom offers it back.
-    rc::room::drop_left_behind(*G, "cabinet", room_node_id_, [this](std::uint64_t id)
-    {
-        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-            it->second.affordance.remove();
-        fitter_->forget_node(id);
-    });
+    // the class lives in the `object_subtype` attr). Left-behind ones were dropped at the top of compute().
     std::vector<DSR::Node> cabinet_nodes;
     for (const auto& n : G->get_nodes_by_type("object"))
         if (n.name().starts_with("cabinet"))

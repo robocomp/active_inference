@@ -229,7 +229,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | table | ✅ resurrects from ltom recall | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ | ✅ | ✅ birth + existence |
 | chair | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` *(Phase 0 re-read, below)* | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* | ✅ | ✅ birth + existence |
 | bottle | ✅ resurrects from ltom recall | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ | ✅ | ⚠️ birth only (no existence channel) |
-| cabinet | ✅ resurrects from ltom recall | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ | ✅ | ✅ birth (both paths) + existence |
+| cabinet | ✅ resurrects from ltom recall (classic path; kitchen runs carry no uid) | ✅ | ✅ trunc | ✅ `rc::exist` + left-behind release in BOTH pipelines *(fixed 2026-11-21, below)* | ✅ | ✅ shared helper | ✅ | ✅ | ✅ *(kitchen model re-bound per room 2026-11-21; was classic-only)* | ✅ birth (both paths) + existence |
 | door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)*; *2026-11-15: behind `Existence.OneModel` (default false) the tracker only holds candidates and the birth is decided inside door_concept, every mask shared among four causes (one-model amendment below); live acceptance failed on rate and candidate churn, so the flag stays off (spec 2026-11-14 §13.6)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ restores from ltsm `remembered_door` notes; refuted places in a private phantom file *(2026-11-14, Task 6)* | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* | — not audited (Phase 0: countable only) | — |
 | refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ | ✅ | ✅ birth + existence |
 | hood *(2026-11-13, Phase 0)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ⚠️ `[Owns]` says `hood_concept 21`, `[Agent].id` is 17 (on main HEAD; an uncommitted fix to 17 sits in the main checkout) | ✅ | ✅ birth (wall-mounted: tolerance = depth/2) + existence |
@@ -257,6 +257,18 @@ evidence) while that room has no usable outline. An out-of-room existence term (
 chair, table, hood, refrigerator and cabinet; bottle has none (containment at birth only). chair's REMOVE cell was
 stale: re-read 2026-11-13, `chair_existence.cpp` integrates into `rc::exist` and decides with
 `rc::exist::decide_removal`, so it is ✅. Ledger: `docs/superpowers/plans/2026-11-11-countable-agents-phase0-ledger.md`.
+
+*2026-11-21 (cabinet left-behind release, branch `fix/cabinet-exit-release`):* the cabinet row's "room follows robot ✅"
+held only for the CLASSIC pipeline. Phase 0 put `rc::room::drop_left_behind` inside the classic `else`, so the mode
+cabinet runs in (`KitchenModel = true`) never released, and its kitchen cell table, built once over the first room's
+walls, kept publishing with the FOLLOWED room as parent: `insert_or_assign_edge_RT` on the existing nodes moved
+room_1's runs under room_2 and room_3 (live crossing/c3a_1), room_concept could not reap the archived rooms, ltsm gave
+no recall, the tour stopped at 2/4. Now: the shared release runs at the top of `compute()` for both pipelines, and the
+kitchen model is bound to the room it was built over (`cabinet_kitchen_room.h`, same `rc::room::left_behind` rule):
+when that room is left its runs are deleted and the table reset, to be rebuilt over the new room's walls once it has a
+usable outline; a run is published only under the room the model was built over. Kitchen runs have no `aff_*`
+children and no uid, so on return they are re-learnt from the masks rather than recalled. Test:
+`cabinet_concept/tests/kitchen_room_test.cpp`. Diagnosis: `docs/cabinet-exit-release-diagnosis.md`. Live check pending.
 
 *2026-11-04 (ltom recall, step 4a):* the CREATE cell of table, chair, bottle, cabinet and refrigerator now reads "resurrects from ltom recall", and hood (no row of its own in this audit) does the same: a tracker birth may take the remembered instance's number and uid (`rc::choose_recall`, MAP over {recalled candidates, new}; birth itself stays tracker-only). Cabinet does it on both tracker birth paths (detection and residual-arm seed); `run_kitchen_model()` nodes carry no uid and are left out.
 

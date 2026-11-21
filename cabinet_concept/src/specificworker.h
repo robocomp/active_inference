@@ -173,6 +173,10 @@ private:
     std::vector<rc::SceneObjectBox> read_scene_objects() const;   // OTHER agents' furniture boxes (room frame) to not penetrate
     rc::KitchenManager                        kitchen_mgr_;
     std::unordered_map<std::string, std::uint64_t> kitchen_nodes_;   // cell signature → DSR node id
+    // The room the kitchen cell table was BUILT over (0 = not built). The model is in that room's frame, so it is
+    // released (nodes deleted, table reset) when the robot leaves it, and publishes only while working there
+    // (cabinet_kitchen_room.h; live c3a_1 2026-11-20: room_1's runs were re-hung under room_2 and room_3).
+    std::uint64_t                                  kitchen_room_ = 0;
     // Last published covariance trace per cell — the RT-cov write self-gates on it, so a settled run does
     // not rewrite its edge every cycle (same discipline as CabinetSceneGraph::write_rt_covariance).
     std::unordered_map<std::string, float>         kitchen_cov_trace_;
