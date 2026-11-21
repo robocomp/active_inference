@@ -1146,6 +1146,11 @@ plan matters, settled here.
   full-control fixture lands 19 mm off in w, 9 mm in cx, |e| ≈ 0.46σ. Stated limit. Pass keeps the lever-only control
   (one basin once converged: 2.9 / 2.35 mm against 3.87 mm) and prints the full-control numbers; live11 watches the
   two flush nightstands for an h or w error.
+- **No-cross contact (owner 11-21: "½ σ_wall").** With LiDAR only, a box pushed against a no-cross neighbour (2c,
+  one-sided Gaussian, σ_wall) settles past the contact by the data's pull (beam blur at a flush contact): 6.0 mm at
+  σ_wall = 2 cm (0.3σ_wall; legacy flag-off 5.8 mm; without (2c) 27 mm). 7c.6's −5 mm bound becomes penetration
+  ≤ ½σ_wall. The fixture's last-step check is per component against 0.1σ_k (rev 3.3.8's stop rule), not a max over
+  mixed units.
 
 ## 8. Pass
 
