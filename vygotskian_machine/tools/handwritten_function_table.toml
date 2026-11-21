@@ -1,0 +1,17 @@
+# E2 baseline: a HAND-WRITTEN level-4 table, the kind an engineer writes without a VLM or a corpus.
+# ⚠ DRAFT (2026-11-21), written by Claude as the conventional "signature objects" rule; the authors should review it,
+#   since the paper presents it as the hand-written alternative to the VLM.
+# pi_cf = signature for the classes listed under f, other for every other class; pi_c,notf is derived as for the VLM
+# (mean of pi_cg over the other functions).
+
+signature = 0.8
+other     = 0.1
+
+[functions]
+"kitchen"     = ["refrigerator", "oven", "stove", "microwave", "dishwasher", "hood", "cabinet", "countertop", "sink"]
+"dining room" = ["dining table", "chair"]
+"living room" = ["sofa", "armchair", "coffee table", "television"]
+"bedroom"     = ["bed", "nightstand", "wardrobe", "chest of drawers"]
+"bathroom"    = ["toilet", "sink", "bathtub", "shower", "mirror"]
+"office"      = ["desk", "office chair", "computer monitor", "bookshelf"]
+"corridor"    = ["coat rack"]

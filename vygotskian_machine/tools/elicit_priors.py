@@ -66,6 +66,14 @@ L3 = [
     "Of all the {cs} standing against walls in ordinary homes, how often is one part of a fitted kitchen run?",
 ]
 L3_BASE_CLASS = "piece of furniture or appliance"
+# Level 4 prior P(f): how often a room serves f (the prior log-odds of Eq. lh_function_evidence).
+PF = [
+    "In ordinary homes, how likely is it that a given room is used as a {f}?",
+    "Pick a room of a typical home at random. How likely is it to be a {f}?",
+    "A robot is placed in a room chosen at random from an ordinary home. How likely is it that this room is the {f}?",
+]
+# (An earlier third wording, "Of all the rooms in ordinary homes, how often is one a {f}?", was read as "does a
+# home have a {f}" and answered "almost always" for kitchen, bedroom, bathroom and living room.)
 
 
 # How a class is named in a question when its label is ambiguous ("a hood" was read as clothing).
@@ -107,6 +115,9 @@ def build_questions(vocab: dict, kitchen_classes: list[str]) -> list[dict]:
             for i, t in enumerate(L4_POS):
                 qs.append(dict(kind="L4", cls=c, func=f, negated=False, para=i,
                                prompt=t.format(f=f, c=spoken(c), a_c=article(spoken(c)))))
+    for f in vocab["functions"]:
+        for i, t in enumerate(PF):
+            qs.append(dict(kind="PF", cls="", func=f, negated=False, para=i, prompt=t.format(f=f)))
     for c in kitchen_classes + [L3_BASE_CLASS]:
         for i, t in enumerate(L3):
             qs.append(dict(kind="L3", cls=c, func="kitchen unit", negated=False, para=i,
@@ -184,7 +195,9 @@ def summarise(records: list[dict], authored: dict[str, float],
             continue
         l3.append(dict(cls=c, authored=a, elicited=statistics.median(paired), spread=spread(paired),
                        q_c=statistics.median(qc.values()), q_base=statistics.median(base.values())))
-    return l4, l3
+    pf = [dict(func=f, p_f=statistics.median(ps.values()), spread=spread(list(ps.values())))
+          for (kind, c, f, neg), ps in sorted(groups.items()) if kind == "PF"]
+    return l4, l3, pf
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -215,6 +228,7 @@ def main() -> None:
 
     if args.dry_run:
         print(f"{len(questions)} questions ({sum(q['kind'] == 'L4' for q in questions)} level 4, "
+              f"{sum(q['kind'] == 'PF' for q in questions)} function prior, "
               f"{sum(q['kind'] == 'L3' for q in questions)} level 3)")
         for q in (questions[0], questions[3], questions[-1]):
             print(" ", q["prompt"])
@@ -246,12 +260,13 @@ def main() -> None:
 
     current = {sha(SYSTEM + "\n" + q["prompt"]) for q in questions}
     records = [r for (m, h), r in cache.items() if m == args.model and h in current]
-    l4, l3 = summarise(records, authored)
+    l4, l3, pf = summarise(records, authored)
     write_csv(args.out / "level4_priors.csv", l4)
+    write_csv(args.out / "function_prior.csv", pf)
     write_csv(args.out / "level3_kitchen.csv", l3)
     (args.out / "provenance.json").write_text(json.dumps(dict(
         model=args.model, model_digest=digest, ollama=url, levels=LEVEL_P, system=SYSTEM,
-        templates=dict(L4_POS=L4_POS, L3=L3, L3_BASE_CLASS=L3_BASE_CLASS), spoken=SPOKEN,
+        templates=dict(L4_POS=L4_POS, PF=PF, L3=L3, L3_BASE_CLASS=L3_BASE_CLASS), spoken=SPOKEN,
         pi_c_notf="uniform mean of pi_cg over the other functions",
         vocab_sha=sha(args.vocab.read_text()), answered=len(records), of=len(questions),
         written=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")), indent=2))
