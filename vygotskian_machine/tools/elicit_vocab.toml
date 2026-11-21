@@ -1,0 +1,23 @@
+# Closed vocabulary for E1 (paper §5.2): what the VLM is asked about.
+# Edit freely; the script caches by prompt hash, so only new or changed questions cost a call.
+
+# Level 4: room functions (the seven of the paper).
+functions = ["kitchen", "dining room", "living room", "bedroom", "bathroom", "office", "corridor"]
+
+# Level 4: object classes whose presence is asked per function (pi_cf) and per not-function (pi_c,notf).
+# Chosen to cover what the robot's agents detect plus what a corpus (Matterport3D / HM3D) annotates;
+# the corpus mapping is done later, when the corpus is chosen.
+classes = [
+  "bed", "nightstand", "wardrobe", "chest of drawers",
+  "sofa", "armchair", "coffee table", "television", "bookshelf",
+  "dining table", "chair",
+  "desk", "office chair", "computer monitor",
+  "toilet", "sink", "bathtub", "shower", "mirror",
+  "refrigerator", "oven", "stove", "microwave", "dishwasher", "hood", "cabinet", "countertop",
+  "washing machine", "plant", "lamp", "rug", "coat rack",
+]
+
+# Level 3: the kitchen membership classes are NOT listed here. They are read from
+# kitchen_metaconcept/etc/config.toml (MemberClasses, MemberClassLogOdds), so the authored values
+# and the elicited ones always refer to the same seven classes.
+kitchen_config = "../../kitchen_metaconcept/etc/config.toml"
