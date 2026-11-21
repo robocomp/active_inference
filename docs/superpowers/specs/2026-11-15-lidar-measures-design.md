@@ -1141,6 +1141,13 @@ plan matters, settled here.
 - **Ray-spacing bounds, corrected (controller's correction of rev 3.3.8).** w and h are distances between two
   independently sampled edges, so their creep and silhouette bounds are the full spacing s at the object; cx, cy (one
   centre) keep ½s. The 7c.5 `physical_lidar_only_sigma_bounded` w check moves to the same rule.
+- **Rev 3.3.10 (owner 11-21, Task 20).** (1) The live-staging silhouette correctly-sized seed (20 cm and 1 m
+  backgrounds) follows the same rule: |Δw| ≤ s, |Δcx| ≤ ½s, s the Helios spacing at the object (measured +7.3 mm =
+  sampling phase, re-derived from the fixture geometry by the reviewer; dense sweep −1.0 mm). (2) Calibration draws
+  vary range noise and the per-ray σ_s offset only; the shared latents (sig2_L, pose) are held at zero variance, since
+  with them the NEES no longer separates the two curvature forms the item exists to compare. (3) Flush neighbour /
+  5 cm background at live ε_px (+14.4 cm w; +22.8 cm per edge at b = 5 cm, ε_px 0.094): stated limit 4, measured live
+  in Task 21 (two flush nightstands) before any model change is decided.
 - **Flush against a known wall (owner: "Stated limit, test the live").** With the robot pose error e modelled, a box
   flush against a known wall has at least two energy basins (w traded against e_x, h against e_y); converged, the
   full-control fixture lands 19 mm off in w, 9 mm in cx, |e| ≈ 0.46σ. Stated limit. Pass keeps the lever-only control
