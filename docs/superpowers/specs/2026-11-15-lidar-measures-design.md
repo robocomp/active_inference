@@ -1131,6 +1131,22 @@ plan matters, settled here.
   multipliers bracket the vertex (β_L < 0 < β_R), never one chosen by ulp-level differences; a lattice-ray fuzz
   against a square yaw-0 box is a CHECK (0 gradient mismatches outside the subdifferential).
 
+**Amendment 11-21c (rev 3.3.9; owner rulings after Task 19 re-review 3).**
+- **Edge information, fully observed form (owner: "Adopt full form").** The bracket form of I_d understated the
+  realised beam curvature on the silhouette DOF by ≈ 4.4× (cx 4.4, w 4.5, yaw 1.45, cy/H/h ≈ 0.9; re-review 3's
+  Calibration number), so damped steps overshot and oscillated (first update 25/0, 4.5 Hz; parked steps non-monotone).
+  W's edge term becomes I_d,i = (φ(d_i/σ_s)/σ_s)²·[1/π_i + 1/(1 − π_i)] — the Fisher information of the hit/miss outcome
+  when the outcome is fully observed — in the solver AND in P. Measured in scratch: first update 4 steps, gn_conv = 1,
+  50 ms (19.9 Hz); parked steps monotone; σ_w 17.80 → 17.08 mm. The (1 − o_i) factor and the member part are unchanged.
+- **Ray-spacing bounds, corrected (controller's correction of rev 3.3.8).** w and h are distances between two
+  independently sampled edges, so their creep and silhouette bounds are the full spacing s at the object; cx, cy (one
+  centre) keep ½s. The 7c.5 `physical_lidar_only_sigma_bounded` w check moves to the same rule.
+- **Flush against a known wall (owner: "Stated limit, test the live").** With the robot pose error e modelled, a box
+  flush against a known wall has at least two energy basins (w traded against e_x, h against e_y); converged, the
+  full-control fixture lands 19 mm off in w, 9 mm in cx, |e| ≈ 0.46σ. Stated limit. Pass keeps the lever-only control
+  (one basin once converged: 2.9 / 2.35 mm against 3.87 mm) and prints the full-control numbers; live11 watches the
+  two flush nightstands for an h or w error.
+
 ## 8. Pass
 
 - **Unit:** a LiDAR-only frame whose memberships all vanish leaves the belief at the prediction (state, Σ and ω);
