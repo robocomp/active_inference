@@ -217,6 +217,10 @@ static void silhouette_live()
     std::printf("  silhouette live: mask %zu px, mask cloud %zu pts ; sigma_px at the front face %.2f px = %.4f m (z %.3f m)\n",
                 L.mask.pixels.size(), anchor.size(), L.sigma_px(zf), sig_m, zf);
     const float prior_sw = params().prior_footprint_std;
+    // The Helios ray spacing along w at the object: the HELIOS's horizontal range to the front face's silhouette edge × its
+    // azimuth step (spec 7c.8 rev 3.3.9/3.3.10; the range is the LiDAR's, not the camera depth zf).
+    const float r_edge = std::hypot(tx + 0.5f * tw - kRobot.x(), (ty - 0.5f * tw) - kRobot.y());
+    const float s_helios = r_edge * ts::kHeliosAzStepDeg * std::numbers::pi_v<float> / 180.0f;
     for (const float gap : {0.20f, 1.0f, 0.05f})
     {
         const std::vector<ts::SceneWall> walls{back_wall(gap)};
@@ -234,7 +238,14 @@ static void silhouette_live()
                         lg.kappa, ew, sw, prior_sw, ecx, t.max_dw, t.max_dcx, b.last_gn_iters(), int(b.last_gn_converged()));
             if (gap > 0.1f)
             {
-                if (dw == 0.0f) { CHECK(t.max_dw < kHalfSpacing); CHECK(t.max_dcx < kHalfSpacing); }
+                // spec 7c.8 rev 3.3.10 (1): the correctly sized seed against the Helios spacing at the object, |Δw| ≤ s, |Δcx| ≤ ½s
+                if (dw == 0.0f)
+                {
+                    std::printf("  silhouette live bg %.2f m correct seed: bound s = %.5f m (Helios horizontal range to the front edge "
+                                "%.4f m x azimuth step %.2f deg)\n", gap, s_helios, r_edge, ts::kHeliosAzStepDeg);
+                    CHECK(t.max_dw <= s_helios);
+                    CHECK(t.max_dcx <= 0.5f * s_helios);
+                }
                 else CHECK(std::abs(ew) <= sw);
             }
             else if (dw == 0.0f)
@@ -470,7 +481,7 @@ static void calibration_nees()
             nrays += double(r.endpoints.size());
             CountableBelief b = belief({tx, ty, tH, tw, tw, 0.0f});
             CountableFrame f = lidar_frame(r);
-            f.sig2_L.fill(0.0f);
+            f.sig2_L.fill(0.0f);   // spec 7c.8 rev 3.3.10 (2): shared latents (sig2_L, pose) held at zero variance in the draws
             f.sigma_pose.setZero();
             b.update(f);
             conv += int(b.last_gn_converged());
