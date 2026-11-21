@@ -2,10 +2,10 @@
  * countable_beam_config.h — the smooth beam model's configuration checks and its BeamConfig (spec 2026-11-15
  * lidar-measures §7c.8 a, a0). Pure: no Qt, no DSR, no ConfigLoader, so the belief tests and the fitter share it.
  *
- * beam_config_problem is the load-time validation (countable_sections.h calls it with sigma_sensor = 0, the SensorModel is
- * not on the graph yet). make_beam_config is the ONE place a BeamConfig for the countable belief is built: it repeats the
- * check with the Helios SensorModel's sigma_sensor (1/p0 = 1/LidarPrecision + sigma_sensor^2) and returns the reason
- * instead of a config when the Student-t range density does not exist (nu = p0 c^2 - 1 <= 0). A default BeamConfig{} has
+ * beam_config_problem is the load-time validation (countable_sections.h calls it with kHeliosRangeSigmaM, the Helios range
+ * sigma). make_beam_config is the ONE place a BeamConfig for the countable belief is built (the fitter, at construction, with
+ * the same sigma_sensor: 1/p0 = 1/LidarPrecision + sigma_sensor^2) and returns the reason instead of a config when the
+ * Student-t range density does not exist (nu = p0 c^2 - 1 <= 0). A default BeamConfig{} has
  * no quantile levels; CountableBelief refuses to use one (CountableBelief::beam_ready).
  */
 #pragma once
@@ -19,6 +19,12 @@
 #include "../../common/ai_belief/beam_ray.h"
 
 namespace rc {
+
+// The Helios range sigma (m): shadow-bridge-dds etc/config.toml [Lidar.helios] RangeSigmaFloorM = 0.02 (the device manual,
+// sec 5.1.1), which the producer advertises as the helios SensorModel's range_sigma_floor_m. The beam density is built at
+// load with this value (the SensorModel reaches the graph only after start; the fitter logs the advertised value once it
+// does). p0 = 1/(1/2500 + 0.02^2) = 1250, p0 c^2 = 3.125 at c = 5 cm, nu = 2.125.
+inline constexpr double kHeliosRangeSigmaM = 0.02;
 
 // Why a smooth-beam configuration cannot run, or nullopt (spec 7c.8): the persistent label needs 0 < eps_px < 1/2 (the camera's
 // pixel-error rate; a rate of 0 or 1/2 makes a label certain or uninformative), and the Student-t range density needs

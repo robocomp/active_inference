@@ -40,6 +40,7 @@
 #include "countable_mask_membership.h"   // rc::MembershipComponents
 #include "countable_projection.h"    // rc::CountableProjection, rc::SilhouetteExistence
 #include "countable_lidar_range_channel.h"   // rc::CountableLidarRangeChannel
+#include "countable_beam_config.h"   // rc::make_beam_config, kHeliosRangeSigmaM (lidar-measures §7c.8)
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "countable_scene_graph.h"
 #include "../../common/rt_twist/rt_twist.h"   // rc::rt::robot_body_twist, SimClockRate
@@ -134,6 +135,9 @@ public:
 
     void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
     { room_interior_ = interior; room_polygon_ = std::move(polygon); have_room_geometry_ = not room_polygon_.empty();
+      // The beam's foreign density (spec 7c.8 rev 3.3.7/3.3.8): the polygon's walls are known surfaces with the WallRef σ
+      // (room_concept publishes no layout σ; the same 0.02 m the wall factors use).
+      lidar_channel_.set_room_walls(room_polygon_, WallRef{}.sigma_m);
       // The projection unit needs the same walls: a silhouette sample behind one is NOT "predicted visible".
       if (projection_) projection_->set_room_polygon(room_polygon_); }
     // The REACHABLE region, for the NBV. A bed stands against a wall, so two of its four faces have
@@ -281,9 +285,17 @@ private:
     // After an ACCEPTED persistent update: log the ρ it used, reset the path of each channel that measured, rebase the chain.
     void consume_paths(CountableInstance& inst, const CountableFrame& frame, bool camera, bool lidar);
     // The camera's membership m(p) for this cycle's slice (empty ⇒ unavailable: no slice, no camera, no delivered size).
+    // Flag on, `persistent_label` (if non-null) receives the persistent label of the same slice (make_persistent_label with
+    // Model.MaskPixelErrorRate, spec 7c.8 a0), empty exactly when the membership is.
     std::function<float(const Eigen::Vector3f&)> build_membership(const CountableInstance& inst, int slice_index,
                                                                    const Eigen::Matrix4f& zed_T_room, bool have_cam,
-                                                                   float mot_pos_var);
+                                                                   float mot_pos_var,
+                                                                   rc::BeamLabel* persistent_label = nullptr);
+    // The persistent path's beam model (spec 7c.8 a, b), built ONCE in the constructor through rc::make_beam_config at the
+    // Helios σ_sensor (kHeliosRangeSigmaM) and handed to every belief (CountableBeliefParams::beam) and to the LiDAR channel
+    // (its Student-t, for p_f). Default (no quantile levels) with the flag off — then nothing reads it.
+    rc::ai::beam::BeamConfig beam_config_;
+    bool helios_sigma_logged_ = false;   // "Helios SensorModel range sigma floor" printed once
     // Measurement only (spec 7c.8 a0): set by build_membership when cfg_.label_dump_enabled, the components behind m(p).
     std::function<rc::MembershipComponents(const Eigen::Vector3f&)> label_components_;
     std::ofstream label_csv_;

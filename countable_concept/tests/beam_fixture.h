@@ -31,7 +31,7 @@ inline float scene_box_sdf(const SceneBox& b, const Eigen::Vector3f& p)
 {
     const float c = std::cos(b.yaw), s = std::sin(b.yaw), dx = p.x() - b.c.x(), dy = p.y() - b.c.y();
     const Eigen::Vector3f a(std::abs(c * dx + s * dy) - 0.5f * b.w, std::abs(-s * dx + c * dy) - 0.5f * b.h,
-                            std::abs(p.z() - 0.5f * b.H) - 0.5f * b.H);
+                            std::abs(p.z() - 0.5f * (b.z0 + b.H)) - 0.5f * (b.H - b.z0));
     return a.cwiseMax(0.0f).norm() + std::min(a.maxCoeff(), 0.0f);
 }
 inline bool on_object(std::span<const SceneBox> obj, const Eigen::Vector3f& p, float tol = 2e-3f)

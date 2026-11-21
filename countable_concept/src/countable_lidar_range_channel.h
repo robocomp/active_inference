@@ -13,6 +13,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -20,6 +21,7 @@
 #include "countable_config.h"     // rc::CountableConfig
 #include "countable_instance.h"   // rc::CountableInstance
 #include "countable_belief.h"     // rc::CountableFrame
+#include "countable_beam_staging.h"   // rc::stage_beam_cycle (spec 7c.8 a0)
 
 namespace rc {
 
@@ -51,6 +53,26 @@ public:
     void feed(CountableInstance& inst, CountableFrame& frame, std::span<const Eigen::Vector3f> anchor_cloud,
               const std::function<float(const Eigen::Vector3f&)>& membership = {}) const;
 
+    // The persistent path's ray-set (spec 2026-11-15 lidar-measures §7c.8 a0; flag on). HELIOS only (the bpearl set is not
+    // staged on this path, spec §9). Stages frame.beam by RAY GEOMETRY through rc::stage_beam_cycle (countable_beam_staging.h) on
+    // the same select box (anchored on `anchor_cloud`) and weights as feed(), with the persistent `label` ({m, q}; nullopt = no
+    // camera information ⇒ that ray is not staged). An EMPTY label is a cycle without membership: nothing is staged and
+    // inst.beam_log counts it (owner 11-18). σ_s = cfg.model_sigma_m, p_f against the floor (Model.FloorSigmaM) and the room
+    // walls set by set_room_walls. feed() still runs for the instruments (probe, dbg_lidar_rays, coverage): they keep reading
+    // the endpoint-in-box subset. Logs into inst.beam_log (staged, nolabel, κ, nomem_cycle); call beam_log.begin_cycle() first.
+    void feed_beam(CountableInstance& inst, CountableFrame& frame, std::span<const Eigen::Vector3f> anchor_cloud,
+                   const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label) const;
+    // The beam config's Student-t (for p_f); set once by the fitter from the BeamConfig it built. Unset ⇒ feed_beam stages nothing.
+    void set_beam_density(const rc::ai::beam::StudentT& st) { beam_st_ = st; }
+    // The room polygon's walls as known surfaces of p_f, each with its position σ (the WallRef σ; room_concept publishes none).
+    void set_room_walls(const std::vector<Eigen::Vector2f>& polygon, double sigma_m)
+    {
+        room_walls_.clear();
+        const std::size_t n = polygon.size();
+        for (std::size_t i = 0; n >= 3 and i < n; ++i)
+            room_walls_.push_back({polygon[i].cast<double>(), polygon[(i + 1) % n].cast<double>(), sigma_m});
+    }
+
     // Measurement only (label dump): the staged HELIOS returns inside this instance's select box, anchored on the same
     // mask-cloud centroid feed() uses. Empty without a fresh helios sweep or an anchor.
     // `margin_m` grows the XY radius and the z-band (dump only; the fit's selection is unchanged); dist_box_m is the
@@ -76,6 +98,8 @@ private:
     SelectBox select_box() const;
 
     const CountableConfig&             cfg_;
+    std::optional<rc::ai::beam::StudentT> beam_st_;            // the beam density (set_beam_density); unset ⇒ no beam staging
+    std::vector<rc::ai::beam::RoomWall>   room_walls_;         // the room polygon's walls (set_room_walls)
     // Staged LiDAR sweeps for the range factor (room frame). Refreshed each compute() cycle; have flag false
     // ⇒ no fresh sweep this cycle ⇒ that plane is a no-op (never reuses a stale sweep).
     std::vector<Eigen::Vector3f>   lidar_sweep_room_;

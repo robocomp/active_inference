@@ -20,12 +20,14 @@
 #include "../../common/media_transport/media_transport.h"   // rc::media::sensor_model_from_graph, max_ring_gap_rad
 #include "countable_mask_membership.h"   // rc::MaskMembership, make_membership (lidar-measures G2)
 #include "countable_viewpoint.h"         // ρ from odometry (lidar-measures §7c.2)
+#include "countable_config_error.h"     // rc::CountableConfigError (beam config refusal)
 #include "../../common/place_memory/place_map.h"   // rc::place::inv_se2 (the robot in the room from T(robot←room))
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <cstdint>
 #include "tick_timing.h"
 #include "rt_memo.h"
@@ -55,6 +57,25 @@ CountableFitter::CountableFitter(std::shared_ptr<DSR::DSRGraph> graph,
     CountableBeliefState::use_quotient = cfg.quotient_chart;   // C2v symmetry-quotient optimisation chart (global mode)
     projection_->set_central_region_frac(cfg.central_region_frac);
     projection_->set_front_params(cfg.front_min_face_area_px, cfg.front_min_confidence);
+    // lidar-measures §7c.8: the beam model's config, at the sensor's precision (1/p0 = 1/LidarPrecision + σ_sensor², σ_sensor =
+    // the Helios range σ). The loader already refused a config for which this fails (refuse_bad_beam_config, same σ), so the
+    // throw below is unreachable from a loaded config; it stays so the agent never runs the beam on a default BeamConfig{}.
+    if (cfg.lidar_measures_on_gated)
+    {
+        auto bc = rc::make_beam_config(cfg.mask_pixel_error_rate, cfg.lidar_precision, cfg.lidar_robust_c_m,
+                                       rc::kHeliosRangeSigmaM);
+        if (not bc)
+        {
+            std::print(stderr, "[lidar-measures] {} (Helios sigma_sensor {} m) — refusing to start\n", bc.error(), rc::kHeliosRangeSigmaM);
+            throw rc::CountableConfigError(std::format("config: {} — refusing to start\n", bc.error()));
+        }
+        beam_config_ = std::move(*bc);
+        lidar_channel_.set_beam_density(beam_config_.st);
+        std::print("[lidar-measures] beam model: p0 {:.1f} (LidarPrecision {} with Helios sigma_sensor {} m), c {} m, nu {:.3f}, eps_px {}, "
+                   "FloorSigmaM {} m, rho_max {} m, sigma_s {} m\n", beam_config_.st.p0, cfg.lidar_precision, rc::kHeliosRangeSigmaM,
+                   cfg.lidar_robust_c_m, beam_config_.st.nu, cfg.mask_pixel_error_rate, cfg.floor_sigma_m,
+                   rc::ai::LidarRays{}.max_range_m, cfg.model_sigma_m);
+    }
 }
 
 // ─── Ego-motion "be-still-to-update" (ported 1:1 from chair_concept) ─────────────────────────────────
@@ -149,13 +170,28 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
     // The Helios beam pattern (spec §7c.2: g = max_ring_gap_rad of its SensorModel). It can be advertised late, so it is
     // looked up every cycle until found; absent ⇒ ρ_L = 1 (logged per instance in stage_persistent).
     const auto t_sm = rc::sub_stage(&rc::TickTiming::ego_sensor_model);   // [timing] helios SensorModel lookup
-    if (helios_ring_gap_rad_ <= 0.0f)
+    if (helios_ring_gap_rad_ <= 0.0f or not helios_sigma_logged_)
         if (const auto sm = rc::media::sensor_model_from_graph(*G_, "helios"); sm.has_value())
-            if (const auto g = rc::media::max_ring_gap_rad(*sm); g.has_value())
+        {
+            if (helios_ring_gap_rad_ <= 0.0f)
+                if (const auto g = rc::media::max_ring_gap_rad(*sm); g.has_value())
+                {
+                    helios_ring_gap_rad_ = *g;
+                    std::print("[lidar-measures] Helios SensorModel: max ring gap {:.4f} rad\n", *g);
+                }
+            // The beam density was built with kHeliosRangeSigmaM at start (spec 7c.8); the advertised value is logged beside it.
+            // Once per run (the lookup stops when both are done, as before for the ring gap alone).
+            if (not helios_sigma_logged_)
             {
-                helios_ring_gap_rad_ = *g;
-                std::print("[lidar-measures] Helios SensorModel: max ring gap {:.4f} rad\n", *g);
+                if (sm->range_sigma_floor_m.has_value())
+                    std::print("[lidar-measures] Helios SensorModel: range sigma floor {} m (the beam density uses {} m)\n",
+                               *sm->range_sigma_floor_m, rc::kHeliosRangeSigmaM);
+                else
+                    std::print("[lidar-measures] Helios SensorModel carries no range sigma floor (the beam density uses {} m)\n",
+                               rc::kHeliosRangeSigmaM);
+                helios_sigma_logged_ = true;
             }
+        }
 }
 
 // Integrate the odometry since this instance's last sample into the two viewpoint paths and the chain's odometry
@@ -350,8 +386,10 @@ CountableFitter::PoseAtStamp CountableFitter::pose_at_stamp(std::uint64_t ts_ms)
 std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(const CountableInstance& inst,
                                                                                 int slice_index,
                                                                                 const Eigen::Matrix4f& zed_T_room,
-                                                                                bool have_cam, float mot_pos_var)
+                                                                                bool have_cam, float mot_pos_var,
+                                                                                rc::BeamLabel* persistent_label)
 {
+    if (persistent_label) *persistent_label = {};
     if (rgb_frame_.empty() and not rgb_absent_logged_)
     {
         std::print("[lidar-measures] no RGB frame staged ⇒ no delivered image size ⇒ no membership: gated cycles "
@@ -394,6 +432,10 @@ std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(c
     if (cfg_.label_dump_enabled)
         label_components_ = rc::make_membership_components(project, mm, f, cfg_.existence_sensor_sigma_m, sigma_chain,
                                                            mot_pos_var, sl.confidence);
+    // The persistent label (spec 7c.8 a0): the same components, floored into [ε_px, 1 − ε_px]; nullopt off the image.
+    if (persistent_label and cfg_.lidar_measures_on_gated)
+        *persistent_label = rc::beam_label(rc::make_persistent_label(project, mm, f, cfg_.existence_sensor_sigma_m, sigma_chain,
+                                                                     mot_pos_var, sl.confidence, cfg_.mask_pixel_error_rate));
     return rc::make_membership(std::move(project), mm, f, cfg_.existence_sensor_sigma_m, sigma_chain, mot_pos_var,
                                sl.confidence);
 }
@@ -1120,6 +1162,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.plaus_fe_scale          = cfg_.plaus_fe_scale;
         p.plaus_height_prior_gain = cfg_.countable_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
         p.persistent = cfg_.lidar_measures_on_gated;   // persistent shared errors + class prior once (spec §7c.1–7c.2)
+        if (p.persistent) p.beam = beam_config_;       // the beam model of the persistent rays (spec 7c.8; built in the constructor)
         inst.ai2_belief = CountableBelief(s0, p);
         inst.ai2_initialized = true;
         std::print("[{}] cold-start state: cx={:.2f} cy={:.2f} H={:.2f} w={:.2f} h={:.2f} yaw={:.2f}\n",
@@ -1139,6 +1182,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     // EVERY call, stale ones included (aged and predict-only cycles add up). Flag off: nothing read, nothing integrated.
     inst.dbg_lidar_only = 0;
     inst.dbg_lidar_msum = 0.0f;
+    inst.beam_log.begin_cycle();   // spec 7c.8 a0: this cycle's beam staging log (the no-membership counter is cumulative)
     inst.dbg_rho_cam = 1.0f; inst.dbg_rho_L = 1.0f; inst.dbg_rho_chain = 1.0f;   // neutral: no update ⇒ no ρ applied
     inst.dbg_dphi_cam = 0.0f; inst.dbg_dz_cam = 0.0f;
     inst.dbg_ray_n = 0;
@@ -1243,11 +1287,13 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     //    empty, latent_inputs / stage_persistent are never called, and both branches below run exactly as before. ──
     // The camera's membership m(p) of THIS slice (extrinsic at the mask stamp); empty ⇒ unavailable.
     std::function<float(const Eigen::Vector3f&)> membership;
+    // Flag on: the persistent label of the same slice (spec 7c.8 a0), empty exactly when `membership` is.
+    rc::BeamLabel persistent_label;
     // Only with a staged sweep: the membership is consumed by the ray selection alone (final review M4; result-preserving).
     if (cfg_.lidar_measures_on_gated and lidar_channel_.has_sweep())
     {
         const rc::StageTimer t_mem(timing_ ? &timing_->membership : nullptr);
-        membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var);
+        membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var, &persistent_label);
     }
     // The latents' marginals (§7c.2): b_cam = the config floors + range lateral/size + the obliquity yaw cap (today's camera
     // fill WITHOUT chain and ego-motion); b_L = the config floors. e's marginal is Σ_pose, staged by stage_persistent (§7c.7).
@@ -1336,6 +1382,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             return false;
         }
         inst.frames_diverged = 0;
+        // Stated limit 1 (spec 7c.8): the rays the accepted θ refutes from behind (π > 0.99, e < −5c), a log only.
+        if (pre_belief.params().persistent) inst.beam_log.gap_rays = inst.ai2_belief.last_gap_rays();
         return true;
     };
 
@@ -1346,14 +1394,23 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // The select box is anchored on the slice's mask cloud (candidate ∪ residual), which is NOT fed to the engine (§7b).
         // No membership (flag off, no slice/camera/delivered size) or no usable rays ⇒ exactly today's predict.
         bool lidar_updated = false;
+        std::vector<Eigen::Vector3f> anchor;
+        if (cfg_.lidar_measures_on_gated)
+        {
+            anchor.reserve(static_cast<std::size_t>(npts));
+            anchor.insert(anchor.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+            anchor.insert(anchor.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+        }
+        // Spec 7c.8 a0 (owner 11-18): a cycle without membership stages no rays; it is only counted (nomem_cycle, or no sweep).
+        if (cfg_.lidar_measures_on_gated and not membership)
+        {
+            CountableFrame none;
+            lidar_channel_.feed_beam(inst, none, anchor, {});
+        }
         if (cfg_.lidar_measures_on_gated and membership)
         {
             CountableFrame frame;
             frame.lidar_only = true;
-            std::vector<Eigen::Vector3f> anchor;
-            anchor.reserve(static_cast<std::size_t>(npts));
-            anchor.insert(anchor.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
-            anchor.insert(anchor.end(), observation.residual_pts.begin(), observation.residual_pts.end());
             // §7b: the LiDAR-only frame's common mode = pose chain + ego-motion (no camera deprojection terms). Read only
             // by the per-frame Woodbury path; the persistent path takes the latents' inputs staged below.
             frame.chain_cov_xx   = inst.chain_cov_xx + mot_pos_var;
@@ -1365,7 +1422,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             {
                 const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
                 if (cfg_.label_dump_enabled and membership) dump_labels(inst, anchor, true);
-                lidar_channel_.feed(inst, frame, anchor, membership);
+                lidar_channel_.feed(inst, frame, anchor, membership);        // the instruments (endpoint-in-box subset)
+                lidar_channel_.feed_beam(inst, frame, anchor, persistent_label);   // the persistent path's rays (spec 7c.8 a0)
             }
             if (rays_usable(frame))
             {
@@ -1489,6 +1547,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
             if (cfg_.label_dump_enabled and membership) dump_labels(inst, frame.points, false);
             lidar_channel_.feed(inst, frame, frame.points, membership);
+            // Flag on (spec 7c.8 a0): the beam set by ray geometry; without membership nothing is staged (counted) and the
+            // camera update below runs as usual.
+            if (cfg_.lidar_measures_on_gated) lidar_channel_.feed_beam(inst, frame, frame.points, persistent_label);
         }
         inst.dbg_ray_n = ray_count(frame);
 
@@ -1699,7 +1760,13 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  // §7c.7 d: the damped GN of the belief's last persistent update — steps taken (accepted + rejected; 0 = no
                  // measured update), converged (1: an accepted θ step below the tolerance, or a rejected one whose undamped
                  // proposal is below it, ruling T14-4) or the cap ended it (0; with rays usually θ on a ray edge), the final λ.
-                 << "gn_it,gn_conv,gn_lambda\n";
+                 << "gn_it,gn_conv,gn_lambda,"
+                 // §7c.8 a0 (Task 20): the persistent path's beam staging THIS cycle — beam_staged = rays staged by ray geometry,
+                 // beam_nolabel = rays crossing the select box left out for lack of camera information, beam_kappa = the sweep
+                 // weight κ; nomem_cycle = 0 membership (or no mask cloud), 1 a sweep but no membership (rays skipped, counted),
+                 // 2 no fresh Helios sweep; gap_rays = rays with π > 0.99 and e < −5c after this cycle's accepted update (stated
+                 // limit 1). All 0 with the flag off.
+                 << "beam_staged,beam_nolabel,beam_kappa,nomem_cycle,gap_rays\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1775,7 +1842,9 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << ',' << inst.dbg_spose_sd(0) << ',' << inst.dbg_spose_sd(1) << ',' << inst.dbg_spose_sd(2)
                  << ',' << inst.dbg_chain_c(0) << ',' << inst.dbg_chain_c(1) << ',' << inst.dbg_chain_c(2)
                  << ',' << inst.ai2_belief.last_gn_iters() << ',' << (inst.ai2_belief.last_gn_converged() ? 1 : 0)
-                 << ',' << inst.ai2_belief.last_lambda() << '\n';
+                 << ',' << inst.ai2_belief.last_lambda()
+                 << ',' << inst.beam_log.staged << ',' << inst.beam_log.nolabel << ',' << inst.beam_log.kappa
+                 << ',' << inst.beam_log.nomem_cycle << ',' << inst.beam_log.gap_rays << '\n';
     }
     ai2_csv_.flush();
 }

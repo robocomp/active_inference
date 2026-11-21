@@ -50,8 +50,8 @@ inline void refuse_pre_countable_config(const ConfigLoader& cfg)
 
 // beam_config_problem (the smooth-beam config validation) lives in countable_beam_config.h (pure, shared with the belief).
 
-// The same check on a loaded config (sigma_sensor is not known at load: it comes from the graph later; the caller checks
-// again with it). Does nothing unless Model.LidarMeasuresOnGated is true. A missing MaskPixelErrorRate reads as 0 => refused.
+// The same check on a loaded config, at the Helios range sigma kHeliosRangeSigmaM (the value the fitter builds the beam density
+// with). Does nothing unless Model.LidarMeasuresOnGated is true. A missing MaskPixelErrorRate reads as 0 => refused.
 inline void refuse_bad_beam_config(const ConfigLoader& cfg)
 {
     const auto get = [&](const char* k, double def) {
@@ -61,7 +61,7 @@ inline void refuse_bad_beam_config(const ConfigLoader& cfg)
     try { on = cfg.exists("Model.LidarMeasuresOnGated") and cfg.get<bool>("Model.LidarMeasuresOnGated"); } catch (...) {}
     if (not on) return;
     if (const auto why = beam_config_problem(get("Model.MaskPixelErrorRate", 0.0), get("Model.LidarPrecision", 0.0),
-                                             get("Model.LidarRobustCM", 0.05)))
+                                             get("Model.LidarRobustCM", 0.05), kHeliosRangeSigmaM))
         throw CountableConfigError(std::format("config: {} — refusing to start\n", *why));
     if (const auto why = floor_sigma_problem(get("Model.FloorSigmaM", 0.0)))   // missing ⇒ 0 ⇒ refused (no default)
         throw CountableConfigError(std::format("config: {} — refusing to start\n", *why));

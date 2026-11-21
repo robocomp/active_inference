@@ -26,10 +26,9 @@ namespace rc {
 // Birth-footprint select box (rotation-agnostic radius + floor-referenced z-band). See countable_lidar_range_channel.h.
 CountableLidarRangeChannel::SelectBox CountableLidarRangeChannel::select_box() const
 {
-    const float m = cfg_.lidar_select_margin_m;
-    return { 0.5f * std::sqrt(cfg_.tracker_birth_width_m * cfg_.tracker_birth_width_m
-                            + cfg_.tracker_birth_depth_m * cfg_.tracker_birth_depth_m) + m,
-             -m, cfg_.tracker_birth_height_m + m };
+    const auto b = countable_select_box(cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, cfg_.tracker_birth_height_m,
+                                        cfg_.lidar_select_margin_m);
+    return {b.radius_xy, b.z_lo, b.z_hi};
 }
 
 Eigen::Vector3f CountableLidarRangeChannel::cloud_centroid(std::span<const Eigen::Vector3f> cloud)
@@ -154,6 +153,31 @@ void CountableLidarRangeChannel::feed(CountableInstance& inst, CountableFrame& f
         if (nbp > 0) frame.lidar_extra.push_back(std::move(bp));
         inst.dbg_lidar_bpearl_rays = nbp;
     }
+}
+
+// The persistent path's ray-set (spec 7c.8 a0): see the header. The staging itself is rc::stage_beam_cycle, shared with the tests.
+void CountableLidarRangeChannel::feed_beam(CountableInstance& inst, CountableFrame& frame,
+                                           std::span<const Eigen::Vector3f> anchor_cloud,
+                                           const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label) const
+{
+    const auto [rxy, z_lo, z_hi] = select_box();
+    BeamStaging st;
+    st.box = {rxy, z_lo, z_hi};
+    st.w = {cfg_.lidar_coverage_n0, cfg_.lidar_coverage_ang_power, cfg_.lidar_robust_c_m};
+    st.rho_max = static_cast<double>(rc::ai::LidarRays{}.max_range_m);   // ρ_max = the ray factor's max_range_m (6 m), spec (a)
+    st.sigma_s = static_cast<double>(cfg_.model_sigma_m);
+    st.room.floor = true;
+    st.room.floor_z = 0.0;
+    st.room.floor_sigma = cfg_.floor_sigma_m;
+    st.room.walls = room_walls_;
+    if (not beam_st_)
+    {
+        frame.beam = rc::ai::beam::BeamRays{};   // no beam density: the fitter did not build a BeamConfig (flag off)
+        return;
+    }
+    st.st = *beam_st_;
+    const bool sweep = lidar_have_sweep_ and not lidar_sweep_room_.empty();
+    stage_beam_cycle(sweep ? &lidar_sweep_room_ : nullptr, lidar_origin_room_, anchor_cloud, st, label, frame.beam, inst.beam_log);
 }
 
 }  // namespace rc

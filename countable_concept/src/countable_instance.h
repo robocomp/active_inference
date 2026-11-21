@@ -19,6 +19,7 @@
 
 #include "countable_model.h"        // CountableModel / CountableState
 #include "countable_belief.h"       // AI2 full-covariance belief (COUNTABLE.md)
+#include "countable_beam_staging.h" // rc::BeamLog (lidar-measures §7c.8 a0)
 #include "countable_viewpoint.h"    // rc::ViewpointPath (lidar-measures §7c.2: ρ from odometry)
 #include "countable_class_evidence.h"   // class factor + existence_product
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
@@ -86,6 +87,9 @@ struct CountableInstance
     float dbg_rho_cam = 1.0f, dbg_rho_L = 1.0f, dbg_rho_chain = 1.0f;
     float dbg_dphi_cam = 0.0f, dbg_dz_cam = 0.0f;
     int   dbg_ray_n = 0;                       // rays in the frame the belief was updated with this cycle
+    // The persistent path's beam staging this cycle (spec 7c.8 a0; ai2_log beam_staged, beam_nolabel, beam_kappa, nomem_cycle,
+    // gap_rays) and the cumulative count of cycles without membership. begin_cycle() each run_inference call.
+    rc::BeamLog beam_log;
     float dbg_itr_cam = 0.0f, dbg_itr_L = 0.0f;   // trace of each channel's information I_ch at the last accepted update
     bool  dbg_rhoL_absent_logged = false;      // "no Helios SensorModel ⇒ ρ_L = 1" printed once per instance
     // e's inputs at the last staged frame (logged every cycle, also while parked): the correction c (x, y, ψ) ρ_chain used,

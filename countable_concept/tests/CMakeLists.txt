@@ -193,3 +193,12 @@ target_include_directories(beam_belief_test PRIVATE ../src ../../common ../../co
 target_compile_options(beam_belief_test PRIVATE -O2)
 target_link_libraries(beam_belief_test PRIVATE Eigen3::Eigen)
 add_test(NAME beam_belief_test COMMAND beam_belief_test)
+
+# The persistent path's rays as the fitter stages them (spec 7c.8 Pass "live staging"): a rendered mask, the agent's
+# make_persistent_label and stage_beam_cycle (countable_beam_staging.h). Run: ./beam_live_staging_test
+add_executable(beam_live_staging_test beam_live_staging_test.cpp ../src/countable_belief.cpp ../src/countable_viewpoint.cpp
+               ../src/countable_mask_membership.cpp)
+target_include_directories(beam_live_staging_test PRIVATE ../src ../../common ../../common/media_transport ${OpenCV_INCLUDE_DIRS})
+target_compile_options(beam_live_staging_test PRIVATE -O2)
+target_link_libraries(beam_live_staging_test PRIVATE Eigen3::Eigen ${OpenCV_LIBS})
+add_test(NAME beam_live_staging_test COMMAND beam_live_staging_test)

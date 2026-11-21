@@ -31,6 +31,13 @@ Conventions (printed again in the header of every report):
       gn               = over updated rows, the gn_it distribution and the share of gn_conv = 0, split camera-only
                          (Itr_L == 0) vs with rays (Itr_L > 0) [info; with rays gn_conv = 0 is usually theta on a ray edge,
                          ruling T14-7; on camera-only rows it should be ~0, final review M6].
+  * beam (spec 7c.8 Pass "Live11", per instance; n/a on logs before beam_staged ... gap_rays) [info]:
+      staged           = beam_staged over rows that staged rays (median / max): rays staged by ray geometry;
+      nolabel          = beam_nolabel summed and its median over those rows: rays left out for lack of camera information;
+      nomem            = rows with nomem_cycle == 1 (a sweep but no membership: rays skipped) and the longest run of
+                         consecutive such rows; nosweep = rows with nomem_cycle == 2 (no fresh Helios sweep), split gated /
+                         admissible (settles Task 15's question: do GATED cycles lack membership or lack a sweep);
+      gap rays         = gap_rays (pi > 0.99, e < -5c after the accepted update, stated limit 1): summed, max, rows > 0.
 Numbers are read with float() on the CSV text (written with '.'); output uses explicit format specs; no locale module.
 """
 import argparse, bisect, csv, math, os, statistics, sys
@@ -38,6 +45,7 @@ import argparse, bisect, csv, math, os, statistics, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCENE = os.path.join(HERE, 'scene_threerooms.csv')
 CLASSES = ('bed', 'nightstand', 'toilet')
+BEAM_COLS = ('beam_staged', 'beam_nolabel', 'beam_kappa', 'nomem_cycle', 'gap_rays')
 NEW_COLS = ('lidar_only', 'lidar_msum', 'rho_cam', 'rho_L', 'rho_chain', 'dphi_cam', 'dz_cam',
             'bcam_H', 'bL_H', 'sbcam_H', 'sbL_H', 'ray_n', 'Itr_cam', 'Itr_L')
 # The localisation latent on (x, y): e_x, e_y (spec 7c.7, the robot's pose error) or, in logs before it, bchain_x, bchain_y.
@@ -296,6 +304,32 @@ def live10_checks(rows, gtpose, proto, proto_ts):
     return m
 
 
+def beam_checks(rows):
+    """The beam-staging columns of one instance's rows (see the module docstring). {} when the log predates them."""
+    if not rows or not all(k in rows[0] for k in BEAM_COLS): return {}
+    m = {}
+    S = [r for r in rows if r['beam_staged'] > 0]
+    m['n_staged_rows'] = len(S)
+    m['staged_med'] = med([r['beam_staged'] for r in S])
+    m['staged_max'] = max((r['beam_staged'] for r in S), default=float('nan'))
+    m['nolabel_sum'] = sum(r['beam_nolabel'] for r in rows)
+    m['nolabel_med'] = med([r['beam_nolabel'] for r in S])
+    m['kappa_med'] = med([r['beam_kappa'] for r in S])
+    run, best = 0, 0
+    for r in rows:
+        run = run + 1 if r['nomem_cycle'] == 1 else 0
+        best = max(best, run)
+    m['nomem'] = sum(1 for r in rows if r['nomem_cycle'] == 1)
+    m['nomem_run'] = best
+    m['nomem_gated'] = sum(1 for r in rows if r['nomem_cycle'] == 1 and r.get('gated', 0) == 1)
+    m['nosweep'] = sum(1 for r in rows if r['nomem_cycle'] == 2)
+    m['nosweep_gated'] = sum(1 for r in rows if r['nomem_cycle'] == 2 and r.get('gated', 0) == 1)
+    m['gap_sum'] = sum(r['gap_rays'] for r in rows)
+    m['gap_max'] = max((r['gap_rays'] for r in rows), default=0)
+    m['gap_rows'] = sum(1 for r in rows if r['gap_rays'] > 0)
+    return m
+
+
 def is_fresh(r): return r.get('gated', 0) == 0 and not (r.get('lidar_only', 0) == 1)
 
 
@@ -444,6 +478,7 @@ def score_run(run, gtobjs, walls, overrides, pin, shift):
                 m['dphi_parked'] = med([abs(r['dphi_cam']) for r in pk]) if pk and 'dphi_cam' in pk[0] else float('nan')
                 m['dz_parked'] = med([abs(r['dz_cam']) for r in pk]) if pk and 'dz_cam' in pk[0] else float('nan')
             m['live10'] = live10_checks(rows, gtpose, proto, proto_ts)
+            m['beam'] = beam_checks(rows)
             if m['live10'] and not proto: notes.append('%s: no proto_room.csv sigma: Sigma_pose check n/a' % node)
             # shift: final size vs the truth
             tw_, th_ = true_dims(g, last.get('yaw', 0.0) + rot)
@@ -500,6 +535,15 @@ def report(label, res, notes, shift):
                     nm, L['gn_%s_n' % tag], '/'.join(fmt(x, '.0f') for x in q), fmt(L['gn_%s_unconv' % tag], '.3f')))
         else:
             P('  live10 (|e| <= 3 sigma, Sigma_pose vs proto_room, gn_it / gn_conv): n/a (columns absent)  [info]')
+        B = m.get('beam') or {}
+        if B:
+            P('  beam: staged rows %d, staged med %s max %s, kappa med %s ; nolabel sum %d med %s ; nomem rows %d (gated %d) longest run %d ; '
+              'no-sweep rows %d (gated %d) ; gap rays sum %d max %d rows %d  [info]' % (
+                B['n_staged_rows'], fmt(B['staged_med'], '.0f'), fmt(B['staged_max'], '.0f'), fmt(B['kappa_med'], '.3f'),
+                B['nolabel_sum'], fmt(B['nolabel_med'], '.0f'), B['nomem'], B['nomem_gated'], B['nomem_run'], B['nosweep'],
+                B['nosweep_gated'], B['gap_sum'], B['gap_max'], B['gap_rows']))
+        else:
+            P('  beam (staged / nolabel / nomem / gap rays): n/a (columns absent)  [info]')
         if shift:
             for k, nm in (('w_err', 'w'), ('h_err', 'h'), ('H_err', 'H')):
                 P('  shift: final %s err vs TRUE size %+.3f m (tol %.2f; the shifted prior would read +%.2f)   %s' % (
