@@ -573,9 +573,9 @@ for _ in range(50):
     mu_ += k_mu * (P_o * e_o - P_p * e_p)
     a_ += -k_a * P_o * e_o * dt_
     s_ += a_ * dt_
-    hist.append((s_, mu_, o_, a_))
+    hist.append((s_, mu_, o_, a_, 0.5 * P_o * (o_ - mu_) ** 2 + 0.5 * P_p * (mu_ - m_pref) ** 2))
 hist = np.array(hist); tt = np.arange(len(hist)) * dt_
-fig, (ax, axb) = plt.subplots(2, 1, figsize=(5.2, 3.9), sharex=True, gridspec_kw={"height_ratios": (2.4, 1)})
+fig, (ax, axb, axf) = plt.subplots(3, 1, figsize=(5.2, 4.6), sharex=True, gridspec_kw={"height_ratios": (2.4, 1, 1)})
 ax.axhline(m_pref, color=COOL, ls="--", lw=1.5); ax.text(4.95, m_pref - 0.16, "goal = prior mean: 1.0 m", color=COOL, ha="right", va="top", fontsize=10)
 ax.plot(tt, hist[:, 2], ".", color=GOOD, ms=4, label=r"reading $o$")
 ax.plot(tt, hist[:, 0], color="0.3", lw=2, label=r"true distance $s$")
@@ -584,7 +584,9 @@ ax.annotate("starts 2.6 m\nfrom the wall", (0.1, 2.55), (0.9, 2.45), fontsize=10
 ax.annotate("drives in until the reading\nagrees with the belief", (1.1, 1.05), (1.6, 1.6), fontsize=10, arrowprops=dict(arrowstyle="->", lw=0.8))
 ax.set_ylabel("distance (m)", fontsize=10); ax.legend(loc="upper right", fontsize=9, frameon=False); ax.set_ylim(0.6, 2.85)
 axb.plot(tt, hist[:, 3], color="0.45", lw=2); axb.axhline(0, color="black", lw=0.5)
-axb.set_ylabel("speed $a$\n(m/s)", fontsize=10); axb.set_xlabel("time (s)", fontsize=10)
+axb.set_ylabel("speed $a$\n(m/s)", fontsize=10)
+axf.plot(tt, hist[:, 4], color=ACCENT, lw=2); axf.set_ylabel("$F$", fontsize=10); axf.set_xlabel("time (s)", fontsize=10)
+axf.text(4.95, 0.6 * hist[:, 4].max(), "perception and action lower the same $F$", ha="right", fontsize=9, color="0.4")
 axb.text(4.95, -1.5, "negative: towards the wall", ha="right", fontsize=9, color="0.4")
 fig.tight_layout(h_pad=0.3); fig.savefig(OUT / "d1_ai_loop.pdf"); plt.close(fig)
 print(f"ai loop: s(5 s) = {hist[-1,0]:.2f}, mu = {hist[-1,1]:.2f}")
