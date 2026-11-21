@@ -47,3 +47,8 @@ problem. Strike = what I propose if the owner rejects it.
    or drop the term with the walls.
 5. **#4 creep:** add phase jitter to the fixture and keep 2 mm as a drift test, separate from the aliasing statement.
 6. **#5:** restore 1 mm (passes). **#1:** restore a cycle-time unit bound at measured + margin.
+
+## Owner verdict (11-21)
+
+"Limits are ok": every restated bound in §A and every change in §B is accepted as it stands. The six
+re-examinations are not required before Task 20; they stay listed here as optional follow-ups.
