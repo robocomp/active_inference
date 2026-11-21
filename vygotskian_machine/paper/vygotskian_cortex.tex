@@ -49,10 +49,10 @@ apartment.
         0 & robot (self) & body, sensor mounts, pose & calibration, self-calibration & implemented \\ \hline
         1 & room(s) & layout of each room, the robot's place in it, the doors that join rooms & authored generative model, fitted online; spatial memory & implemented \\ \hline
         2 & objects & per instance: class, pose, extent, existence & authored generative models, fitted online & implemented \\ \hline
-        3 & meta-objects (aggregates) & arrangements: a ring of chairs around a table, the rectilinear frame of a kitchen & authored schemas & implemented (the kitchen's priors not yet sent down) \\ \hline
+        3 & metaconcepts (aggregates) & arrangements: a ring of chairs around a table, the rectilinear frame of a kitchen & authored schemas & implemented (the kitchen's priors not yet sent down) \\ \hline
         4 & cultural abstraction & the function of a room (kitchen, dining, bedroom, \ldots) & \textbf{culture: the VLM}, weighted by measured reliability and replaced by counts & \textbf{added by this paper} (Section~\ref{sec:lang_hierarchy:culture}) \\ \hline
     \end{tabular}
-    \caption{The probabilistic belief hierarchy. Levels 0--3 are \cortex{} as it exists; level 4 is the addition of this paper.}
+    \caption{The probabilistic belief hierarchy. Levels 0--3 are \cortex{} as it exists, and level 4 is the addition of this paper.}
     \label{tab:lh_levels}
 \end{table}
 

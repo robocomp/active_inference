@@ -40,11 +40,13 @@
 \begin{document}
 \maketitle
 \begin{abstract}
-We propose a robot architecture inspired by Vygotsky's account of how higher mental functions develop, first between
-people and then within the individual. The robot is built on \cortex{}, an existing architecture in which Active
-Inference agents maintain a probabilistic hierarchy of beliefs about the robot, its rooms, the objects in them and
-aggregates of objects, and in which a language agent already plans and talks with a person. We add two things. The
-first is an inner voice, a loop in which a vision-language model (VLM) proposes questions and tests and only the
+We extend \cortex{}, an existing architecture in which Active Inference agents maintain a probabilistic hierarchy of
+beliefs about the robot, its rooms, the objects in them and aggregates of objects, and in which a language agent
+already plans and talks with a person, with a pretrained vision-language model (VLM) that stays frozen. Because the
+robot cannot change the model, the knowledge it carries remains outside the robot and becomes the robot's own only
+through its experience, which is the course Vygotsky described for higher mental functions, first between people and
+then within the individual. We use his account to organise the design, not as a theory to be modelled. We add two things. The
+first is an inner voice, a loop in which the VLM proposes questions and tests and only the
 robot's perception changes the answers, called on by a demand signal built from the surprise that the agents report.
 The second is a cultural plane, in which the VLM supplies a level-4 hypothesis about what each room is for, writes
 missions whose steps predict their own belief outcomes, and imagines on the robot's own models while demand is low.
@@ -60,6 +62,6 @@ plans is selected by its own uncertainty rather than by matching past requests.
 \input{vygotskian_cultural_plane}
 \input{vygotskian_experiments}
 \input{vygotskian_conclusion}
-\renewcommand*{\bibfont}{\footnotesize\setlength{\parskip}{0pt}}\setlength{\bibitemsep}{1pt}
+\renewcommand*{\bibfont}{\footnotesize\setlength{\parskip}{0pt}}\setlength{\bibitemsep}{0pt}
 \printbibliography
 \end{document}

@@ -13,7 +13,7 @@
 We present the experiments in the order in which the machine is built, and each must succeed before the next
 begins. Each new piece is first run read-only, logging what it would have done, and is allowed to influence the
 robot only when that log scores well. Table~\ref{tab:exp_overview} assigns every prediction of
-Sections~\ref{sec:inner_speech:predictions} and~\ref{sec:lang_hierarchy:predictions} to exactly one experiment.
+Sections~\ref{sec:inner_speech:predictions} and~\ref{sec:lang_hierarchy:predictions} to an experiment, and L1 to two.
 
 \begin{table}[!htb]
     \centering
@@ -50,7 +50,10 @@ conditional on it, and E7 repeats its main comparison with a second VLM. Each si
 varying the start pose, the movable objects and the timing of seeded events. We report means with 95\% bootstrap
 intervals and paired tests on identical seeds. The novelty of a goal, fixed before any data are collected, is the
 number of object classes, mission operations and rooms in a reference solution that occur in no goal the robot has
-already performed. All pass criteria below are likewise fixed before any run.
+already performed. In simulation, a scripted person states room functions, approves missions and answers
+questions from the simulator's ground truth. Unless a prediction states its own number, it holds when the 95\%
+interval of the paired difference excludes zero in the predicted direction, and ``match'' means that the interval lies
+within $\pm 10\%$ of the machine's value. We report the power of each ``match'' on 10 paired seeds (\result{--}\%). These criteria are fixed before any run.
 
 \subsection{E1: Culture elicited from the VLM}
 \label{sec:experiments:e1}
@@ -96,14 +99,15 @@ each $\Lambda_f$ should leave its prior log-odds only as the room is explored (F
 \subsection{E3: The function agent, live and read-only}
 \label{sec:experiments:e3}
 
-The level-4 agent runs live from scratch, publishing nothing, and is scored as in E2. In the three-room apartment the
-refrigerator is removed, which weakens the evidence through its kitchen aggregate, and L1 requires the kitchen
+The level-4 agent runs live and read-only, scored as in E2. In the three-room apartment the refrigerator is removed, which weakens the evidence through its kitchen aggregate, and L1 requires the kitchen
 hypothesis to weaken without disappearing ($\Lambda_{\text{kitchen}}$ \result{--} with it, \result{--} without, prior
 \result{--}); a collapse would mean too strong a prior, and the E1 priors would be revised. In the procedural
 apartments, a refrigerator placed alone in a bedroom belongs to no aggregate and counts under its class, and we
 predict that the bedroom hypothesis survives while the kitchen hypothesis for that room rises only as far as one
-diagnostic object supports. In a second condition the elicited priors of the kitchen and the bathroom are exchanged.
-For both we report how many person-confirmed rooms the counts need to override the wrong prior, and whether posteriors
+diagnostic object supports. A bedroom whose bed is removed tests the expected-but-absent term on a class that belongs to no aggregate, and the
+bedroom evidence should fall as the room is explored, and only as far as the search was thorough. In a further
+condition the elicited priors of the kitchen and the bathroom are exchanged.
+For the misplaced refrigerator and the exchanged priors we report how many person-confirmed rooms the counts need to override the wrong prior, and whether posteriors
 with and without the VLM's pseudo-counts then agree on held-out rooms (\result{--}).
 
 \subsection{E4: Missions over beliefs}
@@ -114,8 +118,8 @@ Section~\ref{sec:lang_hierarchy:sequencing}, and L2 holds if search is shorter i
 fewer objects remain unseen in rooms counted as explored (\result{--} versus \result{--}). Divergences are then seeded
 by closing a door the plan relies on, moving an object or leaving a room unexplored, while the demand signal drives
 nothing. For L3 we report the fraction caught before any step fails (\result{--}\%), the median lead time
-(\result{--}~s) and the false alarms, entries into focused mode per hour of missions with no seeded divergence
-(\result{--}). L3 holds if at least 70\% are caught before failure with fewer than one false alarm per hour.
+(\result{--}~s) and the false alarms, entries into focused mode per hour without a seeded divergence
+(\result{--}). L3 holds if at least 70\% are caught with fewer than one false alarm per hour.
 
 \subsection{E5: The inner voice}
 \label{sec:experiments:e5}
@@ -124,12 +128,11 @@ With the voice enabled, known objects are moved and unfamiliar ones introduced. 
 alone and with \cortex{} plus a language-free look policy choosing views by expected information gain under the same
 motion and time budget, which separates asking from looking more. We report the unexplained residual mass per room
 (P1: \result{--}, \result{--} and \result{--}), the proposer's effective weight as confirmed answers accumulate (P2),
-inner questions per hour over repeated visits with habituation disabled (P4: \result{--} to \result{--}), and
+inner questions per hour over repeated visits with habituation to repeated surprise disabled (P4: \result{--} to \result{--}), and
 questions outside the built-in models answered in agreement with ground truth, against the fixed hypothesis set (P6:
 \result{--} versus \result{--}). For L7 the apartment gains a door left ajar that can be pushed open and a glass panel
-that looks like one but does not move, which seeds a false proposal. We report trials to a decision, how often the
-false one is chosen against a machine that accepts proposals without trial, and whether the confirmed one is then used
-without the VLM (\result{--} trials, \result{--} versus \result{--} false choices).
+that looks like one but does not move, which seeds a false proposal (simulation only). We report trials to a decision, false choices against a machine that
+accepts proposals untried, and later use without the VLM (\result{--} trials, \result{--} versus \result{--}).
 
 \subsection{E6: Imagination}
 \label{sec:experiments:e6}
@@ -139,39 +142,39 @@ copy of the world (Section~\ref{sec:lang_hierarchy:imagination}), and each imagi
 observation arrives (\result{--}). After a surprise seeded mid-mission we measure the latency to a validated plan and
 the views needed to confirm an expected object, with and without plans prepared at low demand (L4, P5: \result{--}~s
 versus \result{--}~s, \result{--} versus \result{--} views). For L5 the kitchen model is re-created without its tall
-tier, and we report whether and after how many replay episodes the tier is proposed.
+tier, and L5 holds if the tier is proposed in at least 8 of 10 seeds (\result{--} replay episodes).
 
 \subsection{E7: The scaffold withdrawn}
 \label{sec:experiments:e7}
 
 The robot lives in the procedural apartments over repeated sessions with recurring and novel tasks. We report the
-VLM's effective weight, VLM calls for planning, separately from calls to understand the person, while success holds
+VLM's effective weight, VLM calls for planning made outside wandering, separately from calls to understand the person, while success holds
 (L6: \result{--} to \result{--} per hour), and the rise of VLM use when doors usually open are shut, unfamiliar
 objects appear and goals are given in fewer words (P8). For P9, requests of equal size are assembled by the robot's
-uncertainty, by matching past requests and at random, and P9 holds if the first gives higher answer accuracy and task
+uncertainty, by input matching (the most similar past request of the same goal type, by overlap of classes, rooms and steps)
+and at random as a sanity check, and P9 holds if the first gives higher answer accuracy and task
 success (\result{--} versus \result{--} and \result{--}), settled items are wrong in fewer than 5\% of cases
 (\result{--}), and a silently broken assumption puts its step back into the request before the step fails
 (\result{--}). Detectors retrained only on confirmed answers should lose false negatives (P3: \result{--} to
 \result{--}).
 
-For P7 the format-only and permuted-names controls of Section~\ref{sec:inner_speech:predictions} run on the same
-seeds, with images withheld and the person's words passed through the same substitution, and the machine is also run
-without images so that a gap cannot come from vision. P7 holds if both controls match the image-free machine on
-recurring tasks and fall behind in proportion to novelty (Figure~\result{--}), permuted names doing worse than
-nonsense tokens on novel tasks until the counts override them. Three controls isolate the rest of the design. A VLM
-that writes beliefs directly should produce more wrong beliefs after a wrong proposal, frozen counts and habits should
-show no fall in the VLM's effective weight or request size, and hand-written or uniform priors should label rooms more
-slowly on first visits. Finally, an apartment is changed after a habit is compiled, by moving the dining set or
-locking a door, and the habit's monitored assumptions should detect the change before it fails in at least 8 of 10
+For P7 the format-only and permuted-names controls of Section~\ref{sec:inner_speech:library} run on the same
+seeds, with images withheld and the person's words passed through the same substitution. P7 holds if both controls
+match the machine, also run without images, on
+recurring tasks and the slope of their success gap on novelty has a 95\% interval above zero for both
+(Figure~\result{--}), permuted names doing worse than
+nonsense tokens on novel tasks until the counts override them. A VLM writing beliefs directly should leave more wrong
+beliefs after a wrong proposal, counts and $\beta$ held fixed should leave the VLM's weight unchanged (a sanity check), and
+hand-written or uniform priors should label rooms more slowly on first visits. Finally, the dining set is moved or a door
+locked after a habit is compiled, and the habit's monitored assumptions should catch it before it fails in at least 8 of 10
 seeds (\result{--}).
 
-\subsection{What would count against the machine}
+\paragraph{What would count against the machine.}
 \label{sec:experiments:against}
 
-The VLM supplies no usable culture if its priors in E1 are no better calibrated than the constant prior, and culture
-does not belong at level 4 in its present form if E2 or E3 fails; if the image baseline labels rooms as well as the
-function agent, the hierarchy adds nothing to room labelling. The demand signal has no useful early input if E4 misses
-the criterion, asking adds nothing to looking if the matched look policy resolves as much in E5, and imagination does
-not justify its cost if E6 shows no gain. If the controls keep up on novel tasks in E7, the machine works but is not
-Vygotskian, because its gains come from language rather than culture, and if uncertainty-selected requests do no
-better than input-matched ones at equal size, the robot's uncertainty adds nothing to plan reuse.
+The VLM supplies no usable culture if its E1 priors are no better calibrated than the constant prior, and culture
+does not belong at level 4 if E2 or E3 fails; if the image baseline labels rooms as well as the function agent, the
+hierarchy adds nothing to labelling. The demand signal fails if E4 misses, asking adds nothing to
+looking if the matched look policy does as well in E5, and imagination is not worth its cost if E6 shows no gain. If
+the controls keep up on novel tasks in E7, the machine works but is not Vygotskian, and if uncertainty-selected
+requests do no better than input-matched ones, uncertainty adds nothing to plan reuse.

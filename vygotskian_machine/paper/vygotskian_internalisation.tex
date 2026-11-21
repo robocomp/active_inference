@@ -12,10 +12,10 @@
 The language agent of Section~\ref{sec:cortex} uses language in one direction only. A person speaks, and the agent
 turns the request into commands for the controller. In this section we turn that capability inward, which is the
 internalisation step of the Vygotskian machine (Section~\ref{sec:vygotskian}). We argue that a language model
-embedded in an Active Inference architecture can play the role that inner speech plays in human cognition, as a
+embedded in an Active Inference architecture can serve the robot as inner speech serves a person, as a
 serial and compositional medium in which the agent poses questions to itself, rehearses plans and replays its past
 \cite{vygotsky1986thought, aldersonday2015inner}. On the developmental route, inner speech is outer speech turned
-inward, whereas on the internalist route it comes first and communication later. Large language models follow the
+inward, whereas on the internalist route it comes first and communication later. Large language models resemble the
 developmental route, since they are trained on communicative text and yet reason better when they address
 intermediate steps to themselves \cite{wei2022chain}. We present the voice together with the constraints that keep
 it from becoming a source of confabulated beliefs.
@@ -173,7 +173,7 @@ and offline replay do \cite{buckner2008brain, mattar2018prioritized}. Because hu
 events as perceived ones \cite{johnson1993source}, everything it produces is kept in a separate imagined store, with
 an \emph{imagined} provenance, and enters learning only as a hypothesis to be tested.
 
-\paragraph{The return to reality.}
+\paragraph{Returning from wandering.}
 A surprise suspends wandering and devotes the voice to the event. Where the automatic level could only retry or
 stop, the voice re-interprets the scene, replans or asks a person, and it directs attention by orienting sensors or
 by passing a spatial prior of bounded weight that later views can remove. Each resolved surprise is also a labelled
@@ -184,7 +184,8 @@ ordinary operating state.
 \subsection{Relation to chain-of-thought reasoning}
 \label{sec:inner_speech:cot}
 
-Chain-of-thought is inner speech that is convergent and ungrounded. Our focused loop interleaves reasoning with
+Chain-of-thought resembles inner speech, but it converges on one answer and is not checked against perception. Our
+focused loop interleaves reasoning with
 action and observation \cite{yao2023react}, extended thinking belongs to the wandering mode, and because generated
 traces do not always reflect the computation behind an answer \cite{turpin2023language}, the record of the robot's
 reasoning is its hypotheses, predictions, observations and updates, not the text.
@@ -196,7 +197,7 @@ The question loop reduces uncertainty where surprise occurred, so the robot's ow
 decaying novelty term \cite{schwartenbeck2019curiosity} must correct. Every confirmed answer is also a labelled example. Over days it updates the priors of the long-term
 memories, over weeks it retrains detector and concept likelihoods, and more slowly, recurrent ``unknown'' answers are
 named by the voice and proposed as a new concept. Loops that resolve the same way are compiled into habits, so the
-number of language-model calls per hour should fall as competence grows.
+number of language-model calls per hour made outside wandering should fall.
 
 \subsection{Why a language model: generation versus evaluation}
 \label{sec:inner_speech:why_lm}
@@ -226,10 +227,10 @@ built, which makes the contribution of culture an experimental question.
 To show that the machine needs culture and not merely a language-like format, we compare it with machines that keep
 the format and lose or corrupt the culture. Section~\ref{sec:experiments} uses two such controls, the format-only
 control, in which every class and function name is replaced by a nonsense token, and the permuted-names control, in
-which real names are exchanged consistently. The machine is also run without images, so that a difference cannot come
-from vision. A stronger control would build its language from the robot's
+which real names are exchanged consistently. A stronger control would build its language from the robot's
 experience alone, by library learning as in DreamCoder \cite{ellis2021dreamcoder}, and we leave it to later work
-because it is a substantial system in its own right.
+because it is a substantial system in its own right. A control can also fail only because nonsense tokens make an
+unfamiliar prompt, and the permuted-names control, whose prompts are well formed, guards against that reading.
 
 \subsection{Testable predictions}
 \label{sec:inner_speech:predictions}
@@ -239,18 +240,18 @@ compares policies inside one closed loop with the body, sensors and environment 
 \begin{enumerate}[label=\textbf{P\arabic*}]
     \item The unexplained residual mass per room decreases faster with the focused loop than without it.
     \item The proposer's effective weight in \eqref{eq:inner_prior} falls as confirmed answers accumulate, while
-    answer accuracy holds.
+    answer accuracy matches its earlier value.
     \item Detector false-negative rates fall after retraining on confirmed answers.
-    \item Inner questions per hour decrease over repeated exposure to the same environment while answer accuracy is
-    maintained.
+    \item Inner questions per hour decrease over repeated exposure to the same environment while answer accuracy
+    matches its earlier value.
     \item Plans prepared while wandering reduce the latency from surprise to a validated response.
     \item With the proposer replaced by a fixed hypothesis set (the existing classes and ``unknown''), fewer
     questions outside the built-in models are resolved.
     \item \emph{Culture against format.} The format-only and permuted-names controls match the machine without
     images on recurring goals and fall further behind the more novel a goal is, with novelty fixed in advance. The
     permuted-names control does worse than the format-only control on novel goals until the counts override it.
-    \item \emph{Private speech.} Language-model calls rise when tasks are made harder or novel and fall with
-    repetition, while task success is maintained \cite{berk1992children}.
+    \item \emph{Private speech.} Language-model calls outside wandering rise when tasks are made harder or novel and
+    fall with repetition, while task success matches its earlier value \cite{berk1992children}.
     \item \emph{Plan reuse selected by uncertainty.} At equal request size, requests chosen by the robot's
     uncertainty give higher answer accuracy and task success than requests chosen by matching past requests or at
     random. Items stated as settled are wrong in fewer than 5\% of cases, and when an assumption is silently broken,
@@ -264,7 +265,9 @@ input matching, which is the sense in which its requests become abbreviated like
 \subsection{Limitations}
 \label{sec:inner_speech:limitations}
 
-The demand signal is only as good as the agents' predictive distributions. One language model serves the person and both loops, which bounds offline reasoning on a busy
+The demand signal is only as good as the agents' predictive distributions, and because it averages over the
+monitored observations, one agent's surprise is diluted as agents are added, so the thresholds must be set again
+when the set of agents changes. One language model serves the person and both loops, which bounds offline reasoning on a busy
 robot. The estimate $\beta_x$ is learned only from confirmed answers, which over-represents questions that a person or
 a built-in model can settle, and the format-only control may leave the model able to recognise a scene from its
 structure. Finally, the analogy with human inner speech is functional rather than mechanistic.

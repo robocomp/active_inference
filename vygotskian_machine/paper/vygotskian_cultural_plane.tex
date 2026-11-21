@@ -17,7 +17,7 @@
 
 In this section we turn to the plane on which, according to Vygotsky, every higher function first appears, namely
 the social and cultural plane. For the robot, the vision-language model (VLM) plays the role of \emph{culture}, an
-external store of common-sense knowledge that the robot inherits rather than acquires \cite{clark1998extended}. The
+external store of common-sense knowledge that the robot consults \cite{clark1998extended}. The
 person living with the robot is the second source of culture, and their answers are the most valuable evidence the
 robot receives, entering the counts of \eqref{eq:lh_beta_prior} and the habits of \eqref{eq:lh_habit}. We connect the
 VLM to the belief hierarchy in three roles, which we call culture, sequencing and imagination
@@ -35,7 +35,7 @@ when a new room is entered, for sequencing in focused mode, and for imagination 
         Sequencing  & missions whose steps predict belief changes & the gate, the controller, the belief dynamics \\ \hline
         Imagination & which questions to put to the robot's models & the models, on an imagined copy of the world \\ \hline
     \end{tabular}
-    \caption{The three roles. In each, the language model proposes and a generative model disposes.}
+    \caption{The three roles of the language model and the generative model that tests each proposal.}
     \label{tab:lh_roles}
 \end{table}
 
@@ -47,7 +47,7 @@ propagation \cite{minka2001expectation},
     q_{\setminus i}(\theta) \;\propto\; \frac{q(\theta)}{m_i(\theta)}.
     \label{eq:lh_cavity}
 \end{equation}
-Here $\theta$ are the parameters of the arrangement (for a kitchen, its axis, worktop height and carcass depth),
+Here $\theta$ are the parameters of the arrangement (for a kitchen, its axis, worktop height and cabinet depth),
 $q(\theta)$ is their posterior given all members, and $m_i(\theta)$ is the factor contributed by the posterior of
 member $i$, so that a member is never asked to agree with its own evidence.
 
@@ -78,12 +78,11 @@ false, we take the expected log-likelihood ratio under the probability $p_c$ tha
 \end{equation}
 For a class unit, $p_i$ is the existence probability of unbound instance $i$ in $r$, the product runs over the
 unbound instances observed at least once, and $p_c = 0$ when there is none. For an aggregate unit, $\pi_{cf}$ is the
-probability that an aggregate of that schema is present given $f$, $d_c$ is the detectability of its most detectable
-member, and $p_c$ is its existence probability, given by its log Bayes factor. The prior log-odds of $f$ and the
-probabilities $\pi_{c\bar f}$ are elicited from the VLM like $\pi_{cf}$. Because functions are not exclusive,
-$\pi_{c\bar f}$ is then replaced by counts over rooms that a person confirmed do not serve $f$. Put simply, a unit that was found speaks for the functions that expect it, and a unit looked for and not
-found speaks against them in proportion to how thoroughly it was looked for. The sum is exact when presence is
-certain and otherwise approximates the log marginal likelihood. Because $p_i$ does not depend on the search for other
+probability that an aggregate of that schema is present given $f$, $d_c$ is approximated by the detectability of its most
+detectable member, which overstates it because an aggregate needs several members to be seen, and $p_c$ is its existence probability, given by its log Bayes factor. The prior log-odds of $f$ and the
+probabilities $\pi_{c\bar f}$ are elicited from the VLM like $\pi_{cf}$. Once rooms have been confirmed,
+$\pi_{c\bar f}$, like $\pi_{cf}$, is replaced by counts over rooms that a person confirmed do not serve $f$. Put simply, a unit that was found speaks for the functions that expect it, and a unit looked for and not
+found speaks against them in proportion to how thoroughly it was looked for. The sum is exact when every $p_c$ is 0 or 1 and otherwise approximates the log marginal likelihood. Because $p_i$ does not depend on the search for other
 instances, $d_c$ enters the evidence once, and the dependence that remains between units makes $\Lambda_f$ somewhat
 overconfident. At present $d_c$ is the room's exploration completeness, which is the room
 agent's estimate of the fraction of the room that has been observed, multiplied by a per-class detection rate. This
@@ -121,7 +120,7 @@ In the first stage a function hypothesis sends nothing to its members. In the se
 targets, expected but unseen classes with a coarse placement, which the planners use to value viewpoints and never as
 evidence. This biases where the robot looks but not the evidence, provided that $d_c$ is computed from the viewpoints
 actually occupied. Only at a later stage, and only if its record justifies it, would a function seed level-3 births,
-and in that case the down-date \eqref{eq:lh_cavity} would apply to the members it seeded, so that an object born
+and in that case the cavity rule \eqref{eq:lh_cavity} would apply to the members it seeded, so that an object born
 because ``kitchen'' predicted it is not counted as evidence for ``kitchen''. The cavity rule covers only this route.
 It does not prevent self-confirmation through the counts of \eqref{eq:lh_beta_prior}, which is prevented instead by
 the admission rule stated with that equation, and it does not protect against a VLM that is wrong in the same way
@@ -144,10 +143,12 @@ the mobile base can perform. A proposal is a mission step with its preconditions
 example that pushing a door ajar with the body raises its opening angle until the passage is traversable, and its
 test is an inner question with two hypotheses, scored by \eqref{eq:inner_value}. Only the observed outcome counts as a
 trial. The success probability $\rho_a$ has the prior of \eqref{eq:lh_beta_prior}, with $\rho^{\text{VLM}}_a$ in
-place of $\pi^{\text{VLM}}_{cf}$, and a person's statement such as ``you can push that door'' adds a further
+place of $\pi^{\text{VLM}}_{cf}$ and $\beta$ the VLM's reliability on past affordance proposals, and a person's statement such as ``you can push that door'' adds a further
 pseudo-count of its own weight rather than a trial. The concept agent offers the affordance with its current
 $\rho_a$, so that the controller's expected free energy weighs it without any threshold, and an affordance that fails
-loses weight in the same way. Only actions that the gate classifies as reversible are tried.
+loses weight in the same way. For reporting only, we call a proposal confirmed or rejected once the 95\% interval of
+$\rho_a$ excludes one half. Only actions that the gate already permits and that the base can undo, such as pushing or
+driving forward and backing out, are tried.
 
 \subsection{Sequencing over the hierarchy}
 \label{sec:lang_hierarchy:sequencing}
@@ -163,13 +164,15 @@ $\phi_k$ be the predicate over beliefs that step $k$ predicts, which must hold b
 $\psi_j$ be the assumptions on which the running plan relies (``door 3 is open'', ``room 2 is still the
 kitchen''). Both enter the demand signal \eqref{eq:inner_demand} in a centred, positive-part form,
 \begin{equation}
-    s^{\text{plan}}_t = \max\!\big(0,\, -\log P_t(\phi_k) + \log P_{t_0}(\phi_k)\big) \;\text{at the step's deadline},
+    s^{\text{plan}}_t = \max\!\big(0,\, -\log P_t(\phi_k) + \log \hat P_{t_0}(\phi_k)\big) \;\text{at the step's deadline},
     \qquad
     s^{\text{assume}}_{j,t} = \max\!\big(0,\, -\log P_t(\psi_j) + \log P_{t_0}(\psi_j)\big),
     \label{eq:lh_plan_surprise}
 \end{equation}
-where $P_t$ is the current belief and $t_0$ is the time the plan was made, so that each term is the surprisal of its
-predicate in excess of its value at plan time. Unlike the observation surprisals of
+where $P_t$ is the current belief, $t_0$ is the time the plan was made, $\hat P_{t_0}(\phi_k)$ is the probability,
+predicted at $t_0$ with the imagination tools, that $\phi_k$ will hold at the step's deadline, and $P_{t_0}(\psi_j)$ is
+the belief in the assumption at $t_0$. Each term is therefore the surprisal of its predicate in excess of what the
+plan expected. Unlike the observation surprisals of
 Section~\ref{sec:inner_speech:modes}, these are probabilities of predicates under the belief, and both are averaged
 with them. The first term catches a step that reported success but diverged, and
 the second raises attention when an assumption weakens before any step fails. A plan thus becomes the same kind of
@@ -266,10 +269,10 @@ from objects is also established in semantic mapping \cite{pronobis2012large}. T
 of the hierarchy of Section~\ref{sec:cortex}. In them the room label is an output of the pipeline, whereas here it is a
 hypothesis whose VLM prior is replaced by confirmed counts and weighed against evidence of absence.
 
-Vygotskian robotics \cite{mirolli2011towards} and autotelic agents \cite{colas2022language} use language as a tool for
+Vygotskian robotics \cite{mirolli2011towards} and autotelic agents, which set their own goals \cite{colas2022language}, use language as a tool for
 thought, and Pipitone and Chella's robot speaks its reasoning aloud, which made its decisions more transparent to its
 partner \cite{pipitone2021robots}. Here inner speech is instead an epistemic action recruited on surprise, whose
-conclusions perception must confirm. Developmental robotics stages competence through interaction \cite{cangelosi2015developmental}. Active Inference
+conclusions perception must confirm. Active Inference
 has been applied to robot perception and control \cite{lanillos2021active}, and Pezzulo et al.\ argue that passively
 trained models such as large language models lack the grounding that action provides \cite{pezzulo2024generating},
 which is the grounding the machine supplies by letting only its own models decide. Amortised inference learns a
@@ -282,7 +285,7 @@ count-based form of the same idea, and its trigger for returning to deliberation
 
 Section~\ref{sec:experiments} assigns each prediction to an experiment.
 \begin{enumerate}[label=\textbf{L\arabic*}, start=0]
-    \item Elicited priors rank-correlate with the hand-written ones and beat a constant ``likely'' on corpus frequencies.
+    \item Elicited priors rank-correlate with the hand-written ones and beat a constant ``likely'' on a corpus.
     \item The function hypothesis beats other priors on a corpus, survives a missing refrigerator, and a wrong prior is
     overridden by the counts.
     \item Goals at levels 3--4 make search shorter than the exploration drive.
@@ -290,9 +293,9 @@ Section~\ref{sec:experiments} assigns each prediction to an experiment.
     \item Rehearsal and scene completion shorten replanning latency and views to confirm an object.
     \item Structural replay proposes the missing tall tier when the single-tier kitchen model is re-created.
     \item As confirmed rooms and missions accumulate, the effective weight of the VLM falls, and VLM calls per hour
-    fall while task success holds.
-    \item A proposed affordance of a known class is confirmed or rejected by trial, false proposals are chosen far
-    less often than when proposals are accepted without trial, and a confirmed one is then used without the VLM.
+    outside wandering fall at matched task success.
+    \item A proposed affordance of a known class is decided by trial, a false proposal is chosen at most a third as
+    often as when proposals are accepted without trial, and a confirmed one is then used without the VLM.
 \end{enumerate}
 
 \subsection{Limitations}

@@ -6,15 +6,8 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We have proposed a way of giving a robot the knowledge contained in a vision-language model without letting that
-model write the robot's beliefs. On an existing Active Inference architecture we add an inner voice whose questions
-perception answers, a demand signal that decides when the voice is needed, and a cultural plane in which the VLM
-supplies room functions, missions and imagination, always as proposals that the robot's experience progressively
-replaces.
-
-The machine is inspired by Vygotsky rather than derived from him, and its contribution is the integration of known
-components into one probabilistic hierarchy under one rule of evidence. Its Vygotskian claim rests on P7, that a VLM
-deprived of the culture attached to its words falls behind in proportion to novelty, and P9 tests the weaker claim that
-plan reuse is selected by the robot's uncertainty. Open parts remain. The demand thresholds are declared rather than
-derived, the weak grounding constraint lets the VLM's description of an unfamiliar object shape the answer, and a
-confidently wrong model stays silent until its errors have consequences, which the experiments will weigh.
+We have proposed a way of giving a robot the knowledge of a frozen vision-language model as proposals that its own
+experience progressively replaces, never as beliefs the model writes. Vygotsky's account organises the design, and the
+contribution is the integration of known components under one rule of evidence. The Vygotskian claim rests on P7 and the weaker claim on P9. Some parts remain open. The demand thresholds are declared, not derived,
+the weak grounding constraint lets the VLM's description of an unfamiliar object shape the answer, and a confidently
+wrong model stays silent until its errors have consequences.
