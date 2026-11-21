@@ -34,6 +34,7 @@ struct ChairConfig
     float obs_distance      = 1.8f;    // d_obs for epistemic planner
     float min_standoff_m    = 1.8f;    // min stand-off floor for epistemic viewpoints (YOLO misses too-close chairs)
     int   epistemic_cooldown_cycles = 200;    // min cycles withdrawn after satisfaction
+    bool  epistemic_offer_enabled = true;    // false = the chair publishes no epistemic viewpoint offer (AuRo C3(b) "no epistemic term" arm)
     int   chair_log_period_frames = 0;    // 0 = periodic logs off
 
     // Primary-input (masks) stream gate: no NEW masks frame for this many ms while Operating ⇒ demote

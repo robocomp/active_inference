@@ -623,7 +623,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
                  // that were MISSING when the belief froze: which condition blocked, and whether the yaw cap
                  // was self-inflicted. oblq_eff is what actually feeds the yaw common-mode; obliquity_cos
                  // above is the (circular) point estimate, kept only for comparison.
-                 << "fixated,centroid_r,ego_lin,ego_ang,oblq_eff,nbv_gain_raw,nbv_gain_pub,flip1,flip2,flip3,p_mode_max,view_spent_max\n";
+                 << "fixated,centroid_r,ego_lin,ego_ang,oblq_eff,nbv_gain_raw,nbv_gain_pub,flip1,flip2,flip3,p_mode_max,view_spent_max,t_ms\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -656,7 +656,11 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
              // expression-template gotcha in common/nbv — never let an iterator or a reference outlive the
              // temporary it came from.
              << p_mode_max << ','
-             << inst.ai2_belief.max_view_spent() << '\n';
+             << inst.ai2_belief.max_view_spent() << ','
+             // wall clock (ms since epoch), appended LAST so positional readers keep working: lines the belief up with the
+             // controller log and the ground truth (AuRo C3(b) change-test timeline, 2026-11-21)
+             << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()
+             << '\n';
     ai2_csv_.flush();
 }
 

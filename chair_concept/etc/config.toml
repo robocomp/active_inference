@@ -170,6 +170,7 @@ DetectionAliveMaxFrames = 40 # cycles without a fresh chair mask before detectio
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 MinStandOffM = 2.0          # min stand-off floor for epistemic viewpoints (YOLO misses chairs seen too close)
 EpistemicCooldownCycles = 200 # min cycles a satisfied chair stays withdrawn (anti-chatter)
+EpistemicOfferEnabled = true # false = no epistemic viewpoint offer (AuRo C3(b) comparison arm: the chair is corrected only by what the robot happens to see)
 ChairLogPeriodFrames = 0    # per-chair log throttle; 0 = periodic logs off
 SupportBankMaxPoints = 4000   # max number of chair-owned support points kept in memory
 SupportBankQuantizationM = 0.02 # dedup grid (m) for support-bank hashing

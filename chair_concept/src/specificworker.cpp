@@ -1277,8 +1277,11 @@ void SpecificWorker::publish_chair_intentions(rc::ChairInstance& inst,
     // step_epistemic now owns the propose-vs-withdraw decision via the planner's ΔH (it withdraws
     // when the expected information gain falls below threshold), so it runs unconditionally rather
     // than being gated on the legacy coverage-deficit proxy.
-    if (auto node_opt = G->get_node(node_id); node_opt.has_value())
-        step_epistemic(inst, node_opt.value());
+    // EpistemicOfferEnabled=false (AuRo C3(b) comparison arm, 2026-11-20): the chair offers no viewpoint; it still
+    // updates its belief from whatever the robot happens to see, and still offers its approach.
+    if (cfg_.epistemic_offer_enabled)
+        if (auto node_opt = G->get_node(node_id); node_opt.has_value())
+            step_epistemic(inst, node_opt.value());
     step_approach(inst);
 }
 

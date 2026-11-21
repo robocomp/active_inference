@@ -207,6 +207,9 @@ for leg in $(seq 1 $n_legs); do
   echo "leg $leg (cross $a, want $want): controller '$r', true side $side (xy $xy), graph room $(room_now) -> $st; door behind: $c"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $leg $a "$r" $side "$xy" $st $T0 $(now_ms) "$(room_now)" >> $TSV
   [ $st = OK ] || break
+  # AFTER_LEG="<n>:<command>" (2026-11-21, AuRo C3(b) change test): run once right after leg n succeeds — e.g. move an object
+  # with webots_object.py while the robot is in another room. Off by default.
+  if [ -n "$AFTER_LEG" ] && [ "${AFTER_LEG%%:*}" = "$leg" ]; then echo "after leg $leg: ${AFTER_LEG#*:}"; bash -c "${AFTER_LEG#*:}"; fi
 done
 echo "=== $ok/$n_legs legs"
 [ -n "$LOOK_S" ] && look_round end   # the room the tour ended in is looked at too
