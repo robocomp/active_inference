@@ -21,11 +21,8 @@ namespace bm = rc::ai::beam;
 namespace ts = rc::test;
 using Mat6 = Eigen::Matrix<float, 6, 6>;
 using Vec6 = Eigen::Matrix<float, 6, 1>;
-static int bad = 0, missed = 0;
+static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
-// A spec Pass bound this implementation does not meet, for a reason the report names (a model property or the cost): printed,
-// counted, NOT tuned and not a ctest failure — the controller / owner rules on it (as Task 17's beam_ray_test did).
-#define PASS_ITEM(c) do { if (not (c)) { std::printf("PASS-ITEM MISS line %d: %s (printed, not tuned)\n", __LINE__, #c); ++missed; } } while (0)
 
 static constexpr float tx = 0.30f, ty = -0.255f, tH = 0.62f, tw = 0.51f;
 static constexpr double kTolM = 1e-3, kTolRad = 1e-3;
@@ -176,7 +173,7 @@ static void kappa_zero_is_prediction()
 
 // ─── Reduction (spec Pass "Reduction" through the update): rays deep inside a face (π > 1 − 1e-6), m = 1 − 1e-6, κ = 1, at
 //     n̂·u ≈ 1 and n̂·u = 0.25: one LiDAR-only update on the beam model against 7c.7's update (the 7c.6 first-crossing factor on
-//     the same rays, test hook first_crossing_for_test). θ within 0.1σ per component, √diag P within 3 %.
+//     the same rays, test hook set_first_crossing_for_test). θ within 0.1σ per component, √diag P within 3 %.
 //     The face is a 1.6 m wide box (bed-sized) so the returns span the face: on the 0.51 m nightstand, "deep inside the face"
 //     at n̂·u = 0.25 leaves an 11 cm strip of returns, and over so short a strip the beam's own sharper-prediction term
 //     (p(ρ) ∝ V^−½, V = 1/p₀ + σ_s²/(n̂·u)²: a face turned toward the sensor predicts more sharply) outweighs the residuals and
@@ -220,8 +217,8 @@ static void reduction_update()
         CountableFrame fl = lidar_frame({}); fl.lidar = L;
         CountableBelief a = belief(seed, p);
         a.set_first_update_done(true);
-        CountableBeliefParams q = p; q.first_crossing_for_test = true;
-        CountableBelief c = belief(seed, q);
+        CountableBelief c = belief(seed, p);
+        c.set_first_crossing_for_test(true);
         c.set_first_update_done(true);
         a.update(fb);
         c.update(fl);
@@ -253,7 +250,7 @@ static void reduction_update()
         CHECK(worst_sd <= 0.03);
         // yaw: the beam's p(ρ) ∝ V^−½ with V = 1/p₀ + σ_s²/(n̂·u)² turns a grazing face toward the sensor (a sharper prediction);
         // the 7c.6 factor holds n̂·u fixed in its variance and has no such term. Measured 0.28σ at n̂·u ≈ 0.25 (0.0005σ face-on).
-        PASS_ITEM(r_yaw <= 0.1);
+        CHECK(r_yaw <= 0.1);
     }
 }
 
@@ -424,6 +421,67 @@ static double largest_ray_curvature(const CountableBelief& b, const bm::BeamRays
     return best * r.sigma_s * r.sigma_s;
 }
 
+// ─── The silhouette's w optimum with the floor present (spec 7c.8 rev 3.3.7, the review's per-ring probe as a test): the
+//     silhouette fixture (sensor 0.40 m, wall 1 m behind, hand labels, azimuth 0.05°), the beam energy of the TRUE model widened
+//     by dw ∈ [−8, +24] mm (0.25 mm grid), per Helios ring and summed. With the floor and the wall as known room surfaces in p_f
+//     the optimum is within 1 mm of the truth on the sum (the spec's item) and on every ring that MEETS THE BOX (stages a return
+//     on it — the review's per-ring statement); the rings that only pass over the top or under the front edge carry a w
+//     dependence of hundredths of a nat and are printed. Without the surfaces (p_f = p_pass, rev 3.3.6) the ring that meets the
+//     front face 4 mm above the floor (−14.59°) is monotone in w — printed as the control. ───
+static void silhouette_w_optimum_with_floor()
+{
+    const bm::BeamConfig cfg = params().beam;
+    const ts::SceneBox box = truth_box();
+    const std::vector<ts::SceneBox> obj{box};
+    const std::vector<ts::SceneWall> walls{back_wall(1.0f)};
+    const auto room = ts::room_of(walls);
+    const Eigen::Vector3f o(tx, ty - 0.5f * tw - 1.5f, 0.40f);
+    const auto energy_at = [&](const bm::BeamRays& r, double dw)
+    {
+        const CountableBelief b = belief(truth_state());
+        CountableBeliefState s = truth_state(); s.w = float(tw + dw);
+        const auto parts = b.beam_parts_for_test(s);
+        return bm::beam_rays_energy(parts, r, cfg);
+    };
+    const auto argmin = [&](const bm::BeamRays& r)
+    {
+        double best = 1e300, bw = 0.0;
+        for (int k = -32; k <= 96; ++k)
+        {
+            const double dw = 0.00025 * k, E = energy_at(r, dw);
+            if (E < best) { best = E; bw = dw; }
+        }
+        return bw;
+    };
+    bm::BeamRays all_room, all_plain;
+    double worst = 0.0;
+    std::printf("  silhouette w optimum per ring (mm; with room surfaces / without):");
+    for (const float el : ts::helios_ring_elev_deg())
+    {
+        const std::array<float, 1> rings{el};
+        const auto sweep = ts::raycast_scene(o, obj, walls, true, 0.05f, rings, 12.0f);
+        const bm::BeamRays rr = ts::stage_beam(o, sweep, box, 0.10f, ts::hand_labels(obj), 1.0, 0.01, 6.0, nullptr, &room);
+        if (rr.endpoints.empty()) continue;
+        const bm::BeamRays rp = ts::stage_beam(o, sweep, box, 0.10f, ts::hand_labels(obj));
+        const double a = argmin(rr), b = argmin(rp);
+        const bool meets = std::ranges::any_of(rr.m, [](double m) { return m == ts::kMOn; });
+        if (meets) worst = std::max(worst, std::abs(a));
+        std::printf(" [%+.2f°%s] %+.2f/%+.2f", el, meets ? "" : " no box", 1e3 * a, 1e3 * b);
+        if (all_room.endpoints.empty()) { all_room = rr; all_plain = rp; all_room.endpoints.clear(); all_room.m.clear(); all_room.p_f.clear();
+                                          all_plain.endpoints.clear(); all_plain.m.clear(); }
+        all_room.endpoints.insert(all_room.endpoints.end(), rr.endpoints.begin(), rr.endpoints.end());
+        all_room.m.insert(all_room.m.end(), rr.m.begin(), rr.m.end());
+        all_room.p_f.insert(all_room.p_f.end(), rr.p_f.begin(), rr.p_f.end());
+        all_plain.endpoints.insert(all_plain.endpoints.end(), rp.endpoints.begin(), rp.endpoints.end());
+        all_plain.m.insert(all_plain.m.end(), rp.m.begin(), rp.m.end());
+    }
+    const double tot = argmin(all_room), tot_plain = argmin(all_plain);
+    std::printf("\n  silhouette w optimum, all rings (%zu rays): %+.2f mm with the room surfaces (bound 1 mm) ; %+.2f mm without (rev 3.3.6, "
+                "printed) ; worst ring meeting the box %.2f mm\n", all_room.endpoints.size(), 1e3 * tot, 1e3 * tot_plain, 1e3 * worst);
+    CHECK(std::abs(tot) <= 1e-3);
+    CHECK(worst <= 1e-3);
+}
+
 // ─── Silhouette, hand labels (spec Pass, R7-M4): a front-only sweep, the seed 3 cm too narrow and 3 cm too wide, backgrounds
 //     20 cm and 1 m behind (CHECK: w within σ_w of truth and σ_w below the prior's in 10 frames), 5 cm PRINTED; the largest
 //     per-ray curvature printed. LiDAR-only frames, the recursion from the seed (first update done: the class mean, which is
@@ -490,9 +548,7 @@ static void parked_floors()
     CHECK(min_cx >= fl_cx * (1.0 - 1e-6));
     CHECK(min_w >= fl_w * (1.0 - 1e-6));
     CHECK(std::abs(b.state().w - w10) < 1e-3f);
-    // non-increasing: each update stops at the first accepted step below the tolerance, so a sub-millimetre remainder carries
-    // into the next frame and the sizes need not fall monotonically (measured 0.29 → 0.68 → 0.38 mm, then 0); printed.
-    PASS_ITEM(mono);
+    CHECK(mono);
     CHECK(pos.back() < kTolM and yaw.back() < kTolRad);
 }
 
@@ -577,11 +633,12 @@ static void beam_cost()
         std::ranges::sort(first); std::ranges::sort(parked);
         const double mf = first[first.size() / 2], mp = parked[parked.size() / 2];
         std::printf("  beam_cost %s: %zu near rays of %zu staged (%zu within 8 sigma_s) ; ray work per update, median of 15: first update "
-                    "%.3f ms (mean gn_it %.1f) ; parked %.3f ms (mean gn_it %.1f) ; bound 5 ms\n", cs.nm, r.endpoints.size(),
+                    "%.3f ms (mean gn_it %.1f) ; parked %.3f ms (mean gn_it %.1f) (printed: rev 3.3.7 binds the live fit rate)\n", cs.nm, r.endpoints.size(),
                     all.endpoints.size(), near.size(), mf, it_first / 15.0, mp, it_parked / 15.0);
         CHECK(r.endpoints.size() == 256);
-        PASS_ITEM(mf <= 5.0);
-        PASS_ITEM(mp <= 5.0);
+        // spec 7c.8 rev 3.3.7 ("Bound = agent rate"): the 5 ms median is withdrawn; the ms are PRINTED, the binding rule is
+        // live11's fit rate ≥ 8 Hz per class.
+        (void)mf; (void)mp;
     }
 }
 
@@ -592,11 +649,11 @@ int main()
     occluder_in_front();
     wall_2cm_printed();
     depth_basin();
+    silhouette_w_optimum_with_floor();
     silhouette_hand_labels();
     parked_floors();
     log_counters();
     beam_cost();
-    if (missed) std::printf("beam_belief_test: %d Pass item(s) MISSED (printed above, reported, not tuned)\n", missed);
     std::printf("beam_belief_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }

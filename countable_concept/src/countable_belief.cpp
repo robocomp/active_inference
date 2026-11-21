@@ -742,7 +742,7 @@ void CountableBelief::accumulate_channels(const CountableBeliefState& s_th, cons
         }
     }
     // LIDAR: the smooth beam model of f.beam (spec 7c.8), through b_L. f.lidar / f.lidar_extra are not read on this path.
-    if (params_.first_crossing_for_test) accumulate_rays(s_L, f, Id_L, bd_L, /*first_crossing*/ true);   // test hook (7c.7)
+    if (first_crossing_for_test_) accumulate_rays(s_L, f, Id_L, bd_L, /*first_crossing*/ true);   // test hook (7c.7)
     else                                 accumulate_beam(s_L, f, &Id_L, &bd_L);
     // θ-ONLY, unsaturated: the biases cannot absorb a wall crossing or the class's relational prior.
     // The relational class prior, once PER ANCHOR (T6-1): each only when its context is staged on this admissible frame.
@@ -789,7 +789,7 @@ double CountableBelief::persistent_data_energy(const CountableBeliefState& s_cam
             accumulate_footprint(s_cam, f, Id, bd, /*anchor*/ false, &E);
         }
     }
-    if (params_.first_crossing_for_test)
+    if (first_crossing_for_test_)
     {   // test hook: the 7c.6 first-crossing energy of f.lidar (the pre-7c.8 persistent update)
         const bool convex = not (params_.headboard_h_m > 0.0f);
         E += rc::ai::lidar_rays_first_crossing_energy(*this, s_L, f.lidar, params_.model_sigma_m, convex);
@@ -865,7 +865,7 @@ void CountableBelief::predict_theta_joint(float q_scale)
 
 bool CountableBelief::lidar_measured(const CountableFrame& f) const
 {
-    if (not params_.persistent or params_.first_crossing_for_test)
+    if (not params_.persistent or first_crossing_for_test_)
     {   // today's rule (the flag-off path and the fitter's rays_usable, unchanged)
         const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
         return usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);
@@ -1112,13 +1112,14 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     const Eigen::Matrix<double, N, K> B_cam = chain_selector(true), B_L = chain_selector(false);
     Mat6 Sf_cam = Mat6::Zero(), Sf_L = Mat6::Zero();
     for (int i = 0; i < 6; ++i) { Sf_cam(i, i) = std::max(0.0f, f.fresh_cam[i]); Sf_L(i, i) = std::max(0.0f, f.fresh_L[i]); }
-    // The linearisation (spec 7c.7 d caveat, taken for 7c.8; Task 19): CONSISTENT — each iterate is x̃_k = (θ_k, b_k), every channel
+    // The linearisation (spec 7c.7 d caveat; spec 7c.8 rev 3.3.7): CONSISTENT — each iterate is x̃_k = (θ_k, b_k), every channel
     // linearised at what it measures there, θ_k + B b_k, and the damping is Levenberg–Marquardt on the whole joint state
     // (M = diag W over θ and b). The b̄ restart (x̃_k = (θ_k, b̄), M on θ only) stalls on the beam energy: its fixed point is the
     // joint stationary point only to first order in b − b̄, and its latent step, undamped at every λ, overshoots on the rays a
     // foreign return refutes (J measured −3117 → never below −3134.5 in 12 steps on the silhouette fixture). The test hook
-    // first_crossing_for_test keeps the 7c.7 restart scheme (the "7c.7 update" the Reduction item compares against).
-    const bool consistent = not params_.first_crossing_for_test;
+    // set_first_crossing_for_test keeps the 7c.7 restart scheme (the "7c.7 update" the Reduction item compares against).
+    // Spec 7c.8 rev 3.3.7 ratifies this ("Damping on the joint state"): it applies to every flag-on update, camera-only included.
+    const bool consistent = not first_crossing_for_test_;
 
     std::vector<pu::Channel<N, K>> channels;
     pu::FreshInfo<N> theta_only;
@@ -1136,10 +1137,12 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         theta_only.g = bd_th.cast<double>();
     };
 
-    // Step 3, damped GN (spec 7c.7 d). Each step: x̃_k = (θ_k, b̄), (𝟙 + P̄(W + λM))δ = P̄G − (x̃_k − x̄), M = blockdiag(diag W_θθ,
-    // 0); the candidate's θ after apply_constraints. J = persistent_data_energy at the candidate (each channel at θ + B b) +
-    // ½ yᵀ(x − x̄) (the prior energy, without P̄⁻¹). J falls ⇒ accept, λ/4, rebuild at the new θ; else 4λ and re-solve on the
-    // same linearisation. Converged (ruling T14-4) ⇔ an ACCEPTED θ step is below gn_tol_m (cx, cy, H, w, h) and gn_tol_rad
+    // Step 3, damped GN (spec 7c.7 d, rev 3.3.7). Each step: x̃_k = (θ_k, b_k), (𝟙 + P̄(W + λM))δ = P̄G − (x̃_k − x̄), M = diag W
+    // over θ and b; the candidate's θ after apply_constraints. J = persistent_data_energy at the candidate (each channel at
+    // θ + B b) + ½ yᵀ(x − x̄) (the prior energy, without P̄⁻¹). Nielsen's λ rule (rev 3.3.7): gain ratio ϱ = (J_k − J_{k+1}) /
+    // (J_k − J_model(δ)), J_model the solve's quadratic model (data energy at x̃ − Gᵀδ + ½δᵀWδ, plus the exact prior energy);
+    // ϱ > 0 ⇒ accept, λ ← λ·max(⅓, 1 − (2ϱ − 1)³), ν ← 2, rebuild at the new θ; else λ ← λν, ν ← 2ν and re-solve on the same
+    // linearisation (first λ = 10⁻³, ν = 2). The 7c.7 test hook keeps ×4 / ÷4. Converged (ruling T14-4) ⇔ an ACCEPTED θ step is below gn_tol_m (cx, cy, H, w, h) and gn_tol_rad
     // (yaw, wrapped), after apply_constraints, OR — when a damped proposal is rejected below that tolerance — the UNDAMPED
     // (λ = 0) proposal from the same θ is below it too: θ is then determined to the tolerance (the minimum may sit on a ray
     // edge of the piecewise LiDAR energy, where every step into the edge is rejected), and a growing λ cannot fake it. Stop at
@@ -1170,16 +1173,17 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     };
     Vec6d theta = state_.vec().cast<double>();                         // θ₀ = the current mean (at birth: the data seed)
     VecKd b_post = b_;
-    double J_cur;
+    double J_cur, Ep_cur = 0.0;                                       // J and its prior part at the accepted iterate
     {   // J at x₀ = (θ₀, b̄): x₀ − x̄ is zero on b, and on θ unless this is the first update (class mean ≠ seed), where P̄'s θ
         // block is diagonal with zero cross terms; the pseudo-inverse is then exact (and 0 when x₀ = x̄).
         VecXd x0; x0 << theta, b_;
         const VecXd dx = wrapped(x0 - x_bar);
         const double Ep = dx.isZero(0.0) ? 0.0 : 0.5 * dx.dot(P_bar.completeOrthogonalDecomposition().solve(dx));
         J_cur = data_energy(x0) + Ep;
+        Ep_cur = Ep;
     }
     dbg_gn_energy_.push_back(J_cur);
-    double lambda = 1e-3;
+    double lambda = 1e-3, nu = 2.0;
     Vec6d d_last = Vec6d::Zero();                                      // the last ACCEPTED θ step (zero if none)
     bool converged = false;
     int steps = 0;
@@ -1194,11 +1198,22 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         VecXd xn;
         const Vec6d d = theta_step(x_tilde, xn, st);
         bool accept = false;
+        double rho_gain = 0.0;
         if (d.allFinite())
         {
-            const double J_new = data_energy(xn) + pu::prior_energy<N, K>(st, x_bar + wrapped(xn - x_bar), x_bar);
-            accept = J_new < J_cur and not params_.gn_reject_all_for_test;
-            if (accept) { J_cur = J_new; d_last = d; }
+            const double Ep_new = pu::prior_energy<N, K>(st, x_bar + wrapped(xn - x_bar), x_bar);
+            const double J_new = data_energy(xn) + Ep_new;
+            if (consistent)
+            {   // the quadratic model's decrease: Ep_k − Ep_new + Gᵀδ − ½δᵀWδ (G, W of this linearisation, undamped)
+                Eigen::Matrix<double, N + K, N + K> Wj; VecXd Gj;
+                pu::detail::information<N, K>(std::span<const pu::Channel<N, K>>(channels), theta_only, Wj, Gj);
+                const double pred = Ep_cur - Ep_new + Gj.dot(st.delta) - 0.5 * st.delta.dot(Wj * st.delta);
+                rho_gain = pred > 0.0 ? (J_cur - J_new) / pred : -1.0;
+                accept = rho_gain > 0.0;
+            }
+            else accept = J_new < J_cur;
+            accept = accept and not params_.gn_reject_all_for_test;
+            if (accept) { J_cur = J_new; Ep_cur = Ep_new; d_last = d; }
         }
         if (not accept)
         {
@@ -1213,11 +1228,18 @@ float CountableBelief::update_persistent(const CountableFrame& f)
                 converged = d0.allFinite() and below_tol(d0);
                 if (converged) break;
             }
-            lambda *= 4.0;                                             // re-solve on the same linearisation
+            if (consistent) { lambda *= nu; nu *= 2.0; }                // Nielsen (rev 3.3.7)
+            else lambda *= 4.0;                                        // 7c.7 hook; re-solve on the same linearisation
             continue;
         }
         converged = below_tol(d);
-        lambda /= 4.0;
+        if (consistent)
+        {
+            const double c = 2.0 * rho_gain - 1.0;
+            lambda *= std::max(1.0 / 3.0, 1.0 - c * c * c);
+            nu = 2.0;
+        }
+        else lambda /= 4.0;
         theta  = xn.head<N>();
         b_post = xn.tail<K>();                                         // the accepted iterate's b is the posterior b
         dbg_iterates_.push_back(theta.cast<float>());

@@ -262,18 +262,15 @@ struct CountableBeliefParams
 
     // Optimiser
     int   gn_iters = 4;              // Gauss-Newton iterations per frame (the flag-off engine path)
-    // Persistent path only (spec 7c.7 d; solver constants, no config key): damped GN stops converged (ruling T14-4) when an
-    // ACCEPTED θ step is below gn_tol_m on cx, cy, H, w, h and gn_tol_rad on yaw, or when a damped proposal is rejected below
-    // that tolerance and the UNDAMPED (λ = 0) proposal from the same θ is below it too; else after gn_iters_max
-    // accepted-or-rejected steps (gn_conv = 0: with LiDAR rays this is usually θ on a ray edge, not divergence). A solver tolerance,
-    // not a modelling threshold. gn_reject_all_for_test is a TEST HOOK only (every step rejected, as if J never fell).
-    int    gn_iters_max = 12;
+    // Persistent path only (spec 7c.7 d + 7c.8 rev 3.3.7; solver constants, no config key): damped GN (Nielsen's λ rule, joint
+    // damping) stops converged (ruling T14-4) when an ACCEPTED θ step is below gn_tol_m on cx, cy, H, w, h and gn_tol_rad on yaw,
+    // or when a damped proposal is rejected below that tolerance and the UNDAMPED (λ = 0) proposal from the same θ is below it
+    // too; else after gn_iters_max = 25 (rev 3.3.7) accepted-or-rejected steps (gn_conv = 0). A solver tolerance, not a modelling
+    // threshold. gn_reject_all_for_test is a TEST HOOK only (every step rejected, as if J never fell).
+    int    gn_iters_max = 25;
     double gn_tol_m     = 1e-3;
     double gn_tol_rad   = 1e-3;
     bool   gn_reject_all_for_test = false;
-    // TEST HOOK only (spec 7c.8 Pass, "Reduction"): the persistent LiDAR channel reads f.lidar through the 7c.6 first-crossing
-    // factor (the pre-7c.8 update, "7c.7's update") instead of the beam set, so a test can compare the two on one frame.
-    bool   first_crossing_for_test = false;
     float fd_eps   = 1e-3f;          // finite-difference step for SDF Jacobians (m / rad)
     float jac_slope_clamp = 5.0f;    // clamp per-DOF SDF slope (guards a seam-point info spike; recipe §2)
 
@@ -573,6 +570,10 @@ public:
     // The latent predict of one persistent update alone (e with its lever, and the latents of the channels f measures).
     void    predict_latents_for_test(const CountableFrame& f) { ensure_joint(); predict_latents_persistent(f, frame_has_camera(f), lidar_measured(f)); }
     void    apply_mode_rotation_for_test(int k) { apply_mode_rotation(k); }
+    // TEST HOOK only (spec 7c.8 Pass, "Reduction"; not in the params a fitter fills): the persistent LiDAR channel reads f.lidar
+    // through the 7c.6 first-crossing factor with the 7c.7 (d) solver (b̄ restart, θ-only damping, ×4/÷4 λ) — "7c.7's update" —
+    // instead of the beam set, so a test can compare the two on one frame.
+    void    set_first_crossing_for_test(bool v) { first_crossing_for_test_ = v; }
 
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
     float sdf_box(const Eigen::Vector3f& p, const CountableBeliefState& s) const;
@@ -710,7 +711,7 @@ private:
     void accumulate_no_cross(const CountableBeliefState& s, const CountableFrame& f,
                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision = false,
                              double* E = nullptr) const;
-    // first_crossing (the 7c.6 persistent LiDAR channel; since 7c.8 only the first_crossing_for_test hook): every ray-set with
+    // first_crossing (the 7c.6 persistent LiDAR channel; since 7c.8 only the set_first_crossing_for_test hook): every ray-set with
     // LidarRays::first_crossing = true and surface_sigma_m = model_sigma_m; false: the ray-sets as staged (the historic sphere-trace).
     void accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool first_crossing = false) const;
@@ -827,6 +828,7 @@ private:
     Eigen::Matrix<float, 6, 6> dbg_Id_th_   = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_cam_  = Eigen::Matrix<float, 6, 6>::Zero();
     Eigen::Matrix<float, 6, 6> dbg_Id_L_    = Eigen::Matrix<float, 6, 6>::Zero();
+    bool   first_crossing_for_test_ = false;   // see set_first_crossing_for_test
     int    last_beam_staged_ = 0;
     int    last_gap_rays_    = 0;
     mutable double last_beam_ms_ = 0.0;                 // accumulated by accumulate_beam over one update

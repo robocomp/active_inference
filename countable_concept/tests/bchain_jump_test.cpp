@@ -22,10 +22,8 @@
 #include "beam_fixture.h"
 
 using namespace rc;
-static int bad = 0, missed = 0;
+static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
-// A spec Pass bound the smooth beam model does not meet here (Task 19, reported, not tuned): printed and counted, no ctest failure.
-#define PASS_ITEM(c) do { if (not (c)) { std::printf("PASS-ITEM MISS line %d: %s (printed, not tuned)\n", __LINE__, #c); ++missed; } } while (0)
 
 static const rc::test::SceneBox  kStand{Eigen::Vector2f(0.84f, 3.89f), 0.0f, 0.50f, 0.51f, 0.62f};
 static const rc::test::SceneBox  kBed{Eigen::Vector2f(-0.385f, 3.145f), 0.0f, 1.83f, 2.00f, 0.55f};
@@ -80,7 +78,8 @@ static CountableFrame live9_frame(float bleed, float rho_cam, float rho_L, float
         f.lidar.precision = 2500.0f; f.lidar.robust_c_m = 0.05f;
         // the persistent path's beam set (spec 7c.8): staged by ray geometry through the select box about the stand (+ bleed),
         // hand labels 0.9 on the stand, ε_px on the bed / wall / floor, κ = 1
-        f.beam = rc::test::stage_beam(o, all, kStand, bleed, rc::test::hand_labels({kStand}));
+        const auto room = rc::test::room_of(walls);   // the floor and the back wall are known room surfaces (rev 3.3.7)
+        f.beam = rc::test::stage_beam(o, all, kStand, bleed, rc::test::hand_labels({kStand}), 1.0, 0.01, 6.0, nullptr, &room);
     }
     f.wall.ok = true; f.wall.p = Eigen::Vector2f(0.0f, 4.145f); f.wall.n = Eigen::Vector2f(0.0f, -1.0f);
     f.wall.sigma_m = 0.02f; f.wall.length_m = 8.0f;
@@ -179,12 +178,9 @@ static void lever_arm_sensitivity()
                 lev.e(0) - all.e(0), lev.e(1) - all.e(1), lev.e(2) - all.e(2),
                 std::abs(lev.e(0)) / kSigPose(0), std::abs(lev.e(1)) / kSigPose(1), std::abs(lev.e(2)) / kSigPose(2),
                 std::abs(all.e(0)) / kSigPose(0), std::abs(all.e(1)) / kSigPose(1), std::abs(all.e(2)) / kSigPose(2));
-    // On the beam path (Task 19) these miss: e_y ≈ +0.027 m (0.63σ) on BOTH runs, and θ's position differs from the full control
-    // by up to 1.3 cm (cx +1.0, w +1.3 cm): the first two updates of each run stop at gn_iters_max (gn_conv = 0), and the runs
-    // settle at different points. Printed, counted, reported (not tuned).
-    for (int i = 0; i < 3; ++i) PASS_ITEM(std::abs(lev.e(i)) <= 0.1 * kSigPose(i) and std::abs(all.e(i)) <= 0.1 * kSigPose(i));
+    for (int i = 0; i < 3; ++i) CHECK(std::abs(lev.e(i)) <= 0.1 * kSigPose(i) and std::abs(all.e(i)) <= 0.1 * kSigPose(i));
     CHECK(std::abs(std::remainder(double(lev.th(5)) - double(all.th(5)), 2.0 * M_PI)) <= kSigPose(2));
-    for (int i = 0; i < 5; ++i) PASS_ITEM(std::abs(double(lev.th(i)) - double(all.th(i))) <= tol);
+    for (int i = 0; i < 5; ++i) CHECK(std::abs(double(lev.th(i)) - double(all.th(i))) <= tol);
 }
 
 // (2) The mechanism alone, in common/ai_belief/persistent_update.h with the live9 numbers: one DOF θ = cx, latents
@@ -247,7 +243,6 @@ int main()
 {
     linear_scale_coupling();
     lever_arm_sensitivity();
-    if (missed) std::printf("bchain_jump_test: %d Pass item(s) MISSED (printed above, reported, not tuned)\n", missed);
     std::printf("bchain_jump_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }

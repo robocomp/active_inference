@@ -21,10 +21,8 @@ using namespace rc;
 namespace pu = rc::ai::persistent;
 using Mat6 = Eigen::Matrix<float, 6, 6>;
 using Vec6 = Eigen::Matrix<float, 6, 1>;
-static int bad = 0, missed = 0;
+static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
-// A spec Pass bound the smooth beam model does not meet here (Task 19, reported, not tuned): printed and counted, no ctest failure.
-#define PASS_ITEM(c) do { if (not (c)) { std::printf("PASS-ITEM MISS line %d: %s (printed, not tuned)\n", __LINE__, #c); ++missed; } } while (0)
 
 static constexpr float tx = 0.30f, ty = -0.255f, tH = 0.62f, tw = 0.51f;
 
@@ -317,10 +315,8 @@ static void no_cross_pushes_back_persistent()
         CHECK(th > 0.0f);
         // (spec 7c.6) fixed-precision (2c) + first-crossing rays: the iterates converge (no half-Hessian overshoot, no wall ray
         // switching on and off) and land at the wall
-        // spec 7c.8: on the LiDAR-only update the beam path's damped GN stops at gn_iters_max still moving (Task 19: last
-        // step 6.6 mm, gap −0.018 with (2c) against −0.033 without) — the (2c) push is there, the convergence is not.
-        if (camera) { CHECK(last_step < 0.001f); CHECK(g[0] > -0.005f); }
-        else        { PASS_ITEM(last_step < 0.001f); PASS_ITEM(g[0] > -0.005f); }
+        CHECK(last_step < 0.001f);
+        CHECK(g[0] > -0.005f);
     }
 }
 
@@ -1096,11 +1092,11 @@ static void first_update_converges_on(const char* nm, const CountableFrame& f, b
                 int(r.last_gn_converged()), (b.state().vec() - th0).norm());
     // spec 7c.8 Pass: the deferred item comes back as a CHECK — with the smooth beam energy the camera + ray fixture's first
     // update must return gn_conv = 1 too (T14-7's piecewise-edge reading no longer applies).
-    // Task 19: with the rays the first update does NOT converge in 12 steps (J still falling at the cap; the beam's W
-    // under-states the curvature of refuted rays, so the LM λ climbs and the accepted steps are short) — printed, counted.
-    if (rays) { PASS_ITEM(b.last_gn_converged()); PASS_ITEM(dpos <= 1e-3 and dyaw <= 1e-3); PASS_ITEM(worst_sd <= 0.05); }
-    else      { CHECK(b.last_gn_converged()); CHECK(dpos <= 1e-3 and dyaw <= 1e-3); CHECK(worst_sd <= 0.05); }
-    CHECK(b.last_gn_iters() <= 12);
+    (void)rays;
+    CHECK(b.last_gn_converged());
+    CHECK(dpos <= 1e-3 and dyaw <= 1e-3);
+    CHECK(worst_sd <= 0.05);
+    CHECK(b.last_gn_iters() <= b.params().gn_iters_max);   // 25 (spec 7c.8 rev 3.3.7)
     CHECK(mono);
 }
 static void first_update_converges()
@@ -1151,9 +1147,7 @@ static void parked_updates_contract()
         run("camera + rays", converge_frame(), pos, yaw, drift);
         bool mono = true;
         for (std::size_t k = 1; k < pos.size(); ++k) mono = mono and pos[k] <= pos[k - 1] + 1e-9 and yaw[k] <= yaw[k - 1] + 1e-9;
-        // Task 19: each update stops at its first accepted sub-tolerance step (or the cap), so a sub-mm remainder carries into the
-        // next frame and the sizes are not monotone (measured 1.81, 2.08, 0.86, 0.44, 1.15, … mm) — printed, counted.
-        PASS_ITEM(mono);
+        CHECK(mono);
         CHECK(pos.back() < 1e-3 and yaw.back() < 1e-3);
     }
 }
@@ -1294,7 +1288,6 @@ int main()
     all_steps_rejected_is_finite();
     wrap_invariance_near_pi();
     cycle_cost();
-    if (missed) std::printf("persistent_belief_test: %d Pass item(s) MISSED (printed above, reported, not tuned)\n", missed);
     std::printf("persistent_belief_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }

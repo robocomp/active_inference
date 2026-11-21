@@ -26,10 +26,8 @@
 using namespace rc;
 using Mat6 = Eigen::Matrix<float, 6, 6>;
 using Vec6 = Eigen::Matrix<float, 6, 1>;
-static int bad = 0, missed = 0;
+static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
-// A spec Pass bound the smooth beam model does not meet here (Task 19, reported, not tuned): printed and counted, no ctest failure.
-#define PASS_ITEM(c) do { if (not (c)) { std::printf("PASS-ITEM MISS line %d: %s (printed, not tuned)\n", __LINE__, #c); ++missed; } } while (0)
 
 static constexpr float tx = 0.30f, ty = -0.255f, tH = 0.62f, tw = 0.51f;
 
@@ -198,10 +196,7 @@ static void creep_set(int N)
             }
     }
     std::printf("  creep set, %d sweeps: %d / 16 fail\n", N, fails);
-    // Task 19: the beam model's own silhouette equilibrium sits outside the truth (the silhouette fixture's data optimum is
-    // w + 7.5 mm with these hand labels; θ takes part of it, b_L the rest), so |Δw| reaches ~3 mm against the 2 mm bound of
-    // 7c.6 on the cases whose undamped first step exceeds the 1 mm tolerance. Printed, counted, reported (not tuned).
-    PASS_ITEM(fails == 0);
+    CHECK(fails == 0);   // spec 7c.8 rev 3.3.7: 0/16 with Δw ≤ 2 mm (the floor and the wall are known room surfaces)
 }
 
 int main(int argc, char** argv)
@@ -214,7 +209,6 @@ int main(int argc, char** argv)
     first_crossing_ignores_near_miss();
     first_crossing_hit_matches_legacy_on_face();
     creep_set(N);
-    if (missed) std::printf("creep_set_test: %d Pass item(s) MISSED (printed above, reported, not tuned)\n", missed);
     std::printf("creep_set_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;
 }

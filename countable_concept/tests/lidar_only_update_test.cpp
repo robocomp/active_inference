@@ -376,6 +376,7 @@ static void over_deep_belief_is_not_held()
     std::printf("  over_deep: %zu staged, %d returning beyond the true back face ; start depth error %+.4f m (back face %+.4f, wall 0)\n",
                 r.endpoints.size(), beyond, h0, back0);
     float h_err[4] = {0, 0, 0, 0};
+    float back_meas_50 = 0.0f;                                          // what the rays measure: its back face (wall at y = 0)
     int idx = 0;
     for (int k = 1; k <= 50; ++k)
     {
@@ -386,22 +387,19 @@ static void over_deep_belief_is_not_held()
             h_err[idx++] = s.h - tw;
             const auto& lm = b.latent_mean();
             const double hL = s.h + lm(CountableBelief::kL + 4), cyL = s.cy + lm(CountableBelief::kL + 1) + lm(1);
+            if (k == 50) back_meas_50 = float(cyL + 0.5 * hL);
             std::printf("    sweep %2d: depth error %+.4f m (sigma_h %.4f) back face %+.4f front face %+.4f (true %+.4f) ; gn %d/%d ; gap rays %d ; "
                         "what the rays measure (theta + B e + b_L): depth error %+.4f back face %+.4f front face %+.4f\n",
                         k, s.h - tw, std::sqrt(b.covariance()(4, 4)), s.cy + 0.5f * s.h, s.cy - 0.5f * s.h, cy_t - 0.5f * tw,
                         b.last_gn_iters(), int(b.last_gn_converged()), b.last_gap_rays(), hL - tw, cyL + 0.5 * hL, cyL - 0.5 * hL);
         }
     }
-    // The expectation, rewritten from the number (Task 19 run, spec 7c.8 Pass): the over-deep belief is STILL HELD — measured
-    // depth error +0.100 → +0.149 m after 10 sweeps (+0.158 after 50), the back face pinned at the wall by (2c), the front face
-    // drifting forward. Why (printed by the depth profile below): from a front Helios the extra 10 cm is seen only by the one
-    // band of rays that clears the true back edge and lands on the wall within ~3 cm under the top plane, and those saturate
-    // at −log(1 − π + B). The profile printed below (persistent_data_energy, (2c) included since the wall is staged): flat to
-    // 0.03 nats over −5 … +7.5 cm of depth, then FALLING by 0.3–0.55 nats at +10 … +12.5 cm, where the model's top face reaches
-    // past the wall and the wall returns just above the top plane sit within the flush depth b* of it (stated limit 4, "near
-    // background", ε_px = 0.02 ⇒ b* ≈ 3 cm); beyond, (2c) on θ rises it. (2c) acts on θ only, so the latents carry what the rays
-    // measure (θ + B e + b_L) 9 cm through the wall. CHECKED: held (the error does not fall below its start) and bounded (below
-    // 0.20 m) at 10 sweeps; finite at 50.
+    // The expectation (spec 7c.8 rev 3.3.7 Pass, the wall and the floor known room surfaces in p_f): what the rays measure
+    // (θ + B e + b_L) ends no deeper than the wall's own σ behind it, and the over-deep belief is corrected (no longer held).
+    // Task 19 fix round 1 measured: θ depth error +0.100 → +0.064 (10 sweeps) → +0.047 m (50); the measured back face −0.042 /
+    // −0.062 m (in front of the wall). Before rev 3.3.7 (p_f = p_pass) the belief was HELD and drifted deeper, +0.149 m at 10
+    // sweeps, its measured face 7.6 cm through the wall. CHECKED: the measured back face at 50 sweeps ≤ σ_wall = 0.02 m behind
+    // the wall, and the θ depth error at 10 and 50 sweeps below its start.
     {
         CountableFrame g = f;
         const float front = cy_t - 0.5f * tw;
@@ -416,7 +414,8 @@ static void over_deep_belief_is_not_held()
     }
     CHECK(beyond > 0);
     CHECK(std::isfinite(h_err[3]));
-    CHECK(h_err[2] >= h0 - 1e-3f and h_err[2] < 0.20f);
+    CHECK(h_err[2] < h0 and h_err[3] < h0);
+    CHECK(back_meas_50 <= f.wall.sigma_m);
 }
 
 int main()

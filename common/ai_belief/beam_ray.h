@@ -434,6 +434,10 @@ struct BeamRays
     double kappa = 0;
     double rho_max = 6.0;
     double sigma_s = 0.01;
+    // Per-ray foreign density p_f,i (spec 7c.8 rev 3.3.7, known room surfaces; beam_room.h fills it): it replaces
+    // p_pass = 1/ρ_max in every formula of the ray (p, r, o, the normaliser (1 − m)p_f, the atom, the gradient) as a constant
+    // per ray. EMPTY ⇒ p_pass for every ray, bit for bit (the Task 17/18 fixtures).
+    std::vector<double> p_f;
 };
 
 // Build with BeamConfig::make (the quantile levels of G are tabulated once, ν is fixed at load).
@@ -876,7 +880,8 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
     if (not (rho > 0.0)) return false;
     const Eigen::Vector3d u = du / rho;
     const double sigma = rays.sigma_s, rho_max = rays.rho_max, m = rays.m[i];
-    const double a_ref = (1.0 - m) / rho_max;   // (1 − m)·p_pass: E = 0 when p equals it
+    // (1 − m)·p_f: E = 0 when p equals it; p_f = p_pass (the historic division, bit-exact) unless rays.p_f is staged
+    const double a_ref = rays.p_f.empty() ? (1.0 - m) / rho_max : (1.0 - m) * rays.p_f[i];
     const StudentT& st = cfg.st;
     const std::size_t P = parts.size();
     S.pr.resize(P); S.ap.resize(P); S.dd.resize(P); S.dts.resize(P); S.geo.resize(P);

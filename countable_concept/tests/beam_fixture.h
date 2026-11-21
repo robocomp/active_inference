@@ -3,6 +3,8 @@
 // (rc::lidar_select::select_rays_beam: every return whose ray, continued to ρ_max, crosses the select cylinder ∩ z-band),
 // with HAND labels by default (m_on on the true object, ε_px off it; spec Pass "Silhouette, hand labels") and κ set by the
 // caller (κ = 1 unless a test is about κ). sigma_s is the model σ (the caller of select_rays_beam sets it; spec Task 18).
+// The room's known surfaces (spec 7c.8 rev 3.3.7) — the floor z = 0 and the scene's walls — enter every ray's foreign density
+// p_f (beam_room.h); stage_beam takes them explicitly, helios_beam passes the floor and the scene walls.
 #pragma once
 #include <cmath>
 #include <functional>
@@ -12,6 +14,7 @@
 #include <vector>
 #include <Eigen/Core>
 #include "countable_beam_config.h"
+#include "ai_belief/beam_room.h"
 #include "lidar_select/lidar_select.h"
 #include "test_scene.h"
 
@@ -51,10 +54,20 @@ inline rc::lidar_select::Box select_box(const SceneBox& sel, float margin)
 
 // Stage `sweep` (first hits from `origin`) through select_rays_beam with the select box about `sel`. label(p) = m, or
 // NaN ⇒ no camera information (not staged). κ: set to `kappa` (≥ 0) or, with kappa < 0, select_rays_beam's own κ.
+// The fixtures' room: the floor and every scene wall (a vertical segment) are known room surfaces.
+inline rc::ai::beam::RoomSurfaces room_of(std::span<const SceneWall> walls, bool floor = true)
+{
+    rc::ai::beam::RoomSurfaces r;
+    r.floor = floor;
+    for (const auto& w : walls) r.walls.emplace_back(w.a.cast<double>(), w.b.cast<double>());
+    return r;
+}
+
 inline rc::ai::beam::BeamRays stage_beam(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& sweep,
                                          const SceneBox& sel, float margin, const std::function<double(const Eigen::Vector3f&)>& label,
                                          double kappa = 1.0, double sigma_s = 0.01, double rho_max = 6.0,
-                                         rc::lidar_select::BeamStageStats* stats = nullptr)
+                                         rc::lidar_select::BeamStageStats* stats = nullptr,
+                                         const rc::ai::beam::RoomSurfaces* room = nullptr)
 {
     rc::ai::beam::BeamRays out;
     const auto lab = [&](const Eigen::Vector3f& p) -> std::optional<std::pair<double, float>>
@@ -67,6 +80,7 @@ inline rc::ai::beam::BeamRays stage_beam(const Eigen::Vector3f& origin, const st
                                        out, stats);
     out.sigma_s = sigma_s;
     if (kappa >= 0.0) out.kappa = kappa;
+    if (room) rc::ai::beam::stage_room_foreign_density(out, *room, *rc::ai::beam::StudentT::make(2500.0, 0.05));   // = test_beam_config().st
     return out;
 }
 
@@ -77,6 +91,7 @@ inline rc::ai::beam::BeamRays helios_beam(const Eigen::Vector3f& origin, std::sp
 {
     const auto rings = helios_ring_elev_deg();
     const auto sweep = raycast_scene(origin, boxes, walls, true, kHeliosAzStepDeg, rings, 12.0f);
-    return stage_beam(origin, sweep, sel, margin, label, kappa, sigma_s);
+    const auto room = room_of(walls);
+    return stage_beam(origin, sweep, sel, margin, label, kappa, sigma_s, 6.0, nullptr, &room);
 }
 }  // namespace rc::test
