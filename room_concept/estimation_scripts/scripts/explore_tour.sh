@@ -72,9 +72,16 @@ if [[ "$result" == ALL* ]]; then
   MAXROOM=$(grep -m1 -E "^MaxRoomS" $WT/controller/etc/config.toml 2>/dev/null | grep -oE "[0-9.]+" | head -1); MAXROOM=${MAXROOM%.*}; MAXROOM=${MAXROOM:-300}
   # search ltsm from the start of the LAST recognition episode, not from this moment: recognition can be ACCEPTED before the
   # ground-truth crossing test fires (clean57: accepted, reported "not settled").
-  n_lt=$(grep -n "\[recog\] episode begins" $L/ltsm_agent.log | tail -1 | cut -d: -f1); n_lt=${n_lt:-$(wc -l < $L/ltsm_agent.log)}; n_ct=$(wc -l < $L/controller.log); t1=$(date +%s); settled="not settled within MaxRoomS ($MAXROOM s)"
+  # THE VERDICT MUST BE ABOUT THE ROOM THE ROBOT IS IN (c2_x1b, 2026-11-21): the GT crossing can fire before ltsm begins the
+  # new room's episode; the last episode was then the PREVIOUS room's, its WITHDRAWN was read as this room's verdict and the
+  # fleet stopped 1 s after ltsm proposed the right room. So the room is the controller's current one (re-read every cycle:
+  # it changes at the crossing) and only a swap line NAMING it ("ACCEPTED: <room> adopted", "WITHDRAWN: <room> is not") counts,
+  # searched from the start of that room's own episode.
+  n_ct=$(wc -l < $L/controller.log); t1=$(date +%s); settled="not settled within MaxRoomS ($MAXROOM s)"
   while (( $(date +%s) - t1 < MAXROOM )); do
-    if s1=$(tail -n +$n_lt $L/ltsm_agent.log | grep -a -o -m1 "\[swap\] \(ACCEPTED: [^;]*\|WITHDRAWN: [^;]*\)") && [ -n "$s1" ]; then settled="recognition: ${s1:0:120}"; break; fi
+    cur=$(grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}')
+    n_lt=$(grep -n "\[recog\] episode begins: provisional $cur " $L/ltsm_agent.log | tail -1 | cut -d: -f1)
+    if [ -n "$cur" ] && [ -n "$n_lt" ] && s1=$(tail -n +$n_lt $L/ltsm_agent.log | grep -a -o -m1 "\[swap\] \(ACCEPTED: $cur [^;]*\|WITHDRAWN: $cur [^;]*\)") && [ -n "$s1" ]; then settled="recognition: ${s1:0:120}"; break; fi
     if s2=$(tail -n +$n_ct $L/controller.log | grep -a -o -m1 "\[explore-tour\] room_[0-9]*: \(promoted\|max-time\)[^—]*") && [ -n "$s2" ]; then settled="promoted as a new room: ${s2:0:120}"; break; fi
     sleep 2
   done
