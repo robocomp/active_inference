@@ -1062,6 +1062,46 @@ over σ_s.
   and the test-side h = 1e-7 m, the 1e-9 m halving limit and the n ≤ 4 / z_max ≤ 5 reporting limit. ε of the tangents and the
   1e-4 m bracket are withdrawn.
 
+**Amendment 11-21 (rev 3.3.7; owner rulings after the Task 19 review): known room surfaces, the λ rule, the cost
+rule, joint damping.** The Task 19 review found no implementation defect behind its 20 Pass misses; they are model and
+plan matters, settled here.
+
+- **Known room surfaces in the foreign density (owner: "Floor as known surface").** The review traced the width bias to
+  the floor: on the ring meeting the front face 4 mm above it, floor returns lie 1.5 cm behind the face plane, inside
+  b* ≈ 3 cm, so the model is paid to cover them (w optimum +6–8 mm; an independent integration without the floor gives
+  0.0 mm). This is the "rest surfaces" answer the foreign-density paragraph named and left out. Per staged ray, t_r is
+  its first crossing, in (0, ρ_max], with the room's known surfaces: the floor plane z = 0 of the room frame and the
+  walls of the room polygon the belief already reads for (2c) (walls by the same mechanism is the controller's call —
+  the over-deep fixture's 7.6–9 cm through the wall is the same bias; owner may strike it). The foreign density
+  becomes, per ray,
+
+      p_f(ρ) = p_pass·𝟙[ρ < t_r] + (1 − p_pass·t_r)·St(ρ − t_r)          (no crossing before ρ_max: p_f = p_pass)
+
+  i.e. unmodelled clutter stays uniform at today's 1/ρ_max in front of the room surface, and the mass that went beyond
+  it now lands on it, smeared by the same Student-t. No new parameter, and it is a density on [0, ∞) by construction.
+  p_f,i = p_f(ρ_i) does not depend on θ (the room surfaces are fixed during the update), so it replaces p_pass in every
+  formula of (a), (b) and the rev 3.3.6 block as a per-ray constant — p, r, o, the energy normaliser (1 − m)p_f,i,
+  the atom term, the gradient — with no new derivative. The flush depth b* is then measured against p_f: near a room
+  surface it shrinks to the scale where St(b*)/St(0) ≈ ε_px/(1 − ε_px). Pass: the silhouette fixture's w optimum with
+  the floor present within 1 mm of truth (the review's per-ring probe as a test); creep 0/16 with Δw ≤ 2 mm; the
+  over-deep fixture's measured face no deeper than the wall's own σ behind it; mass and reduction items unchanged
+  (fixtures without room surfaces reduce to rev 3.3.6 exactly, bit-exact).
+- **The λ rule and the cap (owner: "Nielsen λ rule + cap 25").** (d)'s ×4 / ÷4 rule is replaced by Nielsen's:
+  gain ratio ϱ = (J_k − J_{k+1}) / (J_k − J_model(δ)), with J_model the quadratic model of the solve; accept when
+  ϱ > 0: λ ← λ·max(⅓, 1 − (2ϱ − 1)³), ν ← 2; reject: λ ← λ·ν, ν ← 2ν (first λ = 10⁻³, ν = 2). `gn_iters_max` = 25.
+  Solver constants, not model thresholds. Pass: the first-update fixture with rays returns `gn_conv` = 1 within 25 and
+  θ equals the 200-step run (1 mm / 1 mrad); seeds settle within the same tolerance.
+- **The cost rule (owner: "Bound = agent rate").** The 5 ms median of the Cost item cannot hold at this per-ray cost
+  (2.4–3.2 ms per evaluation per 256 rays; live ≈ 1000 rays). It is withdrawn: the unit test PRINTS the ms (first
+  update and parked, box and bed) and fails nothing; the binding rule is live11's fit rate ≥ 8 Hz per class.
+- **Damping on the joint state (owner: "Ratify, write into spec").** (d)'s Levenberg term acts on the whole joint
+  state x = (θ, b): M = diag(W) over θ and the latents (a zero-variance latent still keeps δ = 0), with the consistent
+  linearisation θ_k + B·b_k of (d)'s caveat. On the beam energy the θ-only term rejected every step; the review found
+  the joint form sound (same fixed point). It applies to every flag-on update, camera-only included.
+- **Pass protocol.** Every Pass bound of this section is a CHECK that fails ctest when missed. "Printed" is reserved
+  for items this spec itself marks printed (and the Cost ms above). A miss goes to the owner as a failing test, never
+  as a silenced print.
+
 ## 8. Pass
 
 - **Unit:** a LiDAR-only frame whose memberships all vanish leaves the belief at the prediction (state, Σ and ω);
