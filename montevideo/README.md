@@ -1,7 +1,7 @@
 # A robot that acts to know
 
-**Active inference in a working cognitive architecture.** Twenty hours over five days,
-Montevideo, 30 November – 4 December, 9:00–13:00. Each day is a four-hour session, half theory and
+**Active inference in a working cognitive architecture.** Fifteen hours over five days,
+Montevideo, 30 November – 4 December. Each day is a three-hour session, half theory and
 half hands-on lab.
 
 ## The course
@@ -37,7 +37,7 @@ error.** It appears in many guises — the common-mode ceiling on how much a mas
 re-centred on its own estimate, a fused precision better than its best member, a metric that
 scores what the robot never saw.
 
-### Day 1 — The challenge, probability, and free energy
+### Day 1 — The challenge and probability
 We watch the full cycle run in simulation, and name what each stage must infer. Then we set up the
 mathematics, starting from the beginning:
 - joint distributions and the three operations everything is built from: marginalisation,
@@ -45,20 +45,25 @@ mathematics, starting from the beginning:
 - the same operations on Gaussians, in covariance and in precision form;
 - the chain rule: a joint of N variables factorises into N factors, in N! equivalent orders, and
   why we write the causal one (sparse, physical, modular, and it can generate predictions); where
-  a plain controller or a learnt policy, p(a|o), sits in that picture;
-- generative models, variational inference and the evidence lower bound;
+  a plain controller or a learnt policy, p(a|o), sits in that picture.
+
+*Lab:* the three operations by hand on a door/LiDAR probability table and on a Gaussian wall; one
+joint in two orders; a robot whose action depends on the world only through what it has seen.
+
+### Day 2 — Free energy: perception and action
+- Why exact Bayes cannot be computed, and the belief that replaces the posterior: generative models,
+  variational inference and the evidence lower bound;
 - free energy as complexity minus accuracy;
-- free energy differentiated with respect to the belief and with respect to the action, and a first
-  look at expected free energy, with its pragmatic and epistemic terms;
-- perception as inference under a model rather than reconstruction from data;
 - the Laplace approximation, which gives Gaussian beliefs whose covariance is the inverse
-  curvature, the form everything later takes.
+  curvature, the form everything later takes; Gauss–Newton to find it;
+- free energy as the price of a model;
+- free energy differentiated with respect to the belief and with respect to the action:
+  perception and action as two ways to lower the same quantity.
 
-*Lab:* a warm-up on a door/LiDAR probability table and a Gaussian; then meet the toy world, fit a
-wall from a LiDAR scan as a Laplace belief, test whether its covariance is honest, and choose
-between two models of it by free energy.
+*Lab:* meet the toy world, fit a wall from a LiDAR scan as a Laplace belief, test whether its
+covariance is right, and choose between two models of it by free energy.
 
-### Day 2 — The CORTEX architecture: concepts and memories
+### Day 3 — The CORTEX architecture: concepts and memories
 - Concepts as the fabric of the architecture: one agent per kind of thing, a concept's dimensions
   (geometry, aspect, life cycle, function), the class held by the agent and the instances on the graph.
 - A distributed working memory held as a shared graph: geometry and meaning on the same edges, no
@@ -75,7 +80,7 @@ between two models of it by free energy.
 published covariance is ignored; when the sum of the agents' objectives is the global one and what the
 difference costs; a range gate against a precision; a bias that no precision can bound.
 
-### Day 3 — Concepts: geometry, life cycle, aspect
+### Day 4 — Concepts: geometry, life cycle, aspect
 What a concept agent is: a residual and a Jacobian on a shared engine, what it publishes, a common contract.
 Then three of a concept's dimensions:
 - Geometry: the room as the first belief born, with description length as its price; localisation as one
@@ -94,7 +99,7 @@ walls and localise in it, meet the room's symmetry, and watch a thousand points 
 refuse to shrink the uncertainty. Finally, decide whether a chair is one you remember or a new one,
 by position and by look, and see what a wrong variance does.
 
-### Day 4 — Action
+### Day 5 — Action
 Why action needs a second functional: expected free energy, its pragmatic and epistemic terms, and the identity
 of information gain, mutual information and D-optimal design.
 - Affordances as published, priced offers: what an object can do for the robot's uncertainty, measured in nats.
@@ -102,20 +107,14 @@ of information gain, mutual information and D-optimal design.
 - The next best view as optimal experiment design, and the trap of predicting through what is already known.
 - Control: routes as optimisation, path tracking as pole assignment, and why a well-posed geometry lets the
   follower do without an obstacle term.
-- The robot turns the same objective on itself: calibration as inference, the gauges no data can fix, which
-  motions make which parameters observable, drift and why a prior must never be re-centred on its own running
-  estimate, and standing still as an observation.
+- Talking to the robot: the language model proposes plans and the controller runs them; a question is a query on
+  a belief the robot already holds; imagining is the same model run on a changed copy of the world; every claim
+  must come from a tool that read a belief. Where it is going: an inner voice, the chat turned inward on the
+  robot's own surprises (proposed, not built).
 
 *Lab:* choose viewpoints by expected information; let agents publish priced offers on the toy graph and watch
 the controller hand over between them; explore a room with an occupancy grid that knows when to stop; follow a
-route with a double pole and deform it around an obstacle; recover a hidden wheel-scale error and gyro bias from
-the localiser's corrections.
-
-### Day 5 — Structure, evidence and honesty (to be confirmed)
-Relations between objects as latent variables, and the double counting that appears whenever an
-estimate is returned to those who produced it. Then how such a system is evaluated when no recorded
-dataset can answer the question: policy against policy in one closed loop, and an honest balance of
-which mechanisms earned their place, nulls included.
+route with a double pole and deform it around an obstacle.
 
 ## Throughout
 

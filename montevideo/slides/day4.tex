@@ -2,8 +2,8 @@
 \input{preamble}
 
 \title{A robot that acts to know}
-\subtitle{Day 3 --- Concepts: geometry, life cycle, aspect}
-\date{Wednesday 2 December}
+\subtitle{Day 4 --- Concepts: geometry, life cycle, aspect}
+\date{Thursday 3 December}
 
 \tikzset{bx/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize,
                     minimum height=0.8cm, inner sep=3pt},
@@ -537,7 +537,7 @@
   \alert{The non-convexity problem:} the walls that jut into the room hide floor, so no single place
   sees it all. To know the room, the robot has to move.\\[0.3em]
 
-  {\footnotesize\color{muted} The epistemic term of Day 4 in its simplest form: unseen floor stands in for information.\par}
+  {\footnotesize\color{muted} The epistemic term of Day 5 in its simplest form: unseen floor stands in for information.\par}
   \src{room R1, layouts/apartamento\_layout.svg; layout\_acquisition.tex l.663--720; figures/make\_d3\_explore.py}
 \end{frame}
 
@@ -629,7 +629,7 @@
     \end{column}
   \end{columns}
   \vfill
-  {\footnotesize This is Day 1's complexity term: the KL from prior (10 m) to belief (3 cm) is $\ln(L/\sigma)$.\par}
+  {\footnotesize This is Day 2's complexity term: the KL from prior (10 m) to belief (3 cm) is $\ln(L/\sigma)$.\par}
   \src{layout\_acquisition.tex l.56--66, l.128--146}
 \end{frame}
 
@@ -659,7 +659,7 @@
 
 \begin{frame}{Localising: Kalman's structure, but optimised}
   \small
-  Day 1: with a Gaussian prior and a linear sensor, minimising $F$ \emph{is} the Kalman update.
+  Day 2: with a Gaussian prior and a linear sensor, minimising $F$ \emph{is} the Kalman update.
   Localising has the same two parts:
   \[
     F(X) \;=\; \underbrace{\tfrac12\,(X-\bar X)^{\!\top}\bar P^{-1}(X-\bar X)}_{\text{predict: where the wheels say}}
@@ -683,12 +683,12 @@
       \textbf{Here}: keep stepping, re-linearising at each new pose, until $F$ stops falling. It
       matters when the heading is off: a wall distance turns with it.\\[0.3em]
       \footnotesize Covariance $P=\Hess^{-1}$, with $\Hess=\bar P^{-1}+J^{\top}J/\sigma^2$ the
-      curvature of $F$ at its minimum and $J$ how each $d_n$ changes with the pose: Day 1's Laplace.
+      curvature of $F$ at its minimum and $J$ how each $d_n$ changes with the pose: Day 2's Laplace.
     \end{column}
   \end{columns}
   \vspace{0.6em}
   \centering\alert{Prior from motion, likelihood from the sensor: optimised, not linearised once.}
-  \src{room\_concept.tex l.243--300, l.1601--1640; Day 1, the Kalman update as free energy}
+  \src{room\_concept.tex l.243--300, l.1601--1640; Day 2, the Kalman update as free energy}
 \end{frame}
 
 \begin{frame}{Walls are not enough: corners say which is which}
@@ -829,7 +829,7 @@
   \textbf{The shape is not fitted}: it is the class template, seat $60\times52$ cm with its top at
   0.60 m and a backrest 0.66 m above it. Only the pose is estimated.\\[0.3em]
   Minimised by the same Gauss--Newton steps as the robot's pose; the covariance is again the inverse
-  curvature, $P=\Hess^{-1}$ (Day 1's Laplace).
+  curvature, $P=\Hess^{-1}$ (Day 2's Laplace).
   \src{concept\_agents.tex l.469--535; chair\_concept: chair\_dof.h (pose-only), common/concept\_manifest/chair.concept.toml}
 \end{frame}
 
@@ -1446,8 +1446,8 @@
 % =================================================================================================
 
 
-\begin{frame}{Lab 3: a concept's life, its footing, its look}
-  \texttt{labs/day3.ipynb}, about two hours.
+\begin{frame}{Lab 4: a concept's life, its footing, its look}
+  \texttt{labs/day4.ipynb}, about two hours.
   \begin{columns}[T]
     \begin{column}{0.31\textwidth}
       \small
@@ -1495,7 +1495,7 @@
       \end{itemize}
     \end{column}
     \begin{column}{0.42\textwidth}
-      \begin{block}{Reading for Day 4}\small
+      \begin{block}{Reading for Day 5}\small
         Thesis chapters:
         \begin{itemize}
           \item \emph{Action: affordances and the expected free energy}, up to ``Why the gradient

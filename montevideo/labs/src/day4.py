@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Day 3 — Concepts: geometry, life cycle, aspect
+# # Day 4 — Concepts: geometry, life cycle, aspect
 #
 # Yesterday's agents each own a belief on the shared graph. Today we follow one belief through its
 # life, look at what it stands on, and ask how the robot knows a thing it has seen before.
@@ -63,7 +63,7 @@ SIGMA = 0.02
 # and the object is warranted when $\Delta F<0$. Note that each detection carries its **own** $\sigma_t$:
 # a detector reports how far it should be trusted, and the comparison reads that.
 #
-# **Exercise 1.** Write `delta_F`, using Day 1's `laplace` for $F_\text{Laplace}$.
+# **Exercise 1.** Write `delta_F`, using Day 2's `laplace` for $F_\text{Laplace}$.
 
 # %%
 AREA, P_EXIST = 24.0, 0.1                                     # the living room's area; prior that a new object is here
@@ -811,7 +811,7 @@ for name, X0 in (("true pose", X_true), ("half-turn", X_flip)):
 #
 # **Exercise 15.** Over 60 runs, dead-reckon the first leg, estimate the face's offset along its normal from
 # $N$ = 1 … 32 points, and compare the true rms error with two predictions: independent points
-# only (with Day 1's per-point $\sigma_i = \sigma|u_i^\top n|$), and the Woodbury formula.
+# only (with Day 2's per-point $\sigma_i = \sigma|u_i^\top n|$), and the Woodbury formula.
 
 # %%
 dense = Lidar(n_beams=2880, sigma=SIGMA)
@@ -840,7 +840,7 @@ for seed in range(60):
         j = np.array([n_face[0], n_face[1], (dp_dth @ n_face).mean()])  # ∂(offset)/∂(x, y, θ)
         u = P_face[idx] / np.linalg.norm(P_face[idx], axis=1, keepdims=True)     # beam directions, robot frame
         u_map = u @ se2.rot(th).T
-        sig_i = SIGMA * np.abs(u_map @ n_face)                       # Day 1: noise along the beam, seen along the normal
+        sig_i = SIGMA * np.abs(u_map @ n_face)                       # Day 2: noise along the beam, seen along the normal
         var_indep = np.sum(sig_i ** 2) / N ** 2
         rows[N].append((err, np.sqrt(var_indep), np.sqrt(var_indep + j @ b.Sigma @ j)))
         # END SOLUTION

@@ -2,8 +2,8 @@
 \input{preamble}
 
 \title{A robot that acts to know}
-\subtitle{Day 4 --- Action}
-\date{Thursday 3 December}
+\subtitle{Day 5 --- Action}
+\date{Friday 4 December}
 
 \tikzset{box4/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize, minimum height=0.8cm},
          arr4/.style={-{Stealth[length=2.5mm]}, thick},
@@ -29,10 +29,10 @@
     \node[align=center, font=\small] at (0,-0.15) {one objective,\\one currency};
   \end{tikzpicture}
 
-  \small And at the end the robot turns the same objective on its own body.
+  \small And at the end, the person talks to the robot: language reads and changes the same beliefs.
 \end{frame}
 
-\input{day4_efe}
+\input{day5_efe}
 
 % =================================================================================================
 \section{Affordances: published, priced offers}
@@ -399,197 +399,234 @@
 \end{frame}
 
 % =================================================================================================
-\section{The same objective, turned on itself}
+\section{\texorpdfstring{Talking to the robot\\[0.4em]{\normalsize\mdseries\color{muted} language reads and changes the same beliefs}}{Talking to the robot}}
 % =================================================================================================
 
-\begin{frame}{Calibration is inference, not maintenance}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \includegraphics[width=\textwidth]{d4_sawtooth.pdf}
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      The toy's wheels over-report by 4\%. The room corrects each step, and every correction points the
-      same way.\\[0.5em]
-      A wider covariance would not help: it says how far the prediction may be wrong, not in
-      \emph{which direction}.\\[0.5em]
-      Put $(s_v,s_\omega,b)$ in the state: NEES $8.3\to1.6$.
-    \end{column}
-  \end{columns}
-  \lesson{If the body is a factor of the posterior, estimating it is the same inference.}
-  \src{active\_inference.tex l.797--800; self\_calibration.tex l.53; lab 4, exercises 15--17}
-\end{frame}
-
-\begin{frame}{What no data can determine}
-  \begin{columns}[c]
-    \begin{column}{0.47\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \draw[very thick, muted] (0,0) rectangle (2.0,1.4);
-        \fill[muted!40, draw=black] (0.65,0.55) circle (4pt);
-        \draw[cool] (0.65,0.55) -- (2.0,1.05); \draw[cool] (0.65,0.55) -- (1.4,1.4);
-        \node[lab4] at (1,-0.28) {what the robot believes};
-        \draw[very thick, muted] (2.7,-0.15) rectangle (5.2,1.6);
-        \fill[muted!40, draw=black] (3.51,0.54) circle (5pt);
-        \draw[cool] (3.51,0.54) -- (5.2,1.16); \draw[cool] (3.51,0.54) -- (4.45,1.6);
-        \node[lab4, align=center] at (3.95,-0.5) {everything 2\% larger:\\wheels, track, ranges, room, mounts};
-      \end{tikzpicture}
-
-      \vspace{0.5em}
-      {\small No reading changes.}
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      A transformation that changes no factor of the model is a \textbf{gauge}. The data cannot fix
-      it; only a stated convention can.
-      \vspace{0.4em}
-      \begin{itemize}\small
-        \item Seven survive in the joint model.
-        \item Scale: trust the LiDAR, $s_L\equiv1$. Every scale reported is relative to it.
-        \item The information computation finds this one: $5\times10^{-7}$ along its direction.
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \src{self\_calibration.tex l.643--700}
-\end{frame}
-
-\begin{frame}{What each motion makes observable}
+\begin{frame}[t]{The language model proposes; the controller acts}
   \centering
-  \includegraphics[width=0.86\textwidth]{d4_obs.pdf}
-
-  \raggedright\small
-  Posterior over prior sd, every other parameter estimated too; ``--'' means the motion teaches
-  nothing. Standing still teaches the gyro bias and nothing else. Straight and spin teach disjoint
-  sets. \alert{Observability is a property of the parameter and the motion together.}
-  \src{self\_calibration.tex l.868--877, tab:sc-obs-motion; a subset of the rows}
-\end{frame}
-
-\begin{frame}{Conditional is not marginal}
-  \begin{columns}[c]
-    \begin{column}{0.54\textwidth}
-      \includegraphics[width=\textwidth]{d4_schur.pdf}
-    \end{column}
-    \begin{column}{0.42\textwidth}
-      \small
-      At a constant turn rate, scale and bias both grow in proportion to time: the data see one
-      combination.
-      \[ S=\mathcal I_{\theta\theta}-\mathcal I_{\theta n}\,\mathcal I_{nn}^{-1}\,\mathcal I_{n\theta} \]
-      The Schur complement removes what another unknown could equally have produced. A second rate,
-      or a pause, splits them.
-    \end{column}
-  \end{columns}
-  \src{self\_calibration.tex l.820--830; lab 4, exercise 18}
-\end{frame}
-
-\begin{frame}{Testing it: inject an error, and predict the recovery first}
-  \[
-    \text{recovery} \;=\; 1-\Big(\frac{\sigma_{\text{post}}}{\sigma_{\text{prior}}}\Big)^{\!2}
-  \]
-  \begin{center}
-  \begin{tikzpicture}[x=6.5cm, y=0.58cm, lab/.style={font=\scriptsize}]
-    \draw[muted] (0,0) -- (1.1,0);
-    \foreach \v in {0,0.5,1} { \draw[muted] (\v,0) -- (\v,-0.12); \node[lab, below] at (\v,-0.12) {\v}; }
-    \foreach \y/\n/\pr/\re in {3/Ricoh yaw/0.454/0.454, 2/ZED yaw/0.992/0.984} {
-      \node[lab, left] at (0,\y) {\n};
-      \draw[cool, very thick] (\pr,\y-0.3) -- (\pr,\y+0.3);
-      \fill[accent] (\re,\y) circle (3pt);
-    }
-    \node[lab, left] at (0,1) {forward scale};
-    \fill[accent] (1.042,1) circle (3pt);
-    \node[lab, right] at (1.052,1) {104.2\% of a known 3\%};
-    \draw[cool, very thick] (0.72,4.0) -- (0.72,4.5); \node[lab, right] at (0.73,4.25) {predicted};
-    \fill[accent] (0.93,4.25) circle (3pt); \node[lab, right] at (0.945,4.25) {recovered};
+  \begin{tikzpicture}[s/.style={box4, minimum width=2.2cm, minimum height=0.9cm}]
+    \node[s, fill=muted!10] (p) at (0,0) {the person\\speaks};
+    \node[s, fill=accent!10] (l) at (2.95,0) {language\\model};
+    \node[s, fill=cool!10] (c) at (5.9,0) {plan checked,\\shown as a card};
+    \node[s, fill=good!12] (k) at (8.85,0) {controller\\runs the plan};
+    \node[s, fill=good!12] (r) at (11.8,0) {the robot\\moves};
+    \draw[arr4] (p) -- (l);
+    \draw[arr4] (l) -- (c);
+    \draw[arr4] (c) -- node[below=0.5cm, lab4] {after ``yes''} (k);
+    \draw[arr4] (k) -- (r);
+    \draw[arr4, muted, dashed] (p.south) to[bend right=18] node[below, lab4, text=black] {``stop'', ``pause'': read by code, no model in the loop} (k.south);
   \end{tikzpicture}
-  \end{center}
-  \small
-  Run twice with the same seed: the difference sees only the injection. It is predictable from the
-  posterior alone, so running both checks that the estimator is consistent with itself.
-  \src{self\_calibration.tex l.3056, l.3640--3644}
+
+  \vspace{0.3em}
+  \begin{columns}[T]
+    \begin{column}{0.53\textwidth}
+      \footnotesize
+{\ttfamily\scriptsize\raggedright
+      mission "go to room\_3 and tell me the colour\\
+      \hspace*{4.4em}of every chair on the way"\\
+      \hspace*{1em}watch seen(chair) continue each=c\\
+      \hspace*{2em}report "the colour of \$c"\\
+      \hspace*{1em}cross door\_22 expect=room\_3 retry=2\par}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \small
+      The plan is written in a small mission language: steps, conditions such as
+      \texttt{door\_open(door\_1)<0.5}, and watches on what is seen.\\[0.4em]
+      A condition reads a belief: $P(\text{open})$ is the door agent's.
+    \end{column}
+  \end{columns}
+  \lesson{The language model writes plans; it never drives the robot.}
+  \src{language\_agent/etc/skills/missions.md; docs/command\_taxonomy.md \S1.1}
 \end{frame}
 
-\begin{frame}{A body that drifts, and the prior that must not move}
-  \centering
-  \includegraphics[width=0.88\textwidth]{d4_drift.pdf}
+\begin{frame}[t]{A question is a query on a belief the robot already holds}
+  \centering\small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{@{}p{3.9cm} p{3.6cm} p{5.3cm}@{}}
+    \toprule
+    the person asks & who holds the belief & the answer \\
+    \midrule
+    ``Where is my chair?'' & long-term object memory & its last seen room and pose, copied, not rephrased \\
+    ``Is door\_1 open?'' & the door agent & $P(\text{open})$ from the leaf angle it observes \\
+    ``Can you see the fridge from the door?'' & every concept agent publishes how it detects & $P(\text{see}\given\mathbf v)$ \\
+    \bottomrule
+  \end{tabular}
 
+  \vspace{-0.3em}
+  \[
+    P(\text{see}\given\mathbf v) \;=\; P(\text{notice}\given\mathbf v)\;\cdot\;P(\text{recognise}\given\mathbf v)
+  \]
+  \raggedright\small
+  $\mathbf v$: where the robot would stand. \emph{Notice}: enough of the object is in view past walls and
+  doors. \emph{Recognise}: the detector names it at that distance. The same $P(\text{detect}\given\mathbf v)$
+  that priced a view this morning.
+  \lesson{The language model chooses which belief to ask; the number comes from the belief.}
+  \src{language\_agent/src/can\_see.h, where\_is; common/ perception cards}
+\end{frame}
+
+\begin{frame}[t]{Imagining: the same model, run on a changed copy of the world}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=2.7cm, minimum height=0.9cm}]
+    \node[s, fill=cool!10] (w) at (0,0) {the robot's\\beliefs now};
+    \node[s, fill=accent!10] (x) at (3.9,0) {a copy, with one\\thing changed};
+    \node[s, fill=good!12] (m) at (7.8,0) {the model the\\robot acts with};
+    \node[s, fill=muted!10] (a) at (11.7,0) {an answer,\\with its assumptions};
+    \draw[arr4] (w) -- node[above, lab4] {copy} (x);
+    \draw[arr4] (x) -- node[above, lab4] {predict} (m);
+    \draw[arr4] (m) -- (a);
+    \node[lab4, below=0.15cm of x, align=center] {door\_2 := open};
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  \small
+  \renewcommand{\arraystretch}{1.4}
+  \begin{tabular}{@{}p{5.4cm} p{7.0cm}@{}}
+    \toprule
+    ``Would I fit through door\_2?'' & the controller's own fitting model and the robot's footprint \\
+    ``Would I see the fridge if door\_2 were open?'' & $P(\text{see}\given\mathbf v)$ on the changed copy \\
+    ``Would I get through door\_1?'' & the robot's past crossings of that door, counted \\
+    \bottomrule
+  \end{tabular}
+  \lesson{To imagine is to predict observations under a change: what expected free energy needs.}
+  \src{language\_agent/src/imagine\_fit.h, imagine\_see.h, imagine\_succeed.h}
+\end{frame}
+
+\begin{frame}[t]{Every claim must come from a tool that read a belief}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \small
-      \textbf{Drift.} A body that drifts a thousand times more slowly is tracked only about six times
-      more tightly.
+      \textbf{The person's words become a belief only after a check}
+      \vspace{0.4em}
+
+      \centering
+      \begin{tikzpicture}[s/.style={box4, minimum width=4.6cm}]
+        \node[s, fill=muted!10] (a) at (0,0) {``that chair is mine''};
+        \node[s, fill=cool!10] (b) at (0,-1.3) {card: \emph{chair\_34 belongs to you?}};
+        \node[s, fill=good!12] (c) at (0,-2.6) {stored in memory only on ``yes''};
+        \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c);
+      \end{tikzpicture}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \small
-      \textbf{Never re-centre a prior on its own estimate.} The same evidence counts again, and a
-      parameter nothing excites wanders. \alert{Decided on the argument}: no measurement yet
-      isolates the effect.
+      \textbf{The model's words, when no tool ran}
+      \vspace{0.4em}
+
+      \centering
+      \begin{tikzpicture}[s/.style={box4, minimum width=4.6cm}]
+        \node[s, fill=accent!10] (a) at (0,0) {``I have planned the mission''\\(no tool was called)};
+        \node[s, fill=cool!10] (b) at (0,-1.45) {asked once more: plan it,\\or say nothing was planned};
+        \node[s, fill=muted!10, font=\scriptsize] (c) at (0,-2.9) {kept in the history instead:\\``nothing was planned or sent,\\and the robot did not move''};
+        \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c);
+      \end{tikzpicture}
     \end{column}
   \end{columns}
-  \src{self\_calibration.tex l.1001--1017, l.2763--2825; right panel: lab 4, exercise 21}
+
+  \vspace{0.5em}
+  \small If the false sentence stayed in the history, the model would copy it the next time.
+  \lesson{The language model is not the robot's belief: it may only report what a tool returned.}
+  \src{language\_agent/src/mission\_plan.h l.607--657; human\_claim.h}
 \end{frame}
 
-\begin{frame}{Standing still is an observation}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \centering\small
-      \renewcommand{\arraystretch}{1.3}
-      \begin{tabular}{@{}l c@{}}
-        \toprule
-        parameter & information per second \\
-        \midrule
-        $k_v$ forward scale & $v^2T/\varsigma_p^2$ \\
-        $k_\omega$ heading scale & $\omega^2T/\varsigma_\theta^2$ \\
-        \rowcolor{accent!15}
-        $b_\omega$ gyro bias & $T/\varsigma_\theta^2$ \\
-        \bottomrule
-      \end{tabular}
+\begin{frame}[t]{From speech between people to speech inside \hfill\wip}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=3.4cm, minimum height=0.9cm}]
+    \node[lab4, anchor=east] at (-1.8,0) {a child};
+    \node[s, fill=muted!10] (a) at (0,0) {speech with\\another person};
+    \node[s, fill=muted!10] (b) at (4.3,0) {private speech:\\aloud, to oneself};
+    \node[s, fill=muted!10] (c) at (8.6,0) {inner speech:\\silent, abbreviated};
+    \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c);
+    \node[lab4, anchor=east] at (-1.8,-1.5) {the robot};
+    \node[s, fill=good!12] (d) at (0,-1.5) {chat with\\the person};
+    \node[s, fill=good!12] (e) at (4.3,-1.5) {a robot event wakes\\the model};
+    \node[s, fill=accent!10] (f) at (8.6,-1.5) {questions the robot\\puts to itself};
+    \draw[arr4] (d) -- (e); \draw[arr4, dashed] (e) -- (f);
+    \node[lab4] at (2.15,-2.25) {\color{good!70!black}built};
+    \node[lab4] at (6.45,-2.25) {\color{accent}proposed, not built};
+  \end{tikzpicture}
 
-      \vspace{0.6em}
-      No rate in the last row: only time. Two legs of one route, differing in whether the robot happened
-      to stand still: the data's share of the bias posterior goes from \textbf{about half} to
-      \textbf{almost all}.
+  \vspace{0.2em}
+  \raggedright\small
+  Vygotsky: a function appears first between people, then inside the individual. Children talk aloud
+  to themselves more when the task is harder.\\[0.3em]
+  A wake today: during a mission, a robot event goes to the model, which may look, query, stop or
+  propose, and may not act.
+  \lesson{The robot's inner voice would be the chat, turned inward on its own surprises.}
+  \src{\emph{The Vygotskian Machine}, draft 2026, \S3; Vygotsky 1986; Berk 1992; mission\_plan.h \texttt{allowed\_in\_wake}}
+\end{frame}
+
+\begin{frame}[t]{An inner question is a small active-inference loop \hfill\wip}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=3.3cm, minimum height=0.9cm}]
+    \node[s, fill=accent!10] (q) at (0,0) {surprise: an object\\no agent explains};
+    \node[s, fill=cool!10] (h) at (4.3,0) {hypotheses, each\\with what it predicts};
+    \node[s, fill=cool!10] (t) at (8.6,0) {a test: a motion\\that separates them};
+    \node[s, fill=good!12] (m) at (8.6,-1.6) {the robot measures};
+    \node[s, fill=good!12] (p) at (4.3,-1.6) {the posterior moves};
+    \node[s, fill=muted!10] (e) at (0,-1.6) {stop: the gain no longer\\pays the cost};
+    \draw[arr4] (q) -- (h); \draw[arr4] (h) -- node[below=0.1cm, lab4] {VLM proposes} (t);
+    \draw[arr4] (t) -- (m); \draw[arr4] (m) -- (p); \draw[arr4] (p) -- (e);
+    \draw[arr4, muted] (p) -- (h);
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  \raggedright\small
+  \textbf{Illustrative, not a run:} bag, robot vacuum or moved chair? The vision-language model
+  proposes ``approach to 1 m: a vacuum is under 0.15 m tall and moves''. The robot measures 0.12 m and
+  sees it move.\\[0.3em]
+  The model only sets what each hypothesis predicts. \alert{Only the robot's own measurement moves
+  the posterior.}
+  \lesson{Talking to oneself is choosing the next look by expected information gain.}
+  \src{\emph{The Vygotskian Machine} \S3, vygotskian\_internalisation.tex l.9--123}
+\end{frame}
+
+\begin{frame}{What is measured, and what is not}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \begin{measured}{a local model writes the plans}
+        \small
+        On a robot-mounted computer, a 26-billion-parameter open model wrote correct missions
+        for 66 of 72 requests (24 requests, 3 runs each), in under a second.
+      \end{measured}
+      \small
+      In one simulated run a watch reacted while the robot crossed a door, and a ``stop'' watch ended
+      an exploration at a new chair.
     \end{column}
     \begin{column}{0.46\textwidth}
       \small
-      The world is sampled only where the robot looks. The body is in everything it does.
-
-      \vspace{0.6em}
-      So ordinary driving calibrates, and a manoeuvre earns its place only where the task does not
-      span the covariate; a planner avoids a motion exactly as much as the motion costs it. It should
-      compete with \alert{idleness}, never with a task.
+      \textbf{Not established:}
+      \begin{itemize}
+        \item the inner voice: designed, not built, nothing run;
+        \item the prediction that inner questions fall with practice, as private speech does
+              (a cache would show it too);
+        \item phrase lists catch false claims in English and Spanish only.
+      \end{itemize}
     \end{column}
   \end{columns}
-  \lesson{Here the one calibration action the analysis justifies is a pause.}
-  \src{self\_calibration.tex l.2670--2762; active\_inference.tex l.852--868, l.957--960}
+  \src{missions.md header; vygotskian\_internalisation.tex l.235--264}
 \end{frame}
 
 % =================================================================================================
 \section{Lab}
 % =================================================================================================
 
-\begin{frame}{Lab 4: paying for what you learn}
-  \texttt{labs/day4.ipynb}, about two hours.
+\begin{frame}{Lab 5: paying for what you learn}
+  \texttt{labs/day5.ipynb}, about 75 minutes.
   \begin{enumerate}\small
     \item \textbf{Where to look}: $\Delta H$ on one wall, and travel priced in nats.
     \item \textbf{Priced offers}: producers publish on the graph, the controller selects; find the
           hand-offs nobody coded.
     \item \textbf{The room}: an explorer that knows when to stop, and the trap of predicting through matter.
     \item \textbf{Following}: a double pole, three ways to break it, a route deformed around an obstacle.
-    \item \textbf{The body}: recover hidden wheel and gyro errors from the room's corrections; what each
-          motion teaches.
   \end{enumerate}
   \vspace{0.3em}
-  \small Short of time: skip exercises 2, 16, 19 and 20.
+  \small Short of time: skip exercises 2 and 13.
 \end{frame}
 
-\begin{frame}{Tomorrow}
+\begin{frame}{The last result of the week}
   \centering
   \vspace{1em}
-  {\Large The programme for Day 5 is to be confirmed.}
-
-  \vspace{1.5em}
   \raggedright
-  Today's result to carry there: \alert{what can be learnt is a property of the parameter and the
-  action together}. A robot pays for what it knows; the question left is how anyone can tell whether
-  it paid well.
+  \alert{The robot acts to make its beliefs better, and language is one more way to read and change
+  those beliefs.} Whatever it says, it can show where it came from: a belief, the model that built it,
+  and the look that paid for it.
 \end{frame}
 
 \end{document}

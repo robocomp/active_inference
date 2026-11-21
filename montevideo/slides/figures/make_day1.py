@@ -151,16 +151,16 @@ d_flat, sa_flat = _dF(p0, np.deg2rad(5.0)); d_tilt, _ = _dF(p_tilt, np.deg2rad(5
 print(f"occam: s=5deg flat {d_flat:.1f} nats, tilted {d_tilt:.1f} nats, sigma_alpha {np.rad2deg(sa_flat):.3f} deg")
 fig, (ax, bx) = plt.subplots(1, 2, figsize=(9.0, 3.2), gridspec_kw={"width_ratios": [1.3, 1]})
 ax.semilogx(np.degrees(widths), dF, "o-", ms=3, color="0.2", label="computed")
-ax.semilogx(np.degrees(widths), np.log(widths / sa_flat), "--", color=ACCENT_, label=r"$\ln(s/\sigma_\alpha)$")
+ax.semilogx(np.degrees(widths), np.log(widths / sa_flat), "--", color=ACCENT_, label=r"$\ln(\tau/\sigma_\alpha)$")
 ax.axhline(0, color="k", lw=0.6)
-ax.set_xlabel(r"$s$: prior spread of the angle (degrees)"); ax.set_ylabel("$F$(free) $-$ $F$(fixed)  (nats)")
+ax.set_xlabel(r"$\tau$: prior spread of the angle (degrees)"); ax.set_ylabel("$F$(free) $-$ $F$(fixed)  (nats)")
 ax.set_title("wall at 90°: the extra angle only costs", fontsize=11); ax.legend(frameon=False, fontsize=10)
 bars = bx.bar([0, 1], [d_flat, d_tilt], color=[MUTED_, GOOD_], width=0.55)
 bx.axhline(0, color="k", lw=0.8)
 bx.text(0, d_flat + 3, f"+{d_flat:.1f}\nfixed wins", ha="center", va="bottom", fontsize=10)
 bx.text(1, d_tilt - 3, f"{d_tilt:.0f}\nfree wins", ha="center", va="top", fontsize=10)
 bx.set_xticks([0, 1], ["wall at 90°", "wall tilted 1.5°"]); bx.set_ylim(-100, 25)
-bx.set_ylabel("$F$(free) $-$ $F$(fixed)  (nats)"); bx.set_title("the data decide ($s = 5°$)", fontsize=11)
+bx.set_ylabel("$F$(free) $-$ $F$(fixed)  (nats)"); bx.set_title(r"the data decide ($\tau = 5°$)", fontsize=11)
 fig.tight_layout(); fig.savefig(OUT / "d1_occam.pdf"); plt.close(fig)
 
 # 4. candidate views with their gains
@@ -334,7 +334,7 @@ spring(ax0, mu_star + 0.02, y, 0, 4, 0.35, color=GOOD, lw=3.2)
 for x_, c_ in ((m, COOL), (y, GOOD)):
     ax0.plot([x_, x_], [-0.6, 0.6], color=c_, lw=4)
 ax0.add_patch(plt.Rectangle((mu_star - 0.02, -0.35), 0.04, 0.7, color=ACCENT, zorder=5))
-ax0.text(m, 0.85, "odometry says 2.0 m\n(±0.5: soft spring)", color=COOL, ha="center", va="bottom", fontsize=11)
+ax0.text(m, 0.85, "prior says 2.0 m\n(±0.5: soft spring)", color=COOL, ha="center", va="bottom", fontsize=11)
 ax0.text(y + 0.02, 0.85, "LiDAR says 2.6 m\n(±0.2: stiff spring)", color=GOOD, ha="center", va="bottom", fontsize=11)
 ax0.text(mu_star - 0.03, -0.75, "belief", color=ACCENT, ha="right", va="center", fontsize=11)
 # bottom: the energy in each spring and their sum
@@ -348,7 +348,7 @@ ax.text(2.84, 3.9, "inaccuracy:\nstiff-spring energy", fontsize=12, color=GOOD, 
 ax.text(2.2, 2.55, r"$F$ = total", fontsize=14, color=ACCENT)
 ax.set_xlim(1.8, 2.85); ax.set_ylim(0, 4.0); ax.set_yticks([])
 ax.set_xticks([2.0, 2.2, 2.4, 2.6, 2.8]); ax.tick_params(labelsize=11)
-ax.set_xlabel(r"distance to the wall $\mu$ (m)", fontsize=12); ax.set_ylabel("energy (nats)", fontsize=12)
+ax.set_xlabel(r"centre of the belief $\mu$: distance to the wall (m)", fontsize=12); ax.set_ylabel("energy (nats)", fontsize=12)
 fig.tight_layout(h_pad=0.2); fig.savefig(OUT / "d1_complexity.pdf"); plt.close(fig)
 
 # 9a. a generic one-peak curve g(s) = s^3 e^{-s} and its -ln: a bowl; Laplace parabola and Gaussian at mu = 3.

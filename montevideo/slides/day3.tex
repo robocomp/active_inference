@@ -2,8 +2,8 @@
 \input{preamble}
 
 \title{A robot that acts to know}
-\subtitle{Day 2 --- The CORTEX architecture: concepts and memories}
-\date{Tuesday 1 December}
+\subtitle{Day 3 --- The CORTEX architecture: concepts and memories}
+\date{Wednesday 2 December}
 
 \tikzset{
   ag/.style={draw=cool, thick, rounded corners=3pt, fill=cool!10, align=center, font=\scriptsize,
@@ -178,10 +178,10 @@
   \begin{tikzpicture}[x=1cm, y=1cm]
     \chairside{-0.55,-1.05}{1.1}{0.95}{1.0}{line width=2pt, black}
     \node[lab] at (0,-1.35) {one chair};
-    \node[dimcard=cool]   (g) at (-4.4,0.95)  {\textbf{Geometry}\\where it is, what shape it has,\\and how sure\\{\scriptsize\color{muted} Day 3}};
-    \node[dimcard=muted]  (l) at (4.4,0.95)   {\textbf{Life cycle}\\is it still there? born, missed,\\forgotten, back again\\{\scriptsize\color{muted} Day 3}};
-    \node[dimcard=good]   (a) at (-4.4,-0.95) {\textbf{Aspect}\\what it looks like,\\how you would imagine one\\{\scriptsize\color{muted} Day 3}};
-    \node[dimcard=accent] (f) at (4.4,-0.95)  {\textbf{Function}\\what it offers,\\what can be done with it\\{\scriptsize\color{muted} Day 4}};
+    \node[dimcard=cool]   (g) at (-4.4,0.95)  {\textbf{Geometry}\\where it is, what shape it has,\\and how sure\\{\scriptsize\color{muted} Day 4}};
+    \node[dimcard=muted]  (l) at (4.4,0.95)   {\textbf{Life cycle}\\is it still there? born, missed,\\forgotten, back again\\{\scriptsize\color{muted} Day 4}};
+    \node[dimcard=good]   (a) at (-4.4,-0.95) {\textbf{Aspect}\\what it looks like,\\how you would imagine one\\{\scriptsize\color{muted} Day 4}};
+    \node[dimcard=accent] (f) at (4.4,-0.95)  {\textbf{Function}\\what it offers,\\what can be done with it\\{\scriptsize\color{muted} Day 5}};
     \draw[flow, muted] (-0.8,0.35) -- (g.east);
     \draw[flow, muted] (0.9,0.35) -- (l.west);
     \draw[flow, muted] (-0.8,-0.5) -- (a.east);
@@ -656,7 +656,7 @@
   \begin{tikzpicture}[x=1cm, y=1cm]
     \node[lab, anchor=west, font=\footnotesize\bfseries] at (-1.4,1.95) {today: worked out afresh, every cycle};
     \node[lanebox=cool] (b1) at (0,1) {the beliefs};
-    \node[lanebox=accent] (c1) at (4.2,1) {compare every offer\\(the EFE of Day 4)};
+    \node[lanebox=accent] (c1) at (4.2,1) {compare every offer\\(the EFE of Day 5)};
     \node[lanebox=muted] (a1) at (8.4,1) {act};
     \draw[flow] (b1) -- (c1); \draw[flow] (c1) -- (a1);
     \node[lab, anchor=west, font=\footnotesize\bfseries, text=muted] at (-1.4,-0.1) {to do: distilled from what already worked};
@@ -759,7 +759,7 @@
     \end{column}
     \begin{column}{0.44\textwidth}
       \small
-      Exactly Day 1's $F$, for one instance:
+      Exactly Day 2's $F$, for one instance:
       \[ F_i = \text{misfit} + \text{distance from the class} \]
       A refrigerator is about $0.60\pm0.08$ m deep before it is ever seen: the class does a lot of
       the work.
@@ -842,7 +842,7 @@
     \end{column}
     \begin{column}{0.46\textwidth}
       \small
-      How far the agents' beliefs are from the exact one, in Day 1's units:
+      How far the agents' beliefs are from the exact one, in Day 2's units:
       \[ F[\text{agents}] - F[\text{exact}] \]
       \begin{itemize}
         \item grows with shared error and with the number of objects;
@@ -1013,8 +1013,8 @@
 % =================================================================================================
 
 
-\begin{frame}{Lab 2: agents on a shared graph}
-  \texttt{labs/day2.ipynb}, about two hours.
+\begin{frame}{Lab 3: agents on a shared graph}
+  \texttt{labs/day3.ipynb}, about two hours.
   \begin{enumerate}\small
     \item \textbf{The graph}: an ownership contract, and a sweep for the nodes of dead processes.
     \item \textbf{Agents that only read and write}: an object agent that reads the robot's belief
@@ -1038,7 +1038,7 @@
       \end{itemize}
     \end{column}
     \begin{column}{0.4\textwidth}
-      \begin{block}{Reading for Day 3}\small
+      \begin{block}{Reading for Day 4}\small
         Thesis chapters:
         \begin{itemize}
           \item \emph{The Life Cycle of a Concept Agent};

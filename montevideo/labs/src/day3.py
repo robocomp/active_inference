@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Day 2 — The architecture: one belief, many owners
+# # Day 3 — The architecture: one belief, many owners
 #
 # Yesterday there was one robot, one belief and one free energy. Today the belief is spread over
 # processes that never talk to each other. They only read and write a shared graph.
@@ -244,7 +244,7 @@ print(f"NEES with the published covariance: {NEES_USE:.2f}   ignoring it: {NEES_
 # $$ C = r\,I + s^2\,\mathbf 1\mathbf 1^\top . $$
 #
 # The global free energy of a Gaussian belief $q(\theta)=\mathcal N(\mu,\Sigma)$ is given below. Each
-# agent instead minimises its *own* objective over its own instance: Day 1's complexity and
+# agent instead minimises its *own* objective over its own instance: Day 2's complexity and
 # accuracy, on its own sightings alone, with $R = r + s^2$.
 #
 # ### C1. Write the agent's free energy
@@ -446,7 +446,7 @@ print(f"the gate tuned on the near pass, used on the far pass: rmse {CROSS * 100
 # 1. A small gate throws away useful sightings; a large one lets in sightings that are far noisier
 #    than the rest but count the same. 2. None: the best gate on one scene returns no sightings at all
 #    on the other. 3. It needs $\sigma(\rho)$, a model of how the sensor degrades. That is the
-#    modelling the gate was postponing. A wrong $\sigma(\rho)$ is a wrong model, and Day 3 shows how
+#    modelling the gate was postponing. A wrong $\sigma(\rho)$ is a wrong model, and Day 4 shows how
 #    to test one with NEES; a gate gives you nothing to test.
 
 # %% [markdown]
