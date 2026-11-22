@@ -765,6 +765,29 @@ static void gn_trace_instrument(bool with_fresh = false)
     }
 }
 
+
+// spec 7c.8 rev 3.3.14: the birth cloud's excess position covariance enters the first update's class prior on (cx, cy),
+// once: P̄_θθ(0:2, 0:2) = σ_pos² 𝟙 + excess; the second update no longer carries it.
+static void birth_excess_enters_first_update()
+{
+    const ts::Camera cam = front_camera();
+    const Live L = make_live(cam, truth_box());
+    const auto anchor = mask_cloud(L, truth_box());
+    CountableBelief b({tx, ty, tH, tw, tw, 0.0f}, params());
+    b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+    Eigen::Matrix2f ex; ex << 0.01f, 0.004f, 0.004f, 0.12f;
+    b.set_birth_position_cov(ex);
+    b.update(camera_frame(anchor, nullptr));
+    const float pp = params().prior_pos_std * params().prior_pos_std;
+    const Eigen::Matrix2f got = b.dbg_Pbar_tt().topLeftCorner<2, 2>();
+    const Eigen::Matrix2f want = pp * Eigen::Matrix2f::Identity() + ex;
+    std::printf("  birth excess: Pbar(cx,cy) %.5f %.5f / %.5f %.5f (want %.5f %.5f / %.5f %.5f) ; after: excess %.3e\n",
+                got(0, 0), got(0, 1), got(1, 0), got(1, 1), want(0, 0), want(0, 1), want(1, 0), want(1, 1),
+                b.birth_position_excess().norm());
+    CHECK((got - want).cwiseAbs().maxCoeff() < 1e-6f);
+    CHECK(b.birth_position_excess().isZero(0.0f));
+}
+
 int main()
 {
     std::printf("beam_live_staging_test (spec 7c.8 Pass, live staging)\n");
@@ -778,6 +801,7 @@ int main()
     one_sided_view();
     gn_trace_instrument(false);
     gn_trace_instrument(true);
+    birth_excess_enters_first_update();
     std::printf(bad ? "beam_live_staging_test: %d FAILED\n" : "beam_live_staging_test: OK\n", bad);
     return bad != 0;
 }

@@ -1126,6 +1126,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         P_bar.topRows<N>().setZero();
         P_bar.leftCols<N>().setZero();
         P_bar.diagonal().head<N>() = prior_cov_diag().cast<double>();
+        P_bar.topLeftCorner<2, 2>() += birth_pos_excess_.cast<double>();   // the birth cloud's spread (rev 3.3.14)
     }
     Sigma_ = P_bar.topLeftCorner<N, N>().cast<float>();                // flush_weight reads the predicted Σ, as in the engine
     dbg_Pbar_tt_ = Sigma_;
@@ -1403,6 +1404,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         last_gap_rays_ = count_gap_rays(CountableBeliefState::from_vec((state_.vec().cast<double>() + B_L * b_post).cast<float>()), f);
     }
     first_update_done_ = true;                                         // the class prior at the class mean has entered, once
+    birth_pos_excess_.setZero();                                       // the birth spread entered with it, once (rev 3.3.14)
     if (camera and not f.lidar_only)                                   // each relational anchor has entered, once
     {
         if (f.wall.ok)      wall_prior_added_ = true;

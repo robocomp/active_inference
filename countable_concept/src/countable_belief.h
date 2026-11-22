@@ -541,6 +541,15 @@ public:
     // set_first_update_done(true) behind params.persistent.
     bool first_update_done() const { return first_update_done_; }
     void set_first_update_done(bool v) { first_update_done_ = v; }
+    // spec 7c.8 rev 3.3.14: the birth cloud's EXCESS position covariance (room frame), added to σ_pos² on the (cx, cy) block of
+    // the first update's class prior and of the birth Σ. Zero ⇒ today's diagonal σ_pos².
+    void set_birth_position_cov(const Eigen::Matrix2f& excess)
+    {
+        birth_pos_excess_ = excess;
+        Sigma_.topLeftCorner<2, 2>() += excess;
+        if (joint_init_) P_.topLeftCorner<2, 2>() += excess.cast<double>();
+    }
+    const Eigen::Matrix2f& birth_position_excess() const { return birth_pos_excess_; }
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
     // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the beam set f.beam (spec 7c.8; f.lidar is
     // the flag-off path's and is not read here); θ-only = (2b), (2c) and,
@@ -857,6 +866,7 @@ private:
     bool   joint_init_  = false;
     bool   wall_prior_added_ = false;   // flush + parallel have entered (T6-1)
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
+    Eigen::Matrix2f birth_pos_excess_ = Eigen::Matrix2f::Zero();   // spec 7c.8 rev 3.3.14
     bool   first_update_done_ = false;  // the class prior at the class mean has entered (spec 7c.1 amendment 11-17)
     std::vector<Eigen::Matrix<float, 6, 1>> dbg_iterates_;
     std::vector<double> dbg_gn_energy_;

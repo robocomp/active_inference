@@ -18,6 +18,7 @@
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/object_anchor/ray_anisotropic_cov.h"
 #include "../../common/media_transport/media_transport.h"   // rc::media::sensor_model_from_graph, max_ring_gap_rad
+#include "countable_birth_footprint.h"   // rc::birth_footprint (spec 7c.8 rev 3.3.14)
 #include "countable_mask_membership.h"   // rc::MaskMembership, make_membership (lidar-measures G2)
 #include "countable_viewpoint.h"         // ρ from odometry (lidar-measures §7c.2)
 #include "countable_config_error.h"     // rc::CountableConfigError (beam config refusal)
@@ -913,41 +914,37 @@ std::optional<float> CountableFitter::room_axis() const
 }
 
 // BIRTH ON THE PRIORS. A wall-standing object's first view is its FRONT; the principal-axis yaw of that view is
-// noise on a near-square footprint and the depth is unseen. So the birth takes what the priors already know:
+// noise on a near-square footprint and the depth is unseen. So the birth takes what the priors already know
+// (spec 7c.8 rev 3.3.14, rc::birth_footprint):
 //  · the wall: the one nearest the cloud (the class prior says it stands against one — WallFlushPrior);
 //  · yaw: back face onto that wall, front into the room (local +Y = back = −n);
-//  · width/depth: the cloud's spread ALONG and ACROSS that wall (p5–p95), depth from the prior unless the
-//    cloud really spans it (the same band the depth-observability prior uses);
-//  · centre: the cloud's middle along the wall, half a depth in from it.
-// Not a gate on the fit: the belief starts here and the data then moves it (an object that is genuinely away
-// from the wall loses the flush weight as its pose tightens — see flush_weight).
-void CountableFitter::birth_on_priors(CountableBeliefState& s0, const std::vector<Eigen::Vector3f>& pts, float z_lo, float z_hi,
-                                const std::string& name) const
+//  · width/depth: the CLASS MEANS. The cloud's extent is not the object's: a mask that took in a neighbour
+//    (live14fixA: 2.46 m for a 0.51 m nightstand) seeded a 2.13 m-deep box under the old depth-band rule;
+//  · centre: the cloud's middle along the wall, half the class depth in from it;
+//  · the cloud's extent beyond the class size widens the first update's POSITION covariance instead:
+//    σ² = σ_pos² + (E − L)²/12 per wall axis (an object of length L uniform inside a cloud of length E).
+// Not a gate on the fit: the belief starts here and the data then moves and sizes it.
+std::optional<Eigen::Matrix2f> CountableFitter::birth_on_priors(CountableBeliefState& s0, const std::vector<Eigen::Vector3f>& pts,
+                                                                float z_lo, float z_hi, const std::string& name) const
 {
     std::vector<Eigen::Vector2f> xy;
     for (const auto& p : pts) if (p.z() >= z_lo and p.z() <= z_hi) xy.emplace_back(p.x(), p.y());
-    if (xy.size() < 10) return;
+    if (xy.size() < 10) return std::nullopt;
     Eigen::Vector2f c = Eigen::Vector2f::Zero();
     for (const auto& q : xy) c += q;
     c /= static_cast<float>(xy.size());
     const WallRef w = nearest_wall(c);
-    if (not w.ok) return;
-    const Eigen::Vector2f n = w.n, t(-n.y(), n.x());          // into the room, and along the wall
-    std::vector<float> a, b;
-    for (const auto& q : xy) { a.push_back((q - w.p).dot(t)); b.push_back((q - w.p).dot(n)); }
-    const auto pct = [](std::vector<float> v, float f)
-    { const std::size_t k = static_cast<std::size_t>(f * (v.size() - 1)); std::nth_element(v.begin(), v.begin() + k, v.end()); return v[k]; };
-    const float a0 = pct(a, 0.05f), a1 = pct(a, 0.95f), b0 = pct(b, 0.05f), b1 = pct(b, 0.95f);
+    if (not w.ok) return std::nullopt;
     const float prior_d = cfg_.ai2_prior_depth_m > 0.0f ? cfg_.ai2_prior_depth_m : cfg_.ai2_prior_footprint_m;
-    const float across  = b1 - b0;
-    s0.w   = std::max(0.10f, a1 - a0);
-    s0.h   = across > cfg_.ai2_depth_obs_band_m ? std::max(across, b1) : prior_d;   // a seen side reaches the wall
-    s0.yaw = std::atan2(n.x(), -n.y());                       // R(yaw)·ŷ = −n: the back faces the wall
-    const Eigen::Vector2f ctr = w.p + t * (0.5f * (a0 + a1)) + n * (0.5f * s0.h);
-    std::print("[{}] birth on priors: wall n=({:.2f},{:.2f}) at {:.2f} m from the cloud → yaw={:.1f}° "
-               "w={:.2f} h={:.2f} centre ({:.2f},{:.2f}) [cloud centre ({:.2f},{:.2f})]\n",
-               name, n.x(), n.y(), 0.5f * (b0 + b1), s0.yaw * 57.29578f, s0.w, s0.h, ctr.x(), ctr.y(), c.x(), c.y());
-    s0.cx = ctr.x(); s0.cy = ctr.y();
+    const rc::BirthFootprint bf = rc::birth_footprint(xy, w.p, w.n, cfg_.ai2_prior_footprint_m, prior_d, 0.0f);   // the EXCESS; the belief adds its σ_pos²
+    if (not bf.ok) return std::nullopt;
+    s0.w = bf.w; s0.h = bf.h; s0.yaw = bf.yaw;
+    s0.cx = bf.centre.x(); s0.cy = bf.centre.y();
+    std::print("[{}] birth on priors: wall n=({:.2f},{:.2f}) → yaw={:.1f}° w={:.2f} h={:.2f} (class means) centre ({:.2f},{:.2f}) "
+               "[cloud centre ({:.2f},{:.2f}), extent along {:.2f} across {:.2f} → extra pos std along {:.3f} across {:.3f}]\n",
+               name, w.n.x(), w.n.y(), s0.yaw * 57.29578f, s0.w, s0.h, s0.cx, s0.cy, c.x(), c.y(), bf.extent_t, bf.extent_n,
+               std::sqrt(bf.var_t), std::sqrt(bf.var_n));
+    return bf.pos_cov;
 }
 
 WallRef CountableFitter::nearest_wall(const Eigen::Vector2f& q) const
@@ -1027,6 +1024,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     {
         const auto& m = inst.model.state();
         CountableBeliefState s0{m.cx, m.cy, m.countable_height, m.w, m.h, m.yaw};
+        std::optional<Eigen::Matrix2f> birth_pos_cov;   // spec 7c.8 rev 3.3.14: the cloud's excess position covariance
 
         // The cold-start cloud is THIS FRAME's mask only.
         //
@@ -1101,7 +1099,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
                     if (sum > 1e-4f and (mom.ext_major - mom.ext_minor) / sum > 0.10f)
                         s0.yaw = mom.phi;
                     // ★BORN ON THE FURNITURE PRIORS (owner 2026-11-14): room-axis yaw, back on the nearest wall.
-                    if (have_room_geometry_) birth_on_priors(s0, pts, z_lo, z_hi, inst.node_name);
+                    if (have_room_geometry_) birth_pos_cov = birth_on_priors(s0, pts, z_lo, z_hi, inst.node_name);
                 }
             }
         }
@@ -1168,9 +1166,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.plaus_fe_scale          = cfg_.plaus_fe_scale;
         p.plaus_height_prior_gain = cfg_.countable_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
         p.persistent = cfg_.lidar_measures_on_gated;   // persistent shared errors + class prior once (spec §7c.1–7c.2)
-        if (p.persistent) p.beam = beam_config_;
-        p.gn_trace = cfg_.gn_trace;                    // diagnostic only (Model.GnTrace)       // the beam model of the persistent rays (spec 7c.8; built in the constructor)
+        if (p.persistent) p.beam = beam_config_;       // the beam model of the persistent rays (spec 7c.8; built in the constructor)
+        p.gn_trace = cfg_.gn_trace;                    // diagnostic only (Model.GnTrace)
         inst.ai2_belief = CountableBelief(s0, p);
+        if (birth_pos_cov) inst.ai2_belief.set_birth_position_cov(*birth_pos_cov);   // spec 7c.8 rev 3.3.14
         inst.ai2_initialized = true;
         std::print("[{}] cold-start state: cx={:.2f} cy={:.2f} H={:.2f} w={:.2f} h={:.2f} yaw={:.2f}\n",
                    inst.node_name, s0.cx, s0.cy, s0.H, s0.w, s0.h, s0.yaw);

@@ -1188,6 +1188,26 @@ plan matters, settled here.
   (3) Live, the live12/13 tour: gn_conv = 0 shares and the all-rows > 3σ shares are reported against live13trace. A
       failure is reported, not tuned.
   Out of scope: the nightstand_51 RAW camera gradient mismatch (G/FD 0.11 without marginalisation), traced separately.
+- **Rev 3.3.14 (owner 11-22, "B"): birth size at the class mean; birth position uncertainty from the cloud's spread.**
+  Supersedes `birth_on_priors`' size rule, which took the depth from the cloud whenever its reach from the wall beat
+  `AI2DepthObsBandM` (a 10 cm band, a threshold). Evidence: live14fixA nightstand B was born from a 2.46 m mask cloud that
+  had taken in the bed beside it, so the rule gave h = 2.13 m against a class 0.51 m; the corrected solver then followed it
+  to a 0.61 m error (docs/superpowers/results/2026-11-22-fixA-live14.md).
+  New birth, for a wall-standing class:
+  - Size: the seed's w, h are the class means (AI2PriorFootprintM, AI2PriorDepthM). The data then sizes the box.
+  - Wall, yaw and the flush depth placement are unchanged.
+  - Position covariance at the first update: in the wall frame (t along, n into the room),
+    σ_t² = σ_pos² + max(0, E_t − w̄)²/12 and σ_n² = σ_pos² + max(0, E_n − h̄)²/12. Here E is the cloud's full extent,
+    (p95 − p5)/0.9 for points spread uniformly over it, w̄ and h̄ are the class means, and σ_pos = AI2PriorPosStd. An object
+    of length L lying anywhere in a cloud of length E > L is uniform over E − L, whose variance is (E − L)²/12. It replaces
+    the fixed σ_pos only on the first update's position block (rotated to the room frame), and only at a wall birth.
+  Pass:
+  (1) Unit, a merged cloud (a 0.51 m face plus 1.6 m of neighbour reaching 2.1 m from the wall): seed w, h = class means;
+      σ_n² = σ_pos² + (E_n − h̄)²/12 to 1e-6; along the wall σ_t = σ_pos when E_t ≤ w̄.
+  (2) Unit, a clean single-face cloud: the seed and covariance reduce to σ_pos with the size at the class means.
+  (3) The suite is unchanged otherwise.
+  (4) Live, the live14 tour: nightstand B's final centre error and > 3σ shares are reported against live14fixA. A failure is
+      reported, not tuned.
 - **Flush against a known wall (owner: "Stated limit, test the live").** With the robot pose error e modelled, a box
   flush against a known wall has at least two energy basins (w traded against e_x, h against e_y); converged, the
   full-control fixture lands 19 mm off in w, 9 mm in cx, |e| ≈ 0.46σ. Stated limit. Pass keeps the lever-only control

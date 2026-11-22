@@ -146,8 +146,10 @@ public:
     // step_epistemic() and rc::nbv::is_reachable.
     bool has_room_polygon() const { return room_polygon_.size() >= 3; }
     std::optional<float> room_axis() const;   // the room's principal axis (rad, mod 90°)
-    void birth_on_priors(CountableBeliefState& s0, const std::vector<Eigen::Vector3f>& pts, float z_lo, float z_hi,
-                         const std::string& name) const;
+    // Returns the cloud's EXCESS position covariance (room frame; spec 7c.8 rev 3.3.14) when it placed the seed; the belief
+    // adds it to its class σ_pos² on the first update.
+    std::optional<Eigen::Matrix2f> birth_on_priors(CountableBeliefState& s0, const std::vector<Eigen::Vector3f>& pts,
+                                                   float z_lo, float z_hi, const std::string& name) const;
     const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
     WallRef nearest_wall(const Eigen::Vector2f& q) const;
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement

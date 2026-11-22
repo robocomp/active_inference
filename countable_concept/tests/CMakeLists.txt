@@ -202,3 +202,10 @@ target_include_directories(beam_live_staging_test PRIVATE ../src ../../common ..
 target_compile_options(beam_live_staging_test PRIVATE -O2)
 target_link_libraries(beam_live_staging_test PRIVATE Eigen3::Eigen ${OpenCV_LIBS})
 add_test(NAME beam_live_staging_test COMMAND beam_live_staging_test)
+
+# spec 7c.8 rev 3.3.14: birth size at the class means, position covariance from the cloud's spread. Run: ./birth_footprint_test
+add_executable(birth_footprint_test birth_footprint_test.cpp)
+target_include_directories(birth_footprint_test PRIVATE ../src)
+target_compile_options(birth_footprint_test PRIVATE -O2)
+target_link_libraries(birth_footprint_test PRIVATE Eigen3::Eigen)
+add_test(NAME birth_footprint_test COMMAND birth_footprint_test)
