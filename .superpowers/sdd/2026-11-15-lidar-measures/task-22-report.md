@@ -117,3 +117,31 @@ beam_ray_test.cpp, beam_staging_test.cpp, persistent_belief_test.cpp}, countable
    ≈ 1.4× in σ), cx/w calibration alone 0.76 / 1.34 on the front view — no DOF over-confident in these fixtures.
 4. The fixture q is now the inverse of m at the hand ε (was q = m); only the κ instrument and Σq read it, so no
    existing number moved except where a test was about κ.
+
+## Fix round 1 (review task-22-review.md (a); spec 7c.8 rev 3.3.12) — one_sided_view only
+
+Change (countable_concept/tests/beam_live_staging_test.cpp, `one_sided_view`; no other test or code touched):
+1. (i) CHECK σ of the far face given the near face (= σ_w) ≥ ½ prior σ_w. Printed beside it: the conditional σ(far | near)
+   computed from P, and the far-face position σ (cx − w/2) against its own prior.
+2. (ii) CHECK NEES over the constrained directions A·θ = (cx + w/2, cy, H, h, yaw), using A P Aᵀ: mean / 5 ∈ [0.5, 2].
+   Each component's NEES printed.
+3. (ii) Each draw's prior mean for w is drawn from the w prior, w₀ = tw + σ_w,prior·n (its own rng, seed 20261123; the
+   sweep noise rng is unchanged). CHECK NEES(w) ∈ [0.5, 2].
+   Latents as in rev 3.3.10 (2) (sig2_L = 0, Σ_pose = 0). The old (cy, h)/2 CHECK is gone; (cy, h)/2 and (cx, w)/2 are
+   now printed only.
+
+Command: `make -C build -j8 beam_live_staging_test && ./build/beam_live_staging_test` (in countable_concept/tests), then
+the full countable ctest once.
+
+Output (rc 0, `beam_live_staging_test: OK`):
+- (i) σ per DOF (cx, cy, H, w, h, yaw) 0.04435 0.03153 0.02251 0.05999 0.01924 0.03076; prior 0.300 0.300 0.100 0.060
+  0.060 0.600. Far face given near (= σ_w) **0.05999**, / prior σ_w **1.000** (bound ≥ 0.5, PASS). Conditional σ(far | near)
+  0.05998. Far-face position σ 0.06815 (its prior 0.3015, ratio 0.226).
+- (ii) 200 draws, 958 rays/draw, gn_conv 200/200. Seed w₀ − truth: mean +0.0019, sd 0.0641 (prior σ_w 0.060).
+  - NEES(near, cy, H, h, yaw)/5 = **0.791** (bound [0.5, 2], PASS).
+  - NEES(w) = **1.131** (bound [0.5, 2], PASS).
+  - Components: near face 0.459, cy 0.806, H 0.969, h 0.973, yaw 0.462. Alone: cx 1.130, cy 0.806, H 0.969, w 1.131, h 0.973,
+    yaw 0.462. NEES(cy, h)/2 0.893; NEES(cx, w)/2 0.795.
+- Note: the near face (0.459) and yaw (0.462) alone are still under 0.5, so those two directions are under-confident
+  (√2 in σ). The 5-D bound passes. No DOF is over-confident.
+## ctest: 26/26 passed (full countable ctest after fix round 1)
