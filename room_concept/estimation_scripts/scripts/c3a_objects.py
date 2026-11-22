@@ -39,6 +39,12 @@ R = {'chair': 0.6, 'bottle': 0.4, 'nightstand': 0.5, 'toilet': 0.6, 'hood': 0.6,
      'table': 1.0, 'bed': 1.2, 'cabinet': 1.0}
 
 
+REF_OFFSET = {'Fridge': (0.2695, 0.0)}
+# C3A_POSE_OVERRIDE="chair(3)=-7.4323,8.5130;...": the object's world (x, y) in THAT run (Webots get), for when a test script left it
+# away from the .wbt file's pose (2026-11-22: c3b5 restored CHAIR_3 to its 11-21 home, the file has the owner's new pose).
+POSE_OVERRIDE = {k: tuple(map(float, v.split(','))) for k, v in (kv.split('=') for kv in os.environ.get('C3A_POSE_OVERRIDE', '').split(';') if '=' in kv)}   # local-frame offset origin -> footprint centre (see gt_objects)
+
+
 def gt_objects(wbt):
     """[(name, class, x, y)] for every object of a class some concept agent models."""
     t = F.tokens(open(wbt).read()); i = 0; top = []
@@ -71,8 +77,16 @@ def gt_objects(wbt):
             return
         c = cls(n)
         if c:
-            x, y, _, _ = F.T(n)
-            out.append((name(n) or n['_type'], c, x, y))
+            x, y, _, yaw = F.T(n)
+            # 11-22 REFERENCE POINT: a belief is the FOOTPRINT centre; the Webots origin is not always that. fridge.dae's bbox is
+            # x in [0, 0.539], y in [-0.34, 0.34] (Collada, metres, Z up, identity node matrix), so its centre sits 0.2695 m along
+            # the fridge's local +x. Checked the same way: table1.dae 0.004 m (ignored); RoundTable, KitchenHood (box/cylinders),
+            # chair, nightstand, bed origin = centre; toilet 0.06 m (left). C3A_ORIGIN_REF=1 grades against the raw origin.
+            ox, oy = REF_OFFSET.get(name(n), (0.0, 0.0)) if os.environ.get('C3A_ORIGIN_REF') != '1' else (0.0, 0.0)
+            x, y = x + math.cos(yaw) * ox - math.sin(yaw) * oy, y + math.sin(yaw) * ox + math.cos(yaw) * oy
+            nm = name(n) or n['_type']
+            if nm in POSE_OVERRIDE: x, y = POSE_OVERRIDE[nm]   # the run's live pose, when a script moved it away from the file's
+            out.append((nm, c, x, y))
     for n in top: visit(n)
     return out
 
@@ -120,10 +134,29 @@ def main(run, wbt):
     for r in json.load(open(lay[-1]))['rooms']:
         room_pose['room_' + r['name'].rsplit('_', 1)[-1]] = (r['x'], r['y'], r['yaw'])
     print(f'  room poses in the map frame from {lay[-1]}: ' + ', '.join(f'{k} ({v[0]:.2f},{v[1]:.2f},{v[2]:.3f})' for k, v in sorted(room_pose.items())))
+    # 11-22 FRAME FIX: est_x/est_y are room_concept's INTERNAL frame; a keyframe is in the PUBLISHED room frame. The two are
+    # related by the gauge room_concept logs (proto_room.csv gauge_x/y/theta = T_pub_int, internal -> published,
+    # room_scene_graph.cpp:1363), which changes at every crossing / re-anchor. The fixture layout's room pose ignored it, so
+    # every room_2/3 object and every return-visit object carried the gauge as error (c3a_cab1 back in room_1: 0.58 m, 0.089 rad).
+    # C3A_FIXTURE_FRAMES=1 restores the old path for comparison.
+    G = []
+    if os.path.exists(f'{run}/proto_room.csv') and os.environ.get('C3A_FIXTURE_FRAMES') != '1':
+        for r in csv.DictReader(open(f'{run}/proto_room.csv')):
+            try: G.append((int(r['ts_ms']), float(r['gauge_x']), float(r['gauge_y']), float(r['gauge_theta'])))
+            except (KeyError, ValueError): pass
+    Gts = [g[0] for g in G]
+    print('  frames: ' + ('published -> internal by the logged gauge (proto_room.csv)' if G else 'FIXTURE layout room poses (no gauge)'))
     def to_world(room, x, y, t_ms):
-        if room not in room_pose or not fits: return None
-        rx, ry, ryaw = room_pose[room]
-        mx, my = rx + math.cos(ryaw) * x - math.sin(ryaw) * y, ry + math.sin(ryaw) * x + math.cos(ryaw) * y
+        if not fits: return None
+        if G:
+            import bisect
+            _, g0, g1, gth = G[max(bisect.bisect_right(Gts, t_ms) - 1, 0)]
+            dx, dy = x - g0, y - g1
+            mx, my = math.cos(gth) * dx + math.sin(gth) * dy, -math.sin(gth) * dx + math.cos(gth) * dy
+        else:
+            if room not in room_pose: return None
+            rx, ry, ryaw = room_pose[room]
+            mx, my = rx + math.cos(ryaw) * x - math.sin(ryaw) * y, ry + math.sin(ryaw) * x + math.cos(ryaw) * y
         f = min(fits, key=lambda f: 0 if f[1] <= t_ms <= f[2] else min(abs(t_ms - f[1]), abs(t_ms - f[2])))
         th, t = f[3], f[4]
         return (math.cos(th) * mx - math.sin(th) * my + t[0], math.sin(th) * mx + math.cos(th) * my + t[1])

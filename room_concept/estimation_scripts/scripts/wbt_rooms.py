@@ -16,7 +16,7 @@ import csv, math, re, sys, os
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-WBT = "/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt"
+WBT = __import__("os").environ.get("WBT_PATH", "/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt")   # WBT_PATH: grade an old run against the world it ran in
 MESH_DIR = os.path.join(os.path.dirname(WBT), "meshes")
 RES = 0.01
 BOX = (-9.0, 4.5, -1.0, 14.2)  # x0, x1, y0, y1

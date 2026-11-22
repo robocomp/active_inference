@@ -1,0 +1,13 @@
+run,object,cls,room,nodes,pre_err_m,uids,returned,visit_s,home_in_view_s,first_in_view_s,live_belief_at_home_after_return,recall_offered_s,recall_withdrawn_s,recall_withdrawn_before_leaving,memory_at_end,existence_removes
+c14_r1,TABLE_ROUND,table,room_1,,,,1,98.4,53.6,7.8,none,no,,0,absent,
+c14_r1,CHAIR_2,chair,room_1,chair_192,0.56,21990232555712,1,98.4,53.7,6.9,none,-11.0,94.0,1,chair_192 p=0.88 lives=1 last_end=death,
+c14_r1,NIGHTSTAND_R,nightstand,room_2,nightstand_12,0.08,31885837205516,1,92.8,7.1,38.3,none,-9.9,125.1,0,nightstand_12 p=nan lives=1 last_end=death,
+c14_r1,(run),,,,,7 other memories,,,,,,,,,none lost,chair@-198s
+c14_r2,TABLE_ROUND,table,room_1,table_27,0.17,7696581394459,1,98.8,33.3,6.6,none,-10.9,93.6,1,table_27 p=nan lives=1 last_end=death,
+c14_r2,CHAIR_2,chair,room_1,chair_198,0.28,21990232555718,1,98.8,36.1,6.0,none,-10.9,93.6,1,chair_198 p=0.98 lives=1 last_end=death,
+c14_r2,NIGHTSTAND_R,nightstand,room_2,nightstand_15,0.08,31885837205519,1,92.8,24.2,3.3,none,-6.6,133.4,0,nightstand_15 p=nan lives=1 last_end=death,
+c14_r2,(run),,,,,9 other memories,,,,,,,,,none lost,none
+c14_r3,TABLE_ROUND,table,room_1,,,,1,98.5,28.1,13.6,none,no,,0,absent,
+c14_r3,CHAIR_2,chair,room_1,,,,1,98.5,31.2,13.1,none,no,,0,absent,
+c14_r3,NIGHTSTAND_R,nightstand,room_2,nightstand_16,0.04,31885837205520,1,90.8,10.7,47.3,none,-9.5,143.5,0,nightstand_16 p=nan lives=1 last_end=death,
+c14_r3,(run),,,,,8 other memories,,,,,,,,,none lost,chair@-244s
