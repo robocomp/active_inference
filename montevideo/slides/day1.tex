@@ -50,7 +50,8 @@
     $\rightarrow$ door crossed $\rightarrow$ second room}}}
   \vspace{1em}
 
-  Watch for one thing: \alert{nothing in this video was programmed as a sequence of steps.}
+  \vfill
+  \lesson{Nothing in this video was programmed as a sequence of steps.}
 \end{frame}
 
 \begin{frame}{The cycle we will build this week}
@@ -77,14 +78,17 @@
     \node[day, left=1pt of mem]   {Day 3};
     \node[align=center] at (0,0) {every stage is a belief\\[2pt] \alert{one} quantity to lower\\{\scriptsize (Day 2)}};
   \end{tikzpicture}
+  \vfill
+  \lesson{Each stage is a belief, and one quantity, defined on Day 2, improves them all.}
 \end{frame}
 
 \begin{frame}{The toy version you will build}
   \centering
-  \includegraphics[width=0.78\textwidth]{toyworld.png}
+  \includegraphics[width=0.66\textwidth]{toyworld.png}
 
-  \small Two rooms, one door, three objects, a LiDAR, and a robot whose wheels lie a little.
-  Pure \texttt{numpy}; it runs on your laptop.
+  \small Two rooms, one door, three objects, a LiDAR, and a robot whose wheel odometry drifts a little.
+  \vfill
+  \lesson{Everything you build this week runs on this toy, in \texttt{numpy}, on your laptop.}
 \end{frame}
 
 \begin{frame}{How this course is built}
@@ -157,7 +161,7 @@
       {\color{cool!80!black}$s$: pose and room ($x,y,\theta,w,d$)}\quad {\color{good!70!black}$o$: scan}\quad {\color{black!75}$a$: command ($v,\omega$)}
 
   \vfill
-  \centering Every unknown is a \textbf{random variable}; a belief is its \textbf{distribution}.
+  \lesson{Every unknown is a random variable; a belief is its distribution.}
 \end{frame}
 
 \begin{frame}{A belief over a discrete variable: one number per value}
@@ -195,6 +199,8 @@
       \small how spread the numbers are is \textbf{how uncertain} the belief is
     \end{column}
   \end{columns}
+  \vfill
+  \lesson{One probability per value, adding to 1; how spread they are is the uncertainty.}
 \end{frame}
 
 \begin{frame}{The joint distribution: everything there is to know}
@@ -227,8 +233,8 @@
     \end{column}
   \end{columns}
 
-  \vspace{0.8em}
-  \centering Everything this week is \alert{three operations} on it: summing, slicing, and multiplying back.
+  \vfill
+  \lesson{Everything this week is three operations on the joint: summing, slicing, and multiplying back.}
 \end{frame}
 
 \begin{frame}{Marginalisation: the belief about one variable, summing over the others}
@@ -270,6 +276,8 @@
     \end{column}
   \end{columns}
 
+  \vfill
+  \lesson{To marginalise, add the joint over the variable you drop: $p(O) = 0.41,\ 0.59$.}
 \end{frame}
 
 % The marginal frame's picture with both marginals; the gap column stretched to width 1.
@@ -309,8 +317,7 @@
   \end{tikzpicture}
 
   \vfill
-  $p(\text{open}\given\text{gap})$ is the \alert{0.27} box rescaled, $0.27/0.41$, so that with
-  $p(\text{closed}\given\text{gap})$ it adds to 1.
+  \lesson{Conditioning keeps the column that matches the reading and rescales it: $0.27/0.41 = 0.66$.}
 \end{frame}
 
 \begin{frame}{Factorisation: express the joint as factors}
@@ -347,6 +354,8 @@
     \node[font=\Large, text=muted] at (5.4,1.2) {$=$};
   \end{tikzpicture}
   \vfill
+  \vfill
+  \lesson{Either order rebuilds the same joint: $0.30\times0.9 = 0.41\times0.66 = 0.27$.}
 \end{frame}
 
 \begin{frame}{A belief over a continuous variable: a density}
@@ -389,6 +398,8 @@
       \small a Gaussian belief is \textbf{two numbers}, $\mu$ and $\sigma$
     \end{column}
   \end{columns}
+  \vfill
+  \lesson{A continuous belief is a density: area is probability, and a Gaussian needs only $\mu$ and $\sigma$.}
 \end{frame}
 
 \begin{frame}{The joint of continuous variables: a surface}
@@ -409,13 +420,15 @@
   \end{columns}
 
   \vfill
-  \centering Area became \textbf{volume}: the \textcolor{prob!85!black}{orange} patch, $s,o \in [2.0,\,2.5]$ m, holds probability \textcolor{prob!85!black}{\textbf{0.23}}.
+  \lesson{Area became volume: the orange patch, $s,o \in [2.0,\,2.5]$\,m, holds probability 0.23.}
 \end{frame}
 
 \begin{frame}{Marginalisation: the belief about one variable, integrating over the others}
   \begin{center}\large $\displaystyle p(o) = \int p(s, o)\,ds$\end{center}
   \centering
-  \includegraphics[height=0.72\textheight]{d1_gaussian_marg.pdf}
+  \includegraphics[height=0.64\textheight]{d1_gaussian_marg.pdf}
+  \vfill
+  \lesson{For a density, marginalising integrates over the variable you drop.}
 \end{frame}
 
 \begin{frame}{The covariance matrix: what each number means}
@@ -442,6 +455,8 @@
     }
   \end{tikzpicture}
   \vfill
+  \vfill
+  \lesson{Diagonal: how spread each variable is. Off-diagonal: how much the two move together.}
 \end{frame}
 
 \begin{frame}{The wall's covariance, built from its model}
@@ -466,6 +481,8 @@
     \end{column}
   \end{columns}
   \vfill
+  \vfill
+  \lesson{The covariance follows from what we write: a prior on $s$ and the sensor's noise.}
 \end{frame}
 
 \begin{frame}{Marginalising a Gaussian: cross out the row and column}
@@ -485,12 +502,16 @@
                           \textcolor{muted}{\cancel{0.25}} & \textcolor{good!70!black}{0.29} \end{bmatrix}
     \quad\Longrightarrow\quad p(o) = \N(2,\ \textcolor{good!70!black}{0.29})$}
   \vfill
+  \vfill
+  \lesson{A Gaussian's marginal keeps its own mean and variance: $p(o) = \N(2,\,0.29)$.}
 \end{frame}
 
 \begin{frame}{Conditioning: how evidence enters a belief}
   \begin{center}\large $\displaystyle p(s\given o) \mathrel{:=} \frac{p(s, o)}{p(o)}$\end{center}
   \centering
-  \includegraphics[height=0.76\textheight]{d1_gaussian_cond.pdf}
+  \includegraphics[height=0.66\textheight]{d1_gaussian_cond.pdf}
+  \vfill
+  \lesson{Conditioning on $o$ takes the slice of the joint at the reading and rescales it to area 1.}
 \end{frame}
 
 \begin{frame}{Conditioning a Gaussian: shift the mean, shrink the variance}
@@ -529,12 +550,16 @@
     \node[lab, text=accent, anchor=west] at (2.85,0.7) {after: $2.52 \pm 0.19$};
   \end{tikzpicture}
 
+  \vfill
+  \lesson{The reading moves the belief 86\% of the way and shrinks its spread from 0.50 to 0.19\,m.}
 \end{frame}
 
 \begin{frame}{Factorisation: express the joint as factors}
   \begin{center}\large $p(s, o) \;=\; p(o\given s)\,p(s) \;=\; p(s\given o)\,p(o)$\end{center}
   \centering
-  \includegraphics[height=0.74\textheight]{d1_gaussian_fact.pdf}
+  \includegraphics[height=0.64\textheight]{d1_gaussian_fact.pdf}
+  \vfill
+  \lesson{The same joint, split either way: $p(o\given s)\,p(s)$ or $p(s\given o)\,p(o)$.}
 \end{frame}
 
 \begin{frame}{The chain rule: $N$ variables, $N$ factors}
@@ -709,6 +734,8 @@
     \alert{the joint}         & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
     \bottomrule
   \end{tabular}
+  \vfill
+  \lesson{Only the joint says what the robot expects to see, so only the joint can notice a surprise.}
 \end{frame}
 
 \begin{frame}{Time: one copy of each variable per step}
@@ -820,7 +847,7 @@
   \centering
   \includegraphics[width=0.9\textwidth]{d1_bayes_ops.pdf}
   \vfill
-  \lesson{Step 2, the area $p(o)$, is what a real robot cannot compute; the rest of today avoids it.}
+  \lesson{Step 2, the area $p(o)$, is what a real robot cannot compute; tomorrow we find a way around it.}
 \end{frame}
 
 
@@ -876,7 +903,7 @@
       \node[vs] (a) at (-1.1,0) {$S$}; \node[vo] (b) at (0,0) {$o_1$}; \node[va] (c) at (1.1,0) {$a_2$};
       \draw[ar] (a) -- (b); \draw[ar] (b) -- (c);
     \end{scope}
-    \node[chk] at ($(t4.south west)+(0.1,0.05)$) {$0.63 \ne 0.22$;\; given $o_1$: $0.68 = 0.68$};
+    \node[chk] at ($(t4.south west)+(0.1,0.05)$) {$0.62 \ne 0.22$;\; given $o_1$: $0.68 = 0.68$};
   \end{tikzpicture}
   \vfill
   \lesson{\texttt{labs/day1.ipynb}: the orange numbers are the ones to reach.}

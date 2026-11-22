@@ -659,7 +659,7 @@
 
 \begin{frame}{Localising: Kalman's structure, but optimised}
   \small
-  Day 2: with a Gaussian prior and a linear sensor, minimising $F$ \emph{is} the Kalman update.
+  With a Gaussian prior and a linear sensor, minimising $F$ (Day 2) gives exactly the Kalman update.
   Localising has the same two parts:
   \[
     F(X) \;=\; \underbrace{\tfrac12\,(X-\bar X)^{\!\top}\bar P^{-1}(X-\bar X)}_{\text{predict: where the wheels say}}
@@ -688,7 +688,7 @@
   \end{columns}
   \vspace{0.6em}
   \centering\alert{Prior from motion, likelihood from the sensor: optimised, not linearised once.}
-  \src{room\_concept.tex l.243--300, l.1601--1640; Day 2, the Kalman update as free energy}
+  \src{room\_concept.tex l.243--300, l.1601--1640; Day 2, Gauss--Newton and Laplace}
 \end{frame}
 
 \begin{frame}{Walls are not enough: corners say which is which}

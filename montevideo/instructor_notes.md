@@ -17,7 +17,6 @@ Frame numbers are the slide footers (n/45).
 | 1:00–1:30 | VFE: rearrangement, identity, complexity − accuracy, Kalman worked example (do it on the board), F differentiated twice (belief and action, EFE in one line), Rényi aside | 22–27 |
 | 1:30–1:50 | Laplace: Σ = H⁻¹, Gauss–Newton, the wall, honesty, Occam | 28–32 |
 | — | break | |
-| 2:00–2:10 | What measurement said: F ≠ computation, inherited errors | 33–34 |
 | 2:10–4:00 | Lab 1: warm-up P1–P4 (~15 min), then exercises 1–6 (about 50 min of material: **an hour is spare, see below**) | 35–36 |
 
 **The opening video (unnumbered full-screen slide after the title, `media/InferenciaActiva.mp4`, 46 s).** A robot in an orchard loses sight of a person behind leaves: it predicts, compares, feels the surprise, and has two ways out, change what it believes or move to see. Click once in pympress to start; it loops. Its captions are in **Spanish**: read the four steps aloud in English (believe, predict, compare, correct or act). Point at the second way out, acting to resolve doubt: that is the title of the course and the subject of Day 5. It is an illustration, as its corner label says, not a run of the robot.

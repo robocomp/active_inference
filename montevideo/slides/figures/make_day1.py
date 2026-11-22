@@ -111,7 +111,7 @@ fig.tight_layout(); fig.savefig(OUT / "d1_wall_belief.pdf"); plt.close(fig)
 print(f"wall (robot frame): n={len(pw)} alpha={np.rad2deg(mu_r[0]):.2f} deg d={mu_r[1]:.3f} rho={rho:.2f} L={L_piv:.2f}")
 
 # 2. honesty test: predicted vs empirical sd, uniform vs incidence sigma
-rows = {}
+rows = {}; spread_fits = {}
 for name, sf in (("same 2 cm for every point", lambda b: 0.02), ("2 cm along the beam, projected", isig)):
     fits, sds = [], []
     for _ in range(400):
@@ -119,6 +119,7 @@ for name, sf in (("same 2 cm for every point", lambda b: 0.02), ("2 cm along the
         r = laplace(res(p), [np.pi / 2, 4.0], sf(b), jacobian=jac(p))
         fits.append(r.belief.mu); sds.append(r.belief.sd)
     rows[name] = np.mean(sds, axis=0) / np.std(fits, axis=0)
+    spread_fits[name] = (np.array(fits), np.mean(sds, axis=0))
 fig, ax = plt.subplots(figsize=(4.8, 3.6))
 x = np.arange(2)
 for i, ((name, ratio), col) in enumerate(zip(rows.items(), (MUTED_, GOOD_))):
@@ -134,6 +135,20 @@ ax.set_ylabel("predicted spread / actual scatter", fontsize=10)
 h_, l_ = ax.get_legend_handles_labels()
 fig.legend(h_, l_, frameon=False, fontsize=9, loc="upper center", ncol=1)
 fig.tight_layout(rect=(0, 0, 1, 0.84)); fig.savefig(OUT / "d1_honesty.pdf"); plt.close(fig)
+# 2b. the same test drawn: 400 estimates of d against the two predicted spreads (Day 2)
+fig, ax = plt.subplots(figsize=(5.0, 3.6))
+fB, sdB = spread_fits["2 cm along the beam, projected"]; _, sdA = spread_fits["same 2 cm for every point"]
+dmm = (fB[:, 1] - fB[:, 1].mean()) * 1000
+ax.hist(dmm, bins=24, density=True, color="0.82", edgecolor="0.6", label="400 estimates of $d$, one per scan")
+xx = np.linspace(-32, 32, 300)
+for sd_, col, ls, lab in ((sdA[1], MUTED_, "--", "predicted: same 2 cm for every point"),
+                          (sdB[1], GOOD_, "-", "predicted: 2 cm × cos θ")):
+    ax.plot(xx, np.exp(-0.5 * (xx / (sd_ * 1000)) ** 2) / (sd_ * 1000 * np.sqrt(2 * np.pi)), color=col, ls=ls, lw=2.2, label=lab)
+ax.set_xlabel("estimate of $d$ minus their mean (mm)", fontsize=11); ax.set_xlim(-32, 32); ax.set_yticks([]); ax.spines["left"].set_visible(False)
+ax.set_ylim(0, ax.get_ylim()[1] * 1.45)
+ax.legend(loc="upper left", fontsize=9.5, frameon=False)
+fig.tight_layout(); fig.savefig(OUT / "d2_spread_check.pdf"); plt.close(fig)
+print(f"spread check d: scatter {fB[:,1].std()*1000:.2f} mm, predicted A {sdA[1]*1000:.2f} B {sdB[1]*1000:.2f}")
 
 # 3. Occam: F_free - F_Manhattan vs prior width
 manh = laplace(lambda t: res(p0)(np.array([np.pi / 2, t[0]])), [3.0], isig(b0), prior=Gaussian([3.0], [[4.0]]))
@@ -148,6 +163,27 @@ def _dF(pp, sd):
     f_ = laplace(res(pp), [np.pi / 2, 3.0], isig(b0), jacobian=jac(pp), prior=Gaussian([np.pi / 2, 3.0], np.diag([sd ** 2, 4.0])))
     return f_.free_energy - m_.free_energy, f_.belief.sd[0]
 d_flat, sa_flat = _dF(p0, np.deg2rad(5.0)); d_tilt, _ = _dF(p_tilt, np.deg2rad(5.0))
+def _parts(pp, sd):
+    m_ = laplace(lambda t: res(pp)(np.array([np.pi / 2, t[0]])), [3.0], isig(b0), prior=Gaussian([3.0], [[4.0]]))
+    f_ = laplace(res(pp), [np.pi / 2, 3.0], isig(b0), jacobian=jac(pp), prior=Gaussian([np.pi / 2, 3.0], np.diag([sd ** 2, 4.0])))
+    sg_ = np.asarray(isig(b0), float)
+    def misfit(r):
+        r = np.atleast_1d(r); return 0.5 * np.sum((r / sg_) ** 2) + np.sum(np.log(sg_)) + 0.5 * len(r) * np.log(2 * np.pi)
+    mm = misfit(res(pp)(np.array([np.pi / 2, m_.belief.mu[0]]))); mf = misfit(res(pp)(f_.belief.mu))
+    return mf - mm, (f_.free_energy - mf) - (m_.free_energy - mm)
+fig, axs = plt.subplots(1, 2, figsize=(7.0, 2.7))
+for bx_, pp, ttl in ((axs[0], p0, "wall at 90°"), (axs[1], p_tilt, "wall tilted 1.5°")):
+    dm, dc = _parts(pp, np.deg2rad(5.0)); tot = dm + dc
+    bx_.bar([0, 1, 2], [dm, dc, tot], color=[GOOD_, COOL_, "0.25"], width=0.6)
+    bx_.axhline(0, color="k", lw=0.8)
+    for xi, v in zip([0, 1, 2], [dm, dc, tot]):
+        bx_.text(xi, v, f"{v:+.1f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=12)
+    bx_.set_xticks([0, 1, 2], ["misfit\nto the scan", "complexity", "$F$(free) $-$\n$F$(fixed)"], fontsize=11)
+    lo, hi = min(dm, dc, tot, 0), max(dm, dc, tot, 0); pad = 0.25 * (hi - lo)
+    bx_.set_ylim(lo - pad, hi + pad); bx_.set_title(ttl + (": fixed wins" if tot > 0 else ": free wins"), fontsize=13); bx_.tick_params(axis="y", labelsize=10)
+    print(f"model compare {ttl}: misfit {dm:.2f} complexity {dc:.2f} total {tot:.2f}")
+axs[0].set_ylabel("free $-$ fixed (nats)", fontsize=11)
+fig.tight_layout(); fig.savefig(OUT / "d2_model_compare.pdf"); plt.close(fig)
 print(f"occam: s=5deg flat {d_flat:.1f} nats, tilted {d_tilt:.1f} nats, sigma_alpha {np.rad2deg(sa_flat):.3f} deg")
 fig, (ax, bx) = plt.subplots(1, 2, figsize=(9.0, 3.2), gridspec_kw={"width_ratios": [1.3, 1]})
 ax.semilogx(np.degrees(widths), dF, "o-", ms=3, color="0.2", label="computed")
@@ -376,16 +412,22 @@ fig.patches.append(matplotlib.patches.FancyArrowPatch((xm_ - 0.035, 0.55), (xm_ 
 fig.text(xm_, 0.62, r"$-\ln$", ha="center", fontsize=13)
 fig.savefig(OUT / "d1_laplace_generic.pdf"); plt.close(fig)
 
-# 9. Laplace on the frame-43 example: apparent size o = 1/s, prior N(3, 1^2), reading o = 0.4.
-#    Bowl U(s) = -ln p(o, s); its bottom is the mean, its curvature the precision. Two sensor noises.
-xs9 = np.linspace(1.2, 6.0, 3000); dx9 = xs9[1] - xs9[0]
+# 9. Laplace on the running example (Day 2 frame 13): range to a landmark 0.8 m aside,
+#    h(s) = sqrt(s^2 + 0.8^2), prior N(1, 0.5^2), noise 0.2. Two readings: far (o = 2.0, h nearly
+#    straight) and near (o = 1.0, h bends). Bowl U(s) = -ln p(o, s).
+LM_D, LM_M, LM_SP, LM_N = 0.8, 1.0, 0.5, 0.2
+lm_h = lambda s: np.sqrt(s * s + LM_D * LM_D)
+xs9 = np.linspace(-1.0, 3.0, 4001); dx9 = xs9[1] - xs9[0]
+H_lm = {}
 fig, axes = plt.subplots(2, 2, figsize=(9.0, 3.9), sharex=True, gridspec_kw={"height_ratios": (1.15, 1)})
-for j, (so9, name) in enumerate(((0.025, "precise sensor (noise $\\pm 0.025$)"), (0.1, "the sensor of frame 43 (noise $\\pm 0.1$)"))):
-    U = 0.5 * ((xs9 - 3.0) / 1.0) ** 2 + 0.5 * ((0.4 - 1 / xs9) / so9) ** 2
+for j, (o9, name) in enumerate(((2.0, "reading $o = 2.0$ m: far from the landmark"), (1.0, "reading $o = 1.0$ m: near the landmark"))):
+    U = 0.5 * ((o9 - lm_h(xs9)) / LM_N) ** 2 + 0.5 * ((xs9 - LM_M) / LM_SP) ** 2
     i0 = np.argmin(U); mu9 = xs9[i0]; U -= U[i0]
     H9 = (U[i0 + 5] - 2 * U[i0] + U[i0 - 5]) / (5 * dx9) ** 2
-    Hs = f"{H9:.0f}" if H9 >= 10 else f"{H9:.1f}"
+    H_lm[o9] = H9
+    Hs = f"{H9:.0f}"
     exact = np.exp(-U); exact /= exact.sum() * dx9
+    me = (xs9 * exact).sum() * dx9; sde = np.sqrt(((xs9 - me) ** 2 * exact).sum() * dx9)
     top, bot = axes[0, j], axes[1, j]
     top.plot(xs9, U, color="0.3", lw=2.5, label=r"bowl $-\ln p(o,s)$")
     top.plot(xs9, 0.5 * H9 * (xs9 - mu9) ** 2, color=ACCENT, lw=2, ls="--", label="parabola at the bottom")
@@ -396,21 +438,20 @@ for j, (so9, name) in enumerate(((0.025, "precise sensor (noise $\\pm 0.025$)"),
     bot.fill_between(xs9, npdf(xs9, mu9, 1 / H9), color=ACCENT, alpha=0.35, label=r"belief $q(s)$")
     bot.plot(xs9, exact, color="0.15", lw=1.4, label=r"exact $p(s\mid o)$")
     bot.set_ylim(0, 1.25 * max(exact.max(), npdf(mu9, mu9, 1 / H9))); bot.set_yticks([])
-    bot.set_xlabel(r"$s$: distance (m)", fontsize=11)
-    bot.text(0.98, 0.6, f"$\\mu = {mu9:.2f}$ m\n$\\Sigma = 1/{Hs}$, $\\sigma = {1 / np.sqrt(H9):.2f}$ m",
-             transform=bot.transAxes, ha="right", fontsize=11, color=ACCENT)
-    print(f"laplace {so9}: mu={mu9:.3f} H={H9:.2f} sigma={1/np.sqrt(H9):.3f}")
-axes[0, 0].legend(loc="upper right", fontsize=10, frameon=False); axes[1, 0].legend(loc="lower right", fontsize=10, frameon=False)
+    bot.set_xlabel(r"$s$: position along the track (m)", fontsize=11)
+    bot.text(0.02, 0.62, f"Laplace: $\\sigma = {1 / np.sqrt(H9):.2f}$ m\nexact: $\\sigma = {sde:.2f}$ m",
+             transform=bot.transAxes, ha="left", fontsize=11, color=ACCENT)
+    print(f"laplace o={o9}: mu={mu9:.3f} H={H9:.2f} sigma={1/np.sqrt(H9):.3f} exact mean={me:.3f} sd={sde:.3f}")
+axes[0, 1].legend(loc="upper right", fontsize=10, frameon=False); axes[1, 1].legend(loc="upper right", fontsize=10, frameon=False)
 fig.tight_layout(h_pad=0.4); fig.savefig(OUT / "d1_laplace.pdf"); plt.close(fig)
 
 # 9c. why sigma^2 = 1/H: F as a function of the belief's spread sigma, for the two bowls of block 9.
 fig, axs = plt.subplots(1, 2, figsize=(9.0, 3.3), sharey=False)
-for ax_, H_, name in ((axs[0], 40.76, "precise sensor, $\\mathcal{H} = 41$"), (axs[1], 2.74, "sensor of frame 43, $\\mathcal{H} = 2.7$")):
+for ax_, H_, name in ((axs[0], H_lm[2.0], f"far, $o = 2.0$: $\\mathcal{{H}} = {H_lm[2.0]:.0f}$"), (axs[1], H_lm[1.0], f"near, $o = 1.0$: $\\mathcal{{H}} = {H_lm[1.0]:.0f}$")):
     sgm = np.linspace(0.03, 1.3, 600)
     cost = 0.5 * H_ * sgm ** 2
     pay = -0.5 * np.log(sgm ** 2)
     Ftot = cost + pay
-    off = Ftot.min()
     ax_.plot(sgm, cost, color=ACCENT, lw=1.8, ls="--", label=r"$\frac{1}{2}\mathcal{H}\sigma^2$: grows with $\sigma$")
     ax_.plot(sgm, pay, color=COOL, lw=1.8, ls="--", label=r"$-\frac{1}{2}\ln\sigma^2$: falls with $\sigma$")
     ax_.plot(sgm, Ftot, color="0.1", lw=2.6, label=r"$F$: their sum (+ terms without $\sigma$)")
@@ -424,24 +465,23 @@ h_, l_ = axs[0].get_legend_handles_labels()
 fig.legend(h_, l_, loc="lower center", ncol=3, fontsize=10, frameon=False)
 fig.tight_layout(rect=(0, 0.1, 1, 1)); fig.savefig(OUT / "d1_sigma_balance.pdf"); plt.close(fig)
 
-# 9b. why the posterior is not Gaussian: start from a nonlinear likelihood.
-#     Sensor: apparent size o = 1/s (twice as far, half as tall), noise on o. Read p(o|s) as a function of s:
-#     a lopsided bump. Times a Gaussian prior: a lopsided posterior.
-sg = np.linspace(0.8, 7.0, 2000); dsg = sg[1] - sg[0]
-m_pr, sd_pr, o_r, so = 3.0, 1.0, 0.4, 0.1
-lik = np.exp(-0.5 * ((o_r - 1 / sg) / so) ** 2)
-prior = npdf(sg, m_pr, sd_pr ** 2)
+# 9b. why the posterior is not Gaussian, on the running example: reading o = 1.0 near the landmark.
+#     p(o|s) as a function of s has two bumps (s = +-0.6 give the same range), each lopsided.
+sg = np.linspace(-1.6, 2.8, 3000); dsg = sg[1] - sg[0]
+o_r = 1.0
+lik = np.exp(-0.5 * ((o_r - lm_h(sg)) / LM_N) ** 2)
+prior = npdf(sg, LM_M, LM_SP ** 2)
 post = prior * lik; post /= post.sum() * dsg
 mp = (sg * post).sum() * dsg; vp = ((sg - mp) ** 2 * post).sum() * dsg
 fig, (a1, a2, a3) = plt.subplots(1, 3, figsize=(10.5, 3.3), sharex=True)
 a1.fill_between(sg, lik, color=GOOD, alpha=0.2); a1.plot(sg, lik, color=GOOD, lw=2.4)
 a1.set_title(r"1. likelihood $p(o\mid s)$, as a function of $s$", fontsize=11)
-a1.text(4.3, 0.35, "long tail\nto the far side", color=GOOD, fontsize=10)
-ins = a1.inset_axes([0.56, 0.56, 0.42, 0.3])
-ins.plot(sg, 1 / sg, color="0.2", lw=1.6)
-ins.axhspan(o_r - so, o_r + so, color=GOOD, alpha=0.25)
-ins.set_xlim(0.8, 7); ins.set_ylim(0, 1.0); ins.set_xticks([]); ins.set_yticks([])
-ins.set_title("sensor: $o = 1/s$", fontsize=9, pad=2)
+a1.text(0.0, 1.08, "$s = \\pm0.6$: same range", color=GOOD, fontsize=10, ha="center")
+ins = a1.inset_axes([0.62, 0.55, 0.36, 0.3])
+ins.plot(sg, lm_h(sg), color="0.2", lw=1.6)
+ins.axhspan(o_r - LM_N, o_r + LM_N, color=GOOD, alpha=0.25)
+ins.set_xlim(-1.6, 2.8); ins.set_ylim(0.5, 3.0); ins.set_xticks([]); ins.set_yticks([])
+ins.set_title(r"range $h(s)$", fontsize=9, pad=2)
 a1.set_ylim(0, 1.75)
 a2.fill_between(sg, prior, color=COOL, alpha=0.2); a2.plot(sg, prior, color=COOL, lw=2.4)
 a2.set_title(r"2. prior $p(s)$: a Gaussian", fontsize=11)
@@ -450,9 +490,9 @@ a3.plot(sg, prior / prior.max() * post.max() * 0.6, color=COOL, lw=1, alpha=0.6)
 a3.fill_between(sg, post, color="0.3", alpha=0.25); a3.plot(sg, post, color="0.1", lw=2.4, label=r"posterior $p(s\mid o)$")
 a3.plot(sg, npdf(sg, mp, vp), color=ACCENT, lw=1.6, ls="--", label="a Gaussian, for comparison")
 a3.set_title(r"3. prior $\times$ likelihood: lopsided", fontsize=11)
-a3.set_ylim(0, 1.45 * post.max()); a3.legend(loc="upper right", fontsize=9, frameon=False)
+a3.set_ylim(0, 1.45 * post.max()); a3.legend(loc="upper left", fontsize=9, frameon=False)
 for ax_ in (a1, a2, a3):
-    ax_.set_yticks([]); ax_.set_xlabel(r"$s$: distance (m)"); ax_.set_xlim(0.8, 7.0)
+    ax_.set_yticks([]); ax_.set_xlabel(r"$s$: position along the track (m)"); ax_.set_xlim(-1.6, 2.8)
 fig.tight_layout(w_pad=3.5)
 for (l_, r_), sym in (((a1, a2), r"$\times$"), ((a2, a3), "=")):
     fig.text(0.5 * (l_.get_position().x1 + r_.get_position().x0), 0.55, sym, fontsize=22, ha="center", va="center")
@@ -597,8 +637,44 @@ h_gn = lambda s: np.sqrt(s * s + d_gn * d_gn)
 J_gn = lambda s: s / h_gn(s)
 E_gn = lambda s: 0.5 * Po_gn * (o_gn - h_gn(s)) ** 2 + 0.5 * Pp_gn * (s - m_gn) ** 2
 sg = np.linspace(0.0, 2.6, 600)
+fig, ax = plt.subplots(figsize=(5.0, 3.0))
+ax.plot(sg, E_gn(sg), color="0.2", lw=2.6, label="bowl: the sum")
+ax.plot(sg, 0.5 * Po_gn * (o_gn - h_gn(sg)) ** 2, color="#2E8B57", lw=2.0, ls="--", label=r"$-\ln$ likelihood: $\frac{1}{2}\,25\,(o-h(s))^2$")
+ax.plot(sg, 0.5 * Pp_gn * (sg - m_gn) ** 2, color="#2E6DB4", lw=2.0, ls="-.", label=r"$-\ln$ prior: $\frac{1}{2}\,4\,(s-1)^2$")
+ax.annotate("bottom?", xy=(1.70, E_gn(1.70)), xytext=(0.9, -1.6), fontsize=12, color="0.2", va="center",
+            arrowprops=dict(arrowstyle="->", lw=0.9, color="0.3"))
+ax.set_xlim(0, 2.6); ax.set_ylim(-2.6, 22); ax.set_yticks([]); ax.spines["left"].set_visible(False)
+ax.set_xlabel(r"$s$ (m)", fontsize=12); ax.tick_params(labelsize=11)
+ax.legend(loc="upper center", bbox_to_anchor=(0.55, 1.02), fontsize=11, frameon=False, handlelength=1.6)
+fig.tight_layout(); fig.savefig(OUT / "d1_gn_bowl.pdf"); plt.close(fig)
+# 15b. The exact posterior on a grid (Day 2, "exact answers" frame).
+from scipy.stats import norm as _norm
+s_all = np.linspace(-3, 5, 200001); ds_all = s_all[1] - s_all[0]
+joint = _norm.pdf(o_gn, h_gn(s_all), 0.2) * _norm.pdf(s_all, m_gn, 0.5)
+p_o = joint.sum() * ds_all
+post = joint / p_o
+mu_t = (s_all * post).sum() * ds_all; sd_t = np.sqrt(((s_all - mu_t) ** 2 * post).sum() * ds_all)
+fig, ax = plt.subplots(figsize=(5.2, 4.0))
+sel = (s_all > 0.7) & (s_all < 2.7)
+step = 1500
+xs, ps = s_all[sel][::step], post[sel][::step]
+ax.vlines(xs, 0, ps, color=ACCENT, lw=2.2, alpha=0.85)
+ax.plot(s_all[sel], post[sel], color=ACCENT, lw=1.2)
+ax.plot(s_all[sel], _norm.pdf(s_all[sel], 1.70, 0.202), color="0.35", ls="--", lw=1.5, label=r"Laplace: $\mathcal{N}(1.70,\,0.202^2)$")
+ax.plot([], [], color=ACCENT, lw=2.2, label=r"$p(o\,|\,s_i)\,p(s_i)\,/\,p(o)$ at each grid point")
+for x in s_all[sel][::300]:
+    ax.plot([x, x], [-0.13, -0.05], color="0.55", lw=0.4)
+ax.text(2.22, 0.3, "grid: 200 000 points,\n$-3$ to $5$ m\n(every 300th drawn)", fontsize=10, color="0.35", va="bottom")
+ax.axvline(mu_t, color=COOL, lw=1.3)
+ax.text(mu_t - 0.04, post.max() * 1.03, f"mean {mu_t:.3f}", color=COOL, fontsize=11, va="bottom", ha="right")
+ax.set_xlim(0.7, 2.7); ax.set_ylim(-0.2, post.max() * 1.75); ax.set_yticks([]); ax.spines["left"].set_visible(False)
+ax.set_xlabel(r"$s$ (m)", fontsize=12); ax.tick_params(labelsize=11)
+ax.legend(loc="upper left", fontsize=10.5, frameon=False)
+fig.tight_layout(); fig.savefig(OUT / "d2_grid_posterior.pdf"); plt.close(fig)
+print(f"grid posterior: p(o) = {p_o:.4f}, mean = {mu_t:.4f}, sd = {sd_t:.4f}")
 fig, ax = plt.subplots(figsize=(5.0, 3.4))
-ax.plot(sg, E_gn(sg), color="0.2", lw=2.6, label=r"bowl $-\ln p(o,s)$")
+ax.plot(sg, E_gn(sg), color="0.2", lw=2.6, label=r"the bowl $-\ln p(o,s)$: fixed")
+ax.plot([], [], color="0.45", ls="--", lw=1.7, label=r"$P_k$: its Taylor expansion at $s_k$")
 s_k = 0.6
 shades = [ACCENT, "#E08E0B", COOL]
 for k in range(3):
@@ -608,7 +684,7 @@ for k in range(3):
     par = E_gn(s_k) + g_k * (sg - s_k) + 0.5 * H_k * (sg - s_k) ** 2
     ax.plot(sg, par, color=shades[k], ls="--", lw=1.7)
     ax.plot(s_k, E_gn(s_k), "o", color=shades[k], ms=7, zorder=5)
-    lab_xy = [(0.25, 14.0), (2.35, 9.5), (1.25, 6.5)][k]
+    lab_xy = [(0.25, 12.0), (2.4, 8.0), (1.25, 6.5)][k]
     ax.text(*lab_xy, f"$P_{k}$", color=shades[k], fontsize=14, ha="center", fontweight="bold")
     ax.text(s_k, E_gn(s_k) - 1.1, f"$s_{k}$", color=shades[k], fontsize=12, ha="center", va="top")
     if k < 2:
@@ -616,9 +692,9 @@ for k in range(3):
                     arrowprops=dict(arrowstyle="-|>", color=shades[k], lw=1.5))
     print(f"GN step {k}: s={s_k:.3f} bowl={E_gn(s_k):.2f} slope={g_k:.2f} H={H_k:.2f} -> {s_k + ds_k:.3f}")
     s_k += ds_k
-ax.set_xlim(0, 2.6); ax.set_ylim(-2.6, 16); ax.set_yticks([]); ax.spines["left"].set_visible(False)
+ax.set_xlim(0, 2.6); ax.set_ylim(-2.6, 22); ax.set_yticks([]); ax.spines["left"].set_visible(False)
 ax.set_xlabel(r"$s$ (m)", fontsize=12); ax.tick_params(labelsize=11)
-ax.legend(loc="upper right", fontsize=11, frameon=False)
+ax.legend(loc="upper center", bbox_to_anchor=(0.6, 1.02), fontsize=11, frameon=False, handlelength=1.4)
 fig.tight_layout(); fig.savefig(OUT / "d1_gauss_newton.pdf"); plt.close(fig)
 print(f"gauss-newton: mu = {s_k:.3f}, H = {H_k:.2f}, sigma = {1/np.sqrt(H_k):.3f}")
 
