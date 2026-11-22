@@ -1168,6 +1168,26 @@ plan matters, settled here.
   printed before this bound was set, so it is not blind: a failure is reported, not tuned); (3) each draw takes its
   prior mean for w from the w prior, so the unseen direction is calibrated too: NEES(w) printed with (2)'s band as a
   CHECK. Reviewer's derivation: task-22-review.md (a).
+- **Rev 3.3.13 (owner 11-22, "do A"): the ego-motion share is a per-frame latent in the joint state.** Supersedes "they
+  stay in the per-frame Woodbury of their channel (ρ = 0), outside every b" (dynamics above) and `marginalise_fresh` in the
+  GN step. Each channel c ∈ {cam, L} gets u_c ∈ ℝ⁶. Camera points measure θ + E e + b_cam + u_cam, and rays measure
+  θ + E e + b_L + u_L. Every persistent update re-draws u_c as a NEW source: mean 0, covariance diag(fresh_c) (the
+  ego-motion terms, 0 when the channel does not measure), cross terms 0. That is ρ = 0, and it marginalises the previous
+  frame's u_c out exactly. The state grows from 21 to 33 (K 15 → 27). Why: the GN trace (live13trace,
+  docs/superpowers/results/2026-11-22-gn-trace-live13.md) showed the step's G and W marginalised (3–500× smaller than
+  ∇J) while the acceptance energy J was not. The solver aimed at the minimum of a flattened model and was then judged on the
+  unflattened J: rejection streaks, λ up to 1e87, gn_conv = 0. With u_c in the state, J's prior term ½(x − x̄)ᵀP̄⁻¹(x − x̄)
+  carries the ego-motion prior, so G = ∇J by construction. Equivalent to the Woodbury form at a linear channel's optimum.
+  Pass:
+  (1) gn_trace_instrument with nonzero fresh: the joint G_θ over the central difference of J along θ (h = 1e-3) is in
+      [0.9, 1.1] per component whose |FD| is at least 1 % of the largest. The band is set by the defect's size (0.002–0.45),
+      not by a measurement. Disclosure: a tighter wording (|G − FD₃| ≤ |FD₄ − FD₃| + 1e-3|FD₃|) was drafted after the
+      fresh = 0 fixture had already printed. It would fail one component there (h at the returned θ, ratio 1.0075, the
+      blocks' frozen mixture weights), so it was replaced before the new case was run.
+  (2) The existing suite is unchanged at fresh = 0, where u_c has zero variance and is inert.
+  (3) Live, the live12/13 tour: gn_conv = 0 shares and the all-rows > 3σ shares are reported against live13trace. A
+      failure is reported, not tuned.
+  Out of scope: the nightstand_51 RAW camera gradient mismatch (G/FD 0.11 without marginalisation), traced separately.
 - **Flush against a known wall (owner: "Stated limit, test the live").** With the robot pose error e modelled, a box
   flush against a known wall has at least two energy basins (w traded against e_x, h against e_y); converged, the
   full-control fixture lands 19 mm off in w, 9 mm in cx, |e| ≈ 0.46σ. Stated limit. Pass keeps the lever-only control

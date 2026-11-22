@@ -1021,6 +1021,7 @@ Eigen::Matrix<double, CountableBelief::N, CountableBelief::K> CountableBelief::c
     Eigen::Matrix<double, N, K> B = Eigen::Matrix<double, N, K>::Zero();
     B.block<N, 3>(0, kChain) = chain_B(lever_.l);
     B.block<N, 6>(0, camera ? kCam : kL) = Eigen::Matrix<double, 6, 6>::Identity();
+    B.block<N, 6>(0, camera ? kFc : kFL) = Eigen::Matrix<double, 6, 6>::Identity();   // u_c (rev 3.3.13)
     return B;
 }
 
@@ -1062,11 +1063,22 @@ void CountableBelief::predict_latents_persistent(const CountableFrame& f, bool c
     };
     if (camera) block(kCam, f.rho_cam.data(), f.sig2_cam.data());
     if (lidar)  block(kL,   f.rho_L.data(),   f.sig2_L.data());
+    // u_cam, u_L (spec 7c.8 rev 3.3.13): re-drawn every update as a new source (ρ = 0 marginalises the last frame's u out
+    // exactly): mean 0, covariance diag(fresh_c) when channel c measures this update, else 0 (inert), cross terms 0.
+    const auto fresh_block = [&](int off, const std::array<float, 6>& fr, bool on)
+    {
+        Eigen::VectorXd sv(6);
+        for (int j = 0; j < 6; ++j) sv(j) = on ? std::max(0.0, double(fr[j])) : 0.0;
+        pu::predict_block<N, K>(P_, x, off, 6, Eigen::MatrixXd::Identity(6, 6), Eigen::VectorXd::Zero(6),
+                                sv.asDiagonal().toDenseMatrix(), /*new_source*/ true);
+    };
+    fresh_block(kFc, f.fresh_cam, camera);
+    fresh_block(kFL, f.fresh_L,   lidar);
     b_ = x.tail<K>();
 }
 
 // One persistent update (§7c.2 steps 1–4): predict; per GN iterate restart the biases at b̄, linearise each channel at its
-// own measured quantity, marginalise the channel's fresh (ego-motion) covariance, joint step; joint covariance at the
+// own measured quantity (the ego-motion share is the latent u_c, rev 3.3.13), joint step; joint covariance at the
 // converged θ (b̄ restart, as the engine re-accumulates at its converged state).
 float CountableBelief::update_persistent(const CountableFrame& f)
 {
@@ -1121,8 +1133,9 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     // Channel selectors: camera points measure θ + B_chain e + b_cam, rays θ + B_chain e + b_L; B_chain = chain_B(ℓ) is fixed
     // over the GN iterates (the lever is instance state, never the belief's centre: spec 7c.7 b).
     const Eigen::Matrix<double, N, K> B_cam = chain_selector(true), B_L = chain_selector(false);
-    Mat6 Sf_cam = Mat6::Zero(), Sf_L = Mat6::Zero();
-    for (int i = 0; i < 6; ++i) { Sf_cam(i, i) = std::max(0.0f, f.fresh_cam[i]); Sf_L(i, i) = std::max(0.0f, f.fresh_L[i]); }
+    // The ego-motion share is the latent u_c (rev 3.3.13), so the channels' information enters unmarginalised (Σf = 0 here:
+    // marginalise_fresh is then the identity), and G is the gradient of the J the step is accepted against.
+    const Mat6 Sf_cam = Mat6::Zero(), Sf_L = Mat6::Zero();
     // The linearisation (spec 7c.7 d caveat; spec 7c.8 rev 3.3.7): CONSISTENT — each iterate is x̃_k = (θ_k, b_k), every channel
     // linearised at what it measures there, θ_k + B b_k, and the damping is Levenberg–Marquardt on the whole joint state
     // (M = diag W over θ and b). The b̄ restart (x̃_k = (θ_k, b̄), M on θ only) stalls on the beam energy: its fixed point is the
@@ -1549,12 +1562,12 @@ void CountableBelief::apply_mode_rotation(int k)
         std::swap(prior_mean_(3), prior_mean_(4));
         if (joint_init_)
         {   // the persistent joint state relabels with θ: w, h of θ, b_cam and b_L (e and ℓ are room-frame, untouched)
-            for (const int off : {0, N + kCam, N + kL})
+            for (const int off : {0, N + kCam, N + kL, N + kFc, N + kFL})
             {
                 P_.row(off + 3).swap(P_.row(off + 4));
                 P_.col(off + 3).swap(P_.col(off + 4));
             }
-            for (const int off : {kCam, kL})
+            for (const int off : {kCam, kL, kFc, kFL})
             {
                 std::swap(b_(off + 3), b_(off + 4));
                 std::swap(sig_prev_(off + 3), sig_prev_(off + 4));

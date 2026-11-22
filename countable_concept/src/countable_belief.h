@@ -497,8 +497,11 @@ public:
 
     // ── Persistent shared errors (params.persistent; spec lidar-measures §7c.1–7c.2) ─────────────────────────────────
     // Joint state x = (θ, b) ∈ ℝ²¹, b = (e (δx, δy, δψ), b_cam (6), b_L (6)); covariance() is P's θθ block in float (§7c.7).
-    static constexpr int K = 15;                          // latent DOFs
+    static constexpr int K = 27;                          // latent DOFs
     static constexpr int kChain = 0, kCam = 3, kL = 9;    // offsets of each latent inside b (e = kChain..kChain+2)
+    // spec 7c.8 rev 3.3.13: u_cam, u_L — the channel's ego-motion share, a NEW source every persistent update (mean 0,
+    // diag(fresh_c), cross terms 0). In the state so the GN's G is ∇J (it was marginalised out of G/W but not of J).
+    static constexpr int kFc = 15, kFL = 21;
     using MatJd = Eigen::Matrix<double, N + K, N + K>;
     using VecKd = Eigen::Matrix<double, K, 1>;
     const VecKd&  latent_mean() const { return b_; }
@@ -592,8 +595,8 @@ public:
     // whose gradient accumulate_channels uses exactly) at s_L, θ-only ((1) flush/parallel and the room axis when they enter, (2b),
     // (2c)) at s_th — each term's own energy at its own linearisation point, with the per-frame gates of accumulate_channels.
     // ∇E = −(bd_cam + bd_L + bd_th) up to the state dependence of the blocks' mixture weights (flush posterior, two-sidedness,
-    // the rays' n̂·u), which the GN information also holds fixed. The channels' FRESH-covariance marginalisation is NOT in
-    // the energy: Σf is the ego-motion share, zero while parked, and enters the step only.
+    // the rays' n̂·u), which the GN information also holds fixed. The ego-motion share is the latent u_c (rev 3.3.13), so it
+    // enters J through the prior term, as the step's G does (the old "zero while parked, step only" was wrong: live13trace).
     double persistent_data_energy(const CountableBeliefState& s_cam, const CountableBeliefState& s_L,
                                   const CountableBeliefState& s_th, const CountableFrame& f) const;
     const Eigen::Matrix<float, 6, 6>& dbg_Pbar_tt() const { return dbg_Pbar_tt_; }
