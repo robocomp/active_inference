@@ -1154,7 +1154,8 @@ plan matters, settled here.
   bed median 245), giving κ ≈ 0 on the bed. In the beam model each ray carries its own term weighted by its own m_i; the
   correlation between rays is carried by the persistent shared-error latents; a one-sided view is already flat in J's
   curvature along the unseen directions. So the ray-set energy is Σ_i E_i. "The LiDAR channel measured" ⇔ the staged
-  set is non-empty and Σ_i m_i > 0 over it. coverage and ca stay computed for the instruments and the flag-off path.
+  set is non-empty and Σ_i q_i > 0 over it, q_i the UNFLOORED label (m_i ≥ ε_px > 0 always, so Σ m_i cannot
+  tell a sweep the camera attributes to nothing — the R7-I1 reason). coverage and ca stay computed for the instruments and the flag-off path.
   Pass additions: calibration_nees unchanged with κ ≡ 1; a one-sided fixture (box seen from one face only): the
   far-face direction's σ ≥ ½ its prior σ and NEES/2 ∈ [0.5, 2]; creep and silhouette bounds unchanged; live12 on + shift
   (the live11 tour): no DOF over-confident (0 % below rms/3), h std/rms, shift errors vs the shifted prior and bed Itr_L

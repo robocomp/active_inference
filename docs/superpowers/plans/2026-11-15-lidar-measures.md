@@ -695,3 +695,27 @@ errors not worse than live10's by more than 1 cm; no DOF over-confident (two-sid
 per instance the staged ray count, rays without camera information, cycles without membership and their longest run,
 and the gap-ray count. ε_px and b* from Task 15, and Task 20's printed flush / 5 cm / gap numbers, go to the owner in
 `docs/superpowers/results/2026-11-20-lidar-measures-live11.md`. Push the branch when done; no merge.
+
+### Task 22: κ ≡ 1 on the beam path (spec 7c.8 rev 3.3.11)
+
+**Files:** Modify `common/lidar_select/lidar_select.h` (`select_rays_beam`), `common/ai_belief/beam_ray.h` (energy/gradient/curvature κ factors), `countable_concept/src/countable_belief.cpp` (`lidar_measured`), `countable_concept/src/countable_beam_staging.h` (log); Test `countable_concept/tests/beam_live_staging_test.cpp`, `beam_belief_test.cpp`, `beam_staging_test.cpp`.
+
+**Interfaces:**
+- `BeamRays::kappa` is removed from the energy: the ray-set energy, gradient and curvature are Σ_i E_i, Σ_i ∇E_i, Σ_i W_i (no factor). If a field stays for the log, it must not multiply anything.
+- `CountableBelief::lidar_measured(f)` ⇔ `f.beam.endpoints` non-empty and Σ q_i > 0 over the staged rays, q_i the unfloored label (π_mask·Φ(s/σ_px), 0 without a projection). `select_rays_beam` exposes Σ q over the staged set (e.g. `BeamStageStats::q_sum_staged` and a `BeamRays` member the belief reads).
+- ai2_log: `beam_kappa` keeps logging the OLD coverage·ca (instrument, so live12 compares with live11); append `beam_qsum` (Σ q over staged). Scorer prints it.
+- Flag-off path and the instruments (`probe`, `dbg_lidar_rays`, coverage inputs) unchanged.
+
+- [ ] **Step 1: Failing tests.**
+  - `kappa_not_in_energy` (beam_belief_test): the same staged set with the old κ value 0.03 and 1.0 gives the same E, g, W (bit-equal).
+  - `measured_needs_camera_attribution` (beam_staging_test): staged rays with all q_i = 0 ⇒ `lidar_measured` false; one q_i > 0 ⇒ true; an endpoint-in-box set that is EMPTY while the staged set is not (the live11 bed geometry: low box, rays crossing the top) ⇒ true.
+  - `one_sided_view` (beam_live_staging_test): box seen from one face only (sensor on its +x side, 10 frames, live staging, live ε_px): σ along the unseen depth direction ≥ ½ its prior σ; NEES/2 ∈ [0.5, 2] over 200 draws (rev 3.3.10 (2) latents); print σ per DOF and NEES.
+  - `calibration_nees` unchanged bounds with κ ≡ 1 (re-run; a failure is reported, not tuned).
+- [ ] **Step 2:** Build (-j8 after `pgrep -a cc1plus`), run: FAIL.
+- [ ] **Step 3:** Implement; rebuild the agent binary.
+- [ ] **Step 4:** Full countable ctest: PASS, or a failing spec CHECK left failing and reported with numbers.
+- [ ] **Step 5:** Commit `beam: no sweep weight, κ ≡ 1; measured ⇔ staged Σq > 0 (spec 7c.8 rev 3.3.11)`.
+
+### Task 23 (controller, live): objects_live12, objects_live12shift
+
+As Task 21 (same tour, fixture, 2 legs; claim Webots; ai2_logs archived before each run; flag on; shift = nightstand footprint 0.57, height 0.72). Report in `docs/superpowers/results/2026-11-22-lidar-measures-live12.md` against live11: no DOF over-confident (0 % below rms/3) — the guard; h std/rms per instance; shift final w/h/H errors vs the shifted prior's +0.06/+0.06/+0.10; bed Itr_L median and staged Σq; fit rate ≥ 8 Hz; gn_conv = 0 share. A failure is reported, not tuned. Push the branch; no merge.
