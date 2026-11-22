@@ -1,7 +1,7 @@
 // beam_belief_test — the countable belief on the smooth beam model (spec 2026-11-15 lidar-measures §7c.8 a, b; params.persistent).
 // Every fixture ray-casts a TRUE scene (test_scene.h, first hit only) and stages it by ray geometry through the real staging
 // function (beam_fixture.h → rc::lidar_select::select_rays_beam) with HAND labels: 0.9 on the true object, ε_px = 0.02 off it,
-// unless a test says otherwise; κ = 1 unless a test is about κ. "The tolerance" is 7c.7's 1 mm / 1 mrad.
+// unless a test says otherwise; κ multiplies nothing (rev 3.3.11). "The tolerance" is 7c.7's 1 mm / 1 mrad.
 // Fixture object: the golden nightstand (0.51 × 0.51 × 0.62 at (0.30, −0.255)), Helios 1.5 m in front of its front face.
 // Run: ./beam_belief_test
 #include <algorithm>
@@ -109,13 +109,15 @@ static double max_pos_step(const Vec6& a, const Vec6& b, double& dyaw)
 }
 static Vec6 sd(const CountableBelief& b) { return b.covariance().diagonal().cwiseSqrt(); }
 
-// ─── κ = 0 is the prediction; Σq = 5 (κ ≈ 0.08) is finite and scales every ray term by κ (spec Pass "Density and inputs") ───
-static void kappa_zero_is_prediction()
+// ─── Σq = 0 is the prediction (spec 7c.8 rev 3.3.11 "measured"): the same front sweep with every ray labelled ε_px (the camera
+//     attributes nothing; q = 0 on every staged ray) is not a measurement — the update is the prediction, and camera + those
+//     rays ≡ camera alone. ───
+static void qsum_zero_is_prediction()
 {
     CountableBelief a = belief({tx + 0.02f, ty - 0.01f, tH + 0.01f, tw, tw, 0.0f});
     a.update(camera_frame());                                          // an established belief (first update done)
     const std::vector<ts::SceneWall> walls{back_wall(1.0f)};
-    const bm::BeamRays r0 = front_beam(walls, 0.0);
+    const bm::BeamRays r0 = front_beam(walls, 1.0, {}, [](const Eigen::Vector3f&) { return ts::kEpsPx; });
     const CountableFrame f0 = lidar_frame(r0);
     CountableBelief p = a, l = a;
     const bool measured = l.lidar_measured(f0);
@@ -124,52 +126,71 @@ static void kappa_zero_is_prediction()
     const bool same = l.state().vec() == p.state().vec() and l.covariance() == p.covariance()
                       and l.log_volatility() == p.log_volatility() and l.joint_covariance() == p.joint_covariance()
                       and l.latent_mean() == p.latent_mean() and l.latent_std() == p.latent_std();
-    std::printf("  kappa_zero: %zu staged rays at kappa 0: lidar_measured %d (the fitter's rays_usable: the channel's odometry path is "
-                "NOT restarted) ; update == predict (state, Sigma, omega, P, b, sd(b)) %d ; gn_it %d\n", r0.endpoints.size(),
+    std::printf("  qsum_zero: %zu staged rays at q_sum %.3f: lidar_measured %d (the fitter's rays_usable: the channel's odometry path is "
+                "NOT restarted) ; update == predict (state, Sigma, omega, P, b, sd(b)) %d ; gn_it %d\n", r0.endpoints.size(), r0.q_sum,
                 int(measured), int(same), l.last_gn_iters());
-    CHECK(not r0.endpoints.empty());
+    CHECK(not r0.endpoints.empty() and r0.q_sum == 0.0);
     CHECK(not measured);
     CHECK(same);
     CHECK(l.last_gn_iters() == 0 and l.last_beam_staged() == 0);
-    {   // camera + κ = 0 rays ≡ camera alone
+    {   // camera + Σq = 0 rays ≡ camera alone
         CountableBelief c1 = a, c2 = a;
         CountableFrame fc = camera_frame(), fr = camera_frame();
         fr.beam = r0;
         c1.update(fr); c2.update(fc);
         const bool eq = c1.state().vec() == c2.state().vec() and c1.joint_covariance() == c2.joint_covariance();
-        std::printf("  kappa_zero: camera + kappa-0 rays == camera only: %d\n", int(eq));
+        std::printf("  qsum_zero: camera + q_sum-0 rays == camera only: %d\n", int(eq));
         CHECK(eq);
     }
-    // Σq = 5: κ = Σq/LidarCoverageN0 = 5/60 (one bearing, ca = 1)
-    const double k5 = 5.0 / 60.0;
-    const bm::BeamRays r5 = front_beam(walls, k5);
-    CountableBelief d = a;
-    d.update(lidar_frame(r5));
-    const bool fin = d.state().vec().allFinite() and d.joint_covariance().allFinite();
-    std::printf("  kappa %.4f: update finite %d ; theta moved %.3e ; gn_it %d conv %d\n", k5, int(fin),
-                (d.state().vec() - a.state().vec()).norm(), d.last_gn_iters(), int(d.last_gn_converged()));
-    CHECK(fin);
-    // per-ray hit/miss energy difference: one claimed ray on the front face, the model at the truth (hit) vs 1 m aside (miss)
-    std::size_t ih = 0;
-    for (std::size_t i = 0; i < r5.endpoints.size(); ++i)
-        if (r5.m[i] == ts::kMOn and std::abs(r5.endpoints[i].y() - (ty - 0.5 * tw)) < 1e-4) { ih = i; break; }
-    double worst = 0.0;
-    for (const double kap : {k5, 0.5})
+}
+
+// ─── κ is not in the energy (spec 7c.8 rev 3.3.11, κ ≡ 1 on the beam path): the same staged set carrying the old κ values
+//     0.03, 1.0 (and 0, which used to return early) gives bit-equal E, g, W from accumulate_beam_rays, the same trial energy
+//     from beam_rays_energy, and a bit-equal update. Per ray: a claimed return on the front face is still rewarded. ───
+static void kappa_not_in_energy()
+{
+    CountableBelief a = belief({tx + 0.02f, ty - 0.01f, tH + 0.01f, tw, tw, 0.0f});
+    a.update(camera_frame());
+    const std::vector<ts::SceneWall> walls{back_wall(1.0f)};
+    const bm::BeamRays r = front_beam(walls);
+    const CountableBeliefState s{tx + 0.015f, ty + 0.01f, tH - 0.02f, tw + 0.02f, tw - 0.01f, 0.02f};
+    const auto parts = a.beam_parts_for_test(s);
+    struct Out { Eigen::Matrix<double, 6, 6> W; Eigen::Matrix<double, 6, 1> g; double E, Etrial; Vec6 th; Mat6 P; };
+    const auto run = [&](double kap)
     {
-        const bm::BeamRays one = ts::subset(r5, {ih});   // each ray keeps its own p_f (review D2)
-        bm::BeamRays oneK = one; oneK.kappa = kap;
-        bm::BeamRays one1 = one; one1.kappa = 1.0;
-        const CountableBeliefState hit = truth_state(), miss{tx + 1.0f, ty, tH, tw, tw, 0.0f};
-        const auto E = [&](const bm::BeamRays& r, const CountableBeliefState& s)
-        { CountableFrame f = lidar_frame(r); return a.persistent_data_energy(s, s, s, f); };
-        const double dK = E(oneK, hit) - E(oneK, miss), d1 = E(one1, hit) - E(one1, miss);
-        const double rel = std::abs(dK / (kap * d1) - 1.0);
-        worst = std::max(worst, rel);
-        std::printf("  kappa %.4f: per-ray hit - miss energy %.6f nats ; kappa x (kappa = 1 value %.6f) = %.6f ; rel %.2e\n", kap, dK,
-                    d1, kap * d1, rel);
-        CHECK(d1 < -1.0);   // a claimed return on the surface is rewarded (spec ≈ −6.7 nats at m = 0.9)
+        bm::BeamRays rk = r; rk.kappa = kap;
+        Out o;
+        o.W.setZero(); o.g.setZero(); o.E = 0.0;
+        bm::accumulate_beam_rays<6>(parts, rk, a.params().beam, o.W, o.g, &o.E);
+        o.Etrial = bm::beam_rays_energy(parts, rk, a.params().beam);
+        CountableBelief u = a;
+        u.update(lidar_frame(rk));
+        o.th = u.state().vec(); o.P = u.covariance();
+        return o;
+    };
+    const Out o1 = run(1.0);
+    for (const double kap : {0.03, 0.0})
+    {
+        const Out ok = run(kap);
+        const bool eq = ok.W == o1.W and ok.g == o1.g and ok.E == o1.E and ok.Etrial == o1.Etrial and ok.th == o1.th and ok.P == o1.P;
+        std::printf("  kappa_not_in_energy: kappa %.2f vs 1: E %.9f vs %.9f, trial E %.9f vs %.9f, |g| %.6e vs %.6e, tr W %.6e vs %.6e ; "
+                    "update theta/P bit-equal %d ; all bit-equal %d\n", kap, ok.E, o1.E, ok.Etrial, o1.Etrial, ok.g.norm(), o1.g.norm(),
+                    ok.W.trace(), o1.W.trace(), int(ok.th == o1.th and ok.P == o1.P), int(eq));
+        CHECK(eq);
     }
-    CHECK(worst < 1e-12);
+    CHECK(o1.E != 0.0 and o1.W.trace() > 0.0);
+    // the update on these rays is finite and measured
+    CHECK(o1.th.allFinite() and o1.P.allFinite() and a.lidar_measured(lidar_frame(r)));
+    // per-ray hit/miss energy: one claimed ray on the front face, the model at the truth (hit) vs 1 m aside (miss)
+    std::size_t ih = 0;
+    for (std::size_t i = 0; i < r.endpoints.size(); ++i)
+        if (r.m[i] == ts::kMOn and std::abs(r.endpoints[i].y() - (ty - 0.5 * tw)) < 1e-4) { ih = i; break; }
+    const bm::BeamRays one = ts::subset(r, {ih});   // each ray keeps its own p_f (review D2)
+    const CountableBeliefState hit = truth_state(), miss{tx + 1.0f, ty, tH, tw, tw, 0.0f};
+    const auto E = [&](const CountableBeliefState& st) { CountableFrame f = lidar_frame(one); return a.persistent_data_energy(st, st, st, f); };
+    const double d1 = E(hit) - E(miss);
+    std::printf("  kappa_not_in_energy: per-ray hit - miss energy %.6f nats (one ray, q_sum %.3f)\n", d1, one.q_sum);
+    CHECK(d1 < -1.0);   // a claimed return on the surface is rewarded (spec ≈ −6.7 nats at m = 0.9)
 }
 
 // ─── Reduction (spec Pass "Reduction" through the update): rays deep inside a face (π > 1 − 1e-6), m = 1 − 1e-6, κ = 1, at
@@ -192,7 +213,7 @@ static void reduction_update()
         const CountableBelief probe = belief(seed, p);
         const auto parts = probe.beam_parts_for_test(seed);
         bm::BeamRays R;
-        R.origin = o.cast<double>(); R.kappa = 1.0; R.rho_max = 6.0; R.sigma_s = p.model_sigma_m;
+        R.origin = o.cast<double>(); R.rho_max = 6.0; R.sigma_s = p.model_sigma_m;
         rc::ai::LidarRays L;
         L.origin = o; L.precision = 2500.0f; L.robust_c_m = 0.05f;
         double nu_lo = 1.0, nu_hi = 0.0, pi_min = 1.0;
@@ -214,6 +235,7 @@ static void reduction_update()
                 R.endpoints.push_back(e.cast<double>()); R.m.push_back(1.0 - 1e-6);
                 L.endpoints.push_back(e);
             }
+        R.q_sum = ts::q_sum_of(R);   // the labels' unfloored Σq (rev 3.3.11 "measured")
         CountableFrame fb = lidar_frame(R);
         CountableFrame fl = lidar_frame({}); fl.lidar = L;
         CountableBelief a = belief(seed, p);
@@ -414,7 +436,7 @@ static double largest_ray_curvature(const CountableBelief& b, const bm::BeamRays
     double best = 0.0;
     for (std::size_t i = 0; i < r.endpoints.size(); ++i)
     {
-        bm::BeamRays one = ts::subset(r, {i}); one.kappa = 1.0;
+        const bm::BeamRays one = ts::subset(r, {i});
         Eigen::Matrix<double, 6, 6> W = Eigen::Matrix<double, 6, 6>::Zero();
         Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Zero();
         bm::accumulate_beam_rays<6>(parts, one, b.params().beam, W, g, nullptr);
@@ -563,22 +585,25 @@ static void parked_floors()
     CHECK(pos.back() < kTolM and yaw.back() < kTolRad);
 }
 
-// ─── The log counters (spec 7c.8 a0 + stated limit 1): last_beam_staged = the staged count of a measured frame (0 at κ = 0);
-//     last_gap_rays = rays with π > 0.99 and e < −5c at the returned θ (a log only). A belief 40 cm deeper than the truth with a
-//     wall 50 cm behind the true back face: the wall returns that enter its top 20–40 cm before the wall are counted; the
-//     truth-seeded belief counts 0. κ = 1e-4 on the deep run so the update leaves θ where it is (at κ = 1 the rays shrink the
-//     belief by 18 cm in one update and the count at the returned θ is 0 — the counter is a count of rays, not weighted by κ). ───
+// ─── The log counters (spec 7c.8 a0 + stated limit 1): last_beam_staged = the staged count of a measured frame (0 when not
+//     measured: Σq = 0, rev 3.3.11); last_gap_rays = rays with π > 0.99 and e < −5c at the returned θ (a log only). A belief
+//     40 cm deeper than the truth with a wall 50 cm behind the true back face: the wall returns that enter its top 20–40 cm
+//     before the wall are counted; the truth-seeded belief counts 0. The deep run rejects every GN step (the test hook
+//     gn_reject_all_for_test) so the update leaves θ where it is (left free, the rays shrink the belief by 18 cm in one update
+//     and the count at the returned θ is 0 — the counter is a count of rays at θ). Before rev 3.3.11 κ = 1e-4 did this. ───
 static void log_counters()
 {
     const std::vector<ts::SceneWall> walls{back_wall(0.50f)};
     const bm::BeamRays r = front_beam(walls);
-    CountableBelief t = belief(truth_state()), d = belief({tx, ty + 0.20f, tH, tw, tw + 0.40f, 0.0f});
+    CountableBeliefParams pd = params();
+    pd.gn_reject_all_for_test = true;
+    CountableBelief t = belief(truth_state()), d = belief({tx, ty + 0.20f, tH, tw, tw + 0.40f, 0.0f}, pd);
     t.set_first_update_done(true); d.set_first_update_done(true);
     t.update(lidar_frame(r));
-    { bm::BeamRays rk = r; rk.kappa = 1e-4; d.update(lidar_frame(rk)); }
+    d.update(lidar_frame(r));
     CountableBelief z = t;
-    z.update(lidar_frame(front_beam(walls, 0.0)));
-    std::printf("  log counters: staged %d (frame %zu) ; gap rays truth %d, 40 cm too deep %d (after its update: cy %+.4f h %.4f) ; at kappa 0 "
+    z.update(lidar_frame(front_beam(walls, 1.0, {}, [](const Eigen::Vector3f&) { return ts::kEpsPx; })));
+    std::printf("  log counters: staged %d (frame %zu) ; gap rays truth %d, 40 cm too deep %d (after its update: cy %+.4f h %.4f) ; at q_sum 0 "
                 "staged %d gap %d\n", t.last_beam_staged(), r.endpoints.size(), t.last_gap_rays(), d.last_gap_rays(), d.state().cy - ty,
                 d.state().h, z.last_beam_staged(), z.last_gap_rays());
     CHECK(t.last_beam_staged() == int(r.endpoints.size()));
@@ -652,7 +677,8 @@ static void beam_cost()
 
 int main()
 {
-    kappa_zero_is_prediction();
+    qsum_zero_is_prediction();
+    kappa_not_in_energy();
     reduction_update();
     occluder_in_front();
     wall_2cm_printed();

@@ -10,8 +10,9 @@
  *                                      whether or not a mask cloud exists (an empty slice has none);
  *   - a membership but no mask cloud ⇒ nothing staged (no select box exists);
  *   - otherwise select_rays_beam stages every return whose RAY crosses the select box (ray geometry, not endpoint-in-box), each
- *     with its persistent label m (a return with no camera information is left out and counted as nolabel), κ = coverage·ca from
- *     the endpoint-in-box returns; σ_s = model σ (set here, BeamRays' own default is not used); p_f per ray against the room's
+ *     with its persistent label m (a return with no camera information is left out and counted as nolabel), Σq over the staged
+ *     rays (the "measured" input, rev 3.3.11) and the κ = coverage·ca instrument from the endpoint-in-box returns (it multiplies
+ *     nothing since rev 3.3.11); σ_s = model σ (set here, BeamRays' own default is not used); p_f per ray against the room's
  *     known surfaces (floor z = 0 with Model.FloorSigmaM, the room polygon's walls with their σ).
  */
 #pragma once
@@ -54,21 +55,22 @@ inline BeamLabel beam_label(std::function<std::optional<PersistentLabel>(const E
     };
 }
 
-// One cycle's beam-staging log (ai2_log columns beam_staged, beam_nolabel, beam_kappa, nomem_cycle, gap_rays) and the
+// One cycle's beam-staging log (ai2_log columns beam_staged, beam_nolabel, beam_kappa, nomem_cycle, gap_rays, beam_qsum) and the
 // instance's cumulative count of cycles without membership.
 struct BeamLog
 {
     enum Nomem : int { kMembership = 0, kNoMembership = 1, kNoSweep = 2 };
     int   staged = 0;          // rays handed to the beam model
     int   nolabel = 0;         // rays crossing the select box left out for lack of camera information
-    float kappa = 0.0f;        // the sweep weight coverage·ca
+    float kappa = 0.0f;        // INSTRUMENT: the old sweep weight coverage·ca (rev 3.3.11: multiplies nothing; compares with live11)
+    float qsum = 0.0f;         // Σ q over the staged rays (rev 3.3.11: the LiDAR channel measured ⇔ staged and qsum > 0)
     int   nomem_cycle = kMembership;
     int   gap_rays = 0;        // the belief's count of rays with π > 0.99 and e < −5c after this cycle's update (stated limit 1)
     long  nomem_cycles = 0;    // cumulative: cycles with a sweep and a mask cloud but no membership
-    void begin_cycle() { staged = 0; nolabel = 0; kappa = 0.0f; nomem_cycle = kMembership; gap_rays = 0; }
+    void begin_cycle() { staged = 0; nolabel = 0; kappa = 0.0f; qsum = 0.0f; nomem_cycle = kMembership; gap_rays = 0; }
 };
 
-// What the staging reads besides the sweep: the select box and weights (the flag-off selection's, so κ is today's), ρ_max,
+// What the staging reads besides the sweep: the select box and weights (the flag-off selection's, so the κ instrument is the old one), ρ_max,
 // the model σ_s, the room's known surfaces and the Student-t of the beam config (for p_f).
 struct BeamStaging
 {
@@ -104,6 +106,7 @@ inline void stage_beam_cycle(const std::vector<Eigen::Vector3f>* sweep, const Ei
     log.staged  = st.staged;
     log.nolabel = st.no_label;
     log.kappa   = st.kappa;
+    log.qsum    = st.q_sum_staged;
 }
 
 }  // namespace rc

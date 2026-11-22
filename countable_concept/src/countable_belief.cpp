@@ -757,7 +757,7 @@ void CountableBelief::accumulate_channels(const CountableBeliefState& s_th, cons
 // The energies whose gradients accumulate_channels builds, block by block, with the same per-frame gates (spec 7c.7 d). The
 // points: the mixture's −log p (box + clutter + wall), whose gradient is Σ r_box·(d/R)·∇d — the EM identity, so the
 // responsibilities need not be held fixed; in double from the float SDF. The small blocks add their own ½λr² through their
-// energy output. The rays: the beam energy κ·Σ E_i of f.beam (spec 7c.8; rc::ai::beam::beam_rays_energy, bit-equal to the
+// energy output. The rays: the beam energy Σ E_i of f.beam (κ ≡ 1, rev 3.3.11) (spec 7c.8; rc::ai::beam::beam_rays_energy, bit-equal to the
 // energy accumulate_beam_rays builds).
 double CountableBelief::persistent_data_energy(const CountableBeliefState& s_cam, const CountableBeliefState& s_L,
                                               const CountableBeliefState& s_th, const CountableFrame& f) const
@@ -797,7 +797,7 @@ double CountableBelief::persistent_data_energy(const CountableBeliefState& s_cam
             E += rc::ai::lidar_rays_first_crossing_energy(*this, s_L, lr, params_.model_sigma_m, convex);
     }
     else
-        E += accumulate_beam(s_L, f, nullptr, nullptr);   // LIDAR: the beam energy κ·Σ E_i (spec 7c.8), as accumulate_channels
+        E += accumulate_beam(s_L, f, nullptr, nullptr);   // LIDAR: the beam energy Σ E_i (spec 7c.8, κ ≡ 1), as accumulate_channels
     if (admissible and not size_prior_off_ and f.wall.ok and not wall_prior_added_)
         accumulate_wall(s_th, f, Id, bd, /*base*/ true, /*boost*/ false, /*parallel*/ true, &E);
     if (admissible and not size_prior_off_ and f.room_axis_ok and not axis_prior_added_)
@@ -870,7 +870,9 @@ bool CountableBelief::lidar_measured(const CountableFrame& f) const
         const auto usable = [](const rc::ai::LidarRays& r) { return not r.endpoints.empty() and r.precision > 0.0f; };
         return usable(f.lidar) or std::ranges::any_of(f.lidar_extra, usable);
     }
-    if (not (f.beam.kappa > 0.0) or f.beam.endpoints.empty()) return false;   // κ = 0 is not a measurement (spec 7c.8 a0)
+    // spec 7c.8 rev 3.3.11: measured ⇔ the staged set is non-empty and the camera attributes something to it (Σ q_i > 0, q
+    // unfloored; Σ m_i cannot tell, m_i ≥ ε_px always). κ is no longer read here (nor anywhere in the energy).
+    if (f.beam.endpoints.empty() or not (f.beam.q_sum > 0.0)) return false;
     if (not rc::ai::beam::detail::p_f_consistent(f.beam))
     {   // a staging error (m / p_f not one per ray): refused, loudly, once (Task 19 review D2; own flag, N3)
         if (not beam_inconsistent_logged_)
@@ -929,7 +931,7 @@ std::vector<rc::ai::beam::BeamPart> CountableBelief::beam_parts(const CountableB
     return parts;
 }
 
-// The persistent LiDAR channel: E = κ·Σ E_i (spec 7c.8 a), g = ∇E, W the PSD curvature (b); the GN convention is bd = −∇E,
+// The persistent LiDAR channel: E = Σ E_i (spec 7c.8 a; κ ≡ 1 since rev 3.3.11), g = ∇E, W the PSD curvature (b); the GN convention is bd = −∇E,
 // Id = W. In double inside beam_ray.h; the channel blocks are float (as every channel of accumulate_channels).
 double CountableBelief::accumulate_beam(const CountableBeliefState& s, const CountableFrame& f, Eigen::Matrix<float, 6, 6>* Id,
                                         Eigen::Matrix<float, 6, 1>* bd) const
@@ -1082,7 +1084,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     last_beam_staged_ = 0; last_gap_rays_ = 0; last_beam_ms_ = 0.0;
     dbg_Pbar_tt_ = Sigma_;
     const bool camera = not f.points.empty();
-    const bool lidar  = frame_has_lidar(f);                            // the measured rule (spec 7c.8 a0: κ > 0, staged non-empty)
+    const bool lidar  = frame_has_lidar(f);                            // the measured rule (spec 7c.8 rev 3.3.11: staged non-empty, Σq > 0)
     if (not camera and not (f.lidar_only and lidar))
         return 0.0f;                                                   // predict-only, as the engine
 

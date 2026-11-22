@@ -37,7 +37,10 @@ Conventions (printed again in the header of every report):
       nomem            = rows with nomem_cycle == 1 (a sweep but no membership: rays skipped) and the longest run of
                          consecutive such rows; nosweep = rows with nomem_cycle == 2 (no fresh Helios sweep), split gated /
                          admissible (settles Task 15's question: do GATED cycles lack membership or lack a sweep);
-      gap rays         = gap_rays (pi > 0.99, e < -5c after the accepted update, stated limit 1): summed, max, rows > 0.
+      gap rays         = gap_rays (pi > 0.99, e < -5c after the accepted update, stated limit 1): summed, max, rows > 0;
+      qsum             = beam_qsum (Sum q over the staged rays; rev 3.3.11: measured <=> staged and qsum > 0): median over
+                         staged rows and the count of staged rows with qsum 0; n/a on logs before Task 22 (live10/11).
+                         beam_kappa is the old sweep weight, an instrument since rev 3.3.11 (it multiplies nothing).
 Numbers are read with float() on the CSV text (written with '.'); output uses explicit format specs; no locale module.
 """
 import argparse, bisect, csv, math, os, statistics, sys
@@ -46,6 +49,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCENE = os.path.join(HERE, 'scene_threerooms.csv')
 CLASSES = ('bed', 'nightstand', 'toilet')
 BEAM_COLS = ('beam_staged', 'beam_nolabel', 'beam_kappa', 'nomem_cycle', 'gap_rays')
+# Appended by Task 22 (spec 7c.8 rev 3.3.11): Sum q over the staged rays. Absent from live10/live11 logs (printed n/a there).
+BEAM_QSUM = 'beam_qsum'
 NEW_COLS = ('lidar_only', 'lidar_msum', 'rho_cam', 'rho_L', 'rho_chain', 'dphi_cam', 'dz_cam',
             'bcam_H', 'bL_H', 'sbcam_H', 'sbL_H', 'ray_n', 'Itr_cam', 'Itr_L')
 # The localisation latent on (x, y): e_x, e_y (spec 7c.7, the robot's pose error) or, in logs before it, bchain_x, bchain_y.
@@ -315,6 +320,8 @@ def beam_checks(rows):
     m['nolabel_sum'] = sum(r['beam_nolabel'] for r in rows)
     m['nolabel_med'] = med([r['beam_nolabel'] for r in S])
     m['kappa_med'] = med([r['beam_kappa'] for r in S])
+    m['qsum_med'] = med([r[BEAM_QSUM] for r in S]) if rows and BEAM_QSUM in rows[0] else None
+    m['qsum_zero'] = sum(1 for r in S if r[BEAM_QSUM] == 0) if m['qsum_med'] is not None else None
     run, best = 0, 0
     for r in rows:
         run = run + 1 if r['nomem_cycle'] == 1 else 0
@@ -537,9 +544,11 @@ def report(label, res, notes, shift):
             P('  live10 (|e| <= 3 sigma, Sigma_pose vs proto_room, gn_it / gn_conv): n/a (columns absent)  [info]')
         B = m.get('beam') or {}
         if B:
-            P('  beam: staged rows %d, staged med %s max %s, kappa med %s ; nolabel sum %d med %s ; nomem rows %d (gated %d) longest run %d ; '
-              'no-sweep rows %d (gated %d) ; gap rays sum %d max %d rows %d  [info]' % (
-                B['n_staged_rows'], fmt(B['staged_med'], '.0f'), fmt(B['staged_max'], '.0f'), fmt(B['kappa_med'], '.3f'),
+            qs = ('n/a (column absent)' if B['qsum_med'] is None
+                  else '%s (staged rows with qsum 0: %d)' % (fmt(B['qsum_med'], '.2f'), B['qsum_zero']))
+            P('  beam: staged rows %d, staged med %s max %s, kappa med %s (instrument) ; qsum med %s ; nolabel sum %d med %s ; '
+              'nomem rows %d (gated %d) longest run %d ; no-sweep rows %d (gated %d) ; gap rays sum %d max %d rows %d  [info]' % (
+                B['n_staged_rows'], fmt(B['staged_med'], '.0f'), fmt(B['staged_max'], '.0f'), fmt(B['kappa_med'], '.3f'), qs,
                 B['nolabel_sum'], fmt(B['nolabel_med'], '.0f'), B['nomem'], B['nomem_gated'], B['nomem_run'], B['nosweep'],
                 B['nosweep_gated'], B['gap_sum'], B['gap_max'], B['gap_rows']))
         else:

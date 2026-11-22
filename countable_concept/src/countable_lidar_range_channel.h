@@ -59,7 +59,7 @@ public:
     // camera information ⇒ that ray is not staged). An EMPTY label is a cycle without membership: nothing is staged and
     // inst.beam_log counts it (owner 11-18). σ_s = cfg.model_sigma_m, p_f against the floor (Model.FloorSigmaM) and the room
     // walls set by set_room_walls. feed() still runs for the instruments (probe, dbg_lidar_rays, coverage): they keep reading
-    // the endpoint-in-box subset. Logs into inst.beam_log (staged, nolabel, κ, nomem_cycle); call beam_log.begin_cycle() first.
+    // the endpoint-in-box subset. Logs into inst.beam_log (staged, nolabel, the κ instrument, Σq, nomem_cycle); call beam_log.begin_cycle() first.
     void feed_beam(CountableInstance& inst, CountableFrame& frame, std::span<const Eigen::Vector3f> anchor_cloud,
                    const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label) const;
     // The beam config's Student-t (for p_f); set once by the fitter from the BeamConfig it built. Unset ⇒ feed_beam stages nothing.

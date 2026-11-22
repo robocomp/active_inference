@@ -413,7 +413,7 @@ inline void quantile_nodes_z(double sigma_s, std::span<const double> z, const Ga
 // A zero-width subinterval keeps its motion term dL·h(b); a breakpoint at an exact tangency (∂_ts = 0) adds none.
 // Breakpoints that appear, clip or reorder are the stated kink (iv).
 //
-// Curvature (spec (b)), PSD, × κ: r·J̄J̄ᵀ/V + (1 − o)·I_d·∇d∇dᵀ, r = m·A/p, o = (1 − m)p_pass·B/(m·A + (1 − m)p_pass·π),
+// Curvature (spec (b)), PSD (no κ factor since rev 3.3.11): r·J̄J̄ᵀ/V + (1 − o)·I_d·∇d∇dᵀ, r = m·A/p, o = (1 − m)p_pass·B/(m·A + (1 − m)p_pass·π),
 // I_d = (φ(z_d)/σ_s)²·[1/π + 1/(1 − π)] — the Fisher information of the fully observed hit/miss outcome (spec 7c.8 rev 3.3.9).
 // J̄, t̄ and Var t are moments on the δ-quantile nodes (K_m) at fixed δ; Var t is scaled by
 // Var_exact(δ | δ > d)/Var_nodes(δ), Var_exact = σ_s²(1 + αλ − λ²), α = d/σ_s, λ the Mills ratio.
@@ -441,7 +441,13 @@ struct BeamRays
     Eigen::Vector3d origin = Eigen::Vector3d::Zero();
     std::vector<Eigen::Vector3d> endpoints;
     std::vector<double> m;
+    // INSTRUMENT ONLY (spec 7c.8 rev 3.3.11, κ ≡ 1 on the beam path): the old sweep weight coverage·ca that select_rays_beam
+    // still computes on the endpoint-in-box returns, kept so live logs compare with live11. It multiplies NOTHING.
     double kappa = 0;
+    // Σ q_i over the staged rays, q_i the UNFLOORED camera label (π_mask·Φ(s/σ_px), 0 without a projection; m_i ≥ ε_px > 0
+    // always, so Σ m_i cannot tell a set the camera attributes to nothing). The LiDAR channel measured ⇔ the set is non-empty
+    // and q_sum > 0 (CountableBelief::lidar_measured, rev 3.3.11).
+    double q_sum = 0;
     double rho_max = 6.0;
     double sigma_s = 0.01;
     // Per-ray foreign density p_f,i (spec 7c.8 rev 3.3.7, known room surfaces; beam_room.h fills it): it replaces
@@ -910,7 +916,7 @@ inline bool p_f_consistent(const BeamRays& rays)
     return one_per_ray(rays.p_f) and rays.m.size() == n;   // N2: m too
 }
 
-// The term of ray i: E_i, its gradient and curvature (unscaled by κ). false ⇔ the ray contributes exactly 0 (d > 8σ_s).
+// The term of ray i: E_i, its gradient and curvature (the ray-set sums them unscaled; κ ≡ 1, rev 3.3.11). false ⇔ the ray contributes exactly 0 (d > 8σ_s).
 // force_sweep: run the several-part panel sweep (switch search) even with one part present (the one-part check).
 template <bool Deriv>
 inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const double> cs, std::span<const double> sn,
@@ -1244,7 +1250,9 @@ inline double closest_approach(const BeamPart& part, const Eigen::Vector3d& o, c
     return A.d;
 }
 
-// κ·Σ_i E_i, its exact gradient and the PSD curvature, ADDED into W, g and *E (if not null).
+// Σ_i E_i, its exact gradient and the PSD curvature, ADDED into W, g and *E (if not null). No sweep weight (spec 7c.8 rev 3.3.11,
+// κ ≡ 1): each ray carries its own term weighted by its own m_i; the correlation between rays is the persistent shared-error
+// latents'; BeamRays::kappa is an instrument and multiplies nothing.
 template <int N>
 inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays& rays, const BeamConfig& cfg,
                                  Eigen::Matrix<double, N, N>& W, Eigen::Matrix<double, N, 1>& g, double* E)
@@ -1253,7 +1261,7 @@ inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays
     assert(rays.m.size() == rays.endpoints.size());
     assert(detail::p_f_consistent(rays));
     assert(not cfg.e_levels.empty());   // built by BeamConfig::make
-    if (rays.kappa == 0.0 or parts.empty()) return;
+    if (parts.empty()) return;
     std::vector<double> cs, sn;
     detail::part_trig(parts, cs, sn);   // cos/sin of each part's yaw, once per build
     detail::BeamScratch S;
@@ -1266,17 +1274,17 @@ inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays
         {
             Esum += ro.E; gs += ro.g; Ws += ro.W;
         }
-    W += rays.kappa * Ws;
-    g += rays.kappa * gs;
-    if (E) *E += rays.kappa * Esum;
+    W += Ws;
+    g += gs;
+    if (E) *E += Esum;
 }
 
-// The same κ·Σ_i E_i, no derivatives (the damped step's trial energy).
+// The same Σ_i E_i, no derivatives (the damped step's trial energy).
 inline double beam_rays_energy(std::span<const BeamPart> parts, const BeamRays& rays, const BeamConfig& cfg)
 {
     assert(not cfg.e_levels.empty());
     assert(detail::p_f_consistent(rays));
-    if (rays.kappa == 0.0 or parts.empty()) return 0.0;
+    if (parts.empty()) return 0.0;
     std::vector<double> cs, sn;
     detail::part_trig(parts, cs, sn);
     detail::BeamScratch S;
@@ -1284,7 +1292,7 @@ inline double beam_rays_energy(std::span<const BeamPart> parts, const BeamRays& 
     double Esum = 0.0;
     for (std::size_t i = 0; i < rays.endpoints.size(); ++i)
         if (detail::beam_ray_term<false>(parts, cs, sn, rays, i, cfg, false, S, ro)) Esum += ro.E;
-    return rays.kappa * Esum;
+    return Esum;
 }
 
 }  // namespace rc::ai::beam

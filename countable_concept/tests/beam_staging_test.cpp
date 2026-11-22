@@ -8,8 +8,11 @@
 #include <vector>
 #include <Eigen/Dense>
 #include "lidar_select/lidar_select.h"
+#include "countable_belief.h"
+#include "beam_fixture.h"
 
 using namespace rc::lidar_select;
+using rc::CountableBelief; using rc::CountableBeliefParams; using rc::CountableBeliefState; using rc::CountableFrame;
 using Lab = std::optional<std::pair<double, float>>;
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
@@ -102,6 +105,73 @@ static void kappa_unfloored()
     CHECK(std::abs(out.kappa - st.kappa) < 1e-12 and st.kappa > 0.f and st.kappa <= 1.f);
 }
 
+// ─── "The LiDAR channel measured" (spec 7c.8 rev 3.3.11): ⇔ the staged set is non-empty and Σ q_i > 0 over it, q_i the
+//     UNFLOORED label (m_i ≥ ε_px always). (a) staged rays all with q = 0 ⇒ not measured; (b) one q > 0 ⇒ measured; (c) the
+//     live11 bed geometry — a LOW box, the sensor above it, every ray crossing the box's top band and landing on the floor
+//     beyond the select cylinder: the endpoint-in-box set (the old κ's) is EMPTY, the staged set is not ⇒ measured.
+static void measured_needs_camera_attribution()
+{
+    CountableBeliefParams p;
+    p.persistent = true;
+    p.beam = rc::test::test_beam_config();
+    const CountableBelief b(CountableBeliefState{4.f, 0.f, 1.f, 0.6f, 0.6f, 0.f}, p);
+    const double eps = 0.094;
+    const auto frame = [](const rc::ai::beam::BeamRays& r) { CountableFrame f; f.beam = r; f.lidar_only = true; return f; };
+    // (a), (b): returns 1 m behind the box on rays through it (the same geometry as ray_through_box_staged)
+    std::vector<Eigen::Vector3f> sweep;
+    for (int i = 0; i < 9; ++i) sweep.emplace_back(5.5f, -0.2f + 0.05f * static_cast<float>(i), 0.5f);
+    {
+        rc::ai::beam::BeamRays out;
+        BeamStageStats st;
+        const auto zero = [&](const Eigen::Vector3f&) -> Lab { return Lab{{eps, 0.0f}}; };
+        select_rays_beam(sweep, kO, kC, kBox, kW, 6.0, zero, out, &st);
+        out.sigma_s = 0.01;
+        const bool meas = b.lidar_measured(frame(out));
+        std::printf("  measured (a) all q = 0: staged %d, q_sum_staged %.3f, BeamRays q_sum %.3f -> lidar_measured %d\n", st.staged,
+                    st.q_sum_staged, out.q_sum, int(meas));
+        CHECK(st.staged == 9 and st.q_sum_staged == 0.f and out.q_sum == 0.0);
+        CHECK(not meas);
+    }
+    {
+        rc::ai::beam::BeamRays out;
+        BeamStageStats st;
+        const auto one = [&](const Eigen::Vector3f& p) -> Lab
+        { return std::abs(p.y()) < 1e-4f ? Lab{{eps + (1 - 2 * eps) * 0.3, 0.3f}} : Lab{{eps, 0.0f}}; };
+        select_rays_beam(sweep, kO, kC, kBox, kW, 6.0, one, out, &st);
+        out.sigma_s = 0.01;
+        const bool meas = b.lidar_measured(frame(out));
+        std::printf("  measured (b) one q = 0.3: staged %d, q_sum_staged %.3f, BeamRays q_sum %.3f -> lidar_measured %d\n", st.staged,
+                    st.q_sum_staged, out.q_sum, int(meas));
+        CHECK(st.staged == 9 and std::abs(st.q_sum_staged - 0.3f) < 1e-6f and std::abs(out.q_sum - 0.3) < 1e-6);
+        CHECK(meas);
+    }
+    {   // (c) a 0.45 m bed band, the Helios 1.1 m above the floor 2.5 m from the box centre; returns on the floor 0.6–0.9 m
+        // beyond the centre (outside the 0.5 m cylinder): each ray passes through the band inside the cylinder.
+        const Box low{0.5f, 0.0f, 0.45f};
+        const Eigen::Vector3f oh{1.5f, 0.f, 1.1f};
+        std::vector<Eigen::Vector3f> floor;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 5; ++j)
+                floor.emplace_back(4.6f + 0.1f * static_cast<float>(i), -0.2f + 0.1f * static_cast<float>(j), 0.0f);
+        rc::ai::beam::BeamRays out;
+        BeamStageStats st;
+        const auto lab = [&](const Eigen::Vector3f&) -> Lab { return Lab{{eps + (1 - 2 * eps) * 0.05, 0.05f}}; };
+        select_rays_beam(floor, oh, kC, low, kW, 6.0, lab, out, &st);
+        out.sigma_s = 0.01;
+        const bool meas = b.lidar_measured(frame(out));
+        std::printf("  measured (c) bed geometry: endpoint-in-box %d (old kappa %.4f), staged %d, q_sum_staged %.3f -> lidar_measured %d\n",
+                    st.in_box, st.kappa, st.staged, st.q_sum_staged, int(meas));
+        CHECK(st.in_box == 0 and st.kappa == 0.f);
+        CHECK(st.staged == 20 and std::abs(st.q_sum_staged - 1.0f) < 1e-5f and std::abs(out.q_sum - 1.0) < 1e-5);   // out.q_sum is the double sum, the stats the float
+        CHECK(meas);
+    }
+    {   // an empty staged set is never measured, whatever q_sum says
+        rc::ai::beam::BeamRays e;
+        e.q_sum = 1.0;
+        CHECK(not b.lidar_measured(frame(e)));
+    }
+}
+
 int main()
 {
     ray_through_box_staged();
@@ -109,6 +179,7 @@ int main()
     no_return_staged_at_rho_max();
     no_label_not_staged();
     kappa_unfloored();
+    measured_needs_camera_attribution();
     std::printf(bad == 0 ? "beam_staging_test: PASS\n" : "beam_staging_test: %d FAILED\n", bad);
     return bad == 0 ? 0 : 1;
 }

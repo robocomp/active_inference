@@ -6,6 +6,7 @@
 // The room's known surfaces (spec 7c.8 rev 3.3.7) — the floor z = 0 and the scene's walls — enter every ray's foreign density
 // p_f (beam_room.h); stage_beam takes them explicitly, helios_beam passes the floor and the scene walls.
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <optional>
@@ -40,7 +41,16 @@ inline bool on_object(std::span<const SceneBox> obj, const Eigen::Vector3f& p, f
     return false;
 }
 
-// Hand labels: m_on on the object's boxes, m_off elsewhere (q = m: what κ's coverage counts is irrelevant when κ is set).
+// Hand labels: m_on on the object's boxes, m_off elsewhere. The staging's unfloored q is m inverted through
+// m = ε_px + (1 − 2ε_px)q at the hand labels' ε_px (q = 0 at m = ε_px: the camera attributes nothing; spec 7c.8 rev 3.3.11's
+// "measured" reads Σq). A label below ε_px (no fixture uses one) gives q = 0.
+inline double q_of_m(double m, double eps = kEpsPx) { return std::max(0.0, (m - eps) / (1.0 - 2.0 * eps)); }
+inline double q_sum_of(const rc::ai::beam::BeamRays& r, double eps = kEpsPx)
+{
+    double s = 0.0;
+    for (const double m : r.m) s += q_of_m(m, eps);
+    return s;
+}
 inline std::function<double(const Eigen::Vector3f&)> hand_labels(std::vector<SceneBox> obj, double m_on = kMOn, double m_off = kEpsPx)
 {
     return [obj, m_on, m_off](const Eigen::Vector3f& p) { return on_object(obj, p) ? m_on : m_off; };
@@ -53,7 +63,8 @@ inline rc::lidar_select::Box select_box(const SceneBox& sel, float margin)
 }
 
 // Stage `sweep` (first hits from `origin`) through select_rays_beam with the select box about `sel`. label(p) = m, or
-// NaN ⇒ no camera information (not staged). κ: set to `kappa` (≥ 0) or, with kappa < 0, select_rays_beam's own κ.
+// NaN ⇒ no camera information (not staged). κ (an INSTRUMENT since rev 3.3.11, it multiplies nothing): set to `kappa` (≥ 0)
+// or, with kappa < 0, select_rays_beam's own coverage·ca.
 // The fixtures' room: the floor and every scene wall (a vertical segment) are known room surfaces.
 // Their σ (spec 7c.8 rev 3.3.8): the floor Model.FloorSigmaM = 0.005 m (the class configs' value); a wall the σ the belief's
 // WallRef carries for the room polygon (0.02 m, countable_fitter nearest_wall; room_concept publishes no per-edge σ, its
@@ -68,8 +79,9 @@ inline rc::ai::beam::RoomSurfaces room_of(std::span<const SceneWall> walls, bool
     return r;
 }
 
-// A ray-set holding the rays `idx` of `r`, with every per-ray vector (m, p_f) kept aligned (review D2).
-inline rc::ai::beam::BeamRays subset(const rc::ai::beam::BeamRays& r, const std::vector<std::size_t>& idx)
+// A ray-set holding the rays `idx` of `r`, with every per-ray vector (m, p_f) kept aligned (review D2); its Σq recomputed from
+// the kept m at the labels' ε_px (`eps`: the hand labels' by default, the live ε_px for live-staged sets).
+inline rc::ai::beam::BeamRays subset(const rc::ai::beam::BeamRays& r, const std::vector<std::size_t>& idx, double eps = kEpsPx)
 {
     rc::ai::beam::BeamRays o = r;
     o.endpoints.clear(); o.m.clear(); o.p_f.clear();
@@ -78,15 +90,17 @@ inline rc::ai::beam::BeamRays subset(const rc::ai::beam::BeamRays& r, const std:
         o.endpoints.push_back(r.endpoints[i]); o.m.push_back(r.m[i]);
         if (not r.p_f.empty()) o.p_f.push_back(r.p_f[i]);
     }
+    o.q_sum = q_sum_of(o, eps);
     return o;
 }
-// Append the rays of `src` to `dst` (same origin and staging), per-ray vectors aligned.
+// Append the rays of `src` to `dst` (same origin and staging), per-ray vectors aligned, Σq summed.
 inline void append(rc::ai::beam::BeamRays& dst, const rc::ai::beam::BeamRays& src)
 {
     if (dst.endpoints.empty()) { dst = src; return; }
     dst.endpoints.insert(dst.endpoints.end(), src.endpoints.begin(), src.endpoints.end());
     dst.m.insert(dst.m.end(), src.m.begin(), src.m.end());
     dst.p_f.insert(dst.p_f.end(), src.p_f.begin(), src.p_f.end());
+    dst.q_sum += src.q_sum;
 }
 
 inline rc::ai::beam::BeamRays stage_beam(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& sweep,
@@ -100,7 +114,7 @@ inline rc::ai::beam::BeamRays stage_beam(const Eigen::Vector3f& origin, const st
     {
         const double m = label(p);
         if (std::isnan(m)) return std::nullopt;
-        return std::pair<double, float>{m, static_cast<float>(m)};
+        return std::pair<double, float>{m, static_cast<float>(q_of_m(m))};
     };
     rc::lidar_select::select_rays_beam(sweep, origin, sel.c, select_box(sel, margin), rc::lidar_select::Weights{}, rho_max, lab,
                                        out, stats);

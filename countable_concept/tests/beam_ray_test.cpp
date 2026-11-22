@@ -433,7 +433,7 @@ static bm::BeamRays scene_rays(const Vec6& truth, const BedSpec& b, const Eigen:
     const auto pts = ts::raycast_scene(origin.cast<float>(), boxes, walls, true, az_step, rings, float(kRhoMax));
     const auto P = parts_of(truth, b);
     bm::BeamRays R;
-    R.origin = origin; R.kappa = 1.0; R.rho_max = kRhoMax; R.sigma_s = kSigmaS;
+    R.origin = origin; R.rho_max = kRhoMax; R.sigma_s = kSigmaS;
     for (const auto& pf : pts)
     {
         const Eigen::Vector3d e = pf.cast<double>(), du = e - origin;
@@ -819,7 +819,7 @@ static void add_rays(Profile& pf, const std::vector<bm::BeamPart>& P, const Eige
         {
             QRay q;
             q.parts = P;
-            q.R.origin = o; q.R.kappa = 1.0; q.R.rho_max = kRhoMax; q.R.sigma_s = kSigmaS;
+            q.R.origin = o; q.R.rho_max = kRhoMax; q.R.sigma_s = kSigmaS;
             q.R.endpoints = {o + rho * u}; q.R.m = {m};
             q.E_ref = E_from(ref, m);
             pf.rays.push_back(std::move(q));
@@ -949,7 +949,7 @@ static void atom_fixtures()
         const double rho = 1.0, m = 0.9;
         QRay q;
         q.parts = P;
-        q.R.origin = c.o; q.R.kappa = 1.0; q.R.endpoints = {c.o + rho * c.u}; q.R.m = {m};
+        q.R.origin = c.o; q.R.endpoints = {c.o + rho * c.u}; q.R.m = {m};
         const double E = ray_E(q, cfg), Er = E_from(reference_AB(P, c.o, c.u, rho, st, 4000, 1e-8), m);
         std::printf("atom  %s, rho = 1 m, m = 0.9: E = %.4f, reference %.4f, gap %.2e (spec: Fable 11.9 for the inside case)\n", c.name, E, Er, std::abs(E - Er));
         CHECK(std::abs(E - Er) < 0.01);
@@ -969,7 +969,7 @@ static void face_minima()
         {
             QRay q;
             q.parts = P;
-            q.R.origin = o; q.R.kappa = 1.0; q.R.endpoints = {o + (t0 - e) * u}; q.R.m = {m};
+            q.R.origin = o; q.R.endpoints = {o + (t0 - e) * u}; q.R.m = {m};
             return ray_E(q, cfg);
         };
         int sign_changes = 0, prev = 0;
@@ -1038,7 +1038,6 @@ static void far_rays_exact_zero()
     {
         const Eigen::Vector3d u(1.0, 0.0, 0.0);
         bm::BeamRays one;
-        one.kappa = 1.0;
         one.origin = {0.0, 0.0, 0.6 + dz * kSigmaS};
         CHECK(bm::closest_approach(P[0], one.origin, u, kRhoMax, nullptr) > 8.0 * kSigmaS);
         one.endpoints = {one.origin + 3.0 * u}; one.m = {0.9};
@@ -1063,7 +1062,7 @@ static void reduction_to_7c6()
         const double a = std::acos(nu);
         const Eigen::Vector3d hit(2.0, -0.8, 0.3), u(std::cos(a), std::sin(a), 0.0), o = hit - 2.0 * u;
         bm::BeamRays R;
-        R.origin = o; R.kappa = 1.0; R.endpoints = {hit}; R.m = {1.0 - 1e-6};
+        R.origin = o; R.endpoints = {hit}; R.m = {1.0 - 1e-6};
         Mat6 W = Mat6::Zero(); Vec6 g = Vec6::Zero(); double E = 0.0;
         bm::accumulate_beam_rays<6>(P, R, cfg, W, g, &E);
         bm::detail::PartRay r;
@@ -1095,7 +1094,7 @@ static void sensor_inside_part_is_finite()
 {
     const auto P = parts_of(Vec6(2.5, 0.0, 0.6, 0.5, 0.4, 0.3), kBed);
     bm::BeamRays R;
-    R.origin = {2.5, 0.05, 0.3}; R.kappa = 1.0;   // inside the box
+    R.origin = {2.5, 0.05, 0.3};   // inside the box
     for (int k = 0; k < 24; ++k)
     {
         const double az = k * 2 * std::numbers::pi / 24, el = (k % 3 - 1) * 0.3;
@@ -1110,7 +1109,6 @@ static void parallel_ray_is_finite()
 {
     const auto P = parts_of(Vec6(2.5, 0.0, 0.6, 0.5, 0.4, 0.0), kBed);
     bm::BeamRays R;
-    R.kappa = 1.0;
     // rays parallel to the top face exactly at, just above and just below it; through a vertical edge; along a face plane
     for (double z : {0.6, 0.6 + 1e-12, 0.6 - 1e-12, 0.6 + 0.5 * kSigmaS, 0.6 - 0.5 * kSigmaS})
         for (double y : {0.0, 0.2, -0.2, 0.2 + 1e-9})
@@ -1123,7 +1121,7 @@ static void parallel_ray_is_finite()
         }
     // a ray along the edge line x = 2.25, y = 0.2 (vertical), and along the face plane y = 0.2 at a slant
     bm::BeamRays v;
-    v.kappa = 1.0; v.origin = {2.25, 0.2, 2.0};
+    v.origin = {2.25, 0.2, 2.0};
     v.endpoints = {Eigen::Vector3d(2.25, 0.2, 0.6), Eigen::Vector3d(2.25, 0.2, 0.0)}; v.m = {0.9, 0.02};
     CHECK(finite_psd(P, v, "parallel_ray_is_finite (along an edge)"));
 }
@@ -1146,7 +1144,7 @@ static void largest_curvature_printed()
             Vec6 gd;
             const double d = bm::closest_approach(P[0], o, u, kRhoMax, &gd);
             bm::BeamRays R;
-            R.origin = o; R.kappa = 1.0; R.endpoints = {P0}; R.m = {0.9};   // a claimed return at the closest approach
+            R.origin = o; R.endpoints = {P0}; R.m = {0.9};   // a claimed return at the closest approach
             Mat6 W = Mat6::Zero(); Vec6 g = Vec6::Zero(); double E = 0.0;
             bm::accumulate_beam_rays<6>(P, R, cfg, W, g, &E);
             const double alpha = gd.dot(W * gd) / std::pow(gd.squaredNorm(), 2);   // curvature in d units (nats/m²)

@@ -156,11 +156,13 @@ inline int select_into_weighted(const std::vector<Eigen::Vector3f>& sweep, const
 
 // What one beam-staging pass counted (spec 7c.8). staged = rays handed to the beam model; no_label = returns whose ray
 // crosses the select box but whose camera label was unavailable (nullopt: behind / outside the image) so they are not
-// staged; in_box = returns whose ENDPOINT lies in the select box (the set kappa is computed over); q_sum = their sum of q.
+// staged; in_box = returns whose ENDPOINT lies in the select box (the set kappa is computed over); q_sum = their sum of q;
+// q_sum_staged = the sum of q over the STAGED rays (spec 7c.8 rev 3.3.11: what "the LiDAR channel measured" reads).
 struct BeamStageStats
 {
     int   staged = 0, no_label = 0, in_box = 0;
     float kappa = 0.0f, q_sum = 0.0f;
+    float q_sum_staged = 0.0f;   // Σ q over the STAGED rays (rev 3.3.11: the "measured" rule; the energy carries no κ)
 };
 
 // Ray staging for the smooth beam model (spec 2026-11-15 lidar-measures 7c.8, ray staging). Stages EVERY return whose
@@ -170,9 +172,10 @@ struct BeamStageStats
 // nullopt => the return is not staged (it has no camera evidence) and is counted in stats->no_label. A return farther than
 // rho_max is staged AT rho_max (a beam that saw nothing inside the sensor's useful range).
 //
-// kappa is select_into_weighted's `precision / base` (coverage * ca) computed by that very function, on the SAME sweep and
-// box, over the endpoint-in-box returns weighted by q: reused, not re-derived, so the two cannot drift. No floor: q = 0
-// everywhere gives kappa = 0.
+// out.q_sum = Σ q over the staged rays (q unfloored: 0 where the camera attributes nothing), the "measured" input of rev 3.3.11.
+// kappa (out.kappa, stats->kappa) is an INSTRUMENT since rev 3.3.11 (κ ≡ 1 on the beam path; it multiplies nothing): the old
+// sweep weight, select_into_weighted's `precision / base` (coverage * ca) computed by that very function on the SAME sweep and
+// box, over the endpoint-in-box returns weighted by q, kept so live logs compare with live11. No floor: q = 0 gives 0.
 inline int select_rays_beam(const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
                             const Eigen::Vector2f& centroid_xy, const Box& box, const Weights& w, double rho_max,
                             const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label,
@@ -183,7 +186,9 @@ inline int select_rays_beam(const std::vector<Eigen::Vector3f>& sweep, const Eig
     out.m.clear();
     out.rho_max = rho_max;
     out.kappa   = 0.0;
+    out.q_sum   = 0.0;
     BeamStageStats st;
+    double qs = 0.0;
 
     const double r2 = static_cast<double>(box.radius_xy) * box.radius_xy;
     const double cx = centroid_xy.x(), cy = centroid_xy.y();
@@ -235,15 +240,18 @@ inline int select_rays_beam(const std::vector<Eigen::Vector3f>& sweep, const Eig
         if (not (hit or endpoint_in)) continue;
         const auto& lb = label_of(i);
         if (endpoint_in) ++st.in_box;
-        if (not hit) continue;                            // an endpoint in the box on a degenerate ray: kappa only
+        if (not hit) continue;                            // an endpoint in the box on a degenerate ray: the kappa instrument only
         if (not lb.has_value()) { ++st.no_label; continue; }
         const double r = std::min(rho, rho_max);
         out.endpoints.push_back(o + (v / rho) * r);
         out.m.push_back(lb->first);
+        qs += static_cast<double>(lb->second);
     }
     st.staged = static_cast<int>(out.endpoints.size());
+    out.q_sum = qs;
+    st.q_sum_staged = static_cast<float>(qs);
 
-    // kappa: select_into_weighted over the endpoint-in-box returns, weight q, base 1 => out.precision IS coverage * ca.
+    // kappa (instrument): select_into_weighted over the endpoint-in-box returns, weight q, base 1 => precision IS coverage * ca.
     rc::ai::LidarRays kr;
     float msum = 0.0f;
     const Eigen::Vector3f* base = sweep.data();

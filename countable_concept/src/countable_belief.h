@@ -353,9 +353,10 @@ struct CountableFrame
     std::array<float, 6> fresh_cam{};
     std::array<float, 6> fresh_L{};
     // The persistent path's ray-set (spec 7c.8 a0): every return whose ray crosses the select box, with its persistent label m
-    // and the sweep weight κ (rc::lidar_select::select_rays_beam; the caller sets sigma_s = model_sigma_m). READ ONLY WHEN
+    // and the set's Σq (rc::lidar_select::select_rays_beam; the caller sets sigma_s = model_sigma_m). READ ONLY WHEN
     // params.persistent, in place of `lidar` / `lidar_extra` (which the flag-off path and the instruments keep reading). The
-    // LiDAR channel measured ⇔ κ > 0 and the set is not empty (CountableBelief::lidar_measured).
+    // LiDAR channel measured ⇔ the set is not empty and Σq > 0 (CountableBelief::lidar_measured; spec 7c.8 rev 3.3.11: the
+    // energy carries no sweep weight, beam.kappa is an instrument).
     rc::ai::beam::BeamRays beam;
 };
 
@@ -446,9 +447,9 @@ public:
         return std::ranges::any_of(f.lidar_extra, usable);
     }
     // "The LiDAR channel measured" (spec 7c.8 a0, R6-I4). Flag off: today's rule, a ray-set with endpoints and precision > 0
-    // (f.lidar or an extra set). Flag on: the beam set, κ > 0 and staged non-empty (f.lidar is not read), AND a BeamConfig
+    // (f.lidar or an extra set). Flag on: the beam set staged non-empty with Σq > 0 (rev 3.3.11; f.lidar is not read), AND a BeamConfig
     // built by make (beam_ready; else logged once and not a measurement). frame_has_lidar, the b_L predict and the fitter's
-    // rays_usable / record_channels read this; a sweep with κ = 0 is not a measurement (the belief stays at the prediction).
+    // rays_usable / record_channels read this; a sweep with Σq = 0 (the camera attributes nothing) is not a measurement (the belief stays at the prediction).
     bool lidar_measured(const CountableFrame& f) const;
     // The beam config was built by BeamConfig::make (it carries the quantile levels of the composite rule).
     bool beam_ready() const { return not params_.beam.e_levels.empty(); }
@@ -555,7 +556,7 @@ public:
     // δ_last, the last ACCEPTED θ step (zero if none; ruling T14-1, kept by T14-4): P_θθ carries δ_last δ_lastᵀ on top of the joint posterior.
     const Eigen::Matrix<double, 6, 1>& last_gn_step() const { return last_gn_step_; }
     // The data energy whose gradients accumulate_channels builds: camera (the points' mixture −log likelihood, (2d) top, the
-    // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the smooth beam model of f.beam, spec 7c.8: κ·Σ E_i,
+    // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the smooth beam model of f.beam, spec 7c.8: Σ E_i, κ ≡ 1 since rev 3.3.11,
     // whose gradient accumulate_channels uses exactly) at s_L, θ-only ((1) flush/parallel and the room axis when they enter, (2b),
     // (2c)) at s_th — each term's own energy at its own linearisation point, with the per-frame gates of accumulate_channels.
     // ∇E = −(bd_cam + bd_L + bd_th) up to the state dependence of the blocks' mixture weights (flush posterior, two-sidedness,
@@ -732,7 +733,7 @@ private:
     void  predict_latents_persistent(const CountableFrame& f, bool camera, bool lidar);
     static bool frame_has_camera(const CountableFrame& f) { return not f.points.empty(); }
     bool frame_has_lidar(const CountableFrame& f) const { return lidar_measured(f); }
-    // The persistent LiDAR channel (spec 7c.8): κ·Σ E_i of f.beam on the model's parts at s, its exact gradient (bd −= ∇E) and
+    // The persistent LiDAR channel (spec 7c.8): Σ E_i of f.beam (κ ≡ 1, rev 3.3.11) on the model's parts at s, its exact gradient (bd −= ∇E) and
     // the PSD curvature (Id += W), or with Id == nullptr its energy only. Nothing unless lidar_measured(f).
     double accumulate_beam(const CountableBeliefState& s, const CountableFrame& f, Eigen::Matrix<float, 6, 6>* Id,
                            Eigen::Matrix<float, 6, 1>* bd) const;

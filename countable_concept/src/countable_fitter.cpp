@@ -1316,7 +1316,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         return li;
     };
     // "The LiDAR channel measured" (spec 7c.8 a0): the belief's rule — flag off, a ray-set with precision > 0 (unchanged); flag
-    // on, the beam set with κ > 0 and staged non-empty (Task 20 stages frame.beam).
+    // on, the beam set staged non-empty with Σq > 0 (rev 3.3.11) (Task 20 stages frame.beam).
     const auto rays_usable = [&](const CountableFrame& f) { return inst.ai2_belief.lidar_measured(f); };
     // The rays of the updating frame: with the flag on, the beam's staged set (frame.beam, what the update consumes); flag off,
     // the endpoint-in-box set (frame.lidar + extras).
@@ -1770,11 +1770,12 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  // proposal is below it, ruling T14-4) or the cap ended it (0; with rays usually θ on a ray edge), the final λ.
                  << "gn_it,gn_conv,gn_lambda,"
                  // §7c.8 a0 (Task 20): the persistent path's beam staging THIS cycle — beam_staged = rays staged by ray geometry,
-                 // beam_nolabel = rays crossing the select box left out for lack of camera information, beam_kappa = the sweep
-                 // weight κ; nomem_cycle = 0 membership (or no mask cloud), 1 a sweep but no membership (rays skipped, counted),
+                 // beam_nolabel = rays crossing the select box left out for lack of camera information, beam_kappa = the OLD
+                 // sweep weight coverage·ca (an instrument since rev 3.3.11: it multiplies nothing); nomem_cycle = 0 membership (or no mask cloud), 1 a sweep but no membership (rays skipped, counted),
                  // 2 no fresh Helios sweep; gap_rays = rays with π > 0.99 and e < −5c after this cycle's accepted update (stated
-                 // limit 1). All 0 with the flag off.
-                 << "beam_staged,beam_nolabel,beam_kappa,nomem_cycle,gap_rays\n";
+                 // limit 1); beam_qsum = Σ q over the staged rays (rev 3.3.11: the LiDAR channel measured ⇔ staged and
+                 // beam_qsum > 0). All 0 with the flag off.
+                 << "beam_staged,beam_nolabel,beam_kappa,nomem_cycle,gap_rays,beam_qsum\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1852,7 +1853,7 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << ',' << inst.ai2_belief.last_gn_iters() << ',' << (inst.ai2_belief.last_gn_converged() ? 1 : 0)
                  << ',' << inst.ai2_belief.last_lambda()
                  << ',' << inst.beam_log.staged << ',' << inst.beam_log.nolabel << ',' << inst.beam_log.kappa
-                 << ',' << inst.beam_log.nomem_cycle << ',' << inst.beam_log.gap_rays << '\n';
+                 << ',' << inst.beam_log.nomem_cycle << ',' << inst.beam_log.gap_rays << ',' << inst.beam_log.qsum << '\n';
     }
     ai2_csv_.flush();
 }

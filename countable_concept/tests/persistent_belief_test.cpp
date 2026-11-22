@@ -100,19 +100,20 @@ static rc::ai::LidarRays scene_rays(const Eigen::Vector3f& origin, float cy, flo
 }
 // The persistent path reads the BEAM set (spec 7c.8), not f.lidar: the same sweep (same origin, same scene) staged by RAY
 // GEOMETRY through the select box (the truth box + 10 cm) with hand labels — 0.9 on the truth box, ε_px = 0.02 on the wall /
-// floor — κ = 1, σ_s = model_sigma_m. Endpoint staging (f.lidar's select_near, which drops the floor beside the box) would
+// floor — σ_s = model_sigma_m (κ multiplies nothing since rev 3.3.11). Endpoint staging (f.lidar's select_near, which drops the floor beside the box) would
 // leave the silhouettes without the returns that refute a wider or deeper box: measured on the creep set, +6.7 cm on w.
 // beam_of keeps the endpoint-selected set for the one fixture that compares against it (wall_behind's printed baseline).
 static rc::ai::beam::BeamRays beam_of(const rc::ai::LidarRays& r, const rc::test::SceneBox& box)
 {
     rc::ai::beam::BeamRays b;
-    b.origin = r.origin.cast<double>(); b.kappa = 1.0; b.rho_max = 6.0; b.sigma_s = params().model_sigma_m;
+    b.origin = r.origin.cast<double>(); b.rho_max = 6.0; b.sigma_s = params().model_sigma_m;
     const std::vector<rc::test::SceneBox> obj{box};
     for (const auto& e : r.endpoints)
     {
         b.endpoints.push_back(e.cast<double>());
         b.m.push_back(rc::test::on_object(obj, e) ? rc::test::kMOn : rc::test::kEpsPx);
     }
+    b.q_sum = rc::test::q_sum_of(b);   // the labels' unfloored Σq (spec 7c.8 rev 3.3.11 "measured")
     return b;
 }
 // Stage a ray-set on a frame for both paths: f.lidar (flag off) and f.beam (flag on), labelled against the truth box at cy.
