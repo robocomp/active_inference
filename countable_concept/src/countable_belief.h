@@ -21,6 +21,7 @@
 #include <array>
 #include <cstdio>
 #include <vector>
+#include <limits>
 #include <Eigen/Dense>
 
 #include "countable_class_evidence.h"
@@ -274,6 +275,10 @@ struct CountableBeliefParams
     // component, P = (𝟙 + P̄W)⁻¹P̄ at the current linearisation. A solver tolerance, not a model threshold.
     double gn_tol_sigma = 0.1;
     bool   gn_reject_all_for_test = false;
+    // DIAGNOSTIC only (Model.GnTrace; default 0 = off; no model effect): 1 = record every GN step of every persistent update
+    // and, on updates that end unconverged (gn_conv = 0), a finite-difference check of each channel's gradient and curvature
+    // at θ₀ and at the returned θ; 2 = the check on every update. Read by the fitter into gn_steps.csv / gn_fd.csv.
+    int    gn_trace = 0;
     float fd_eps   = 1e-3f;          // finite-difference step for SDF Jacobians (m / rad)
     float jac_slope_clamp = 5.0f;    // clamp per-DOF SDF slope (guards a seam-point info spike; recipe §2)
 
@@ -547,6 +552,33 @@ public:
     const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return dbg_iterates_; }   // ACCEPTED θ iterates
     // J = persistent_data_energy + prior_energy at θ₀ and after every accepted step of the last persistent update (spec 7c.7 d).
     const std::vector<double>& dbg_gn_energy() const { return dbg_gn_energy_; }
+    // Model.GnTrace (diagnostic): one row per GN step of the last persistent update, and the finite-difference check.
+    struct GnTraceStep
+    {
+        int    step = 0;             // 1-based step count (accepted + rejected, as gn_it)
+        double lambda = 0.0;         // λ the step was solved at (0 = the undamped stop-rule proposal)
+        double rho = 0.0;            // Nielsen gain ratio (−1 when the predicted decrease is ≤ 0; NaN for the λ = 0 proposal)
+        double pred = 0.0;           // the quadratic model's predicted decrease
+        double J_before = 0.0, J_after = 0.0;
+        int    accepted = 0;
+        Eigen::Matrix<double, 6, 1> d = Eigen::Matrix<double, 6, 1>::Zero();             // θ step after constraints
+        Eigen::Matrix<double, 6, 1> d0_sigma = Eigen::Matrix<double, 6, 1>::Constant(std::numeric_limits<double>::quiet_NaN());   // undamped step / σ_k at this linearisation (NaN: not computed)
+    };
+    struct GnTraceFd
+    {
+        int at = 0;                  // 0 = θ₀ (b̄), 1 = the returned θ (b_post)
+        int channel = 0;             // 0 camera, 1 LiDAR, 2 θ-only, 3 all channels along θ (b fixed)
+        int k = 0;                   // θ component (cx, cy, H, w, h, yaw)
+        double grad_an = 0.0;        // ∂E/∂θ_k the solver uses, from the raw (unmarginalised) information: −bd_k (channel 3: −G_k)
+        double grad_marg = 0.0;      // −g_k after the fresh marginalisation (channels 0, 1; = grad_an otherwise)
+        double grad_fd3 = 0.0;       // central difference at h = 1e-3
+        double grad_fd4 = 0.0;       // central difference at h = 1e-4
+        double curv_an = 0.0;        // the information's diagonal I_kk (Gauss-Newton curvature)
+        double curv_fd = 0.0;        // second difference at h = 1e-3
+    };
+    const std::vector<GnTraceStep>& dbg_gn_steps() const { return dbg_gn_steps_; }
+    const std::vector<GnTraceFd>&   dbg_gn_fd()    const { return dbg_gn_fd_; }
+    long gn_update_serial() const { return gn_update_serial_; }   // bumped by every persistent update (trace de-duplication)
     // The last persistent update's damped GN (spec 7c.7 d): steps taken (accepted + rejected), whether it converged (
     // the undamped (λ = 0) proposal from the current θ is below the tolerance, Task 19 fix round 2), and the final λ.
     // Logged (gn_it, gn_conv, gn_lambda); no gate reads them.
@@ -824,6 +856,9 @@ private:
     bool   first_update_done_ = false;  // the class prior at the class mean has entered (spec 7c.1 amendment 11-17)
     std::vector<Eigen::Matrix<float, 6, 1>> dbg_iterates_;
     std::vector<double> dbg_gn_energy_;
+    std::vector<GnTraceStep> dbg_gn_steps_;
+    std::vector<GnTraceFd>   dbg_gn_fd_;
+    long gn_update_serial_ = 0;
     int    last_gn_iters_     = 0;
     bool   last_gn_converged_ = false;
     double last_lambda_       = 0.0;

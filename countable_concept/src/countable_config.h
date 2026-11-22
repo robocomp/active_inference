@@ -329,6 +329,7 @@ struct CountableConfig
     // errors (CountableBeliefParams::persistent), counts the class prior once, and on a GATED camera cycle with an assigned
     // mask runs a LiDAR-only update whose rays are weighted by the mask's membership. false ⇒ byte-identical to before.
     bool  lidar_measures_on_gated   = false;
+    int   gn_trace                  = 0;       // Model.GnTrace (diagnostic; 0 off)
     // Measurement only (spec 7c.8 a0, plan Task 15b): with LidarMeasuresOnGated, write label_dump.csv (one row per Helios
     // return in the select box: the camera label inputs) next to AI2CsvPath. Changes no behaviour.
     bool  label_dump_enabled        = false;

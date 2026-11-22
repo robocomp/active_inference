@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <iomanip>
 #include <format>
 #include <cstdint>
 #include "tick_timing.h"
@@ -1167,7 +1168,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.plaus_fe_scale          = cfg_.plaus_fe_scale;
         p.plaus_height_prior_gain = cfg_.countable_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
         p.persistent = cfg_.lidar_measures_on_gated;   // persistent shared errors + class prior once (spec §7c.1–7c.2)
-        if (p.persistent) p.beam = beam_config_;       // the beam model of the persistent rays (spec 7c.8; built in the constructor)
+        if (p.persistent) p.beam = beam_config_;
+        p.gn_trace = cfg_.gn_trace;                    // diagnostic only (Model.GnTrace)       // the beam model of the persistent rays (spec 7c.8; built in the constructor)
         inst.ai2_belief = CountableBelief(s0, p);
         inst.ai2_initialized = true;
         std::print("[{}] cold-start state: cx={:.2f} cy={:.2f} H={:.2f} w={:.2f} h={:.2f} yaw={:.2f}\n",
@@ -1856,6 +1858,49 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << ',' << inst.beam_log.nomem_cycle << ',' << inst.beam_log.gap_rays << ',' << inst.beam_log.qsum << '\n';
     }
     ai2_csv_.flush();
+    if (cfg_.gn_trace > 0) log_gn_trace(inst);
+}
+
+// Model.GnTrace (diagnostic): the last persistent update's GN steps and finite-difference check, beside the ai2 log.
+void CountableFitter::log_gn_trace(const CountableInstance& inst)
+{
+    const auto& steps = inst.ai2_belief.dbg_gn_steps();
+    const auto& fd    = inst.ai2_belief.dbg_gn_fd();
+    if (steps.empty() and fd.empty()) return;
+    long& seen = gn_trace_serial_[inst.node_name];
+    if (seen == inst.ai2_belief.gn_update_serial()) return;   // no new persistent update since the last write
+    seen = inst.ai2_belief.gn_update_serial();
+    const auto sibling = [&](std::string_view suffix)
+    {
+        std::filesystem::path p(cfg_.ai2_csv_path);
+        return (p.parent_path() / (p.stem().string() + std::string(suffix))).string();
+    };
+    if (not gn_steps_csv_.is_open())
+    {
+        rc::diag::open_rotating(gn_steps_csv_, sibling("_gn_steps.csv"));
+        gn_steps_csv_.imbue(std::locale::classic());
+        gn_steps_csv_ << "cycle,node,gn_conv,step,lambda,rho,pred,J_before,J_after,accepted,"
+                         "d_cx,d_cy,d_H,d_w,d_h,d_yaw,d0s_cx,d0s_cy,d0s_H,d0s_w,d0s_h,d0s_yaw\n";
+        rc::diag::open_rotating(gn_fd_csv_, sibling("_gn_fd.csv"));
+        gn_fd_csv_.imbue(std::locale::classic());
+        gn_fd_csv_ << "cycle,node,gn_conv,at,channel,k,grad_an,grad_marg,grad_fd3,grad_fd4,curv_an,curv_fd\n";
+    }
+    const int conv = inst.ai2_belief.last_gn_converged() ? 1 : 0;
+    gn_steps_csv_ << std::setprecision(10);
+    for (const auto& r : steps)
+    {
+        gn_steps_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << conv << ',' << r.step << ',' << r.lambda
+                      << ',' << r.rho << ',' << r.pred << ',' << r.J_before << ',' << r.J_after << ',' << r.accepted;
+        for (int k = 0; k < 6; ++k) gn_steps_csv_ << ',' << r.d(k);
+        for (int k = 0; k < 6; ++k) gn_steps_csv_ << ',' << r.d0_sigma(k);
+        gn_steps_csv_ << '\n';
+    }
+    gn_fd_csv_ << std::setprecision(10);
+    for (const auto& r : fd)
+        gn_fd_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << conv << ',' << r.at << ',' << r.channel << ','
+                   << r.k << ',' << r.grad_an << ',' << r.grad_marg << ',' << r.grad_fd3 << ',' << r.grad_fd4 << ','
+                   << r.curv_an << ',' << r.curv_fd << '\n';
+    gn_steps_csv_.flush(); gn_fd_csv_.flush();
 }
 
 // ─── Factory helpers ──────────────────────────────────────────────────────────────────────────────

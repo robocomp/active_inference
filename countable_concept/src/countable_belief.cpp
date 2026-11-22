@@ -1079,6 +1079,7 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     predict_theta_joint(1.0f);                                         // step 1, θ
     dbg_iterates_.clear();
     dbg_gn_energy_.clear();
+    dbg_gn_steps_.clear(); dbg_gn_fd_.clear(); ++gn_update_serial_;   // Model.GnTrace (diagnostic)
     last_gn_iters_ = 0; last_gn_converged_ = false; last_lambda_ = 0.0;   // gn_it = 0 ⇒ no measured update this cycle
     last_gn_step_.setZero();
     last_beam_staged_ = 0; last_gap_rays_ = 0; last_beam_ms_ = 0.0;
@@ -1183,6 +1184,9 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     };
     Vec6d theta = state_.vec().cast<double>();                         // θ₀ = the current mean (at birth: the data seed)
     VecKd b_post = b_;
+    const Vec6d theta0 = theta;                                        // Model.GnTrace: the FD check at θ₀, b̄
+    const VecKd b_bar0 = b_;
+    Vec6d trace_d0 = Vec6d::Constant(std::numeric_limits<double>::quiet_NaN());   // undamped step / σ at this linearisation
     double J_cur, Ep_cur = 0.0;                                       // J and its prior part at the accepted iterate
     {   // J at x₀ = (θ₀, b̄): x₀ − x̄ is zero on b, and on θ unless this is the first update (class mean ≠ seed), where P̄'s θ
         // block is diagonal with zero cross terms; the pseudo-inverse is then exact (and 0 when x₀ = x̄).
@@ -1216,10 +1220,18 @@ float CountableBelief::update_persistent(const CountableFrame& f)
             bool small = d0.allFinite();
             for (int k = 0; k < N and small; ++k)
                 small = std::abs(d0(k)) < params_.gn_tol_sigma * std::sqrt(std::max(0.0, P_lin(k, k)));
+            if (params_.gn_trace > 0)
+                for (int k = 0; k < N; ++k) trace_d0(k) = d0(k) / std::sqrt(std::max(1e-300, P_lin(k, k)));
             if (small and not params_.gn_reject_all_for_test)
             {
                 const double Ep0 = pu::prior_energy<N, K>(st0, x_bar + wrapped(x0n - x_bar), x_bar);
                 const double J0 = data_energy(x0n) + Ep0;
+                if (params_.gn_trace > 0)
+                {
+                    GnTraceStep r; r.step = steps + 1; r.lambda = 0.0; r.rho = std::numeric_limits<double>::quiet_NaN();
+                    r.J_before = J_cur; r.J_after = J0; r.accepted = (J0 <= J_cur) ? 1 : 0; r.d = d0; r.d0_sigma = trace_d0;
+                    dbg_gn_steps_.push_back(r);
+                }
                 if (J0 <= J_cur)
                 {
                     ++steps;
@@ -1239,10 +1251,14 @@ float CountableBelief::update_persistent(const CountableFrame& f)
         const Vec6d d = theta_step(x_tilde, xn, st);
         bool accept = false;
         double rho_gain = 0.0;
+        GnTraceStep trace_row; trace_row.step = steps; trace_row.lambda = lambda; trace_row.J_before = J_cur; trace_row.d = d;
+        trace_row.d0_sigma = trace_d0;
+        trace_d0.setConstant(std::numeric_limits<double>::quiet_NaN());   // the d0 belongs to the first step of a linearisation
         if (d.allFinite())
         {
             const double Ep_new = pu::prior_energy<N, K>(st, x_bar + wrapped(xn - x_bar), x_bar);
             const double J_new = data_energy(xn) + Ep_new;
+            trace_row.J_after = J_new;
             if (consistent)
             {   // the quadratic model's decrease: Ep_k − Ep_new + Gᵀδ − ½δᵀWδ (G, W of this linearisation, undamped)
                 Eigen::Matrix<double, N + K, N + K> Wj; VecXd Gj;
@@ -1250,10 +1266,16 @@ float CountableBelief::update_persistent(const CountableFrame& f)
                 const double pred = Ep_cur - Ep_new + Gj.dot(st.delta) - 0.5 * st.delta.dot(Wj * st.delta);
                 rho_gain = pred > 0.0 ? (J_cur - J_new) / pred : -1.0;
                 accept = rho_gain > 0.0;
+                trace_row.pred = pred;
             }
             else accept = J_new < J_cur;
             accept = accept and not params_.gn_reject_all_for_test;
             if (accept) { J_cur = J_new; Ep_cur = Ep_new; d_last = d; }
+        }
+        if (params_.gn_trace > 0)
+        {
+            trace_row.rho = rho_gain; trace_row.accepted = accept ? 1 : 0;
+            dbg_gn_steps_.push_back(trace_row);
         }
         if (not accept)
         {
@@ -1300,6 +1322,65 @@ float CountableBelief::update_persistent(const CountableFrame& f)
     build(state_.vec().cast<double>(), consistent ? b_post : b_);
     P_ = pu::joint_cov<N, K>(P_bar, std::span<const pu::Channel<N, K>>(channels), theta_only);
     P_.topLeftCorner<N, N>() += d_last * d_last.transpose();
+    if (params_.gn_trace >= 2 or (params_.gn_trace == 1 and not converged))
+    {   // Model.GnTrace (diagnostic): does the solver's G / W match the energy J it accepts against? Per channel, the raw −bd
+        // (the energy's analytic gradient), the marginalised −g (what the step uses), central differences of
+        // persistent_data_energy with only that channel's state perturbed (each channel reads its own state), and the
+        // information diagonal against the second difference. Channel 3: the joint θ gradient against data_energy along θ.
+        const auto fd_check = [&](const Vec6d& th, const VecKd& bb, int at)
+        {
+            Mat6 Ic, IL, It; Vec6 gc, gL, gt;
+            const Vec6d sc0 = th + B_cam * bb, sl0 = th + B_L * bb;
+            accumulate_channels(S(th), S(sc0), S(sl0), f, Ic, gc, IL, gL, It, gt);
+            const auto mc = pu::marginalise_fresh<N>(Ic, gc, Sf_cam);
+            const auto mL = pu::marginalise_fresh<N>(IL, gL, Sf_L);
+            const double E0 = persistent_data_energy(S(sc0), S(sl0), S(th), f);
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                if (ch == 0 and not camera) continue;
+                if (ch == 1 and not lidar) continue;
+                for (int k = 0; k < N; ++k)
+                {
+                    const auto E = [&](double h)
+                    {
+                        Vec6d a = sc0, l = sl0, t = th;
+                        (ch == 0 ? a : ch == 1 ? l : t)(k) += h;
+                        return persistent_data_energy(S(a), S(l), S(t), f);
+                    };
+                    GnTraceFd r; r.at = at; r.channel = ch; r.k = k;
+                    const Vec6& g = ch == 0 ? gc : ch == 1 ? gL : gt;
+                    const Mat6& I = ch == 0 ? Ic : ch == 1 ? IL : It;
+                    r.grad_an   = -double(g(k));
+                    r.grad_marg = ch == 0 ? -mc.g(k) : ch == 1 ? -mL.g(k) : r.grad_an;
+                    const double ep3 = E(1e-3), em3 = E(-1e-3);
+                    r.grad_fd3 = (ep3 - em3) / 2e-3;
+                    r.grad_fd4 = (E(1e-4) - E(-1e-4)) / 2e-4;
+                    r.curv_an  = double(I(k, k));
+                    r.curv_fd  = (ep3 - 2.0 * E0 + em3) / 1e-6;
+                    dbg_gn_fd_.push_back(r);
+                }
+            }
+            build(th, bb);
+            Eigen::Matrix<double, N + K, N + K> Wj; VecXd Gj;
+            pu::detail::information<N, K>(std::span<const pu::Channel<N, K>>(channels), theta_only, Wj, Gj);
+            for (int k = 0; k < N; ++k)
+            {
+                const auto E = [&](double h) { VecXd x; x << th, bb; x(k) += h; return data_energy(x); };
+                GnTraceFd r; r.at = at; r.channel = 3; r.k = k;
+                r.grad_an = r.grad_marg = -Gj(k);
+                const double ep3 = E(1e-3), em3 = E(-1e-3);
+                r.grad_fd3 = (ep3 - em3) / 2e-3;
+                r.grad_fd4 = (E(1e-4) - E(-1e-4)) / 2e-4;
+                r.curv_an  = Wj(k, k);
+                VecXd x0; x0 << th, bb;
+                r.curv_fd  = (ep3 - 2.0 * data_energy(x0) + em3) / 1e-6;
+                dbg_gn_fd_.push_back(r);
+            }
+        };
+        fd_check(theta0, b_bar0, 0);
+        fd_check(state_.vec().cast<double>(), consistent ? b_post : b_, 1);
+        build(state_.vec().cast<double>(), consistent ? b_post : b_);   // restore the final linearisation for the dbg_Id_* below
+    }
     b_ = b_post;
     Sigma_ = P_.topLeftCorner<N, N>().cast<float>();
     dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;

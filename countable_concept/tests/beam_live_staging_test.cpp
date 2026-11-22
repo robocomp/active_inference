@@ -711,6 +711,40 @@ static void one_sided_view()
     }
 }
 
+
+// Model.GnTrace (diagnostic instrument): one camera + beam update from an offset seed with the trace on records one row per
+// GN step and 2 linearisations x (camera, LiDAR, θ-only, all-along-θ) x 6 components of the finite-difference check, every
+// value finite. The table is PRINTED (not bounded): it is the instrument's offline reading of G / W against the energy.
+static void gn_trace_instrument()
+{
+    const ts::Camera cam = front_camera();
+    const std::vector<ts::SceneBox> boxes{truth_box()};
+    const Live L = make_live(cam, truth_box());
+    const auto anchor = mask_cloud(L, truth_box());
+    const std::vector<ts::SceneWall> walls{back_wall(0.20f)};
+    const Eigen::Vector3f o(kRobot.x(), kRobot.y(), kSilZ);
+    const bm::BeamRays r = stage(helios_sweep(o, boxes, walls), o, anchor, L.label, walls);
+    CountableBeliefParams p = params();
+    p.gn_trace = 2;
+    CountableBelief b({tx + 0.03f, ty, tH, tw + 0.05f, tw, 0.0f}, p);
+    b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+    b.set_first_update_done(true);
+    b.update(camera_frame(anchor, &r));
+    const auto& st = b.dbg_gn_steps();
+    const auto& fd = b.dbg_gn_fd();
+    std::printf("  gn trace: gn %d/%d, %zu step rows, %zu fd rows\n", b.last_gn_iters(), int(b.last_gn_converged()), st.size(), fd.size());
+    CHECK(st.size() >= std::size_t(b.last_gn_iters()) and st.size() <= std::size_t(b.last_gn_iters()) + 1);
+    CHECK(fd.size() == 2u * 4u * 6u);
+    for (const auto& x : st) CHECK(std::isfinite(x.J_before) and x.d.allFinite());
+    const char* ch[] = {"cam", "L", "th", "all"};
+    for (const auto& x : fd)
+    {
+        CHECK(std::isfinite(x.grad_an) and std::isfinite(x.grad_fd3) and std::isfinite(x.grad_fd4) and std::isfinite(x.curv_fd));
+        std::printf("    at %d %-3s k%d grad an %+.4e marg %+.4e fd3 %+.4e fd4 %+.4e | curv an %.4e fd %.4e\n", x.at, ch[x.channel],
+                    x.k, x.grad_an, x.grad_marg, x.grad_fd3, x.grad_fd4, x.curv_an, x.curv_fd);
+    }
+}
+
 int main()
 {
     std::printf("beam_live_staging_test (spec 7c.8 Pass, live staging)\n");
@@ -722,6 +756,7 @@ int main()
     gap_under_furniture();
     calibration_nees();
     one_sided_view();
+    gn_trace_instrument();
     std::printf(bad ? "beam_live_staging_test: %d FAILED\n" : "beam_live_staging_test: OK\n", bad);
     return bad != 0;
 }

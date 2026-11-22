@@ -315,6 +315,9 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
+    std::ofstream                  gn_steps_csv_, gn_fd_csv_;   // Model.GnTrace (diagnostic)
+    void log_gn_trace(const CountableInstance& inst);
+    std::unordered_map<std::string, long> gn_trace_serial_;   // last update written per node
 
     // YOLO-independent LiDAR range channel: owns the staged per-cycle sweep + return selection (feed).
     CountableLidarRangeChannel         lidar_channel_{cfg_};
