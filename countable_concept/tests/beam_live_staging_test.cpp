@@ -578,17 +578,18 @@ static void staging_cost_printed()
     CHECK(log.staged > 0);
 }
 
-// ─── One-sided view (spec 7c.8 rev 3.3.11 Pass, κ ≡ 1): the box seen from ONE face only — the robot on its +x side, 1.5 m from
-//     the +x face, looking −x (ZED heading π), the Helios at 0.40 m (below the 0.62 m top, so no ray sees the top face), a
-//     known wall 1 m behind the far (−x) face. Live staging, live ε_px. The unseen depth direction is the box's x extent w
-//     (the far face x = cx − w/2 is never hit; the near face pins cx + w/2).
-//     (i) 10 LiDAR-only frames from the truth seed (the silhouette fixtures' protocol): σ_w ≥ ½ its prior σ (CHECK); σ per DOF,
-//         the prior σ and σ of the far-face coordinate printed.
-//     (ii) Calibration on the same view (rev 3.3.10 (2) protocol of calibration_nees: 200 draws, per-ray surface offset
-//         δ ~ N(0, σ_s) and range noise N(0, σ_sensor), one LiDAR-only update from the truth seed per draw, shared latents sig2_L
-//         and Σ_pose at zero variance): NEES of the pair the view observes across the line of sight, (cy, h), / 2 ∈ [0.5, 2]
-//         (CHECK — calibration_nees's (cx, w) rotated to this view); every DOF alone, (cx, w) / 2 and the near-face coordinate
-//         cx + w/2 printed. A failure is reported, not tuned. ───
+// ─── One-sided view (spec 7c.8 rev 3.3.11 Pass, bounds per rev 3.3.12; κ ≡ 1): the box seen from ONE face only — the robot on
+//     its +x side, 1.5 m from the +x face, looking −x (ZED heading π), the Helios at 0.40 m (below the 0.62 m top, so no ray sees
+//     the top face), a known wall 1 m behind the far (−x) face. Live staging, live ε_px. LiDAR-only frames. The far face
+//     x = cx − w/2 is never hit; the near face cx + w/2 is.
+//     (i) 10 LiDAR-only frames from the truth seed: σ of the far face given the near face (= σ_w) ≥ ½ the prior σ_w (CHECK,
+//         rev 3.3.12 (1)); σ per DOF, the prior σ, the far-face position σ and its σ conditional on the near face printed.
+//     (ii) Calibration (rev 3.3.10 (2) protocol: 200 draws, per-ray surface offset δ ~ N(0, σ_s) and range noise
+//         N(0, σ_sensor), one LiDAR-only update per draw, shared latents sig2_L and Σ_pose at zero variance). Each draw's prior
+//         mean for w is drawn from the w prior, w₀ = tw + σ_w,prior·n (rev 3.3.12 (3)); the other seed components at the truth.
+//         CHECK NEES over the constrained directions (near face cx + w/2, cy, H, h, yaw) / 5 ∈ [0.5, 2] (rev 3.3.12 (2)) and
+//         NEES(w) ∈ [0.5, 2] (rev 3.3.12 (3)); each component's NEES, (cy, h)/2 and (cx, w)/2 printed. A failure is reported,
+//         not tuned. ───
 static void one_sided_view()
 {
     const float x_near = tx + 0.5f * tw;
@@ -624,14 +625,19 @@ static void one_sided_view()
         const Vec6 sd = P.diagonal().cwiseSqrt();
         const double s_far = std::sqrt(double(P(0, 0)) + 0.25 * double(P(3, 3)) - double(P(0, 3)));
         const double s_far0 = std::sqrt(double(prior_sd(0) * prior_sd(0)) + 0.25 * double(prior_sd(3) * prior_sd(3)));
+        // the far face given the near face: var(far) − cov(far, near)² / var(near)
+        const double v_near = double(P(0, 0)) + 0.25 * double(P(3, 3)) + double(P(0, 3));
+        const double c_fn = double(P(0, 0)) - 0.25 * double(P(3, 3));
+        const double s_far_given_near = std::sqrt(std::max(0.0, s_far * s_far - c_fn * c_fn / v_near));
         std::printf("  one-sided view: mask %zu px, anchor %zu pts ; staged %d nolabel %d (old kappa %.4f) q_sum %.2f ; far-face hits %d ; "
                     "gn %d/%d after 10 frames\n", L.mask.pixels.size(), anchor.size(), lg.staged, lg.nolabel, lg.kappa, lg.qsum, far_hits,
                     b.last_gn_iters(), int(b.last_gn_converged()));
         std::printf("  one-sided view sigma per DOF (cx, cy, H, w, h, yaw) after 10 frames: %.5f %.5f %.5f %.5f %.5f %.5f ; prior %.3f %.3f "
-                    "%.3f %.3f %.3f %.3f ; sigma_w / prior %.3f (bound >= 0.5) ; far face cx - w/2 sigma %.5f (prior %.4f, ratio %.3f) ; "
+                    "%.3f %.3f %.3f %.3f ; far face given near (= sigma_w) %.5f, / prior sigma_w %.3f (bound >= 0.5) ; conditional "
+                    "sigma(far | near) %.5f ; far-face position cx - w/2 sigma %.5f (its prior %.4f, ratio %.3f) ; "
                     "theta - truth cx %+.5f cy %+.5f H %+.5f w %+.5f h %+.5f yaw %+.5f\n", sd(0), sd(1), sd(2), sd(3), sd(4), sd(5),
-                    prior_sd(0), prior_sd(1), prior_sd(2), prior_sd(3), prior_sd(4), prior_sd(5), sd(3) / prior_sd(3), s_far, s_far0,
-                    s_far / s_far0, b.state().cx - tx, b.state().cy - ty, b.state().H - tH, b.state().w - tw, b.state().h - tw,
+                    prior_sd(0), prior_sd(1), prior_sd(2), prior_sd(3), prior_sd(4), prior_sd(5), sd(3), sd(3) / prior_sd(3),
+                    s_far_given_near, s_far, s_far0, s_far / s_far0, b.state().cx - tx, b.state().cy - ty, b.state().H - tH, b.state().w - tw, b.state().h - tw,
                     b.state().yaw);
         CHECK(lg.staged > 0 and far_hits == 0);
         CHECK(sd(3) >= 0.5f * prior_sd(3));
@@ -640,10 +646,11 @@ static void one_sided_view()
     {
         const auto rings = ts::helios_ring_elev_deg();
         const int n_az = static_cast<int>(std::lround(360.0f / ts::kHeliosAzStepDeg));
-        std::mt19937 rng(20261122u);
-        std::normal_distribution<float> n01(0.0f, 1.0f);
-        double s_cyh = 0.0, s_cxw = 0.0, s_near = 0.0, nrays = 0.0;
+        std::mt19937 rng(20261122u), rng_w(20261123u);
+        std::normal_distribution<float> n01(0.0f, 1.0f), nw(0.0f, 1.0f);
+        double s_cyh = 0.0, s_cxw = 0.0, s_con = 0.0, nrays = 0.0;
         Eigen::Matrix<double, 6, 1> alone = Eigen::Matrix<double, 6, 1>::Zero();
+        Eigen::Matrix<double, 5, 1> alone_con = Eigen::Matrix<double, 5, 1>::Zero();
         int n = 0, conv = 0;
         const auto nees2 = [](const Eigen::Matrix<float, 6, 6>& P, int i, int j, double ei, double ej)
         {
@@ -652,6 +659,10 @@ static void one_sided_view()
             const Eigen::Vector2d e(ei, ej);
             return e.dot(S.ldlt().solve(e));
         };
+        // the constrained directions: near face cx + w/2, cy, H, h, yaw (rows of A over θ = (cx, cy, H, w, h, yaw))
+        Eigen::Matrix<double, 5, 6> A = Eigen::Matrix<double, 5, 6>::Zero();
+        A(0, 0) = 1.0; A(0, 3) = 0.5; A(1, 1) = 1.0; A(2, 2) = 1.0; A(3, 4) = 1.0; A(4, 5) = 1.0;
+        double w0_sum = 0.0, w0_sq = 0.0;
         for (int draw = 0; draw < 200; ++draw)
         {
             std::vector<Eigen::Vector3f> sweep;
@@ -665,28 +676,38 @@ static void one_sided_view()
                 }
             const bm::BeamRays r = stage(sweep, o, anchor, L.label, walls);
             nrays += double(r.endpoints.size());
-            CountableBelief b = belief({tx, ty, tH, tw, tw, 0.0f});
+            const float w0 = tw + prior_sd(3) * nw(rng_w);   // rev 3.3.12 (3): this draw's prior mean for w, from the w prior
+            w0_sum += double(w0 - tw); w0_sq += double(w0 - tw) * double(w0 - tw);
+            CountableBelief b = belief({tx, ty, tH, w0, tw, 0.0f});
             CountableFrame f = side_frame(r);
             f.sig2_L.fill(0.0f);   // rev 3.3.10 (2): shared latents (sig2_L, pose) at zero variance in the draws
             f.sigma_pose.setZero();
             b.update(f);
             conv += int(b.last_gn_converged());
-            const auto& P = b.covariance();
+            const Eigen::Matrix<double, 6, 6> P = b.covariance().cast<double>();
             const CountableBeliefState& st = b.state();
             const Eigen::Matrix<double, 6, 1> e = (st.vec() - CountableBeliefState{tx, ty, tH, tw, tw, 0.0f}.vec()).cast<double>();
-            s_cyh += nees2(P, 1, 4, e(1), e(4));
-            s_cxw += nees2(P, 0, 3, e(0), e(3));
-            const double en = e(0) + 0.5 * e(3), vn = double(P(0, 0)) + 0.25 * double(P(3, 3)) + double(P(0, 3));
-            s_near += en * en / vn;
-            for (int i = 0; i < 6; ++i) alone(i) += e(i) * e(i) / double(P(i, i));
+            s_cyh += nees2(b.covariance(), 1, 4, e(1), e(4));
+            s_cxw += nees2(b.covariance(), 0, 3, e(0), e(3));
+            const Eigen::Matrix<double, 5, 1> ec = A * e;
+            const Eigen::Matrix<double, 5, 5> Pc = A * P * A.transpose();
+            s_con += ec.dot(Pc.ldlt().solve(ec));
+            for (int i = 0; i < 5; ++i) alone_con(i) += ec(i) * ec(i) / Pc(i, i);
+            for (int i = 0; i < 6; ++i) alone(i) += e(i) * e(i) / P(i, i);
             ++n;
         }
-        const double nees_cyh = s_cyh / n / 2.0;
+        const double nees_con = s_con / n / 5.0;
         alone /= double(n);
-        std::printf("  one-sided calibration (%d draws, %.0f rays/draw, gn_conv %d/%d): mean NEES(cy, h)/2 %.3f (bound [0.5, 2]) ; "
-                    "NEES(cx, w)/2 %.3f ; near face cx + w/2 alone %.3f ; alone cx %.3f cy %.3f H %.3f w %.3f h %.3f yaw %.3f\n", n,
-                    nrays / n, conv, n, nees_cyh, s_cxw / n / 2.0, s_near / n, alone(0), alone(1), alone(2), alone(3), alone(4), alone(5));
-        CHECK(nees_cyh >= 0.5 and nees_cyh <= 2.0);
+        alone_con /= double(n);
+        std::printf("  one-sided calibration (%d draws, %.0f rays/draw, gn_conv %d/%d ; seed w0 - truth mean %+.4f sd %.4f, prior sigma_w %.3f): "
+                    "mean NEES(near, cy, H, h, yaw)/5 %.3f (bound [0.5, 2]) ; NEES(w) %.3f (bound [0.5, 2])\n", n, nrays / n, conv, n,
+                    w0_sum / n, std::sqrt(std::max(0.0, w0_sq / n - (w0_sum / n) * (w0_sum / n))), prior_sd(3), nees_con, alone(3));
+        std::printf("  one-sided calibration components (PRINTED): near face cx + w/2 %.3f cy %.3f H %.3f h %.3f yaw %.3f ; alone cx %.3f "
+                    "cy %.3f H %.3f w %.3f h %.3f yaw %.3f ; NEES(cy, h)/2 %.3f ; NEES(cx, w)/2 %.3f\n", alone_con(0), alone_con(1),
+                    alone_con(2), alone_con(3), alone_con(4), alone(0), alone(1), alone(2), alone(3), alone(4), alone(5), s_cyh / n / 2.0,
+                    s_cxw / n / 2.0);
+        CHECK(nees_con >= 0.5 and nees_con <= 2.0);
+        CHECK(alone(3) >= 0.5 and alone(3) <= 2.0);
     }
 }
 
