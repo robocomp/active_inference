@@ -1160,6 +1160,14 @@ plan matters, settled here.
   far-face direction's σ ≥ ½ its prior σ and NEES/2 ∈ [0.5, 2]; creep and silhouette bounds unchanged; live12 on + shift
   (the live11 tour): no DOF over-confident (0 % below rms/3), h std/rms, shift errors vs the shifted prior and bed Itr_L
   reported. A failure is reported, not tuned. Proposal: docs/superpowers/specs/2026-11-22-beam-kappa-proposal.md.
+- **Rev 3.3.12 (owner 11-22): one-sided fixture bounds corrected.** The rev 3.3.11 wording ("the far-face direction's
+  σ ≥ ½ its prior σ") cannot hold for any correct posterior: once the near face is measured the far face is near − w,
+  so its σ is σ_w, not a fraction of the 0.30 m position prior. Replaced by: (1) σ of the far face given the near face
+  (= σ_w) ≥ ½ the prior σ_w; (2) calibration over the directions the view constrains — near face, cy, H, h, yaw —
+  NEES/5 ∈ [0.5, 2] (the band used by every calibration item here; the near-face and yaw values 0.470 / 0.454 were
+  printed before this bound was set, so it is not blind: a failure is reported, not tuned); (3) each draw takes its
+  prior mean for w from the w prior, so the unseen direction is calibrated too: NEES(w) printed with (2)'s band as a
+  CHECK. Reviewer's derivation: task-22-review.md (a).
 - **Flush against a known wall (owner: "Stated limit, test the live").** With the robot pose error e modelled, a box
   flush against a known wall has at least two energy basins (w traded against e_x, h against e_y); converged, the
   full-control fixture lands 19 mm off in w, 9 mm in cx, |e| ≈ 0.46σ. Stated limit. Pass keeps the lever-only control
