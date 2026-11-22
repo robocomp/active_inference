@@ -1304,7 +1304,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     }
     // The latents' marginals (§7c.2): b_cam = the config floors + range lateral/size + the obliquity yaw cap (today's camera
     // fill WITHOUT chain and ego-motion); b_L = the config floors. e's marginal is Σ_pose, staged by stage_persistent (§7c.7).
-    // The ego-motion terms are FRESH every frame (ρ = 0), marginalised inside each channel.
+    // The ego-motion terms are FRESH every frame (ρ = 0): the belief's per-frame latents u_cam / u_L (spec 7c.8 rev 3.3.13).
     const auto latent_inputs = [&](float obliquity_yaw_var)
     {
         const float p2 = cfg_.ai2_common_mode_pos_std  * cfg_.ai2_common_mode_pos_std;

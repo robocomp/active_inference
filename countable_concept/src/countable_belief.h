@@ -249,7 +249,8 @@ struct CountableBeliefParams
 
     // ── PERSISTENT SHARED ERRORS + THE CLASS PRIOR COUNTED ONCE (spec 2026-11-15 lidar-measures §7c.1–7c.2) ──────────
     // false ⇒ today's per-frame Woodbury path, bit-identical (lidar_golden_test). true ⇒ the belief carries latents
-    // b = (e (δx, δy, δψ), b_cam (6), b_L (6)) beside θ in a 21×21 double covariance (§7c.7); e is the robot's pose error in
+    // b = (e (δx, δy, δψ), b_cam (6), b_L (6), u_cam (6), u_L (6)) beside θ in a 33×33 double covariance (§7c.7; u_c, the
+    // per-frame ego-motion share, rev 3.3.13); e is the robot's pose error in
     // the room, measured through B_chain = chain_B(ℓ) with a lever ℓ held as instance state; the camera points measure
     // θ + B_chain e + b_cam, the rays θ + B_chain e + b_L; the relational anchors (wall flush/parallel, room axis) enter once,
     // at the first admissible camera update; the footprint (2) and height (2a) anchors never (Σ₀ = the class P carries them);
@@ -843,7 +844,7 @@ private:
     mutable float   dbg_wall_lambda_ = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
 
-    // Persistent joint state (params.persistent): P_ over x = (θ, b), b_ the latent mean, sig_prev_ the σ b_cam / b_L were
+    // Persistent joint state (params.persistent): P_ over x = (θ, b), b_ the latent mean (u_c re-drawn every update, rev 3.3.13), sig_prev_ the σ b_cam / b_L were
     // last predicted at (0 ⇒ never measured: the next predict draws it as a new source; its e entries are unused),
     // lever_ / last_sigma_pose_ = e's lever and the Σ_pose e was last predicted at (zero ⇒ e is a new source next time),
     // wall_/axis_prior_added_ = the relational anchors have entered. Sigma_ mirrors P_'s θθ block in float for every reader of

@@ -631,8 +631,10 @@ static void parked_range_jitter_equality()
 // spec 7c.7 b, "chain once for both" in its 3×3 form: a parked camera + LiDAR update; the data information the two channels
 // add on (cx, cy, yaw) equals (B Σ_pose Bᵀ + (Σ_cam⁻¹ + Σ_L⁻¹)⁻¹)⁻¹, B the three non-zero rows of B_chain, Σ_ch the channel's
 // data covariance plus its own latent (inverse-free: Σ_ch⁻¹ = (𝟙 + I_ch Σ_b)⁻¹ I_ch). θ-only channel empty (anchors in,
-// (2c) and the depth boost off), no fresh covariance, first update done (P̄ = the recursion's prediction, no θ–b cross terms).
-static void chain_once_for_both_3x3()
+// (2c) and the depth boost off), first update done (P̄ = the recursion's prediction, no θ–b cross terms). with_fresh (spec 7c.8
+// rev 3.3.13): each channel's ego-motion share u_c ~ N(0, diag fresh_c) is in the state, so Σ_ch = data + Σ_b + Σ_fresh —
+// the Woodbury form the latent replaces, exact on this linear channel.
+static void chain_once_for_both_3x3(bool with_fresh = false)
 {
     using M6d = Eigen::Matrix<double, 6, 6>;
     CountableBeliefParams p = params();
@@ -651,6 +653,11 @@ static void chain_once_for_both_3x3()
     f.R.assign(f.points.size(), params().sigma_base_m * params().sigma_base_m);
     f.sigma_pose = full_sigma_pose();
     f.robot_xy = Eigen::Vector2f(tx - 1.5f, ty - 1.5f);
+    if (with_fresh)
+    {
+        f.fresh_cam = {3e-4f, 2e-4f, 1e-4f, 2e-4f, 1.5e-4f, 1e-4f};
+        f.fresh_L   = {1e-4f, 2.5e-4f, 1e-4f, 1e-4f, 2e-4f, 5e-5f};
+    }
     b.update(f);
     CHECK(b.dbg_Id_th().norm() == 0.0f);
     const M6d Pbar = b.dbg_Pbar_tt().cast<double>();
@@ -659,7 +666,7 @@ static void chain_once_for_both_3x3()
     const M6d Ppost = b.joint_covariance().topLeftCorner<6, 6>() - b.last_gn_step() * b.last_gn_step().transpose();
     const M6d I_data = Ppost.inverse() - Pbar.inverse();
     Mat6 Sbc = Mat6::Zero(), SbL = Mat6::Zero();
-    for (int i = 0; i < 6; ++i) { Sbc(i, i) = f.sig2_cam[i]; SbL(i, i) = f.sig2_L[i]; }
+    for (int i = 0; i < 6; ++i) { Sbc(i, i) = f.sig2_cam[i] + f.fresh_cam[i]; SbL(i, i) = f.sig2_L[i] + f.fresh_L[i]; }
     const M6d Ac = pu::marginalise_fresh<6>(b.dbg_Id_cam(), Vec6::Zero(), Sbc).I;
     const M6d AL = pu::marginalise_fresh<6>(b.dbg_Id_L(),   Vec6::Zero(), SbL).I;
     const Eigen::Matrix<double, 6, 3> B = chain_B(b.chain_lever().l);
@@ -678,8 +685,8 @@ static void chain_once_for_both_3x3()
     const Eigen::Matrix3d got    = D3.inverse();
     const double r3 = rel(got, expect);
     const double r6 = rel(I_data, (B * f.sigma_pose * B.transpose() + Cch).inverse().eval());
-    std::printf("  chain once for both (3x3 on cx, cy, yaw): rel %.3e (6x6 form rel %.3e) ; min eig of the channels' info %.3e ; "
-                "lever (%.3f %.3f) ; diag got %.4e %.4e %.4e expect %.4e %.4e %.4e\n", r3, r6, min_eig, b.chain_lever().l.x(),
+    std::printf("  chain once for both%s (3x3 on cx, cy, yaw): rel %.3e (6x6 form rel %.3e) ; min eig of the channels' info %.3e ; "
+                "lever (%.3f %.3f) ; diag got %.4e %.4e %.4e expect %.4e %.4e %.4e\n", with_fresh ? " (fresh on)" : "", r3, r6, min_eig, b.chain_lever().l.x(),
                 b.chain_lever().l.y(), got(0, 0), got(1, 1), got(2, 2), expect(0, 0), expect(1, 1), expect(2, 2));
     CHECK(r3 <= 1e-6);
 }
@@ -1321,7 +1328,8 @@ int main()
     sanitize_reseeds_e();
     relocalisation_redraws_e();
     parked_range_jitter_equality();
-    chain_once_for_both_3x3();
+    chain_once_for_both_3x3(false);
+    chain_once_for_both_3x3(true);
     transport_invariance_arc();
     published_cov_no_chain_double_count();
     bad_seed_recovers();
