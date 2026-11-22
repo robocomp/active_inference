@@ -427,14 +427,25 @@ def score_run(run, gtobjs, walls, overrides, pin, shift):
             m['n_looks'] = len(looks)
             start = next((i for i, r in enumerate(rows) if is_fresh(r) and r.get('range', 99) <= NEAR_M), None)
             m['settled'] = 0
+            # Over-confidence over EVERY row with a posterior (not only the settled window, so an instance never seen within
+            # NEAR_M is still checked): the share of rows whose error exceeds 3 posterior std, per DOF. A calibrated Gaussian
+            # gives 0.27 %; rows are autocorrelated, so this is reported, not bounded.
+            twa = lambda r: true_dims(g, r.get('yaw', 0.0) + rot)
+            allr = [r for r in rows if r.get('std_cx', 0) > 0]
+            m['z3'] = {}
+            for k, ef, sk in (('cx', lambda r: r['cx'] - gx, 'std_cx'), ('cy', lambda r: r['cy'] - gy, 'std_cy'),
+                              ('H', lambda r: r['H'] - g['top'], 'std_H'), ('w', lambda r: r['w'] - twa(r)[0], 'std_w'),
+                              ('h', lambda r: r['h'] - twa(r)[1], 'std_h')):
+                rs = [r for r in allr if r.get(sk, 0) > 0]
+                m['z3'][k] = (sum(1 for r in rs if abs(ef(r)) > 3 * r[sk]) / len(rs)) if rs else float('nan')
             if start is not None:
                 S = rows[start:]
                 m['settled'] = len(S)
                 tw = lambda r: true_dims(g, r.get('yaw', 0.0) + rot)
                 errs = {'cx': [r['cx'] - gx for r in S], 'cy': [r['cy'] - gy for r in S], 'H': [r['H'] - g['top'] for r in S],
-                        'h': [r['h'] - tw(r)[1] for r in S]}
+                        'w': [r['w'] - tw(r)[0] for r in S], 'h': [r['h'] - tw(r)[1] for r in S]}
                 stds = {'cx': [r['std_cx'] for r in S], 'cy': [r['std_cy'] for r in S], 'H': [r['std_H'] for r in S],
-                        'h': [r['std_h'] for r in S]}
+                        'w': [r['std_w'] for r in S], 'h': [r['std_h'] for r in S]}
                 dof = {}
                 for k in errs:
                     e, s = errs[k], stds[k]
@@ -510,13 +521,15 @@ def report(label, res, notes, shift):
         P('  final centre error      %s m  (live6 ref: bed 0.055, nightstands 0.02-0.06, toilet 0.23)  [info]' % fmt(m['final_err']))
         P('  final |H - true top|    %s m  (H %s, top %.2f)  [info; compare with the live6 column]' % (fmt(m['H_err_final']), fmt(m['H_final']), g['top']))
         if 'dof' in m:
-            for k in ('cx', 'cy', 'H', 'h'):
+            for k in ('cx', 'cy', 'H', 'w', 'h'):
                 d = m['dof'][k]
                 P('  %-2s rms %s  std min %s max %s  inside[rms/3,3rms] %5.1f%% (below %5.1f%%)   %s' % (
                     k, fmt(d['rms'], '.4f'), fmt(d['smin'], '.4f'), fmt(d['smax'], '.4f'), 100 * d['inside'], 100 * d['below'], verdict(d['ok'])))
             P('  median NEES (3 dof: cx,cy,H; expected ~2.4)  %s  [info]' % fmt(m['nees'], '.2f'))
         else:
             P('  no fresh-mask row from within %.1f m: DOF checks not scored   FAIL' % NEAR_M)
+        P('  rows with |err| > 3 std (all %d rows; calibrated Gaussian 0.27%%)  %s  [info]' % (
+            m['rows'], '  '.join('%s %5.1f%%' % (k, 100 * v) for k, v in m['z3'].items())))
         P('  largest centre step toward %s between looks %s m (largest step %s m)   %s' % (
             m['drift_what'], fmt(m['drift'], '.3f'), fmt(m['max_step'], '.3f'), verdict(m['drift'] <= DRIFT_MAX)))
         P('  fit rate %s Hz (median-dt %s Hz)   %s' % (fmt(m['rate'], '.1f'), fmt(m['rate_med'], '.1f'), verdict(m['rate'] >= RATE_MIN)))
@@ -576,7 +589,7 @@ def side_by_side(named):
                 v = min((m.get(key, float('nan')) for m in ms), default=float('nan')) if ms else float('nan')
                 line += '%14s' % fmt(v, spec)
             P(line)
-        for k in ('cx', 'cy', 'H', 'h'):
+        for k in ('cx', 'cy', 'H', 'w', 'h'):
             line = '%-26s' % ('%s %s std-check' % (gname, k))
             for _, res in named:
                 ms = [m for m in res.values() if m['gt'] == gname and not m['phantom'] and 'dof' in m]
