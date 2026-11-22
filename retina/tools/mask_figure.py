@@ -8,6 +8,13 @@ for the file layout). Needs no running fleet.
     python3 -I retina/tools/mask_figure.py DUMP_DIR STAMP              # (a) RGB + (b) masks
     python3 -I retina/tools/mask_figure.py DUMP_DIR STAMP --topview    # + (c) top view of one mask
     python3 -I retina/tools/mask_figure.py DUMP_DIR STAMP --topview --mask 2 --out fig/masks
+    python3 -I retina/tools/mask_figure.py DUMP_DIR STAMP --masks 0,5,8 --topview --mask 0 \
+        --instance door_1 --ai2-log RUN/ai2_log.csv          # chosen masks only + instance box in (c)
+
+Options added for paper use: --masks i,j,k shows only those mask indices (print the omitted ones in
+the caption); --instance NAME [--ai2-log CSV] draws the instance's final box (cx,cy,w,s,yaw from the
+last ai2_log row of that node) in the room frame in (c), next to the points of --mask.
+Labels in (b) are placed with collision avoidance and leader lines, always inside the frame.
 
 Panels
   (a) the RGB frame (<stamp>.jpg)
@@ -130,11 +137,12 @@ def class_colours(idx):
     return {lab: PALETTE[i % len(PALETTE)] for i, lab in enumerate(labels)}
 
 
-def draw_masks(ax, rgb, idx, pix, colours, min_conf):
+def draw_masks(ax, rgb, idx, pix, colours, min_conf, keep=None):
     h, w = rgb.shape[:2]
     over = rgb.astype(float) / 255.0
-    shown = [m for m in idx if m["confidence"] >= min_conf]
+    shown = [m for m in idx if m["confidence"] >= min_conf and (keep is None or m["mask"] in keep)]
     sils = {}
+    anchors = []
     for m in shown:
         sil = silhouette(pix.get(m["mask"]), m["stride"], h, w)
         sils[m["mask"]] = sil
@@ -152,17 +160,83 @@ def draw_masks(ax, rgb, idx, pix, colours, min_conf):
         for c in cnts:
             c = c[:, 0, :]
             c = np.vstack([c, c[:1]])
-            ax.plot(c[:, 0], c[:, 1], ls, color=colours[m["label"]], lw=0.9)
+            ax.plot(c[:, 0], c[:, 1], ls, color=colours[m["label"]], lw=1.0)
         ys, xs = np.nonzero(sil)
-        # Label at the silhouette's top-centre, nudged inside the frame.
-        tx = float(np.clip(xs.mean(), 0.08 * w, 0.92 * w))
-        ty = float(np.clip(ys.min() + 0.04 * h, 0.05 * h, 0.95 * h))
-        ax.text(tx, ty, f"{m['label']} {m['confidence']:.2f}", fontsize=6, ha="center", va="top",
-                color="black", bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=colours[m["label"]],
-                                         lw=0.6, alpha=0.85))
+        # anchor = the silhouette pixel closest to its centroid (always on the mask)
+        d2 = (xs - xs.mean()) ** 2 + (ys - ys.mean()) ** 2
+        k = int(np.argmin(d2))
+        anchors.append(dict(x=float(xs[k]), y=float(ys[k]), area=int(sil.sum()), colour=colours[m["label"]],
+                            text=f"{m['label']} {m['confidence']:.2f}"))
+    return anchors
 
 
-def draw_topview(ax, idx, pts, pose, chosen, colours):
+def place_labels(ax, anchors, fs=6.5):
+    """Greedy collision-free placement of the "class score" boxes, with leader lines. Call after the
+    figure layout is final (it measures text in display pixels)."""
+    fig = ax.figure
+    rend = fig.canvas.get_renderer()
+    inv = ax.transData.inverted()
+    clip = ax.get_window_extent(rend)
+    placed = []      # display-pixel boxes (x0, y0, x1, y1) already taken
+    lead = []        # leader segments already drawn (display px), to keep them from crossing labels
+
+    def overlap(a, b, pad=2.0):
+        return not (a[2] + pad < b[0] or b[2] + pad < a[0] or a[3] + pad < b[1] or b[3] + pad < a[1])
+
+    for an in sorted(anchors, key=lambda a: a["area"]):
+        t = ax.text(0, 0, an["text"], fontsize=fs, ha="center", va="center", color="black",
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=an["colour"], lw=0.7, alpha=0.92),
+                    zorder=5)
+        bb = t.get_window_extent(rend)
+        bw, bh = bb.width, bb.height
+        ax_px = ax.transData.transform((an["x"], an["y"]))
+        best = None
+        for r in [0] + list(np.arange(0.6, 14, 0.5) * bh):
+            for ang in (np.linspace(0, 2 * np.pi, 16, endpoint=False) if r else [0.0]):
+                cx = ax_px[0] + r * np.cos(ang)
+                cy = ax_px[1] + r * np.sin(ang)
+                box = (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)
+                if box[0] < clip.x0 + 1 or box[2] > clip.x1 - 1 or box[1] < clip.y0 + 1 or box[3] > clip.y1 - 1:
+                    continue
+                if any(overlap(box, q) for q in placed):
+                    continue
+                if r and any(overlap((min(ax_px[0], cx), min(ax_px[1], cy), max(ax_px[0], cx), max(ax_px[1], cy)),
+                                     q, pad=-3) for q in placed):
+                    continue      # the leader would run across another label
+                best = (cx, cy, box, r)
+                break
+            if best:
+                break
+        if best is None:   # nowhere free: keep it centred on the anchor, clipped inside the frame
+            cx = float(np.clip(ax_px[0], clip.x0 + bw / 2 + 1, clip.x1 - bw / 2 - 1))
+            cy = float(np.clip(ax_px[1], clip.y0 + bh / 2 + 1, clip.y1 - bh / 2 - 1))
+            best = (cx, cy, (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2), 0)
+        cx, cy, box, r = best
+        placed.append(box)
+        px, py = inv.transform((cx, cy))
+        t.set_position((px, py))
+        ax.plot(an["x"], an["y"], "o", ms=2.2, mfc=an["colour"], mec="white", mew=0.4, zorder=4)
+        if r:
+            # leader from the anchor to the nearest point on the label box
+            qx = float(np.clip(ax_px[0], box[0], box[2]))
+            qy = float(np.clip(ax_px[1], box[1], box[3]))
+            lx, ly = inv.transform((qx, qy))
+            ax.plot([an["x"], lx], [an["y"], ly], "-", color=an["colour"], lw=0.7, zorder=4)
+
+
+def load_instance(path, name):
+    last = None
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if r["node"] == name:
+                last = r
+    if last is None:
+        sys.exit(f"no rows for node {name} in {path}")
+    return dict(name=name, cx=float(last["cx"]), cy=float(last["cy"]), w=float(last["w"]),
+                s=float(last["s"]), yaw=float(last["yaw"]), cycle=int(last["cycle"]))
+
+
+def draw_topview(ax, idx, pts, pose, chosen, colours, inst=None, keep=None):
     c, s = np.cos(pose["yaw"]), np.sin(pose["yaw"])
     R = np.array([[c, -s], [s, c]])
     t = np.array([pose["x"], pose["y"]])
@@ -173,7 +247,7 @@ def draw_topview(ax, idx, pts, pose, chosen, colours):
     rng = np.random.default_rng(0)
     for m in idx:
         p = pts.get(m["mask"])
-        if p is None or len(p) == 0 or m["mask"] == chosen["mask"]:
+        if p is None or len(p) == 0 or m["mask"] == chosen["mask"] or (keep is not None and m["mask"] not in keep):
             continue
         q = to_room(p)
         if len(q) > 3000:
@@ -182,18 +256,34 @@ def draw_topview(ax, idx, pts, pose, chosen, colours):
     q = to_room(pts[chosen["mask"]])
     if len(q) > 8000:
         q = q[rng.choice(len(q), 8000, replace=False)]
-    ax.scatter(q[:, 0], q[:, 1], s=0.6, color=colours[chosen["label"]], linewidths=0, rasterized=True)
+    ax.scatter(q[:, 0], q[:, 1], s=1.5, color=colours[chosen["label"]], linewidths=0, rasterized=True, zorder=4)
+    extent = [q, t[None, :]]
+    if inst is not None:
+        ci, si = np.cos(inst["yaw"]), np.sin(inst["yaw"])
+        Ri = np.array([[ci, -si], [si, ci]])
+        corners = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]) * 0.5 * np.array([inst["w"], inst["s"]])
+        box = corners @ Ri.T + np.array([inst["cx"], inst["cy"]])
+        ax.fill(box[:, 0], box[:, 1], facecolor="0.9", edgecolor="black", lw=0.8, zorder=1)
+        ax.plot([], [], "-", color="black", lw=1.0, label=f"instance {inst['name']}")
+        extent.append(box)
     # Camera: position + optical axis (camera +y).
     fwd = R @ np.array([0.0, 1.0])
     ax.plot(*t, marker="o", ms=3, color="black")
     span = max(0.3, 0.25 * float(np.max(np.linalg.norm(q - t, axis=1))))
     ax.annotate("", xy=t + span * fwd, xytext=t,
                 arrowprops=dict(arrowstyle="->", lw=0.8, color="black"))
-    ax.set_aspect("equal", adjustable="datalim")
+    allp = np.vstack(extent)
+    lo, hi = allp.min(0), allp.max(0)
+    ctr, half = (lo + hi) / 2, max((hi - lo).max() / 2 * 1.15, 0.5)
+    ax.set_xlim(ctr[0] - half, ctr[0] + half)
+    ax.set_ylim(ctr[1] - half, ctr[1] + half)
+    ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("room x (m)", fontsize=7)
     ax.set_ylabel("room y (m)", fontsize=7)
     ax.tick_params(labelsize=6)
     ax.grid(True, lw=0.3, color="0.85")
+    ax.plot([], [], "o", ms=3, color="black", label="camera (arrow = optical axis)")
+    ax.legend(fontsize=6, loc="upper center", bbox_to_anchor=(0.5, -0.16), frameon=False, handlelength=1.5)
 
 
 def choose_mask(idx, pts, want):
@@ -219,6 +309,9 @@ def main():
     ap.add_argument("--pick", action="store_true", help="list candidate stamps and exit")
     ap.add_argument("--topview", action="store_true", help="add panel (c): one mask's points, room frame")
     ap.add_argument("--mask", type=int, default=None, help="mask index for panel (c) (default: auto)")
+    ap.add_argument("--masks", default=None, help="comma-separated mask indices to show (default: all)")
+    ap.add_argument("--instance", default=None, help="instance node name whose final box is drawn in (c)")
+    ap.add_argument("--ai2-log", default=None, help="ai2_log.csv for --instance (default: DUMP_DIR/../ai2_log.csv)")
     ap.add_argument("--min-conf", type=float, default=0.0, help="hide masks below this confidence")
     ap.add_argument("--out", default=None, help="output path without extension")
     a = ap.parse_args()
@@ -240,6 +333,13 @@ def main():
     if idx and (idx[0]["img_w"], idx[0]["img_h"]) != (rgb.shape[1], rgb.shape[0]):
         sys.exit(f"mask pixel space {idx[0]['img_w']}x{idx[0]['img_h']} != image {rgb.shape[1]}x{rgb.shape[0]}")
     colours = class_colours(idx)
+    keep = None if a.masks is None else {int(v) for v in a.masks.split(",")}
+    if keep is not None:
+        omitted = [f"{m['mask']}:{m['label']} {m['confidence']:.2f}({m['segmenter']})" for m in idx if m["mask"] not in keep]
+        print("omitted masks:", ", ".join(omitted) or "none")
+    inst = None
+    if a.instance:
+        inst = load_instance(a.ai2_log or os.path.join(a.dump_dir, "..", "ai2_log.csv"), a.instance)
 
     chosen = pose = pts = None
     if a.topview:
@@ -253,32 +353,39 @@ def main():
     three = chosen is not None and pose is not None
 
     h, w = rgb.shape[:2]
-    n = 3 if three else 2
-    widths = [1.0, 1.0, 0.8] if three else [1.0, 1.0]
-    img_w_in = FIG_W_IN * 1.0 / sum(widths)
-    fig_h = img_w_in * h / w + 0.35
-    fig, axes = plt.subplots(1, n, figsize=(FIG_W_IN, fig_h), gridspec_kw=dict(width_ratios=widths))
+    if three:
+        fig = plt.figure(figsize=(FIG_W_IN, FIG_W_IN * 0.645))
+        gs = fig.add_gridspec(2, 2, width_ratios=[1.15, 0.85], wspace=0.10, hspace=0.12)
+        axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[:, 1])]
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(FIG_W_IN, FIG_W_IN / 2 * h / w + 0.35))
+        axes = list(axes)
 
     axes[0].imshow(rgb, interpolation="nearest")
-    draw_masks(axes[1], rgb, idx, pix, colours, a.min_conf)
+    anchors = draw_masks(axes[1], rgb, idx, pix, colours, a.min_conf, keep)
     for ax in axes[:2]:
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_xlim(0, w)
         ax.set_ylim(h, 0)
     if three:
-        draw_topview(axes[2], idx, pts, pose, chosen, colours)
+        draw_topview(axes[2], idx, pts, pose, chosen, colours, inst, keep)
     for ax, tag in zip(axes, "abc"):
-        ax.set_title(f"({tag})", fontsize=8, loc="left")
+        ax.set_title(f"({tag})", fontsize=8, loc="left", pad=2)
     if three:
-        axes[2].set_title(f"{chosen['label']}, {chosen['n_points']} pts", fontsize=7, loc="right")
-    # Outline-style key for (b).
-    axes[1].plot([], [], "-", color="0.3", lw=0.9, label="YOLO-seg")
-    axes[1].plot([], [], "--", color="0.3", lw=0.9, label="ADE20K semantic")
-    axes[1].legend(fontsize=6, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=2, frameon=False,
-                   handlelength=2.2, borderaxespad=0.2)
+        axes[2].set_title(f"{chosen['label']} {chosen['confidence']:.2f}: {chosen['n_points']} points",
+                          fontsize=6.5, loc="right", pad=2)
+    axes[1].plot([], [], "-", color="0.3", lw=1.0, label="YOLO-seg")
+    axes[1].plot([], [], "--", color="0.3", lw=1.0, label="ADE20K semantic")
+    axes[1].legend(fontsize=6, loc="lower right", frameon=True, framealpha=0.85, handlelength=2.0,
+                   borderpad=0.3).set_zorder(6)
 
-    fig.tight_layout(pad=0.3, w_pad=0.6)
+    if not three:
+        fig.tight_layout(pad=0.3, w_pad=0.6)
+    else:
+        fig.subplots_adjust(left=0.01, right=0.985, top=0.96, bottom=0.05)
+    fig.canvas.draw()
+    place_labels(axes[1], anchors)
     out = a.out or os.path.join(a.dump_dir, f"fig_{a.stamp}")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     fig.savefig(out + ".pdf", dpi=DPI)
