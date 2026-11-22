@@ -1148,6 +1148,17 @@ plan matters, settled here.
   with them the NEES no longer separates the two curvature forms the item exists to compare. (3) Flush neighbour /
   5 cm background at live ε_px (+14.4 cm w; +22.8 cm per edge at b = 5 cm, ε_px 0.094): stated limit 4, measured live
   in Task 21 (two flush nightstands) before any model change is decided.
+- **Rev 3.3.11 (owner 11-22, "A"): no sweep weight on the beam path, κ ≡ 1.** Supersedes "Sweep weight" and the κ
+  factors in "Energy", "Gradient" and "Curvature" above, on the persistent beam path only. Live11 showed κ computed on a
+  different, much smaller set (endpoint-in-box returns, bed median 2) than the one the energy sums over (beam-staged,
+  bed median 245), giving κ ≈ 0 on the bed. In the beam model each ray carries its own term weighted by its own m_i; the
+  correlation between rays is carried by the persistent shared-error latents; a one-sided view is already flat in J's
+  curvature along the unseen directions. So the ray-set energy is Σ_i E_i. "The LiDAR channel measured" ⇔ the staged
+  set is non-empty and Σ_i m_i > 0 over it. coverage and ca stay computed for the instruments and the flag-off path.
+  Pass additions: calibration_nees unchanged with κ ≡ 1; a one-sided fixture (box seen from one face only): the
+  far-face direction's σ ≥ ½ its prior σ and NEES/2 ∈ [0.5, 2]; creep and silhouette bounds unchanged; live12 on + shift
+  (the live11 tour): no DOF over-confident (0 % below rms/3), h std/rms, shift errors vs the shifted prior and bed Itr_L
+  reported. A failure is reported, not tuned. Proposal: docs/superpowers/specs/2026-11-22-beam-kappa-proposal.md.
 - **Flush against a known wall (owner: "Stated limit, test the live").** With the robot pose error e modelled, a box
   flush against a known wall has at least two energy basins (w traded against e_x, h against e_y); converged, the
   full-control fixture lands 19 mm off in w, 9 mm in cx, |e| ≈ 0.46σ. Stated limit. Pass keeps the lever-only control
