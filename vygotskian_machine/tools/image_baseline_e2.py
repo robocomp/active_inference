@@ -37,12 +37,12 @@ def frames(scan_dir: Path, k: int) -> list[Path]:
     return [fs[round(i * (len(fs) - 1) / (k - 1))] for i in range(k)]
 
 
-def ask(url: str, model: str, funcs: list[str], imgs: list[Path]) -> str:
+def ask(url: str, model: str, funcs: list[str], imgs: list[Path], num_ctx: int | None = None) -> str:
     body = {
         "model": model, "stream": False, "think": False,
         "format": {"type": "object", "properties": {"function": {"type": "string", "enum": funcs}},
                    "required": ["function"]},
-        "options": {"temperature": 0, "seed": 0},
+        "options": {"temperature": 0, "seed": 0, **({"num_ctx": num_ctx} if num_ctx else {})},
         "messages": [{"role": "user", "content": PROMPT.format(n=len(imgs), opts=", ".join(funcs)),
                       "images": [base64.b64encode(p.read_bytes()).decode() for p in imgs]}],
     }
@@ -68,6 +68,9 @@ def main() -> None:
     ap.add_argument("--vocab", type=Path, default=HERE / "elicit_vocab.toml")
     ap.add_argument("--model", default="gemma4:26b")
     ap.add_argument("--k", type=int, action="append", help="frames per room (repeatable); default 1 and 4")
+    ap.add_argument("--num-ctx", type=int, default=None,
+                    help="smaller context = smaller KV cache, so the image encoder fits beside other GPU users; "
+                         "part of the cache key")
     ap.add_argument("--cache", type=Path, default=HERE / "e2_out/image_answers.jsonl")
     args = ap.parse_args()
     url = os.environ.get("OLLAMA", "http://localhost:11434").rstrip("/")
@@ -81,24 +84,24 @@ def main() -> None:
     if args.cache.exists():
         for line in args.cache.read_text().splitlines():
             rec = json.loads(line)
-            cache[(rec["model"], rec["scan"], rec["k"])] = rec["answer"]
+            cache[(rec["model"], rec["scan"], rec["k"], rec.get("num_ctx"))] = rec["answer"]
 
     with args.cache.open("a") as fh:
         for k in ks:
-            todo = [r for r in rooms if (args.model, r["room"], k) not in cache]
+            todo = [r for r in rooms if (args.model, r["room"], k, args.num_ctx) not in cache]
             t0 = time.monotonic()
             for n, r in enumerate(todo, 1):
                 imgs = frames(args.frames / r["room"], k)
-                a = ask(url, args.model, all_funcs, imgs)
-                cache[(args.model, r["room"], k)] = a
-                fh.write(json.dumps(dict(model=args.model, scan=r["room"], k=k, answer=a,
+                a = ask(url, args.model, all_funcs, imgs, args.num_ctx)
+                cache[(args.model, r["room"], k, args.num_ctx)] = a
+                fh.write(json.dumps(dict(model=args.model, scan=r["room"], k=k, answer=a, num_ctx=args.num_ctx,
                                          frames=[p.name for p in imgs])) + "\n")
                 fh.flush()
                 if n % 50 == 0 or n == len(todo):
                     print(f"  k={k}: {n}/{len(todo)}  {(time.monotonic() - t0) / n:.2f} s/room", flush=True)
 
     for k in ks:
-        ans = [cache[(args.model, r["room"], k)] for r in rooms]
+        ans = [cache[(args.model, r["room"], k, args.num_ctx)] for r in rooms]
         pred = [{a} for a in ans]
         mf1, per = scores(pred, truth, funcs, list(range(len(rooms))))
         acc = sum(a == t for a, t in zip(ans, truth)) / len(rooms)

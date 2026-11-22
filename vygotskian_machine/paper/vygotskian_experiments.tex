@@ -108,15 +108,15 @@ pairs over rooms, and L1 holds on the corpus if the VLM source beats the uniform
 Co-occurrence bounds what any prior can achieve, and the image baseline, which needs no belief hierarchy, is what the
 machine must justify.
 
-As elicited, the VLM fails L1 on ScanNet. It beats the uniform prior but trails the hand-written table by 0.21 in
-macro F1 (0.53 against 0.74, 95\% interval $[-0.25,-0.16]$). The cause is the overstatement found in E1: a class the
+As elicited, the VLM fails L1 on ScanNet. It beats the uniform prior but trails the hand-written table by 0.22 in
+macro F1 (0.53 against 0.75, 95\% interval $[-0.27,-0.18]$). The cause is the overstatement found in E1: a class the
 VLM expects but the room lacks costs every function heavily, so bedrooms and living rooms are rejected and the
 corridor, which expects almost nothing, is claimed in 252 of 457 rooms. Calibration maps the levels 0.05, 0.25, 0.5,
 0.75 and 0.95 to 0.03, 0.03, 0.38, 0.38 and 0.68, and the calibrated VLM reaches a macro F1 of 0.75 and a top-1
-accuracy of 0.84. It ties the hand-written table in macro F1 ($+0.01$, $[-0.01,+0.04]$) and beats it in top-1
-($+0.09$, $[+0.05,+0.13]$), stays below co-occurrence (0.80 and 0.92), and beats one image (0.69 and 0.70). L1
+accuracy of 0.84. It ties the hand-written table in macro F1 ($-0.00$, $[-0.03,+0.03]$) and beats it in top-1
+($+0.06$, $[+0.02,+0.09]$), stays below co-occurrence (0.80 and 0.92), and beats one image (0.69 and 0.70). L1
 therefore holds on the corpus for the ranking of functions but not for the decision of which functions to claim,
-and only after a calibration that uses counts. The corridor is the weakest function for every source of $\pi_{cf}$ (F1 0.15 to 0.34),
+and only after a calibration that uses counts. The corridor is the weakest function for every source of $\pi_{cf}$ (F1 0.15 to 0.32),
 because a ScanNet hallway holds few annotated objects.
 The corpus assumes perfect detection, so the robot's recorded tours test the evidence under its own perception, where
 each $\Lambda_f$ should leave its prior log-odds only as the room is explored (Figure~\result{--}).
