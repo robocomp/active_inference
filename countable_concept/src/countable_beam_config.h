@@ -56,6 +56,16 @@ inline std::optional<std::string> floor_sigma_problem(double floor_sigma_m)
     return std::nullopt;
 }
 
+// The model's surface sigma sigma_s (Model.ModelSigmaM): beam_ray_term divides by it (phi_s, zd, Id), so 0, a negative or a
+// non-finite value turns every update into NaN (update_guarded would then drop them silently).
+inline std::optional<std::string> model_sigma_problem(double model_sigma_m)
+{
+    if (not (model_sigma_m > 0.0 and std::isfinite(model_sigma_m)))
+        return std::format("Model.ModelSigmaM = {} must be > 0 and finite when Model.LidarMeasuresOnGated is on (the beam's "
+                           "surface sigma sigma_s; the ray term divides by it)", model_sigma_m);
+    return std::nullopt;
+}
+
 // The countable belief's BeamConfig (CountableBeliefParams::beam), at the SENSOR's precision p0 (spec "Range densities"):
 // 1/p0 = 1/LidarPrecision + sigma_sensor^2, c = LidarRobustCM, nu = p0 c^2 - 1. Built with BeamConfig::make at the composite
 // rule chosen by the Quadrature item (n, z_max, K_m) = (4, 3.0, 8), L = 11. The caller (the fitter, once the Helios

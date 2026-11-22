@@ -275,6 +275,16 @@ int main()
             CHECK(r.first != 0);
             CHECK(r.second.find("MaskPixelErrorRate") != std::string::npos);
         }
+        for (const char* bad_ms : {"ModelSigmaM = 0.0\n", "ModelSigmaM = -0.01\n", "ModelSigmaM = nan\n", "ModelSigmaM = inf\n"})
+        {   // sigma_s <= 0 or non-finite: the ray term divides by it
+            const auto r = beam_refused(std::string("MaskPixelErrorRate = 0.094\nFloorSigmaM = 0.005\n") + bad_ms);
+            CHECK(r.first != 0);
+            CHECK(r.second.find("ModelSigmaM") != std::string::npos);
+        }
+        {
+            const auto r = beam_refused("MaskPixelErrorRate = 0.094\nFloorSigmaM = 0.005\nModelSigmaM = 0.010\n");
+            CHECK(r.first == 0 and r.second.empty());
+        }
         const ConfigLoader weak = load_text("[Agent]\nname = \"n\"\n[Model]\nLidarMeasuresOnGated = true\nLidarPrecision = 300.0\n"
                                             "LidarRobustCM = 0.05\nMaskPixelErrorRate = 0.094\n");
         const auto r = refuse_in_child(weak);

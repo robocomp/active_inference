@@ -62,6 +62,11 @@ CountableFitter::CountableFitter(std::shared_ptr<DSR::DSRGraph> graph,
     // throw below is unreachable from a loaded config; it stays so the agent never runs the beam on a default BeamConfig{}.
     if (cfg.lidar_measures_on_gated)
     {
+        if (const auto why = rc::model_sigma_problem(cfg.model_sigma_m))   // same check as the loader's refuse_bad_beam_config
+        {
+            std::print(stderr, "[lidar-measures] {} — refusing to start\n", *why);
+            throw rc::CountableConfigError(std::format("config: {} — refusing to start\n", *why));
+        }
         auto bc = rc::make_beam_config(cfg.mask_pixel_error_rate, cfg.lidar_precision, cfg.lidar_robust_c_m,
                                        rc::kHeliosRangeSigmaM);
         if (not bc)
@@ -1313,8 +1318,11 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     // "The LiDAR channel measured" (spec 7c.8 a0): the belief's rule — flag off, a ray-set with precision > 0 (unchanged); flag
     // on, the beam set with κ > 0 and staged non-empty (Task 20 stages frame.beam).
     const auto rays_usable = [&](const CountableFrame& f) { return inst.ai2_belief.lidar_measured(f); };
-    const auto ray_count = [](const CountableFrame& f)
+    // The rays of the updating frame: with the flag on, the beam's staged set (frame.beam, what the update consumes); flag off,
+    // the endpoint-in-box set (frame.lidar + extras).
+    const auto ray_count = [&](const CountableFrame& f)
     {
+        if (cfg_.lidar_measures_on_gated) return static_cast<int>(f.beam.endpoints.size());
         int n = static_cast<int>(f.lidar.endpoints.size());
         for (const auto& r : f.lidar_extra) n += static_cast<int>(r.endpoints.size());
         return n;

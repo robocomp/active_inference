@@ -14,6 +14,8 @@ scorer's bathroom frame fit had no usable samples. Room-side, flag-independent (
 
 ## Pass "Live11"
 
+(The bed rows below are not beam evidence: κ = 0 on 39/80 staged rows, see the paragraph after the staging table.)
+
 | item | bound | live11 (on) | verdict |
 |---|---|---|---|
 | fit rate | ≥ 8 Hz | bed 31.2, nightstand_1 29.2, nightstand_0 79.8 Hz | PASS |
@@ -66,6 +68,27 @@ scorer's 3 cm / 5 cm size tolerances.
 
 No cycle lacked membership (Task 15's open question on GATED cycles: none occurred on these instances).
 
+**The beam did not measure the bed (read this before citing Pass Live11).** Recomputed from `bed_ai2_log.csv` and
+`nightstand_ai2_log.csv` (rows with `beam_staged` > 0; updated rows = Itr_L > 0):
+
+| instance | staged rows | κ = 0 exactly | κ med / max | updated rows | Itr_L med (range) | σ at med Itr_L |
+|---|---|---|---|---|---|---|
+| bed_21 | 80 | **39** | 5e-7 / 0.032 | 41 | **9.4** (0.10 – 459) | ≈ 0.33 m |
+| nightstand_40 | 78 | 0 | 0.061 / 0.183 | 78 | 365 (27 – 11985) | ≈ 0.052 m |
+| nightstand_41 | 26 | 2 | 0.006 / 0.017 | 24 | 244 (9 – 1069) | ≈ 0.064 m |
+
+bed_21 staged rays on 80 rows, but κ is exactly 0 on 39 of them, so the beam made no measurement on those cycles. On the
+rest κ is at most 0.032 and the median Itr_L is 9.4, i.e. σ ≈ 0.33 m: the beam barely informs the bed. **The bed's
+improvement over live10 (0.084 → 0.037 m) is therefore NOT evidence for the beam model.** The nightstands did get real
+information (Itr_L 245 – 365), though nightstand_41's κ is small (median 0.006) and nightstand_40's is 0.061.
+
+Likely mechanism: κ = coverage · ca with ca = (1 − R)^power, R the resultant length of the ray bearings. A one-sided view
+(the bed seen from one side) has R near 1, so ca → 0 and κ → 0. That is flag-off's endpoint-factor weighting applied to a
+model in which misses already carry the information. It is a spec-level question, not a code defect.
+
+The "Pass Live11" table above is a pass on the stated bounds; for the bed it is a pass of the camera path with the beam
+inert on about half its rows, and only the nightstand rows (and the flush-neighbour result) speak for the beam.
+
 ## Inputs carried to the owner
 
 - ε_px (owner ruling 11-20, max over runs): bed 0.085, nightstand 0.094, toilet 0.001; b*(ε_px) per Task 15.
@@ -78,3 +101,4 @@ No cycle lacked membership (Task 15's open question on GATED cycles: none occurr
 2. Wrong size priors survive one look (shift run).
 3. Toilet never born: bathroom has no outline (room side).
 4. Flush against an unknown (non-wall) neighbour: fixture +14 cm, not yet seen live.
+5. κ collapses on one-sided views (bed): owner 11-22 — revisit κ in the spec.

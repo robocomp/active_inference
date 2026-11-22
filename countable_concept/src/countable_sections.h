@@ -65,6 +65,8 @@ inline void refuse_bad_beam_config(const ConfigLoader& cfg)
         throw CountableConfigError(std::format("config: {} — refusing to start\n", *why));
     if (const auto why = floor_sigma_problem(get("Model.FloorSigmaM", 0.0)))   // missing ⇒ 0 ⇒ refused (no default)
         throw CountableConfigError(std::format("config: {} — refusing to start\n", *why));
+    if (const auto why = model_sigma_problem(get("Model.ModelSigmaM", 0.010)))   // the loader's own default is 0.010
+        throw CountableConfigError(std::format("config: {} — refusing to start\n", *why));
 }
 
 }  // namespace rc
