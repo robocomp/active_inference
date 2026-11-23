@@ -1718,3 +1718,143 @@ Each line: the constant, the other patches that move with it, and the modelling 
 - bed and toilet configs have the same key set as nightstand with different values (size priors, wall prior, birth seeds). Their rows are listed separately, but the engine they share is counted once.
 - `Masks.legacy_room_frame` (table only) is a coordinate-convention A/B switch; it is listed as switch (other).
 - The "where" column for config rows gives the loader line (`*_config.cpp:N`), which is where the key is read; the consumer (fitter, belief) was followed only when the role was unclear from the comment.
+
+---
+
+## Addendum 1: object-path libraries (scope extension)
+
+- Counted on tree `6e93ab69c852dd8524e8896ad003c146dff8b8dd` (HEAD `5823d6349245f2878c306e60b4a79222baf94f9f`, the commit that holds the baseline above). Date 2026-11-23.
+- Same definition, labels, exclusion rule and method as above. No existing row was relabelled; the `?` rows above are untouched.
+- Libraries: `ls common/` has `existence_belief`, `detectability`, `instance_tracker`, `contour_edge`, `exclusion`, `occlusion`. There is NO `common/birth`. The `rc::birth` namespace lives in `common/instance_tracker/birth_evidence.h`, so the "birth" row = `instance_tracker/birth_evidence.h` + the two closest directories `common/birth_surprise` and `common/birth_fragment`. `instance_tracker.h` is the instance_tracker row.
+- `common/ai_belief`: all six files were already scanned in the baseline; there is nothing new. (`persistent_update.h`, `beam_room.h`, `dof_spec.h`, `recursive_laplace.h` have no model constants; see the shared-engine section.)
+- Scan: same two passes (named constants; literal scan read in context). Defaults in library structs that a class config overrides are listed as library constants (they are the value in force when the class does not set the key). Test fixtures, log formats and `check(` lines are skipped. `exclusion/*.h` and `birth_surprise/residual_field_reader.h` and `birth_fragment.h` (non-test) hold no numeric model constants; `exclusion` therefore has 0 rows. `common/perception_card` (the p_detect composition) is linked by the chair and was not in the requested list; it is not scanned.
+- Limit as before: manual last step; the rows are a careful sample, not a proof.
+
+### Addendum summary table (libraries)
+
+Same columns as the main summary.
+
+| library | class | sensor | patch | switches (patch) | ambiguous (?) | excluded | switches (other) | patch total | ambiguous split | total rows |
+|---|---|---|---|---|---|---|---|---|---|---|
+| common/existence_belief | 0 | 2 | 6 | 0 | 1 | 3 | 0 | 6 | sensor 1 | 12 |
+| common/detectability | 0 | 3 | 0 | 0 | 4 | 1 | 0 | 0 | patch 4 | 8 |
+| common/birth (closest: instance_tracker/birth_evidence.h + birth_surprise + birth_fragment) | 0 | 0 | 3 | 0 | 0 | 1 | 0 | 3 | - | 4 |
+| common/instance_tracker | 0 | 0 | 6 | 0 | 0 | 0 | 0 | 6 | - | 6 |
+| common/contour_edge | 0 | 0 | 0 | 0 | 7 | 1 | 0 | 0 | patch 3, sensor 4 | 8 |
+| common/exclusion | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/occlusion | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 | - | 2 |
+
+### common/existence_belief
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| CarveParams.sensor_sigma_m | 0.03 | common/existence_belief/existence_belief.h:52 | LiDAR range sigma (default; config ExistenceSensorSigmaM overrides) | sensor |
+| CarveParams.detection_prob | 0.85 | common/existence_belief/existence_belief.h:53 | P(beam returns / occupied), sensor hit rate (default) | sensor |
+| CarveParams.clutter_prob | 0.05 | common/existence_belief/existence_belief.h:54 | P(beam returns / empty) (default) | sensor? |
+| ExistenceBelief L_max default | 4.0 | common/existence_belief/existence_belief.h:483 | /L/ cap of the log-odds | patch |
+| frame-correlation clamp | 0.95 | common/existence_belief/existence_belief.h:513 | upper clamp of rho | patch |
+| stationarity clamp | 60 | common/existence_belief/existence_belief.h:559 | argument clamp of exp(-u2) (numerics) | excluded |
+| RemovalPolicy.logodds_max | 4.0 | common/existence_belief/existence_belief.h:754 | /L/ clamp, also the recantation budget | patch |
+| RemovalPolicy.removal_prob | 0.12 | common/existence_belief/existence_belief.h:755 | remove below P(exists) | patch |
+| RemovalPolicy.frame_correlation | 0.0 (off) | common/existence_belief/existence_belief.h:756 | rho for correlated misses; 0 = independent | patch |
+| RemovalPolicy.remove_frames | 15 | common/existence_belief/existence_belief.h:757 | removal debounce in ideal observations | patch |
+| RemovalPolicy.stall_warn_cycles | 300 | common/existence_belief/existence_belief.h:758 | report period of a starved instance (logging) | excluded |
+| erfc / tanh structure | 0.7071, tanh | common/existence_belief/existence_belief.h:122 | Gaussian CDF; tanh common-mode saturation is structural (no constant) | excluded |
+
+### common/detectability
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| DetectorEnvelope.min_fill | 0.10 | common/detectability/detectability.h:49 | fleet-prior lower shoulder of detector envelope | sensor |
+| DetectorEnvelope.max_fill | 0.60 | common/detectability/detectability.h:50 | fleet-prior upper shoulder | sensor |
+| DetectorEnvelope.soft | 0.06 | common/detectability/detectability.h:51 | shoulder roll-off width | sensor |
+| best_fill fallback | 0.35 | common/detectability/detectability.h:117 | framing returned when the envelope is invalid | patch? |
+| best_fill scan grid / frac clamp | 200 / 0.99 | common/detectability/detectability.h:121 | scan resolution and clamp of peak fraction (numerics) | excluded |
+| BlindSpotParams.ell_az/ell_el/ell_lr | 0.30 / 0.12 / 0.25 | common/detectability/blind_spot_map.h:39 | kernel length scales of the learned blind-spot correction | patch? |
+| BlindSpotParams.kappa0 | 1.0 | common/detectability/blind_spot_map.h:40 | geometric prior strength (observations) | patch? |
+| visit-close distance | 0.25 (dist^2) | common/detectability/blind_spot_map.h:80 | a move of half a kernel length closes a visit | patch? |
+
+### common/birth (closest: instance_tracker/birth_evidence.h + birth_surprise + birth_fragment)
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| Detectability.periph_ref | 0.50 | common/instance_tracker/birth_evidence.h:58 | periphery reference of birth quality (default) | patch |
+| Detectability.range_ref_m | 2.5 | common/instance_tracker/birth_evidence.h:59 | range reference of birth quality (default) | patch |
+| BirthSurpriseProbe.cover_margin_m | 0.30 | common/birth_surprise/birth_surprise_probe.h:75 | margin of "region covered by a believed box" | patch |
+| surprise log radii | 0.50 / 0.30 | common/birth_surprise/birth_surprise_log.h:100 | radii of the residual-mass sample (diagnostic log, read-only probe) | excluded |
+
+### common/instance_tracker
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| TrackerParams.gate_mahalanobis | 9.0 | common/instance_tracker/instance_tracker.h:41 | association chi2 gate (default; class config overrides) | patch |
+| TrackerParams.gate_fallback_m | 0.40 | common/instance_tracker/instance_tracker.h:42 | metric gate before covariance exists | patch |
+| TrackerParams.detection_noise_m | 0.05 | common/instance_tracker/instance_tracker.h:48 | association noise | patch |
+| TrackerParams.birth_frames | 5.0 | common/instance_tracker/instance_tracker.h:55 | birth debounce (default) | patch |
+| TrackerParams.birth_min_sep_m | 0.25 | common/instance_tracker/instance_tracker.h:57 | birth separation (default) | patch |
+| TrackerParams.birth_match_m | 0.20 | common/instance_tracker/instance_tracker.h:59 | candidate match radius of a pending birth | patch |
+
+### common/contour_edge
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| DepthCheck.sigma_depth_m | 0.10 | common/contour_edge/contour_depth_check.h:102 | depth sigma of the contour depth channel | sensor? |
+| DepthCheck.sigma_depth_rel | 0.02 | common/contour_edge/contour_depth_check.h:103 | relative depth sigma | sensor? |
+| DepthCheck.sigma_step_m | 0.08 | common/contour_edge/contour_depth_check.h:107 | depth step sigma | sensor? |
+| kMinValidDepth | 0.05 | common/contour_edge/contour_depth_check.cpp:13 | minimum valid depth (ZED) | sensor? |
+| kControlOffsets | -1.6,-1,1,1.6 | common/contour_edge/contour_edge_project.h:95 | control offsets for the slid-sideways comparison | patch? |
+| control offsets (cpp copy) | -1.6,-1,1,1.6 | common/contour_edge/contour_edge_check.cpp:86 | second copy of the same offsets | patch? |
+| edge min length | 4.0 px | common/contour_edge/contour_edge_check.cpp:52 | skip edges shorter than this (also in depth_check) | patch? |
+| sampling density | 8..160 steps, len/3 | common/contour_edge/contour_edge_check.cpp:56 | samples along an edge (cost/resolution) | excluded |
+
+### common/exclusion
+
+No numeric model constants found in `exclusion.h` / `claims.h` (geometry and set logic only).
+
+### common/occlusion
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| kOwnWallSkipM | 0.15 | common/occlusion/occlusion.h:84 | a sample within this of a wall is not occluded by it | patch |
+| occluder angular floors | 0.05 / 0.2 | common/occlusion/occlusion.h:51 | floors of occluder half-size and range | patch |
+
+### Libraries linked per class
+
+From `#include` in each `*_concept/src` (grep of `common/...` includes) and the CMake source lists. `*` = chair reaches `detectability` only through `common/perception_card/terms.h` (chair_detect.h), not by a direct include. Files of `common/ai_belief` are listed by file, so a class is charged only for the engine headers it includes.
+
+| class | ai_belief files linked | libraries linked |
+|---|---|---|
+| chair | dof_spec.h, recursive_laplace.h | existence_belief, instance_tracker, contour_edge, exclusion, occlusion, detectability*, birth_evidence |
+| table | dof_spec.h, recursive_laplace.h, lidar_ray_factor.h | existence_belief, instance_tracker, contour_edge, exclusion, occlusion, detectability, birth_evidence, birth_surprise |
+| refrigerator | dof_spec.h, recursive_laplace.h, lidar_ray_factor.h | existence_belief, instance_tracker, contour_edge, exclusion, occlusion, detectability, birth_evidence, birth_surprise, birth_fragment |
+| hood | dof_spec.h, recursive_laplace.h, lidar_ray_factor.h | existence_belief, instance_tracker, contour_edge, exclusion, occlusion, detectability, birth_evidence, birth_surprise, birth_fragment |
+| nightstand, bed, toilet (countable) | beam_ray.h, beam_room.h, dof_spec.h, lidar_ray_factor.h, persistent_update.h, recursive_laplace.h | existence_belief, instance_tracker, contour_edge, exclusion, occlusion, detectability, birth_evidence, birth_surprise, birth_fragment |
+
+### Combined totals per class (class row + engine row it runs on + libraries it links)
+
+Class row = the baseline row (config + class src). Engine = for nightstand/bed/toilet the countable-engine row (src) plus the linked ai_belief files; for the others, the linked ai_belief files. Each constant counted once per class. Cells are counts of rows.
+
+| class | class | sensor | patch | switches (patch) | ambiguous (?) | excluded | switches (other) | patch total | ambiguous split | total rows |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chair | 5 | 8 | 98 | 9 | 38 | 41 | 6 | 107 | class 3, patch 18, sensor 9, excluded 8 | 205 |
+| table | 5 | 15 | 100 | 13 | 50 | 51 | 3 | 113 | class 7, patch 20, sensor 18, excluded 5 | 237 |
+| refrigerator | 9 | 15 | 114 | 8 | 64 | 53 | 4 | 122 | class 11, patch 30, sensor 18, excluded 5 | 267 |
+| hood | 11 | 12 | 113 | 8 | 64 | 53 | 4 | 121 | class 11, patch 30, sensor 18, excluded 5 | 265 |
+| nightstand | 13 | 19 | 112 | 11 | 69 | 65 | 4 | 123 | class 12, patch 30, sensor 22, excluded 5 | 293 |
+| bed | 13 | 19 | 112 | 11 | 69 | 65 | 4 | 123 | class 12, patch 30, sensor 22, excluded 5 | 293 |
+| toilet | 13 | 19 | 112 | 11 | 69 | 65 | 4 | 123 | class 12, patch 30, sensor 22, excluded 5 | 293 |
+
+Parts of each combined total (patch total, ambiguous), so the growth is traceable:
+
+| class | own row | engine src | ai_belief linked | libraries linked | combined patch total | combined ambiguous |
+|---|---|---|---|---|---|---|
+| chair | 91 / 26 | 0 / 0 | 0 / 0 | 16 / 12 | 107 | 38 |
+| table | 95 / 35 | 0 / 0 | 1 / 3 | 17 / 12 | 113 | 50 |
+| refrigerator | 104 / 49 | 0 / 0 | 1 / 3 | 17 / 12 | 122 | 64 |
+| hood | 103 / 49 | 0 / 0 | 1 / 3 | 17 / 12 | 121 | 64 |
+| nightstand | 95 / 32 | 10 / 19 | 1 / 6 | 17 / 12 | 123 | 69 |
+| bed | 95 / 32 | 10 / 19 | 1 / 6 | 17 / 12 | 123 | 69 |
+| toilet | 95 / 32 | 10 / 19 | 1 / 6 | 17 / 12 | 123 | 69 |
+
+(Cells show patch total / ambiguous.) The three countable classes share the engine and library rows; their combined totals differ only in their own config row.
+
