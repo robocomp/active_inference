@@ -1858,3 +1858,2835 @@ Parts of each combined total (patch total, ambiguous), so the growth is traceabl
 
 (Cells show patch total / ambiguous.) The three countable classes share the engine and library rows; their combined totals differ only in their own config row.
 
+
+---
+
+## Addendum 2: scope from the build
+
+Rule (referee's ruling, verbatim):
+
+> "The scope is every source file each class binary compiles or includes from common/ and from its own directory, taken from the build (the compile commands and the compiler's dependency output), not from a hand list. The after-count uses the same rule on the same build targets."
+
+- Counted on tree `45e5f5280f48f85a2e222900aaedce39a869583b` (HEAD `535d57ec6a77c18a430848e6dad4da9a61bb647e`, which holds the baseline and addendum 1). Date 2026-11-23. Same definition, labels and exclusion rule; no existing row was relabelled and the `?` rows are untouched.
+- Build targets: `chair_concept`, `table_concept`, `refrigerator_concept`, `hood_concept`, `countable_concept` (the binary nightstand, bed and toilet run).
+- Method: `cmake -S <agent> -B <scratch>/deps/<agent> -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` for each target (nothing was built). Every translation unit in `compile_commands.json` was rerun with `-o`/`-c` removed and `-MM -MG` added (8 at a time). The dependency lists were merged and filtered to files that exist under the worktree `common/` and under the agent's own directory. System, Qt, Eigen, `/usr/local` (cortex), and generated files were dropped.
+- Notes: (1) `-MG` was not needed: no listed header was missing. (2) 13 of the translation units per target are Qt `*_autogen/mocs_compilation.cpp` files that do not exist before a build, so `-MM` returned nothing for them; the headers they would pull (the Q_OBJECT classes) are reached by the normal translation units, so the lists are not shortened by this. All other translation units gave a dependency list. (3) Dropped as generated: `<agent>_concept/generated/*` (RoboComp boilerplate, 4 files: 3 reached per target) and `common/media_transport/generated/idl/*` (Fast DDS IDL output, 35 files reached). They are tracked but machine generated, and they hold no model constants. (4) Class manifests (`*.concept.toml`) are class knowledge and stay uncounted, as before; the manifest code (`common/concept_manifest/*.h`) is in scope and is listed.
+- Method for new files: the same literal scan and per-library rows. Plumbing-only files are listed with 0 rows. Pure display (`dashboard`, `graph3d`) rows are labelled excluded.
+- Own-directory files were already scanned in the baseline, except a few not in my earlier lists (`*_dof.h` target sigmas and `*_model.cpp` floors); they are added below as rows of the class concerned.
+
+### Files pulled in per target
+
+| target | translation units | own-dir files | common/ files | total files (after dropping generated) | generated dropped | common/ files already counted (baseline + addendum 1) | common/ files newly counted |
+|---|---|---|---|---|---|---|---|
+| chair_concept | 68 | 27 | 138 | 165 | 38 | 16 | 122 |
+| table_concept | 71 | 30 | 141 | 171 | 38 | 22 | 119 |
+| refrigerator_concept | 71 | 28 | 139 | 167 | 38 | 21 | 118 |
+| hood_concept | 71 | 28 | 141 | 169 | 38 | 21 | 120 |
+| countable_concept | 73 | 43 | 145 | 188 | 38 | 23 | 122 |
+
+Union of common/ files newly counted: 132 files in 53 directories (list below under "Newly counted files").
+
+### Per-target file lists
+
+<details><summary>chair_concept: 165 files</summary>
+
+**chair_concept/src/** (27)
+
+```
+chair_belief.cpp
+chair_belief.h
+chair_card.h
+chair_config.cpp
+chair_config.h
+chair_contour.h
+chair_detect.h
+chair_dof.h
+chair_existence.cpp
+chair_existence.h
+chair_fitter.cpp
+chair_fitter.h
+chair_ghost.h
+chair_instance.h
+chair_mesh.h
+chair_model.cpp
+chair_model.h
+chair_prior.h
+chair_scene_graph.cpp
+chair_scene_graph.h
+chair_support_bank.h
+epistemic_planner.cpp
+epistemic_planner.h
+specificworker.cpp
+specificworker.h
+specificworker_dashboard.cpp
+specificworker_presence.cpp
+```
+
+**common/affordance_manager/** (4)
+
+```
+affordance_manager.cpp
+affordance_manager.h
+affordance_room_scope.h
+update_if_live.h
+```
+
+**common/affordance_protocol/** (2)
+
+```
+affordance_goal_parse.h
+affordance_protocol.h
+```
+
+**common/agent_exit/** (1)
+
+```
+terminal_exit.h
+```
+
+**common/agent_presence_coordinator/** (2)
+
+```
+agent_presence_coordinator.cpp
+agent_presence_coordinator.h
+```
+
+**common/agent_presence_monitor/** (2)
+
+```
+agent_presence_monitor.cpp
+agent_presence_monitor.h
+```
+
+**common/agent_state_publisher/** (4)
+
+```
+agent_state_publisher.h
+agent_status.h
+agent_status_overlay.cpp
+agent_status_overlay.h
+```
+
+**common/ai_belief/** (2)
+
+```
+dof_spec.h
+recursive_laplace.h
+```
+
+**common/appearance_belief/** (4)
+
+```
+appearance_belief.h
+colour_name.h
+colour_terms.h
+colour_trace.h
+```
+
+**common/birth_fragment/** (1)
+
+```
+birth_fragment.h
+```
+
+**common/concept_manifest/** (2)
+
+```
+back_panel.h
+concept_manifest.h
+```
+
+**common/concept_presence/** (1)
+
+```
+concept_presence.h
+```
+
+**common/config_report/** (2)
+
+```
+config_read.h
+config_report.h
+```
+
+**common/contour_edge/** (6)
+
+```
+contour_depth_check.cpp
+contour_depth_check.h
+contour_edge_check.cpp
+contour_edge_check.h
+contour_edge_project.cpp
+contour_edge_project.h
+```
+
+**common/dashboard/** (13)
+
+```
+belief_card_fill.h
+belief_certainty.h
+belief_inspector.h
+belief_series.h
+belief_strip.h
+concept_dashboard.h
+custom_widget.h
+evidence_monitor.h
+series_pruner.cpp
+series_pruner.h
+timeseries_plot.cpp
+timeseries_plot.h
+window_geometry.h
+```
+
+**common/detectability/** (1)
+
+```
+detectability.h
+```
+
+**common/diag_log/** (1)
+
+```
+rotating_csv.h
+```
+
+**common/epistemic_step/** (1)
+
+```
+epistemic_step.h
+```
+
+**common/exclusion/** (2)
+
+```
+claims.h
+exclusion.h
+```
+
+**common/existence_belief/** (1)
+
+```
+existence_belief.h
+```
+
+**common/footprint/** (1)
+
+```
+footprint.h
+```
+
+**common/graph3d/** (3)
+
+```
+graph3d_scene.h
+graph3d_scene_builder.cpp
+graph3d_scene_builder.h
+```
+
+**common/graph_layout/** (1)
+
+```
+graph_layout.h
+```
+
+**common/graph_provenance/** (1)
+
+```
+creation_stamp.h
+```
+
+**common/instance_identity/** (1)
+
+```
+instance_identity.h
+```
+
+**common/instance_tracker/** (2)
+
+```
+birth_evidence.h
+instance_tracker.h
+```
+
+**common/interaction_anchor/** (3)
+
+```
+anchor_leaf.h
+interaction_anchor.h
+relative_pose.h
+```
+
+**common/lidar_ingestor/** (2)
+
+```
+concept_lidar_ingestor.cpp
+concept_lidar_ingestor.h
+```
+
+**common/mask_ingestor/** (4)
+
+```
+mask_azimuth_windows.h
+mask_ingestor.cpp
+mask_ingestor.h
+mask_nodes.h
+```
+
+**common/media_transport/** (6)
+
+```
+flat_json.h
+lidar_plane_reader.cpp
+lidar_plane_reader.h
+media_transport.cpp
+media_transport.h
+sensor_model.h
+```
+
+**common/nbv/** (4)
+
+```
+countable_planner.h
+graph_obstacles.h
+identified_obstacle.h
+viewpoint_score.h
+```
+
+**common/obj/** (3)
+
+```
+convergence.h
+obj_loader.cpp
+obj_loader.h
+```
+
+**common/object_affordance/** (2)
+
+```
+object_affordance.cpp
+object_affordance.h
+```
+
+**common/occlusion/** (1)
+
+```
+occlusion.h
+```
+
+**common/owned_nodes/** (1)
+
+```
+owned_nodes.h
+```
+
+**common/perception_card/** (4)
+
+```
+card.h
+card_io.h
+term_spec.h
+terms.h
+```
+
+**common/peripheral_channel/** (1)
+
+```
+peripheral_channel.h
+```
+
+**common/phantom_log/** (2)
+
+```
+observer_pose.h
+phantom_log.h
+```
+
+**common/pragmatic_affordance/** (5)
+
+```
+object_approach.cpp
+object_approach.h
+object_approach_geometry.h
+pragmatic_affordance.cpp
+pragmatic_affordance.h
+```
+
+**common/recall_match/** (3)
+
+```
+identity_link.h
+recall_candidates.h
+recall_match.h
+```
+
+**common/rgb_ingestor/** (4)
+
+```
+depth_ingestor.cpp
+depth_ingestor.h
+rgb_ingestor.cpp
+rgb_ingestor.h
+```
+
+**common/robot_capability/** (2)
+
+```
+robot_capability.cpp
+robot_capability.h
+```
+
+**common/robot_footprint/** (4)
+
+```
+mesh_hull.cpp
+mesh_hull.h
+robot_footprint.cpp
+robot_footprint.h
+```
+
+**common/robust_metrics/** (2)
+
+```
+robust_metrics.cpp
+robust_metrics.h
+```
+
+**common/room_resolve/** (4)
+
+```
+room_containment.h
+room_follow.h
+room_resolve.h
+room_resolve_rule.h
+```
+
+**common/room_transition/** (1)
+
+```
+exit_fact.h
+```
+
+**common/rt_covariance/** (1)
+
+```
+rt_covariance.h
+```
+
+**common/rt_query_probe/** (1)
+
+```
+rt_query_probe.h
+```
+
+**common/rt_twist/** (1)
+
+```
+rt_twist.h
+```
+
+**common/sensor_calib/** (6)
+
+```
+proposal_publisher.cpp
+proposal_publisher.h
+scan_registration.cpp
+scan_registration.h
+trajectory_harvester.cpp
+trajectory_harvester.h
+```
+
+**common/status_stream/** (3)
+
+```
+status_sink.h
+status_stream.cpp
+status_stream.h
+```
+
+**common/stream_gate/** (1)
+
+```
+stream_gate.h
+```
+
+**common/support_bank/** (1)
+
+```
+support_bank.h
+```
+
+**common/thumbs/** (2)
+
+```
+thumb_select.h
+thumb_wire.h
+```
+
+**common/track/** (2)
+
+```
+merge_instances.h
+merge_sweep.h
+```
+
+**common/view_atlas/** (1)
+
+```
+view_atlas.h
+```
+
+</details>
+
+<details><summary>table_concept: 171 files</summary>
+
+**common/affordance_manager/** (4)
+
+```
+affordance_manager.cpp
+affordance_manager.h
+affordance_room_scope.h
+update_if_live.h
+```
+
+**common/affordance_protocol/** (2)
+
+```
+affordance_goal_parse.h
+affordance_protocol.h
+```
+
+**common/agent_exit/** (1)
+
+```
+terminal_exit.h
+```
+
+**common/agent_presence_coordinator/** (2)
+
+```
+agent_presence_coordinator.cpp
+agent_presence_coordinator.h
+```
+
+**common/agent_presence_monitor/** (2)
+
+```
+agent_presence_monitor.cpp
+agent_presence_monitor.h
+```
+
+**common/agent_state_publisher/** (4)
+
+```
+agent_state_publisher.h
+agent_status.h
+agent_status_overlay.cpp
+agent_status_overlay.h
+```
+
+**common/ai_belief/** (4)
+
+```
+beam_ray.h
+dof_spec.h
+lidar_ray_factor.h
+recursive_laplace.h
+```
+
+**common/appearance_belief/** (1)
+
+```
+appearance_belief.h
+```
+
+**common/birth_fragment/** (1)
+
+```
+birth_fragment.h
+```
+
+**common/birth_surprise/** (3)
+
+```
+birth_surprise_log.h
+birth_surprise_probe.h
+residual_field_reader.h
+```
+
+**common/concept_manifest/** (2)
+
+```
+back_panel.h
+concept_manifest.h
+```
+
+**common/concept_presence/** (1)
+
+```
+concept_presence.h
+```
+
+**common/config_report/** (2)
+
+```
+config_read.h
+config_report.h
+```
+
+**common/contour_edge/** (6)
+
+```
+contour_depth_check.cpp
+contour_depth_check.h
+contour_edge_check.cpp
+contour_edge_check.h
+contour_edge_project.cpp
+contour_edge_project.h
+```
+
+**common/dashboard/** (13)
+
+```
+belief_card_fill.h
+belief_certainty.h
+belief_inspector.h
+belief_series.h
+belief_strip.h
+concept_dashboard.h
+custom_widget.h
+evidence_monitor.h
+series_pruner.cpp
+series_pruner.h
+timeseries_plot.cpp
+timeseries_plot.h
+window_geometry.h
+```
+
+**common/detect_probe/** (1)
+
+```
+detect_probe.h
+```
+
+**common/detectability/** (2)
+
+```
+blind_spot_map.h
+detectability.h
+```
+
+**common/diag_log/** (1)
+
+```
+rotating_csv.h
+```
+
+**common/epistemic_step/** (1)
+
+```
+epistemic_step.h
+```
+
+**common/exclusion/** (2)
+
+```
+claims.h
+exclusion.h
+```
+
+**common/existence_belief/** (1)
+
+```
+existence_belief.h
+```
+
+**common/footprint/** (1)
+
+```
+footprint.h
+```
+
+**common/graph3d/** (3)
+
+```
+graph3d_scene.h
+graph3d_scene_builder.cpp
+graph3d_scene_builder.h
+```
+
+**common/graph_layout/** (1)
+
+```
+graph_layout.h
+```
+
+**common/graph_provenance/** (1)
+
+```
+creation_stamp.h
+```
+
+**common/instance_identity/** (1)
+
+```
+instance_identity.h
+```
+
+**common/instance_tracker/** (2)
+
+```
+birth_evidence.h
+instance_tracker.h
+```
+
+**common/interaction_anchor/** (3)
+
+```
+anchor_leaf.h
+interaction_anchor.h
+relative_pose.h
+```
+
+**common/lidar_ingestor/** (2)
+
+```
+concept_lidar_ingestor.cpp
+concept_lidar_ingestor.h
+```
+
+**common/lidar_select/** (1)
+
+```
+lidar_select.h
+```
+
+**common/mask_ingestor/** (4)
+
+```
+mask_azimuth_windows.h
+mask_ingestor.cpp
+mask_ingestor.h
+mask_nodes.h
+```
+
+**common/media_transport/** (6)
+
+```
+flat_json.h
+lidar_plane_reader.cpp
+lidar_plane_reader.h
+media_transport.cpp
+media_transport.h
+sensor_model.h
+```
+
+**common/nbv/** (4)
+
+```
+countable_planner.h
+graph_obstacles.h
+identified_obstacle.h
+viewpoint_score.h
+```
+
+**common/obj/** (3)
+
+```
+convergence.h
+obj_loader.cpp
+obj_loader.h
+```
+
+**common/object_affordance/** (2)
+
+```
+object_affordance.cpp
+object_affordance.h
+```
+
+**common/object_anchor/** (2)
+
+```
+object_anchor_contract.h
+ray_anisotropic_cov.h
+```
+
+**common/occlusion/** (1)
+
+```
+occlusion.h
+```
+
+**common/owned_nodes/** (1)
+
+```
+owned_nodes.h
+```
+
+**common/perception_card/** (3)
+
+```
+card.h
+card_io.h
+term_spec.h
+```
+
+**common/peripheral_channel/** (1)
+
+```
+peripheral_channel.h
+```
+
+**common/phantom_log/** (2)
+
+```
+observer_pose.h
+phantom_log.h
+```
+
+**common/pragmatic_affordance/** (5)
+
+```
+object_approach.cpp
+object_approach.h
+object_approach_geometry.h
+pragmatic_affordance.cpp
+pragmatic_affordance.h
+```
+
+**common/recall_match/** (2)
+
+```
+recall_candidates.h
+recall_match.h
+```
+
+**common/rgb_ingestor/** (4)
+
+```
+depth_ingestor.cpp
+depth_ingestor.h
+rgb_ingestor.cpp
+rgb_ingestor.h
+```
+
+**common/robot_capability/** (2)
+
+```
+robot_capability.cpp
+robot_capability.h
+```
+
+**common/robot_footprint/** (4)
+
+```
+mesh_hull.cpp
+mesh_hull.h
+robot_footprint.cpp
+robot_footprint.h
+```
+
+**common/robust_metrics/** (2)
+
+```
+robust_metrics.cpp
+robust_metrics.h
+```
+
+**common/room_resolve/** (4)
+
+```
+room_containment.h
+room_follow.h
+room_resolve.h
+room_resolve_rule.h
+```
+
+**common/room_transition/** (1)
+
+```
+exit_fact.h
+```
+
+**common/rt_covariance/** (1)
+
+```
+rt_covariance.h
+```
+
+**common/rt_query_probe/** (1)
+
+```
+rt_query_probe.h
+```
+
+**common/rt_twist/** (1)
+
+```
+rt_twist.h
+```
+
+**common/sensor_calib/** (6)
+
+```
+proposal_publisher.cpp
+proposal_publisher.h
+scan_registration.cpp
+scan_registration.h
+trajectory_harvester.cpp
+trajectory_harvester.h
+```
+
+**common/status_stream/** (3)
+
+```
+status_sink.h
+status_stream.cpp
+status_stream.h
+```
+
+**common/stream_gate/** (1)
+
+```
+stream_gate.h
+```
+
+**common/support_bank/** (1)
+
+```
+support_bank.h
+```
+
+**common/track/** (2)
+
+```
+merge_instances.h
+merge_sweep.h
+```
+
+**common/view_atlas/** (1)
+
+```
+view_atlas.h
+```
+
+**table_concept/src/** (30)
+
+```
+epistemic_planner.cpp
+epistemic_planner.h
+round_table_belief.h
+specificworker.cpp
+specificworker.h
+specificworker_dashboard.cpp
+specificworker_lifecycle.cpp
+specificworker_presence.cpp
+table_belief.cpp
+table_belief.h
+table_card.h
+table_config.cpp
+table_config.h
+table_contour.h
+table_dof.h
+table_existence.cpp
+table_existence.h
+table_fitter.cpp
+table_fitter.h
+table_geometry.h
+table_instance.h
+table_lidar_range_channel.cpp
+table_lidar_range_channel.h
+table_model.cpp
+table_model.h
+table_projection.cpp
+table_projection.h
+table_scene_graph.cpp
+table_scene_graph.h
+table_support_bank.h
+```
+
+</details>
+
+<details><summary>refrigerator_concept: 167 files</summary>
+
+**common/affordance_manager/** (4)
+
+```
+affordance_manager.cpp
+affordance_manager.h
+affordance_room_scope.h
+update_if_live.h
+```
+
+**common/affordance_protocol/** (2)
+
+```
+affordance_goal_parse.h
+affordance_protocol.h
+```
+
+**common/agent_exit/** (1)
+
+```
+terminal_exit.h
+```
+
+**common/agent_presence_coordinator/** (2)
+
+```
+agent_presence_coordinator.cpp
+agent_presence_coordinator.h
+```
+
+**common/agent_presence_monitor/** (2)
+
+```
+agent_presence_monitor.cpp
+agent_presence_monitor.h
+```
+
+**common/agent_state_publisher/** (4)
+
+```
+agent_state_publisher.h
+agent_status.h
+agent_status_overlay.cpp
+agent_status_overlay.h
+```
+
+**common/ai_belief/** (4)
+
+```
+beam_ray.h
+dof_spec.h
+lidar_ray_factor.h
+recursive_laplace.h
+```
+
+**common/birth_fragment/** (1)
+
+```
+birth_fragment.h
+```
+
+**common/birth_surprise/** (3)
+
+```
+birth_surprise_log.h
+birth_surprise_probe.h
+residual_field_reader.h
+```
+
+**common/concept_manifest/** (2)
+
+```
+back_panel.h
+concept_manifest.h
+```
+
+**common/concept_presence/** (1)
+
+```
+concept_presence.h
+```
+
+**common/config_report/** (2)
+
+```
+config_read.h
+config_report.h
+```
+
+**common/contour_edge/** (6)
+
+```
+contour_depth_check.cpp
+contour_depth_check.h
+contour_edge_check.cpp
+contour_edge_check.h
+contour_edge_project.cpp
+contour_edge_project.h
+```
+
+**common/dashboard/** (13)
+
+```
+belief_card_fill.h
+belief_certainty.h
+belief_inspector.h
+belief_series.h
+belief_strip.h
+concept_dashboard.h
+custom_widget.h
+evidence_monitor.h
+series_pruner.cpp
+series_pruner.h
+timeseries_plot.cpp
+timeseries_plot.h
+window_geometry.h
+```
+
+**common/detect_probe/** (1)
+
+```
+detect_probe.h
+```
+
+**common/detectability/** (1)
+
+```
+detectability.h
+```
+
+**common/diag_log/** (1)
+
+```
+rotating_csv.h
+```
+
+**common/epistemic_step/** (1)
+
+```
+epistemic_step.h
+```
+
+**common/exclusion/** (2)
+
+```
+claims.h
+exclusion.h
+```
+
+**common/existence_belief/** (1)
+
+```
+existence_belief.h
+```
+
+**common/footprint/** (1)
+
+```
+footprint.h
+```
+
+**common/graph3d/** (3)
+
+```
+graph3d_scene.h
+graph3d_scene_builder.cpp
+graph3d_scene_builder.h
+```
+
+**common/graph_layout/** (1)
+
+```
+graph_layout.h
+```
+
+**common/graph_provenance/** (1)
+
+```
+creation_stamp.h
+```
+
+**common/instance_identity/** (1)
+
+```
+instance_identity.h
+```
+
+**common/instance_tracker/** (2)
+
+```
+birth_evidence.h
+instance_tracker.h
+```
+
+**common/interaction_anchor/** (3)
+
+```
+anchor_leaf.h
+interaction_anchor.h
+relative_pose.h
+```
+
+**common/lidar_ingestor/** (2)
+
+```
+concept_lidar_ingestor.cpp
+concept_lidar_ingestor.h
+```
+
+**common/lidar_select/** (1)
+
+```
+lidar_select.h
+```
+
+**common/mask_ingestor/** (4)
+
+```
+mask_azimuth_windows.h
+mask_ingestor.cpp
+mask_ingestor.h
+mask_nodes.h
+```
+
+**common/media_transport/** (6)
+
+```
+flat_json.h
+lidar_plane_reader.cpp
+lidar_plane_reader.h
+media_transport.cpp
+media_transport.h
+sensor_model.h
+```
+
+**common/nbv/** (4)
+
+```
+countable_planner.h
+graph_obstacles.h
+identified_obstacle.h
+viewpoint_score.h
+```
+
+**common/obj/** (3)
+
+```
+convergence.h
+obj_loader.cpp
+obj_loader.h
+```
+
+**common/object_affordance/** (2)
+
+```
+object_affordance.cpp
+object_affordance.h
+```
+
+**common/object_anchor/** (2)
+
+```
+object_anchor_contract.h
+ray_anisotropic_cov.h
+```
+
+**common/occlusion/** (1)
+
+```
+occlusion.h
+```
+
+**common/owned_nodes/** (1)
+
+```
+owned_nodes.h
+```
+
+**common/perception_card/** (3)
+
+```
+card.h
+card_io.h
+term_spec.h
+```
+
+**common/peripheral_channel/** (1)
+
+```
+peripheral_channel.h
+```
+
+**common/phantom_log/** (2)
+
+```
+observer_pose.h
+phantom_log.h
+```
+
+**common/pragmatic_affordance/** (5)
+
+```
+object_approach.cpp
+object_approach.h
+object_approach_geometry.h
+pragmatic_affordance.cpp
+pragmatic_affordance.h
+```
+
+**common/recall_match/** (2)
+
+```
+recall_candidates.h
+recall_match.h
+```
+
+**common/rgb_ingestor/** (4)
+
+```
+depth_ingestor.cpp
+depth_ingestor.h
+rgb_ingestor.cpp
+rgb_ingestor.h
+```
+
+**common/robot_capability/** (2)
+
+```
+robot_capability.cpp
+robot_capability.h
+```
+
+**common/robot_footprint/** (4)
+
+```
+mesh_hull.cpp
+mesh_hull.h
+robot_footprint.cpp
+robot_footprint.h
+```
+
+**common/robust_metrics/** (2)
+
+```
+robust_metrics.cpp
+robust_metrics.h
+```
+
+**common/room_resolve/** (4)
+
+```
+room_containment.h
+room_follow.h
+room_resolve.h
+room_resolve_rule.h
+```
+
+**common/room_transition/** (1)
+
+```
+exit_fact.h
+```
+
+**common/rt_covariance/** (1)
+
+```
+rt_covariance.h
+```
+
+**common/rt_query_probe/** (1)
+
+```
+rt_query_probe.h
+```
+
+**common/rt_twist/** (1)
+
+```
+rt_twist.h
+```
+
+**common/sensor_calib/** (6)
+
+```
+proposal_publisher.cpp
+proposal_publisher.h
+scan_registration.cpp
+scan_registration.h
+trajectory_harvester.cpp
+trajectory_harvester.h
+```
+
+**common/status_stream/** (3)
+
+```
+status_sink.h
+status_stream.cpp
+status_stream.h
+```
+
+**common/stream_gate/** (1)
+
+```
+stream_gate.h
+```
+
+**common/support_bank/** (1)
+
+```
+support_bank.h
+```
+
+**common/track/** (2)
+
+```
+merge_instances.h
+merge_sweep.h
+```
+
+**common/view_atlas/** (1)
+
+```
+view_atlas.h
+```
+
+**refrigerator_concept/src/** (28)
+
+```
+epistemic_planner.cpp
+epistemic_planner.h
+refrigerator_belief.cpp
+refrigerator_belief.h
+refrigerator_card.h
+refrigerator_config.cpp
+refrigerator_config.h
+refrigerator_dof.h
+refrigerator_existence.cpp
+refrigerator_existence.h
+refrigerator_fitter.cpp
+refrigerator_fitter.h
+refrigerator_geometry.h
+refrigerator_instance.h
+refrigerator_lidar_range_channel.cpp
+refrigerator_lidar_range_channel.h
+refrigerator_model.cpp
+refrigerator_model.h
+refrigerator_projection.cpp
+refrigerator_projection.h
+refrigerator_scene_graph.cpp
+refrigerator_scene_graph.h
+refrigerator_support_bank.h
+specificworker.cpp
+specificworker.h
+specificworker_dashboard.cpp
+specificworker_lifecycle.cpp
+specificworker_presence.cpp
+```
+
+</details>
+
+<details><summary>hood_concept: 169 files</summary>
+
+**common/affordance_manager/** (4)
+
+```
+affordance_manager.cpp
+affordance_manager.h
+affordance_room_scope.h
+update_if_live.h
+```
+
+**common/affordance_protocol/** (2)
+
+```
+affordance_goal_parse.h
+affordance_protocol.h
+```
+
+**common/agent_exit/** (1)
+
+```
+terminal_exit.h
+```
+
+**common/agent_presence_coordinator/** (2)
+
+```
+agent_presence_coordinator.cpp
+agent_presence_coordinator.h
+```
+
+**common/agent_presence_monitor/** (2)
+
+```
+agent_presence_monitor.cpp
+agent_presence_monitor.h
+```
+
+**common/agent_state_publisher/** (4)
+
+```
+agent_state_publisher.h
+agent_status.h
+agent_status_overlay.cpp
+agent_status_overlay.h
+```
+
+**common/ai_belief/** (4)
+
+```
+beam_ray.h
+dof_spec.h
+lidar_ray_factor.h
+recursive_laplace.h
+```
+
+**common/birth_fragment/** (1)
+
+```
+birth_fragment.h
+```
+
+**common/birth_surprise/** (3)
+
+```
+birth_surprise_log.h
+birth_surprise_probe.h
+residual_field_reader.h
+```
+
+**common/concept_manifest/** (2)
+
+```
+back_panel.h
+concept_manifest.h
+```
+
+**common/concept_presence/** (1)
+
+```
+concept_presence.h
+```
+
+**common/config_report/** (2)
+
+```
+config_read.h
+config_report.h
+```
+
+**common/contour_edge/** (6)
+
+```
+contour_depth_check.cpp
+contour_depth_check.h
+contour_edge_check.cpp
+contour_edge_check.h
+contour_edge_project.cpp
+contour_edge_project.h
+```
+
+**common/dashboard/** (13)
+
+```
+belief_card_fill.h
+belief_certainty.h
+belief_inspector.h
+belief_series.h
+belief_strip.h
+concept_dashboard.h
+custom_widget.h
+evidence_monitor.h
+series_pruner.cpp
+series_pruner.h
+timeseries_plot.cpp
+timeseries_plot.h
+window_geometry.h
+```
+
+**common/detect_probe/** (1)
+
+```
+detect_probe.h
+```
+
+**common/detectability/** (1)
+
+```
+detectability.h
+```
+
+**common/diag_log/** (1)
+
+```
+rotating_csv.h
+```
+
+**common/epistemic_step/** (1)
+
+```
+epistemic_step.h
+```
+
+**common/exclusion/** (2)
+
+```
+claims.h
+exclusion.h
+```
+
+**common/existence_belief/** (1)
+
+```
+existence_belief.h
+```
+
+**common/footprint/** (1)
+
+```
+footprint.h
+```
+
+**common/graph3d/** (3)
+
+```
+graph3d_scene.h
+graph3d_scene_builder.cpp
+graph3d_scene_builder.h
+```
+
+**common/graph_layout/** (1)
+
+```
+graph_layout.h
+```
+
+**common/graph_provenance/** (1)
+
+```
+creation_stamp.h
+```
+
+**common/instance_identity/** (1)
+
+```
+instance_identity.h
+```
+
+**common/instance_tracker/** (2)
+
+```
+birth_evidence.h
+instance_tracker.h
+```
+
+**common/interaction_anchor/** (3)
+
+```
+anchor_leaf.h
+interaction_anchor.h
+relative_pose.h
+```
+
+**common/lidar_ingestor/** (2)
+
+```
+concept_lidar_ingestor.cpp
+concept_lidar_ingestor.h
+```
+
+**common/lidar_select/** (1)
+
+```
+lidar_select.h
+```
+
+**common/mask_ingestor/** (4)
+
+```
+mask_azimuth_windows.h
+mask_ingestor.cpp
+mask_ingestor.h
+mask_nodes.h
+```
+
+**common/media_transport/** (6)
+
+```
+flat_json.h
+lidar_plane_reader.cpp
+lidar_plane_reader.h
+media_transport.cpp
+media_transport.h
+sensor_model.h
+```
+
+**common/nbv/** (4)
+
+```
+countable_planner.h
+graph_obstacles.h
+identified_obstacle.h
+viewpoint_score.h
+```
+
+**common/obj/** (3)
+
+```
+convergence.h
+obj_loader.cpp
+obj_loader.h
+```
+
+**common/object_affordance/** (2)
+
+```
+object_affordance.cpp
+object_affordance.h
+```
+
+**common/object_anchor/** (2)
+
+```
+object_anchor_contract.h
+ray_anisotropic_cov.h
+```
+
+**common/occlusion/** (1)
+
+```
+occlusion.h
+```
+
+**common/owned_nodes/** (1)
+
+```
+owned_nodes.h
+```
+
+**common/perception_card/** (3)
+
+```
+card.h
+card_io.h
+term_spec.h
+```
+
+**common/peripheral_channel/** (1)
+
+```
+peripheral_channel.h
+```
+
+**common/phantom_log/** (2)
+
+```
+observer_pose.h
+phantom_log.h
+```
+
+**common/pragmatic_affordance/** (5)
+
+```
+object_approach.cpp
+object_approach.h
+object_approach_geometry.h
+pragmatic_affordance.cpp
+pragmatic_affordance.h
+```
+
+**common/recall_match/** (2)
+
+```
+recall_candidates.h
+recall_match.h
+```
+
+**common/rgb_ingestor/** (4)
+
+```
+depth_ingestor.cpp
+depth_ingestor.h
+rgb_ingestor.cpp
+rgb_ingestor.h
+```
+
+**common/robot_capability/** (2)
+
+```
+robot_capability.cpp
+robot_capability.h
+```
+
+**common/robot_footprint/** (4)
+
+```
+mesh_hull.cpp
+mesh_hull.h
+robot_footprint.cpp
+robot_footprint.h
+```
+
+**common/robust_metrics/** (2)
+
+```
+robust_metrics.cpp
+robust_metrics.h
+```
+
+**common/room_resolve/** (4)
+
+```
+room_containment.h
+room_follow.h
+room_resolve.h
+room_resolve_rule.h
+```
+
+**common/room_transition/** (1)
+
+```
+exit_fact.h
+```
+
+**common/rt_covariance/** (1)
+
+```
+rt_covariance.h
+```
+
+**common/rt_query_probe/** (1)
+
+```
+rt_query_probe.h
+```
+
+**common/rt_twist/** (1)
+
+```
+rt_twist.h
+```
+
+**common/sensor_calib/** (6)
+
+```
+proposal_publisher.cpp
+proposal_publisher.h
+scan_registration.cpp
+scan_registration.h
+trajectory_harvester.cpp
+trajectory_harvester.h
+```
+
+**common/status_stream/** (3)
+
+```
+status_sink.h
+status_stream.cpp
+status_stream.h
+```
+
+**common/stream_gate/** (1)
+
+```
+stream_gate.h
+```
+
+**common/support_bank/** (1)
+
+```
+support_bank.h
+```
+
+**common/track/** (2)
+
+```
+merge_instances.h
+merge_sweep.h
+```
+
+**common/view_atlas/** (1)
+
+```
+view_atlas.h
+```
+
+**common/view_field/** (2)
+
+```
+phantom_feed.h
+view_field.h
+```
+
+**hood_concept/src/** (28)
+
+```
+epistemic_planner.cpp
+epistemic_planner.h
+hood_belief.cpp
+hood_belief.h
+hood_card.h
+hood_config.cpp
+hood_config.h
+hood_dof.h
+hood_existence.cpp
+hood_existence.h
+hood_fitter.cpp
+hood_fitter.h
+hood_geometry.h
+hood_instance.h
+hood_lidar_range_channel.cpp
+hood_lidar_range_channel.h
+hood_model.cpp
+hood_model.h
+hood_projection.cpp
+hood_projection.h
+hood_scene_graph.cpp
+hood_scene_graph.h
+hood_support_bank.h
+specificworker.cpp
+specificworker.h
+specificworker_dashboard.cpp
+specificworker_lifecycle.cpp
+specificworker_presence.cpp
+```
+
+</details>
+
+<details><summary>countable_concept: 188 files</summary>
+
+**common/affordance_manager/** (4)
+
+```
+affordance_manager.cpp
+affordance_manager.h
+affordance_room_scope.h
+update_if_live.h
+```
+
+**common/affordance_protocol/** (2)
+
+```
+affordance_goal_parse.h
+affordance_protocol.h
+```
+
+**common/agent_exit/** (1)
+
+```
+terminal_exit.h
+```
+
+**common/agent_presence_coordinator/** (2)
+
+```
+agent_presence_coordinator.cpp
+agent_presence_coordinator.h
+```
+
+**common/agent_presence_monitor/** (2)
+
+```
+agent_presence_monitor.cpp
+agent_presence_monitor.h
+```
+
+**common/agent_state_publisher/** (4)
+
+```
+agent_state_publisher.h
+agent_status.h
+agent_status_overlay.cpp
+agent_status_overlay.h
+```
+
+**common/ai_belief/** (6)
+
+```
+beam_ray.h
+beam_room.h
+dof_spec.h
+lidar_ray_factor.h
+persistent_update.h
+recursive_laplace.h
+```
+
+**common/birth_fragment/** (1)
+
+```
+birth_fragment.h
+```
+
+**common/birth_surprise/** (3)
+
+```
+birth_surprise_log.h
+birth_surprise_probe.h
+residual_field_reader.h
+```
+
+**common/concept_manifest/** (4)
+
+```
+back_panel.h
+class_prior.h
+concept_manifest.h
+shape_parts.h
+```
+
+**common/concept_presence/** (1)
+
+```
+concept_presence.h
+```
+
+**common/config_report/** (2)
+
+```
+config_read.h
+config_report.h
+```
+
+**common/contour_edge/** (6)
+
+```
+contour_depth_check.cpp
+contour_depth_check.h
+contour_edge_check.cpp
+contour_edge_check.h
+contour_edge_project.cpp
+contour_edge_project.h
+```
+
+**common/dashboard/** (13)
+
+```
+belief_card_fill.h
+belief_certainty.h
+belief_inspector.h
+belief_series.h
+belief_strip.h
+concept_dashboard.h
+custom_widget.h
+evidence_monitor.h
+series_pruner.cpp
+series_pruner.h
+timeseries_plot.cpp
+timeseries_plot.h
+window_geometry.h
+```
+
+**common/detect_probe/** (1)
+
+```
+detect_probe.h
+```
+
+**common/detectability/** (1)
+
+```
+detectability.h
+```
+
+**common/diag_log/** (1)
+
+```
+rotating_csv.h
+```
+
+**common/epistemic_step/** (1)
+
+```
+epistemic_step.h
+```
+
+**common/exclusion/** (2)
+
+```
+claims.h
+exclusion.h
+```
+
+**common/existence_belief/** (1)
+
+```
+existence_belief.h
+```
+
+**common/footprint/** (1)
+
+```
+footprint.h
+```
+
+**common/graph3d/** (3)
+
+```
+graph3d_scene.h
+graph3d_scene_builder.cpp
+graph3d_scene_builder.h
+```
+
+**common/graph_layout/** (1)
+
+```
+graph_layout.h
+```
+
+**common/graph_provenance/** (1)
+
+```
+creation_stamp.h
+```
+
+**common/instance_identity/** (1)
+
+```
+instance_identity.h
+```
+
+**common/instance_tracker/** (2)
+
+```
+birth_evidence.h
+instance_tracker.h
+```
+
+**common/interaction_anchor/** (3)
+
+```
+anchor_leaf.h
+interaction_anchor.h
+relative_pose.h
+```
+
+**common/lidar_ingestor/** (2)
+
+```
+concept_lidar_ingestor.cpp
+concept_lidar_ingestor.h
+```
+
+**common/lidar_select/** (1)
+
+```
+lidar_select.h
+```
+
+**common/mask_ingestor/** (4)
+
+```
+mask_azimuth_windows.h
+mask_ingestor.cpp
+mask_ingestor.h
+mask_nodes.h
+```
+
+**common/media_transport/** (6)
+
+```
+flat_json.h
+lidar_plane_reader.cpp
+lidar_plane_reader.h
+media_transport.cpp
+media_transport.h
+sensor_model.h
+```
+
+**common/nbv/** (4)
+
+```
+countable_planner.h
+graph_obstacles.h
+identified_obstacle.h
+viewpoint_score.h
+```
+
+**common/obj/** (3)
+
+```
+convergence.h
+obj_loader.cpp
+obj_loader.h
+```
+
+**common/object_affordance/** (2)
+
+```
+object_affordance.cpp
+object_affordance.h
+```
+
+**common/object_anchor/** (2)
+
+```
+object_anchor_contract.h
+ray_anisotropic_cov.h
+```
+
+**common/occlusion/** (1)
+
+```
+occlusion.h
+```
+
+**common/owned_nodes/** (1)
+
+```
+owned_nodes.h
+```
+
+**common/perception_card/** (3)
+
+```
+card.h
+card_io.h
+term_spec.h
+```
+
+**common/peripheral_channel/** (1)
+
+```
+peripheral_channel.h
+```
+
+**common/phantom_log/** (2)
+
+```
+observer_pose.h
+phantom_log.h
+```
+
+**common/place_memory/** (1)
+
+```
+place_map.h
+```
+
+**common/pragmatic_affordance/** (5)
+
+```
+object_approach.cpp
+object_approach.h
+object_approach_geometry.h
+pragmatic_affordance.cpp
+pragmatic_affordance.h
+```
+
+**common/recall_match/** (2)
+
+```
+recall_candidates.h
+recall_match.h
+```
+
+**common/rgb_ingestor/** (4)
+
+```
+depth_ingestor.cpp
+depth_ingestor.h
+rgb_ingestor.cpp
+rgb_ingestor.h
+```
+
+**common/robot_capability/** (2)
+
+```
+robot_capability.cpp
+robot_capability.h
+```
+
+**common/robot_footprint/** (4)
+
+```
+mesh_hull.cpp
+mesh_hull.h
+robot_footprint.cpp
+robot_footprint.h
+```
+
+**common/robust_metrics/** (2)
+
+```
+robust_metrics.cpp
+robust_metrics.h
+```
+
+**common/room_resolve/** (4)
+
+```
+room_containment.h
+room_follow.h
+room_resolve.h
+room_resolve_rule.h
+```
+
+**common/room_transition/** (1)
+
+```
+exit_fact.h
+```
+
+**common/rt_covariance/** (1)
+
+```
+rt_covariance.h
+```
+
+**common/rt_query_probe/** (1)
+
+```
+rt_query_probe.h
+```
+
+**common/rt_twist/** (1)
+
+```
+rt_twist.h
+```
+
+**common/self_body/** (1)
+
+```
+self_body.h
+```
+
+**common/sensor_calib/** (6)
+
+```
+proposal_publisher.cpp
+proposal_publisher.h
+scan_registration.cpp
+scan_registration.h
+trajectory_harvester.cpp
+trajectory_harvester.h
+```
+
+**common/status_stream/** (3)
+
+```
+status_sink.h
+status_stream.cpp
+status_stream.h
+```
+
+**common/stream_gate/** (1)
+
+```
+stream_gate.h
+```
+
+**common/support_bank/** (1)
+
+```
+support_bank.h
+```
+
+**common/track/** (2)
+
+```
+merge_instances.h
+merge_sweep.h
+```
+
+**common/view_atlas/** (1)
+
+```
+view_atlas.h
+```
+
+**countable_concept/src/** (43)
+
+```
+countable_assets.h
+countable_beam_config.h
+countable_beam_staging.h
+countable_belief.cpp
+countable_belief.h
+countable_birth_footprint.h
+countable_card.h
+countable_class_evidence.h
+countable_config.cpp
+countable_config.h
+countable_config_error.h
+countable_dof.h
+countable_existence.cpp
+countable_existence.h
+countable_fitter.cpp
+countable_fitter.h
+countable_geometry.h
+countable_instance.h
+countable_lidar_range_channel.cpp
+countable_lidar_range_channel.h
+countable_mask_membership.cpp
+countable_mask_membership.h
+countable_model.cpp
+countable_model.h
+countable_projection.cpp
+countable_projection.h
+countable_scene_graph.cpp
+countable_scene_graph.h
+countable_sections.h
+countable_shape_parts.h
+countable_support_bank.h
+countable_viewpoint.cpp
+countable_viewpoint.h
+epistemic_planner.cpp
+epistemic_planner.h
+rt_memo.h
+specificworker.cpp
+specificworker.h
+specificworker_dashboard.cpp
+specificworker_lifecycle.cpp
+specificworker_presence.cpp
+tick_memo.h
+tick_timing.h
+```
+
+</details>
+
+### Newly counted files (not scanned in the baseline or addendum 1)
+
+| library (common/) | files | pulled by | rows |
+|---|---|---|---|
+| affordance_manager | affordance_manager.cpp, affordance_manager.h, affordance_room_scope.h, update_if_live.h | all five | 4 |
+| affordance_protocol | affordance_goal_parse.h, affordance_protocol.h | all five | 4 |
+| agent_exit | terminal_exit.h | all five | 0 |
+| agent_presence_coordinator | agent_presence_coordinator.cpp, agent_presence_coordinator.h | all five | 0 |
+| agent_presence_monitor | agent_presence_monitor.cpp, agent_presence_monitor.h | all five | 0 |
+| agent_state_publisher | agent_state_publisher.h, agent_status.h, agent_status_overlay.cpp, agent_status_overlay.h | all five | 0 |
+| appearance_belief | appearance_belief.h, colour_name.h, colour_terms.h, colour_trace.h | chair, table | 6 |
+| concept_manifest | back_panel.h, class_prior.h, concept_manifest.h, shape_parts.h | all five | 1 |
+| concept_presence | concept_presence.h | all five | 0 |
+| config_report | config_read.h, config_report.h | all five | 0 |
+| dashboard | belief_card_fill.h, belief_certainty.h, belief_inspector.h, belief_series.h, belief_strip.h, concept_dashboard.h, custom_widget.h, evidence_monitor.h, series_pruner.cpp, series_pruner.h, timeseries_plot.cpp, timeseries_plot.h, window_geometry.h | all five | 3 |
+| detect_probe | detect_probe.h | table, refrigerator, hood, nightstand/bed/toilet | 0 |
+| diag_log | rotating_csv.h | all five | 0 |
+| epistemic_step | epistemic_step.h | all five | 0 |
+| footprint | footprint.h | all five | 0 |
+| graph3d | graph3d_scene.h, graph3d_scene_builder.cpp, graph3d_scene_builder.h | all five | 1 |
+| graph_layout | graph_layout.h | all five | 0 |
+| graph_provenance | creation_stamp.h | all five | 0 |
+| instance_identity | instance_identity.h | all five | 0 |
+| interaction_anchor | anchor_leaf.h, interaction_anchor.h, relative_pose.h | all five | 3 |
+| lidar_ingestor | concept_lidar_ingestor.cpp, concept_lidar_ingestor.h | all five | 0 |
+| lidar_select | lidar_select.h | table, refrigerator, hood, nightstand/bed/toilet | 2 |
+| mask_ingestor | mask_azimuth_windows.h, mask_ingestor.cpp, mask_ingestor.h, mask_nodes.h | all five | 2 |
+| media_transport | flat_json.h, lidar_plane_reader.cpp, lidar_plane_reader.h, media_transport.cpp, media_transport.h, sensor_model.h | all five | 1 |
+| nbv | countable_planner.h, graph_obstacles.h, identified_obstacle.h, viewpoint_score.h | all five | 4 |
+| obj | convergence.h, obj_loader.cpp, obj_loader.h | all five | 0 |
+| object_affordance | object_affordance.cpp, object_affordance.h | all five | 2 |
+| object_anchor | object_anchor_contract.h, ray_anisotropic_cov.h | table, refrigerator, hood, nightstand/bed/toilet | 5 |
+| owned_nodes | owned_nodes.h | all five | 0 |
+| perception_card | card.h, card_io.h, term_spec.h, terms.h | all five | 1 |
+| peripheral_channel | peripheral_channel.h | all five | 1 |
+| phantom_log | observer_pose.h, phantom_log.h | all five | 0 |
+| place_memory | place_map.h | nightstand/bed/toilet | 4 |
+| pragmatic_affordance | object_approach.cpp, object_approach.h, object_approach_geometry.h, pragmatic_affordance.cpp, pragmatic_affordance.h | all five | 3 |
+| recall_match | identity_link.h, recall_candidates.h, recall_match.h | all five | 1 |
+| rgb_ingestor | depth_ingestor.cpp, depth_ingestor.h, rgb_ingestor.cpp, rgb_ingestor.h | all five | 0 |
+| robot_capability | robot_capability.cpp, robot_capability.h | all five | 0 |
+| robot_footprint | mesh_hull.cpp, mesh_hull.h, robot_footprint.cpp, robot_footprint.h | all five | 2 |
+| robust_metrics | robust_metrics.cpp, robust_metrics.h | all five | 0 |
+| room_resolve | room_containment.h, room_follow.h, room_resolve.h, room_resolve_rule.h | all five | 0 |
+| room_transition | exit_fact.h | all five | 0 |
+| rt_covariance | rt_covariance.h | all five | 2 |
+| rt_query_probe | rt_query_probe.h | all five | 0 |
+| rt_twist | rt_twist.h | all five | 0 |
+| self_body | self_body.h | nightstand/bed/toilet | 1 |
+| sensor_calib | proposal_publisher.cpp, proposal_publisher.h, scan_registration.cpp, scan_registration.h, trajectory_harvester.cpp, trajectory_harvester.h | all five | 5 |
+| status_stream | status_sink.h, status_stream.cpp, status_stream.h | all five | 0 |
+| stream_gate | stream_gate.h | all five | 0 |
+| support_bank | support_bank.h | all five | 3 |
+| thumbs | thumb_select.h, thumb_wire.h | chair | 0 |
+| track | merge_instances.h, merge_sweep.h | all five | 0 |
+| view_atlas | view_atlas.h | all five | 5 |
+| view_field | phantom_feed.h, view_field.h | hood | 2 |
+
+### Rows of the newly counted files
+
+Same columns as the main summary; per library.
+
+| library | class | sensor | patch | switches (patch) | ambiguous (?) | excluded | switches (other) | patch total | ambiguous split | total rows |
+|---|---|---|---|---|---|---|---|---|---|---|
+| common/affordance_manager | 0 | 0 | 0 | 0 | 3 | 1 | 0 | 0 | excluded 3 | 4 |
+| common/affordance_protocol | 0 | 0 | 0 | 0 | 3 | 1 | 0 | 0 | excluded 3 | 4 |
+| common/agent_exit | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/agent_presence_coordinator | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/agent_presence_monitor | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/agent_state_publisher | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/appearance_belief | 0 | 0 | 0 | 0 | 6 | 0 | 0 | 0 | class 3, patch 2, sensor 1 | 6 |
+| common/concept_manifest | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | excluded 1 | 1 |
+| common/concept_presence | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/config_report | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/dashboard | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | - | 3 |
+| common/detect_probe | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/diag_log | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/epistemic_step | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/footprint | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/graph3d | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | - | 1 |
+| common/graph_layout | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/graph_provenance | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/instance_identity | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/interaction_anchor | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 0 | class 1, patch 2 | 3 |
+| common/lidar_ingestor | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/lidar_select | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 | - | 2 |
+| common/mask_ingestor | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | patch 1 | 2 |
+| common/media_transport | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | - | 1 |
+| common/nbv | 0 | 0 | 0 | 0 | 3 | 1 | 0 | 0 | sensor 1, excluded 2 | 4 |
+| common/obj | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/object_affordance | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | excluded 1 | 2 |
+| common/object_anchor | 0 | 0 | 2 | 0 | 3 | 0 | 0 | 2 | patch 1, sensor 2 | 5 |
+| common/owned_nodes | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/perception_card | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | - | 1 |
+| common/peripheral_channel | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 | - | 1 |
+| common/phantom_log | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/place_memory | 0 | 0 | 1 | 0 | 3 | 0 | 0 | 1 | class 1, patch 2 | 4 |
+| common/pragmatic_affordance | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 0 | excluded 3 | 3 |
+| common/recall_match | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 1 |
+| common/rgb_ingestor | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/robot_capability | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/robot_footprint | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | excluded 1 | 2 |
+| common/robust_metrics | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/room_resolve | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/room_transition | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/rt_covariance | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | patch 1 | 2 |
+| common/rt_query_probe | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/rt_twist | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/self_body | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | excluded 1 | 1 |
+| common/sensor_calib | 0 | 1 | 0 | 0 | 3 | 1 | 0 | 0 | patch 2, sensor 1 | 5 |
+| common/status_stream | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/stream_gate | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/support_bank | 0 | 0 | 2 | 0 | 0 | 1 | 0 | 2 | - | 3 |
+| common/thumbs | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/track | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - | 0 |
+| common/view_atlas | 0 | 0 | 0 | 0 | 4 | 1 | 0 | 0 | class 1, patch 2, sensor 1 | 5 |
+| common/view_field | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | patch 1, excluded 1 | 2 |
+
+#### common/affordance_manager
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| kPosEps / kYawEps | 0.03 / 0.0872665 | common/affordance_manager/affordance_manager.cpp:443 | affordance proposal change dedup (affordance layer, not the estimator) | excluded? |
+| kSameSpotM / kSameYawRad | 0.30 / 0.05 | common/affordance_manager/affordance_manager.cpp:815 | "same spot" test of an affordance claim | excluded? |
+| kVerdictQuantM | 0.05 | common/affordance_manager/affordance_manager.cpp:1461 | quantisation of the logged verdict | excluded |
+| select_lambda_cost_ | 0.2 | common/affordance_manager/affordance_manager.h:398 | cost weight of affordance selection (planner) | excluded? |
+
+#### common/affordance_protocol
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| detection_confidence GE | 0.20 | common/affordance_protocol/affordance_protocol.h:228 | contract gate on detector confidence, same literal in 8 contracts | excluded? |
+| still(a,b) | 0.10/0.15, 0.12/0.20 | common/affordance_protocol/affordance_protocol.h:229 | contract "robot still" thresholds per class contract | excluded? |
+| advance roi_fill | table 0.45, hood 0.30 | common/affordance_protocol/affordance_protocol.h:134 | contract advance threshold on ROI fill | excluded? |
+| timeout_ms default | 10000 | common/affordance_protocol/affordance_protocol.h:82 | contract timeout | excluded |
+
+#### common/agent_exit
+
+0 rows (plumbing or numeric guards only; files: terminal_exit.h).
+
+#### common/agent_presence_coordinator
+
+0 rows (plumbing or numeric guards only; files: agent_presence_coordinator.cpp, agent_presence_coordinator.h).
+
+#### common/agent_presence_monitor
+
+0 rows (plumbing or numeric guards only; files: agent_presence_monitor.cpp, agent_presence_monitor.h).
+
+#### common/agent_state_publisher
+
+0 rows (plumbing or numeric guards only; files: agent_state_publisher.h, agent_status.h, agent_status_overlay.cpp, agent_status_overlay.h).
+
+#### common/appearance_belief
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| prior_sigma | 0.29 | common/appearance_belief/appearance_belief.h:48 | colour prior std (uniform on [0,1]) | class? |
+| drift_sigma_per_s | 0.02 | common/appearance_belief/appearance_belief.h:53 | colour process noise (appearance persistence) | class? |
+| max_cells_per_frame | 16 | common/appearance_belief/appearance_belief.h:60 | cap of colour evidence per frame (shared-error style cap) | patch? |
+| p_foreign_mask | 0.05 | common/appearance_belief/appearance_belief.h:67 | share of mask pixels from another object (detector error) | sensor? |
+| chroma_sigma / lum_sigma | 0.04 / 0.15 | common/appearance_belief/colour_name.h:45 | width of colour-name likelihood | patch? |
+| colour prototypes (12) | RGB table | common/appearance_belief/colour_terms.h:19 | RGB prototypes of the colour vocabulary | class? |
+
+#### common/concept_manifest
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| band-contains-body fraction | 0.999 | common/concept_manifest/concept_manifest.h:408 | startup validation of a LiDAR band against the body | excluded? |
+
+#### common/concept_presence
+
+0 rows (plumbing or numeric guards only; files: concept_presence.h).
+
+#### common/config_report
+
+0 rows (plumbing or numeric guards only; files: config_read.h, config_report.h).
+
+#### common/dashboard
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| window / linger seconds | 60 / 6 / 5 (clamp) | common/dashboard/belief_strip.h:492 | display time windows (display only) | excluded |
+| visible_window_s | 60 | common/dashboard/concept_dashboard.h:59 | display window (display only) | excluded |
+| plot padding | 0.05, 0.1 | common/dashboard/timeseries_plot.cpp:218 | plot axis padding (display only) | excluded |
+
+#### common/detect_probe
+
+0 rows (plumbing or numeric guards only; files: detect_probe.h).
+
+#### common/diag_log
+
+0 rows (plumbing or numeric guards only; files: rotating_csv.h).
+
+#### common/epistemic_step
+
+0 rows (plumbing or numeric guards only; files: epistemic_step.h).
+
+#### common/footprint
+
+0 rows (plumbing or numeric guards only; files: footprint.h).
+
+#### common/graph3d
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| scene colours, radii, gaps | ~45 literals | common/graph3d/graph3d_scene_builder.cpp:23 | viewer colours and stratum geometry (visualisation only) | excluded |
+
+#### common/graph_layout
+
+0 rows (plumbing or numeric guards only; files: graph_layout.h).
+
+#### common/graph_provenance
+
+0 rows (plumbing or numeric guards only; files: creation_stamp.h).
+
+#### common/instance_identity
+
+0 rows (plumbing or numeric guards only; files: instance_identity.h).
+
+#### common/interaction_anchor
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| kLeafHalfThickM | 0.02 | common/interaction_anchor/anchor_leaf.h:41 | half thickness of the door leaf slab (shape) | class? |
+| kRotScaleSigma | 0.09 | common/interaction_anchor/relative_pose.h:74 | sigma scale of relative rotation | patch? |
+| kUnseenSigmaXYM / kUnseenSigmaYawRad | 0.08 / 0.05 | common/interaction_anchor/relative_pose.h:119 | sigma assigned to an unseen anchor | patch? |
+
+#### common/lidar_ingestor
+
+0 rows (plumbing or numeric guards only; files: concept_lidar_ingestor.cpp, concept_lidar_ingestor.h).
+
+#### common/lidar_select
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| coverage_n0 default | 60 | common/lidar_select/lidar_select.h:58 | ray count for full weight (same as LidarCoverageN0) | patch |
+| robust_c_m default | 0.10 | common/lidar_select/lidar_select.h:60 | Cauchy scale default (class config LidarRobustCM is 0.05) | patch |
+
+#### common/mask_ingestor
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| semantic class_id threshold | 1000 | common/mask_ingestor/mask_ingestor.h:136 | id convention for semantic masks | excluded |
+| pose_extrap_max_dt_s | 0.2 | common/mask_ingestor/mask_ingestor.h:278 | max extrapolation of the camera pose to the mask stamp | patch? |
+
+#### common/media_transport
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| deg2rad | pi/180 | common/media_transport/sensor_model.h:100 | unit conversion | excluded |
+
+#### common/nbv
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| default hfov | 70 deg | common/nbv/viewpoint_score.h:78 | default camera field of view (overwritten from the sensor model) | sensor? |
+| fov validity bounds / clamps | 0.05, 3.0, 0.1 | common/nbv/viewpoint_score.h:83 | validity guards on FOV (planner) | excluded? |
+| Gauss-Hermite nodes and weights | 5 nodes | common/nbv/viewpoint_score.h:253 | quadrature | excluded |
+| planner floors and caps | 0.05 / 200 / 8.0 | common/nbv/viewpoint_score.h:677 | depth floor, search caps, collision floor of the viewpoint planner | excluded? |
+
+#### common/obj
+
+0 rows (plumbing or numeric guards only; files: convergence.h, obj_loader.cpp, obj_loader.h).
+
+#### common/object_affordance
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| contract gate | 0.20 / 0.15 | common/object_affordance/object_affordance.cpp:339 | default contract gate and still threshold of the affordance | excluded? |
+| gain change dedup | 0.1 | common/object_affordance/object_affordance.cpp:296 | republish only if gain changed more than this | excluded |
+
+#### common/object_anchor
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| sigma_perp | 0.04 | common/object_anchor/ray_anisotropic_cov.h:29 | across-ray sigma of the object anchor | sensor? |
+| c_bias | 0.7 | common/object_anchor/ray_anisotropic_cov.h:30 | bias factor of the along-ray sigma | patch? |
+| depth_alpha | 0.01 | common/object_anchor/ray_anisotropic_cov.h:31 | depth sigma growth | sensor? |
+| obliquity_floor | 0.15 | common/object_anchor/ray_anisotropic_cov.h:32 | floor of obliquity | patch |
+| sigma_along_min | 0.06 | common/object_anchor/ray_anisotropic_cov.h:33 | floor of along-ray sigma | patch |
+
+#### common/owned_nodes
+
+0 rows (plumbing or numeric guards only; files: owned_nodes.h).
+
+#### common/perception_card
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| division guards | 1e-3 / 1e-6 | common/perception_card/terms.h:57 | numerical guards; terms take their constants (ref_m, power, sigma0, k) from each class card, not from this library | excluded |
+
+#### common/peripheral_channel
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| angular_margin_rad | 0.10 | common/peripheral_channel/peripheral_channel.h:95 | angular margin of a peripheral match | patch |
+
+#### common/phantom_log
+
+0 rows (plumbing or numeric guards only; files: observer_pose.h, phantom_log.h).
+
+#### common/place_memory
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| pool_p | 3.0 | common/place_memory/place_map.h:173 | pooling exponent of place scores | patch? |
+| tau / decay_a / decay_b / decay_r_m | 0.0552 / 0.770 / 0.190 / 0.580 | common/place_memory/place_map.h:235 | fitted memory decay of a place (persistence) | class? |
+| scene_depth_m | 4.0 | common/place_memory/place_map.h:240 | nominal scene depth | patch? |
+| max_pos_sigma_m | 6.0 | common/place_memory/place_map.h:253 | position sigma above which a place is not used (gate) | patch |
+
+#### common/pragmatic_affordance
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| turn_radius_m / value / arrival_m | 0.398 / 0.3 / 0.25 | common/pragmatic_affordance/object_approach.h:56 | approach affordance parameters (planner/affordance) | excluded? |
+| clearance_m | 0.398 | common/pragmatic_affordance/object_approach_geometry.h:56 | approach geometry clearance (robot property) | excluded? |
+| offer_prob / withdraw_prob | 0.60 / 0.35 | common/pragmatic_affordance/pragmatic_affordance.h:123 | hysteresis of offering an affordance | excluded? |
+
+#### common/recall_match
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| LinkParams pi_move / pi_gone / lambda_new | 0.10 each | common/recall_match/identity_link.h:51 | permanence rates of the identity link (same as Tracker.Link* config) | class |
+
+#### common/rgb_ingestor
+
+0 rows (plumbing or numeric guards only; files: depth_ingestor.cpp, depth_ingestor.h, rgb_ingestor.cpp, rgb_ingestor.h).
+
+#### common/robot_capability
+
+0 rows (plumbing or numeric guards only; files: robot_capability.cpp, robot_capability.h).
+
+#### common/robot_footprint
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| base polygon | 0.284/0.10/0.22/0.23 m | common/robot_footprint/robot_footprint.cpp:26 | robot body outline (robot property; not the object estimator) | excluded? |
+| footprint validation bounds | 0.15..1.00, 0.05, 0.10 | common/robot_footprint/robot_footprint.cpp:122 | sanity checks on a loaded footprint | excluded |
+
+#### common/robust_metrics
+
+0 rows (plumbing or numeric guards only; files: robust_metrics.cpp, robust_metrics.h).
+
+#### common/room_resolve
+
+0 rows (plumbing or numeric guards only; files: room_containment.h, room_follow.h, room_resolve.h, room_resolve_rule.h).
+
+#### common/room_transition
+
+0 rows (plumbing or numeric guards only; files: exit_fact.h).
+
+#### common/rt_covariance
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| kFlatRollPitchVar | 5e-4 | common/rt_covariance/rt_covariance.h:45 | variance of roll/pitch of a floor-standing object | patch? |
+| change_frac / min_move_m | 0.05 / 0.05 | common/rt_covariance/rt_covariance.h:87 | publication dedup | excluded |
+
+#### common/rt_query_probe
+
+0 rows (plumbing or numeric guards only; files: rt_query_probe.h).
+
+#### common/rt_twist
+
+0 rows (plumbing or numeric guards only; files: rt_twist.h).
+
+#### common/self_body
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| far cull | 6 sigma | common/self_body/self_body.h:94 | distance beyond which self-body term is skipped (cost cull) | excluded? |
+
+#### common/sensor_calib
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| move_sigma | 0.1 | common/sensor_calib/proposal_publisher.h:75 | sigma of a published calibration proposal | patch? |
+| scan_registration shrink | 0.7 / 0.25 | common/sensor_calib/scan_registration.cpp:157 | sigma shrink and weight floor in the registration loop | patch? |
+| ScanReg sigma_m / pi_inlier0 | 0.01 / 0.8 | common/sensor_calib/scan_registration.h:22 | LiDAR registration range sigma / inlier prior | sensor? |
+| trajectory harvester sigmas | 0.05,0.0175,0.01,0.002,0.005,0.2,0.01,0.01,0.002 | common/sensor_calib/trajectory_harvester.h:85 | odometry, wheel, gyro and registration noise of the self-calibration | sensor |
+| ring_span_s / history_s | 30 / 90 | common/sensor_calib/trajectory_harvester.h:96 | history windows (engineering) | excluded |
+
+#### common/status_stream
+
+0 rows (plumbing or numeric guards only; files: status_sink.h, status_stream.cpp, status_stream.h).
+
+#### common/stream_gate
+
+0 rows (plumbing or numeric guards only; files: stream_gate.h).
+
+#### common/support_bank
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| radius_margin_m / height_margin_m | 0.50 / 0.25 | common/support_bank/support_bank.h:65 | ownership margins (class config SupportSelect*Margin overrides) | patch |
+| below_m | 0.05 | common/support_bank/support_bank.h:74 | margin below the floor | patch |
+| quantization_m | 0.02 | common/support_bank/support_bank.h:75 | dedup grid | excluded |
+
+#### common/thumbs
+
+0 rows (plumbing or numeric guards only; files: thumb_select.h, thumb_wire.h).
+
+#### common/track
+
+0 rows (plumbing or numeric guards only; files: merge_instances.h, merge_sweep.h).
+
+#### common/view_atlas
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| ell_rad / repeat_ell_rad / repeat_ell_logr | 0.90 / 0.10 / 0.20 | common/view_atlas/view_atlas.h:41 | kernel length scales of the view atlas | patch? |
+| mu_own / mu_bg / cov_own / cov_bg / cov_n | 0.96,0.97 / 0.87,0.50 / 9e-4 ... | common/view_atlas/view_atlas.h:46 | measured appearance statistics of own vs background | sensor? |
+| lambda_nats | 0.05 | common/view_atlas/view_atlas.h:51 | weight of the atlas term | patch? |
+| max_rate_hz | 4.0 | common/view_atlas/view_atlas.h:52 | update rate cap | excluded |
+| pi_move | 0.2 | common/view_atlas/view_atlas.h:53 | P(object moved), permanence | class? |
+
+#### common/view_field
+
+| name | value | where | role | label |
+|---|---|---|---|---|
+| cell_m | 0.25 | common/view_field/view_field.h:71 | grid resolution | excluded? |
+| prior_strength / forget | 20 / 0.995 | common/view_field/view_field.h:78 | prior pseudo-counts and forgetting of the view field | patch? |
+
+#### Own-directory rows added (files not in the earlier lists)
+
+| class | name | value | where | role | label |
+|---|---|---|---|---|---|
+| chair | DOF sigma_star | 0.07 m,0.07 m,0.07 rad | chair_concept/src/chair_dof.h:42 | target posterior sigma per DOF: when an object counts as resolved (epistemic demand) | patch? |
+| table | DOF sigma_star | 0.02 m (cx,cy,H,w,h), 0.05 rad (yaw) | table_concept/src/table_dof.h:25 | target posterior sigma per DOF (epistemic demand) | patch? |
+| table | model size floors | w,h>=0.1; H>=0.05+top; leg>=0.05 | table_concept/src/table_model.cpp:139 | clamps of the state in the model | patch? |
+| refrigerator | DOF sigma_star | 0.02 m, 0.05 rad (copied from table) | refrigerator_concept/src/refrigerator_dof.h:21 | target posterior sigma per DOF (epistemic demand) | patch? |
+| refrigerator | model size floors | w,h>=0.1; H>=0.05+top; leg>=0.05 | refrigerator_concept/src/refrigerator_model.cpp:108 | clamps of the state in the model | patch? |
+| hood | model size floors | w,h>=0.1; extent>=0.05 | hood_concept/src/hood_model.cpp:113 | clamps of the state in the model | patch? |
+
+### Updated combined totals per class under the build rule
+
+Class load = own row (baseline) + own-directory rows added above + engine row (nightstand/bed/toilet: countable-engine src) + every common/ file the target pulls (ai_belief, the seven libraries and the newly counted files), counted per file. Cells are counts of rows. `countable` is shared by nightstand, bed and toilet; each adds its own config row.
+
+| class | class | sensor | patch | switches (patch) | ambiguous (?) | excluded | switches (other) | patch total | ambiguous split | total rows |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chair | 6 | 9 | 101 | 9 | 69 | 57 | 6 | 110 | class 8, patch 26, sensor 13, excluded 22 | 257 |
+| table | 5 | 16 | 107 | 13 | 89 | 71 | 3 | 120 | class 11, patch 32, sensor 26, excluded 20 | 304 |
+| refrigerator | 9 | 16 | 121 | 8 | 96 | 73 | 4 | 129 | class 13, patch 38, sensor 25, excluded 20 | 327 |
+| hood | 11 | 13 | 120 | 8 | 97 | 73 | 4 | 128 | class 13, patch 38, sensor 25, excluded 21 | 326 |
+| nightstand | 13 | 20 | 120 | 11 | 100 | 80 | 4 | 131 | class 15, patch 38, sensor 27, excluded 20 | 348 |
+| bed | 13 | 20 | 120 | 11 | 100 | 80 | 4 | 131 | class 15, patch 38, sensor 27, excluded 20 | 348 |
+| toilet | 13 | 20 | 120 | 11 | 100 | 80 | 4 | 131 | class 15, patch 38, sensor 27, excluded 20 | 348 |
+
+Breakdown (patch total / ambiguous):
+
+| class | own row (+own dir) | countable engine src | common/ (all pulled files) | combined patch total | combined ambiguous | baseline row alone | addendum 1 combined |
+|---|---|---|---|---|---|---|---|
+| chair | 91 / 27 | 0 / 0 | 19 / 42 | 110 | 69 | 91 / 26 | 107 / 38 |
+| table | 95 / 37 | 0 / 0 | 25 / 52 | 120 | 89 | 95 / 35 | 113 / 50 |
+| refrigerator | 104 / 51 | 0 / 0 | 25 / 45 | 129 | 96 | 104 / 49 | 122 / 64 |
+| hood | 103 / 50 | 0 / 0 | 25 / 47 | 128 | 97 | 103 / 49 | 121 / 64 |
+| nightstand | 95 / 32 | 10 / 19 | 26 / 49 | 131 | 100 | 95 / 32 | 123 / 69 |
+| bed | 95 / 32 | 10 / 19 | 26 / 49 | 131 | 100 | 95 / 32 | 123 / 69 |
+| toilet | 95 / 32 | 10 / 19 | 26 / 49 | 131 | 100 | 95 / 32 | 123 / 69 |
+
+The growth from addendum 1 comes from the newly counted common/ files. Most are labelled `excluded` or `?` (affordance, planner, display, calibration code on the object path); the patch total moves little. Which of the `?` rows are patch is left to the blind referee.
+
