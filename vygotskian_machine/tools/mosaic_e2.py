@@ -21,16 +21,18 @@ HERE = Path(__file__).resolve().parent
 FRAMES = Path("/media/datadisk/scannet/tasks/scannet_frames_25k")
 ROOMS = ["scene0003_00", "scene0217_00", "scene0061_00", "scene0026_00", "scene0093_00", "scene0497_00"]
 SOURCES = [("vlm", "VLM elicited"), ("vlm_cal", "VLM calibrated"), ("handwritten", "Hand-written"),
-           ("image", "One image")]
+           ("image", "One image"), ("objects", "Object list")]
 GOOD, BAD, INK, MUTED = "#008300", "#c0392b", "#1f1f1e", "#6b6a63"
 
 
 def main() -> None:
     per = {r["room"]: r for r in csv.DictReader((HERE / "e2_out/e2_per_room_scannet.csv").open())}
+    for rec in map(json.loads, (HERE / "e2_out/objects_answers.jsonl").open()):
+        per[rec["room"]]["objects_answer"] = rec["answer"]
     frame = {r["scan"]: r["frames"][0] for r in map(json.loads, (HERE / "e2_out/image_answers.jsonl").open())
              if r["k"] == 1 and r.get("num_ctx") is None}
     plt.rcParams.update({"font.size": 7, "font.family": "DejaVu Sans", "pdf.fonttype": 42})
-    fig, axs = plt.subplots(2, 3, figsize=(6.9, 4.9), gridspec_kw={"hspace": 1.05, "wspace": 0.06})
+    fig, axs = plt.subplots(2, 3, figsize=(6.9, 5.2), gridspec_kw={"hspace": 1.2, "wspace": 0.06})
     for ax, room in zip(axs.flat, ROOMS):
         r = per[room]
         ax.imshow(plt.imread(FRAMES / room / "color" / frame[room]))
@@ -42,6 +44,7 @@ def main() -> None:
         ax.text(0, -0.03, objs, transform=ax.transAxes, va="top", fontsize=6.3, color=MUTED, style="italic",
                 linespacing=1.1)
         for i, (k, name) in enumerate(SOURCES):
+            k = "objects_answer" if k == "objects" else k
             ok = r[k] == r["truth"]
             y = -0.21 - 0.1 * i
             ax.text(0, y, "✓" if ok else "✗", transform=ax.transAxes, va="top", fontsize=7.5,

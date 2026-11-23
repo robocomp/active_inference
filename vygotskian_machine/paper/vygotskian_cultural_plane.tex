@@ -106,6 +106,11 @@ reliability for $f$, the posterior mean, under a $\mathrm{Beta}(1,1)$ prior, of 
 agrees with a person who has stated the room's function. It is updated only on such rooms, so the VLM's reliability is
 never scored against labels its own priors produced. The effective weight of the VLM, $\kappa\beta_f/(\kappa\beta_f +
 n_f)$, decreases as experience accumulates.
+The VLM answers on a graded scale whose levels it does not map to frequencies correctly
+(Section~\ref{sec:experiments:e2}). We therefore take $\pi^{\text{VLM}}_{cf} = g(\ell_{cf})$, where $\ell_{cf}$ is the
+level the VLM chose and $g$ is one monotone map from levels to probabilities, shared by every class and function and
+fitted by isotonic regression to the same confirmed rooms. The VLM supplies the order of the classes, and the
+confirmed rooms supply the scale.
 
 The counts must not confirm the prior that produced them, as they would if a room counted because a posterior
 computed with $\hat\pi_{cf}$ had become confident. We therefore admit a room into $n_f$ only if a person has stated its

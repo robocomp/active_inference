@@ -1,9 +1,8 @@
 % =====================================================================================================
 % vygotskian_experiments.tex — The Vygotskian machine, part 5: experimental evidence
 %
-% DRAFT (2026-11-20, revised after the critical review, cut for length). STRUCTURE ONLY: no experiment of the
-% Vygotskian machine has been run yet. Every number is a red \result{} placeholder; the prose says what each
-% experiment measures and which prediction it tests, so that the values can be swapped in without rewriting.
+% DRAFT. E1 and the offline part of E2 have been run (tools/, 2026-11-23); every other number is a red \result{}
+% placeholder, and the prose says what each experiment measures and which prediction it tests.
 % Order = the build order of the design note (Part E): each experiment gates the next.
 % =====================================================================================================
 
@@ -72,8 +71,8 @@ We also report the correct membership decisions that change when logged kitchen 
 
 L0 holds on both corpora and on replay, where every changed decision admits a true kitchen unit. The VLM orders each
 function's classes well (rank correlation 0.71 to 0.80 with ScanNet, 0.31 for its 19 corridors) but overstates
-presence by 0.22, so a corpus frequency blind to function scores better (0.114): the VLM supplies the order and the
-counts of Eq.~\eqref{eq:lh_beta_prior} correct the level. The log holds only kitchen units, so raising the cabinet
+presence by 0.22, so a corpus frequency blind to function scores better (0.114): the VLM supplies the order, and E2 shows
+that the level has to come from counts. The log holds only kitchen units, so raising the cabinet
 to 1.85 has an untested cost.
 
 \begin{table}[!htb]
@@ -100,50 +99,66 @@ Each ScanNet room is scored from its annotated objects, taken as certain detecti
 as searched and absent. Five sources of $\pi_{cf}$ are compared:
 \begin{itemize}
     \item \emph{VLM, as elicited}: the five answer levels of E1 used as probabilities;
-    \item \emph{VLM, calibrated}: the same answers, with each level replaced once by how often ProcTHOR-10k rooms
-          actually contain an object the VLM gave that level (monotone, by isotonic regression; ScanNet is held out);
-    \item \emph{uniform} (0.5 everywhere), \emph{hand-written} (the authors' table of signature objects), and
-          \emph{co-occurrence} counted on the other half of ScanNet, the best a prior can do.
+    \item \emph{VLM, calibrated}: the map $g$ of Section~\ref{sec:lang_hierarchy:culture} fitted once on the 45{,}160
+          labelled rooms of ProcTHOR-10k (ScanNet is held out);
+    \item \emph{uniform} (0.5 everywhere), \emph{hand-written} (the authors' table of signature objects, extended
+          after the first run), and \emph{co-occurrence} counted on the other half of ScanNet.
 \end{itemize}
-A sixth baseline asks the VLM for the function from one photograph of the room. We report macro F1 of the functions
-with $\Lambda_f > 0$ and top-1 accuracy of the largest $\Lambda_f$, with paired bootstrap intervals over rooms. L1
-holds on the corpus if the VLM source beats the uniform and hand-written sources.
+Two baselines skip the evidence: the VLM asked for the function from one photograph of the room, and from the list
+of its annotated objects \cite{chen2022leveraging}. We report macro F1 of the functions with $\Lambda_f > 0$ and
+top-1 accuracy of the largest $\Lambda_f$, with paired bootstrap intervals over rooms. L1 holds on the corpus if the
+VLM source beats the uniform and hand-written sources. To see how the robot would get $g$, we also refit it from
+$n$ rooms drawn from one half of ScanNet, as if a person had confirmed them, and score the other half (20 draws per
+$n$, both halves in turn).
 
-The results are in Figures~\ref{fig:exp_e2} and~\ref{fig:exp_e2_rooms}:
+The results are in Figures~\ref{fig:exp_e2}--\ref{fig:exp_e2_rooms}:
 \begin{itemize}
-    \item \textbf{As elicited, the VLM fails L1} (macro F1 0.53 against 0.75 hand-written, $[-0.27,-0.18]$). It
-          overstates presence (E1), so an expected object that is missing sinks the right function, and the
-          corridor, which expects nothing, wins 252 of 457 rooms.
-    \item \textbf{Calibrated, it ties the hand-written table in F1 and beats it in top-1} (0.75 and 0.84;
-          differences $-0.00$ $[-0.03,+0.03]$ and $+0.06$ $[+0.02,+0.09]$). The levels 0.05, 0.25, 0.5, 0.75, 0.95
-          become 0.03, 0.03, 0.38, 0.38, 0.68. On ProcTHOR, in sample, it reaches 0.93 and 0.96.
-    \item \textbf{It beats one photograph} (0.69 and 0.70), which often shows a wall, a wardrobe or a radiator,
-          and stays below co-occurrence (0.80 and 0.92).
-    \item \textbf{The corridor is weak for every source} (F1 at most 0.41), because a ScanNet hallway holds few
-          annotated objects.
+    \item \textbf{L1 fails as stated.} As elicited, the VLM trails the hand-written table (macro F1 0.53 against
+          0.75, $[-0.27,-0.18]$). It overstates presence (E1), so an expected object that is missing sinks the right
+          function, and the corridor, which expects nothing, wins 252 of 457 rooms. Eq.~\eqref{eq:lh_beta_prior}
+          without counts does not help (0.55, top-1 0.50).
+    \item \textbf{The order is right; the scale is not.} Calibrated on ProcTHOR, the VLM ties the hand-written
+          table in F1 and beats it in top-1 (0.75 and 0.84; differences $-0.00$ $[-0.03,+0.03]$ and $+0.06$
+          $[+0.02,+0.09]$). The levels 0.05, 0.25, 0.5, 0.75, 0.95 become 0.03, 0.03, 0.38, 0.38, 0.68.
+    \item \textbf{Five confirmed rooms are enough to learn the scale} (Figure~\ref{fig:exp_e2_curve}). With $g$
+          fitted on five rooms the VLM reaches 0.75 and 0.84; Eq.~\eqref{eq:lh_beta_prior} per cell needs about 50
+          rooms, and counts without the VLM about 100. This is the VLM's contribution: the order of the classes,
+          which saves the robot tens of confirmed rooms.
+    \item \textbf{Asking the VLM directly is better on the corpus.} Given the object list, the VLM names the
+          function with macro F1 0.84 and top-1 0.92, ahead of the calibrated evidence ($+0.09$ $[+0.05,+0.14]$ and
+          $+0.09$ $[+0.05,+0.12]$) and of one photograph (0.69 and 0.70), which often shows only a wall or a
+          wardrobe. The corridor is weak for every source (F1 at most 0.41).
 \end{itemize}
-L1 therefore holds for ranking functions, not for deciding which to claim, and only once counts have set the
-levels. The corpus assumes perfect detection, so the robot's recorded tours test the evidence under its own
-perception, where each $\Lambda_f$ should leave its prior log-odds only as the room is explored
-(Figure~\result{--}).
+On the corpus, then, culture enters the evidence only as an order, and the evidence does not beat asking the VLM.
+What the corpus cannot show is what the direct question lacks: a list of uncertain detections from a partly searched
+room, absence weighed by where the robot looked, and no VLM call once the rooms are confirmed. The robot's recorded
+tours test this, where each $\Lambda_f$ should leave its prior log-odds only as the room is explored, and where the
+direct question must be asked from the robot's own detections (Figure~\result{--}).
 
 \begin{figure}[!htb]
     \centering
     \includegraphics[width=\textwidth]{figures/e2_results.pdf}
     \caption{Function evidence on ScanNet (E2, 457 rooms, held out). (a) Macro F1 and top-1 accuracy per source;
-    co-occurrence is fitted on the other half of the corpus. (b) F1 per function.}
+    the object-list and one-image baselines ask the VLM directly. (b) F1 per function.}
     \label{fig:exp_e2}
+\end{figure}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=\textwidth]{figures/e2_curve.pdf}
+    \caption{Learning the VLM's scale from person-confirmed rooms (E2). Mean over 20 draws and both halves of
+    ScanNet, with the 95\% range shaded; scored on the held-out half.}
+    \label{fig:exp_e2_curve}
 \end{figure}
 
 \begin{figure}[!htb]
     \centering
     \includegraphics[width=\textwidth]{figures/e2_rooms.pdf}
     \caption{Six ScanNet rooms (E2). Title: the annotated function; photograph: the frame the image baseline saw;
-    italics: the annotated objects the evidence uses; below: the top function under each source. The last room is
-    labelled a living room but holds a kitchen run, so every source fails.}
+    italics: the annotated objects; below: the top function under each source. The last room is labelled a living
+    room but holds a kitchen run, so every source fails.}
     \label{fig:exp_e2_rooms}
 \end{figure}
-
 
 \subsection{E3: The function agent, live and read-only}
 \label{sec:experiments:e3}
@@ -221,8 +236,10 @@ seeds (\result{--}).
 \label{sec:experiments:against}
 
 The VLM supplies no usable culture if its E1 priors are no better calibrated than the constant prior, and culture
-does not belong at level 4 if E2 or E3 fails; if the image baseline labels rooms as well as the function agent, the
-hierarchy adds nothing to labelling. The demand signal fails if E4 misses, asking adds nothing to
+does not belong at level 4 if E2 or E3 fails; if asking the VLM directly, from an image or from the
+list of detected objects, labels rooms as well as the function agent, the hierarchy adds nothing to labelling. On
+the corpus the object list already does better (E2), so this falsifier is decided live, in E3, on the robot's own
+detections. The demand signal fails if E4 misses, asking adds nothing to
 looking if the matched look policy does as well in E5, and imagination is not worth its cost if E6 shows no gain. If
 the controls keep up on novel tasks in E7, the machine works but is not Vygotskian, and if uncertainty-selected
 requests do no better than input-matched ones, uncertainty adds nothing to plan reuse.

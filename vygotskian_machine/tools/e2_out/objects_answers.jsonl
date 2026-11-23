@@ -1,0 +1,457 @@
+{"model": "gemma4:26b", "room": "scene0001_00", "objects": ["sofa", "armchair", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0002_00", "objects": ["sofa", "television", "chair", "refrigerator", "microwave", "cabinet", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0003_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0004_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0006_00", "objects": ["bed", "nightstand", "television", "chair", "desk", "mirror", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0007_00", "objects": ["cabinet"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0009_00", "objects": ["sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0010_00", "objects": ["chair", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0011_00", "objects": ["armchair", "television", "chair", "sink", "refrigerator", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0012_00", "objects": ["armchair", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0013_00", "objects": ["armchair", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0014_00", "objects": ["toilet", "sink", "shower", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0017_00", "objects": ["chair", "desk", "computer monitor", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0019_00", "objects": ["sofa", "chair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0021_00", "objects": ["sofa", "armchair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0022_00", "objects": ["sofa", "armchair", "chair", "refrigerator"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0024_00", "objects": ["chest of drawers", "sofa", "armchair", "chair", "cabinet", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0025_00", "objects": ["sofa", "desk", "office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0026_00", "objects": ["toilet", "sink", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0027_00", "objects": ["sofa", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0029_00", "objects": ["toilet", "bathtub"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0031_00", "objects": ["sofa", "armchair", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0032_00", "objects": ["bed", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0033_00", "objects": ["armchair", "coffee table", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0034_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0035_00", "objects": ["bed", "nightstand", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0036_00", "objects": ["sofa", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0039_00", "objects": ["bed", "nightstand", "chair", "desk", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0040_00", "objects": ["sofa", "bookshelf", "chair", "desk", "office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0042_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0043_00", "objects": ["chair", "desk"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0045_00", "objects": ["sofa", "television", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0047_00", "objects": ["dining table", "chair", "sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0049_00", "objects": ["chest of drawers", "sofa", "armchair", "coffee table", "television", "bookshelf", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0050_00", "objects": ["sofa", "armchair", "chair", "desk", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0051_00", "objects": ["bed", "nightstand", "chest of drawers", "bookshelf", "chair", "computer monitor", "toilet", "sink", "shower", "mirror"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0055_00", "objects": ["bed", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0058_00", "objects": ["chair", "desk", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0059_00", "objects": ["sofa", "armchair", "chair", "refrigerator", "microwave", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0060_00", "objects": ["computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0061_00", "objects": ["sofa", "television", "chair", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0062_00", "objects": ["toilet", "sink", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0063_00", "objects": ["chair", "refrigerator", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0065_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0067_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0068_00", "objects": ["sink", "refrigerator", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0070_00", "objects": ["bed", "chair", "computer monitor", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0071_00", "objects": [], "answer": "corridor"}
+{"model": "gemma4:26b", "room": "scene0072_00", "objects": ["bed", "wardrobe", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0073_00", "objects": ["bed", "chest of drawers", "chair", "coat rack"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0076_00", "objects": ["television", "chair", "office chair", "sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0077_00", "objects": ["cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0078_00", "objects": ["bed", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0080_00", "objects": ["toilet", "sink", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0081_00", "objects": ["sofa"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0082_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0083_00", "objects": ["toilet", "sink", "bathtub", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0084_00", "objects": ["toilet", "sink", "shower", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0085_00", "objects": ["bed", "nightstand", "television", "chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0086_00", "objects": ["toilet", "sink", "mirror", "plant"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0087_00", "objects": ["sofa", "armchair", "coffee table", "dining table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0089_00", "objects": ["bookshelf", "chair", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0090_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0091_00", "objects": ["sofa", "coffee table", "television", "chair", "desk", "mirror"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0092_00", "objects": ["bed", "nightstand", "chest of drawers", "bookshelf", "chair", "desk", "computer monitor", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0093_00", "objects": ["chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0094_00", "objects": ["sink", "refrigerator", "stove", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0096_00", "objects": ["chest of drawers", "toilet", "sink", "mirror", "coat rack"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0097_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0098_00", "objects": ["bookshelf", "chair", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0100_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "cabinet", "rug"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0105_00", "objects": ["toilet", "bathtub", "shower"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0107_00", "objects": ["bed", "nightstand", "armchair", "television", "chair", "desk", "refrigerator", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0108_00", "objects": ["television", "bookshelf", "chair", "desk"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0110_00", "objects": ["bed", "wardrobe", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0111_00", "objects": ["sofa", "television", "sink", "refrigerator", "stove", "microwave", "hood", "cabinet"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0112_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0113_00", "objects": ["armchair", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0114_00", "objects": ["chair", "desk", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0116_00", "objects": ["toilet", "sink", "bathtub", "shower", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0117_00", "objects": ["chair", "sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0118_00", "objects": ["coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0119_00", "objects": ["toilet", "sink", "bathtub", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0124_00", "objects": ["toilet", "sink", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0125_00", "objects": ["armchair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0126_00", "objects": ["bookshelf", "chair", "desk", "office chair", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0127_00", "objects": ["bed", "wardrobe", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0128_00", "objects": ["sofa", "coffee table", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0129_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0131_00", "objects": ["sofa", "chair", "desk", "office chair", "computer monitor", "refrigerator"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0133_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0135_00", "objects": ["toilet", "sink", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0137_00", "objects": ["bed", "nightstand", "armchair", "television", "desk", "office chair", "refrigerator", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0138_00", "objects": ["chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0141_00", "objects": ["sofa", "chair", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0142_00", "objects": ["chair", "desk", "office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0143_00", "objects": ["bed", "nightstand", "armchair", "chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0144_00", "objects": ["bed", "nightstand", "chest of drawers", "armchair", "chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0146_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0147_00", "objects": ["bed", "nightstand", "chest of drawers", "armchair", "television", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0148_00", "objects": ["sofa", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0149_00", "objects": ["chair", "sink", "refrigerator", "stove", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0150_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0151_00", "objects": ["sofa", "coffee table", "television", "chair", "stove"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0152_00", "objects": ["coffee table", "chair", "cabinet", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0153_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0157_00", "objects": ["bed", "nightstand", "chest of drawers", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0158_00", "objects": ["sink", "refrigerator", "stove", "microwave", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0160_00", "objects": ["sofa", "coffee table", "chair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0161_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0162_00", "objects": ["sofa", "coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0164_00", "objects": ["refrigerator", "oven", "stove", "microwave", "dishwasher", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0165_00", "objects": ["armchair", "mirror"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0166_00", "objects": ["sofa", "bookshelf", "chair", "desk", "computer monitor", "cabinet", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0168_00", "objects": ["coffee table", "bookshelf", "chair", "desk", "computer monitor", "refrigerator", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0170_00", "objects": ["toilet", "sink", "bathtub", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0172_00", "objects": ["bed", "cabinet", "coat rack"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0174_00", "objects": ["bookshelf", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0175_00", "objects": ["toilet", "sink", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0177_00", "objects": ["sofa", "bookshelf", "chair", "desk", "computer monitor", "cabinet", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0178_00", "objects": ["bed", "nightstand", "chair", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0179_00", "objects": ["chair", "desk", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0181_00", "objects": ["sofa", "coffee table", "chair", "sink", "refrigerator", "stove", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0184_00", "objects": ["bed", "nightstand", "chest of drawers", "television", "chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0186_00", "objects": ["bookshelf", "chair", "desk", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0192_00", "objects": ["coffee table", "television", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0193_00", "objects": ["bed", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0195_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "cabinet", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0196_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0197_00", "objects": ["sink", "refrigerator", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0198_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0200_00", "objects": ["bed", "nightstand", "chair", "desk", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0201_00", "objects": ["sofa", "dining table", "sink", "refrigerator", "stove", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0203_00", "objects": ["sofa", "armchair", "coffee table", "bookshelf"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0206_00", "objects": ["bookshelf", "chair", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0209_00", "objects": ["bed", "nightstand", "armchair", "television", "desk", "office chair", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0210_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0211_00", "objects": ["bookshelf", "chair", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0212_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0213_00", "objects": ["sofa", "armchair", "coffee table", "chair", "mirror", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0214_00", "objects": ["toilet", "sink", "shower", "mirror", "refrigerator", "stove", "microwave", "dishwasher", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0217_00", "objects": ["bed", "wardrobe", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0219_00", "objects": ["bed"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0220_00", "objects": ["chair", "sink", "refrigerator", "stove", "microwave", "cabinet", "countertop", "plant"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0221_00", "objects": ["bed", "nightstand", "chair", "desk", "office chair", "sink", "bathtub", "mirror", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0222_00", "objects": ["bed", "nightstand", "chest of drawers", "chair", "desk", "refrigerator"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0223_00", "objects": ["bed", "wardrobe", "chair", "desk", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0224_00", "objects": ["bed", "wardrobe", "sofa", "bookshelf", "mirror"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0226_00", "objects": ["armchair", "coffee table", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0230_00", "objects": ["sofa", "bookshelf", "chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0232_00", "objects": ["toilet", "sink", "mirror", "cabinet", "washing machine"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0233_00", "objects": ["bed", "chest of drawers", "chair", "desk", "mirror", "refrigerator", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0234_00", "objects": ["sofa", "computer monitor", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0235_00", "objects": ["bed", "nightstand", "chest of drawers", "armchair", "television", "chair", "mirror", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0236_00", "objects": ["bed", "nightstand", "chest of drawers", "bookshelf", "mirror"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0237_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0238_00", "objects": ["chair", "desk", "office chair", "computer monitor", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0239_00", "objects": ["sofa"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0241_00", "objects": ["chest of drawers", "bookshelf", "desk", "office chair", "cabinet", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0242_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0243_00", "objects": ["bed", "wardrobe", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0244_00", "objects": ["sofa", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0246_00", "objects": ["bed", "nightstand", "wardrobe", "chest of drawers", "chair", "toilet", "sink", "mirror", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0247_00", "objects": ["sofa", "armchair", "coffee table", "chair", "sink", "refrigerator", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0248_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0250_00", "objects": ["toilet", "bathtub", "shower", "mirror", "cabinet", "plant", "rug"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0251_00", "objects": ["chair", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0253_00", "objects": ["bed", "wardrobe", "sofa", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0254_00", "objects": ["toilet", "sink", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0255_00", "objects": ["cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0256_00", "objects": ["chair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0259_00", "objects": ["bed", "nightstand", "desk", "office chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0260_00", "objects": ["toilet", "sink", "bathtub", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0262_00", "objects": ["sofa", "bookshelf", "chair", "desk", "office chair", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0263_00", "objects": ["chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0264_00", "objects": ["chair", "desk", "office chair", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0265_00", "objects": ["toilet", "sink", "bathtub", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0267_00", "objects": [], "answer": "corridor"}
+{"model": "gemma4:26b", "room": "scene0268_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0270_00", "objects": ["bed", "nightstand", "television", "chair", "desk", "office chair", "sink", "mirror", "refrigerator", "microwave", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0271_00", "objects": ["bed", "chest of drawers", "television", "chair", "desk", "mirror", "cabinet", "plant", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0272_00", "objects": ["chest of drawers", "bookshelf", "chair", "desk", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0273_00", "objects": ["sofa", "armchair", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0274_00", "objects": ["chair", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0275_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0277_00", "objects": ["bed", "chest of drawers", "chair", "desk", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0279_00", "objects": ["bed", "nightstand", "sofa", "television", "chair", "desk", "office chair", "sink", "mirror", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0280_00", "objects": ["bed", "nightstand", "chest of drawers"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0281_00", "objects": ["sofa", "armchair", "coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0282_00", "objects": ["bed", "chest of drawers", "chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0286_00", "objects": ["bed", "nightstand", "chest of drawers", "chair", "mirror", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0287_00", "objects": ["bed", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0290_00", "objects": [], "answer": "corridor"}
+{"model": "gemma4:26b", "room": "scene0293_00", "objects": ["bookshelf", "desk"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0294_00", "objects": ["sofa", "coffee table", "television", "chair", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0295_00", "objects": ["bed", "nightstand", "chest of drawers", "bookshelf", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0296_00", "objects": ["bed", "nightstand", "sofa", "armchair", "coffee table", "television", "chair", "cabinet", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0297_00", "objects": ["sofa", "coffee table", "television", "chair", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0298_00", "objects": ["bed", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0299_00", "objects": ["sofa", "chair", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0301_00", "objects": ["sofa", "coffee table", "television", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0305_00", "objects": ["bookshelf", "chair", "desk", "office chair", "computer monitor", "cabinet", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0306_00", "objects": ["bed", "bookshelf", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0308_00", "objects": ["bed", "television", "chair", "desk", "mirror", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0309_00", "objects": ["armchair", "chair", "desk", "computer monitor", "cabinet", "countertop", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0310_00", "objects": ["sink", "stove", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0313_00", "objects": ["sofa", "coffee table", "chair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0315_00", "objects": ["sofa", "armchair", "coffee table", "chair", "cabinet", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0316_00", "objects": ["armchair", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0319_00", "objects": ["sofa", "armchair", "coffee table", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0321_00", "objects": ["bed", "nightstand", "desk", "office chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0322_00", "objects": ["chair", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0323_00", "objects": ["sink", "refrigerator", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0324_00", "objects": [], "answer": "corridor"}
+{"model": "gemma4:26b", "room": "scene0326_00", "objects": ["sofa", "chair", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0328_00", "objects": ["sink", "refrigerator", "oven", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0330_00", "objects": ["sofa", "coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0331_00", "objects": ["bed", "chest of drawers", "bookshelf", "chair", "desk", "plant"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0332_00", "objects": ["bed", "chest of drawers", "bookshelf", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0333_00", "objects": ["chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0334_00", "objects": ["sofa", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0335_00", "objects": ["television", "chair", "sink", "refrigerator", "stove", "microwave", "dishwasher", "cabinet", "countertop", "plant"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0336_00", "objects": ["coffee table", "bookshelf", "chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0339_00", "objects": ["sofa", "armchair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0340_00", "objects": ["bed", "nightstand", "armchair", "television", "chair", "desk", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0341_00", "objects": ["sofa", "bookshelf", "desk", "office chair", "computer monitor", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0344_00", "objects": ["sofa", "armchair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0346_00", "objects": ["toilet", "sink", "bathtub", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0347_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0348_00", "objects": ["sink", "refrigerator", "stove", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0350_00", "objects": ["sink", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0351_00", "objects": ["chair", "desk", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0352_00", "objects": ["sofa", "chair", "cabinet", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0353_00", "objects": ["bed", "wardrobe", "chest of drawers", "sofa", "bookshelf", "chair", "desk", "refrigerator", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0356_00", "objects": ["bed", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0359_00", "objects": ["bed", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0362_00", "objects": ["sofa", "coffee table", "television", "desk", "office chair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0364_00", "objects": ["bed", "chest of drawers", "chair", "desk", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0365_00", "objects": ["toilet", "sink", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0366_00", "objects": ["toilet", "sink", "mirror", "cabinet", "countertop", "plant"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0367_00", "objects": ["sofa", "coffee table", "dining table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0368_00", "objects": ["sofa", "armchair", "chair", "office chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0369_00", "objects": ["chair", "desk", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0371_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0374_00", "objects": ["sofa", "coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0375_00", "objects": ["toilet", "sink", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0376_00", "objects": ["bed", "nightstand", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0378_00", "objects": ["bookshelf", "chair", "desk", "office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0379_00", "objects": ["chair", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0380_00", "objects": ["chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0382_00", "objects": ["chair", "desk"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0383_00", "objects": ["chair", "desk", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0385_00", "objects": ["nightstand", "sofa", "armchair", "television", "chair", "cabinet", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0386_00", "objects": ["sofa", "chair", "desk", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0387_00", "objects": ["coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0389_00", "objects": ["bed", "nightstand", "television", "chair", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0390_00", "objects": ["chair", "sink", "refrigerator", "stove", "dishwasher", "hood", "cabinet", "countertop", "plant"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0394_00", "objects": ["bed", "nightstand", "wardrobe", "chest of drawers", "armchair", "sink", "mirror", "cabinet", "plant", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0395_00", "objects": ["sofa", "bookshelf", "chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0396_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0397_00", "objects": ["bed", "nightstand", "chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0398_00", "objects": ["bed", "wardrobe", "chest of drawers", "chair", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0399_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0400_00", "objects": ["bed", "wardrobe", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0406_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0407_00", "objects": ["sofa", "coffee table", "bookshelf", "chair", "cabinet", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0409_00", "objects": ["dining table", "chair", "refrigerator", "stove", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0410_00", "objects": ["toilet", "bathtub", "shower"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0412_00", "objects": ["sink"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0413_00", "objects": ["toilet", "sink", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0415_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0416_00", "objects": ["bed", "nightstand", "armchair", "television", "desk", "office chair", "computer monitor", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0418_00", "objects": ["bed", "nightstand", "chair", "coat rack"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0423_00", "objects": ["armchair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0424_00", "objects": ["sofa", "television", "bookshelf", "chair", "desk", "computer monitor"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0425_00", "objects": ["bed", "wardrobe", "chest of drawers", "chair", "desk", "computer monitor", "microwave"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0426_00", "objects": ["bed", "chest of drawers", "television", "chair", "desk", "computer monitor", "lamp", "coat rack"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0429_00", "objects": ["toilet", "sink", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0431_00", "objects": ["plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0432_00", "objects": ["armchair", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0433_00", "objects": ["dining table", "chair", "sink", "refrigerator", "oven", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0434_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0435_00", "objects": ["bed", "nightstand", "armchair", "television", "desk", "office chair", "toilet", "sink", "bathtub", "shower", "mirror", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0436_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0437_00", "objects": ["armchair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0438_00", "objects": ["bed", "nightstand", "chest of drawers", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0439_00", "objects": ["sink", "refrigerator", "stove", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0440_00", "objects": ["bed", "wardrobe", "chest of drawers", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0441_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0442_00", "objects": ["armchair", "chair", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0445_00", "objects": ["bed", "chest of drawers", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0446_00", "objects": ["toilet", "sink", "shower"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0447_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0448_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0449_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0457_00", "objects": ["bed", "chest of drawers", "armchair", "desk", "office chair", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0458_00", "objects": ["toilet", "sink", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0460_00", "objects": ["toilet", "sink", "bathtub", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0464_00", "objects": ["bookshelf", "chair", "desk", "computer monitor", "plant", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0465_00", "objects": ["chair", "sink", "refrigerator", "oven", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0467_00", "objects": ["sofa", "coffee table", "television", "chair", "cabinet", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0468_00", "objects": ["bed", "wardrobe", "chest of drawers", "bookshelf", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0469_00", "objects": ["chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0471_00", "objects": ["toilet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0473_00", "objects": [], "answer": "corridor"}
+{"model": "gemma4:26b", "room": "scene0474_00", "objects": ["sofa", "bookshelf", "chair", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0476_00", "objects": ["office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0477_00", "objects": ["bed", "nightstand", "chest of drawers", "chair", "office chair", "toilet", "sink", "bathtub", "shower", "mirror", "cabinet", "lamp"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0479_00", "objects": ["sink", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0480_00", "objects": ["sofa", "coffee table", "television", "chair", "cabinet", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0484_00", "objects": ["sofa", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0485_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0486_00", "objects": ["sink", "refrigerator", "oven", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0487_00", "objects": ["sofa", "armchair", "sink", "refrigerator", "microwave", "cabinet", "countertop", "lamp"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0488_00", "objects": ["sink", "refrigerator", "stove", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0492_00", "objects": ["chair", "toilet", "sink", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0497_00", "objects": ["armchair", "chair", "sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0498_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0499_00", "objects": ["sofa", "armchair", "chair", "lamp", "rug"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0501_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0503_00", "objects": ["sofa", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0505_00", "objects": ["sofa", "chair", "desk", "office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0506_00", "objects": ["bed", "nightstand", "chest of drawers", "bookshelf", "desk", "office chair", "mirror"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0507_00", "objects": ["sofa", "lamp", "rug"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0509_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0510_00", "objects": ["toilet", "sink", "shower", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0513_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0514_00", "objects": ["sofa", "coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0517_00", "objects": ["bed", "wardrobe", "chest of drawers", "sofa", "coffee table", "chair", "desk", "computer monitor", "sink", "mirror", "refrigerator"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0518_00", "objects": ["sofa", "coffee table", "television", "desk", "office chair", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0519_00", "objects": ["sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0520_00", "objects": ["sofa", "armchair", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0521_00", "objects": ["bed", "nightstand", "chest of drawers", "sofa", "bookshelf", "toilet", "sink", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0522_00", "objects": ["sink", "cabinet", "countertop", "washing machine", "plant"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0523_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0525_00", "objects": ["bookshelf", "office chair", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0526_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0527_00", "objects": ["sink", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0529_00", "objects": ["sofa", "coffee table", "bookshelf", "chair", "sink", "refrigerator", "stove", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0530_00", "objects": [], "answer": "corridor"}
+{"model": "gemma4:26b", "room": "scene0532_00", "objects": ["sink", "refrigerator", "stove", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0535_00", "objects": ["bookshelf", "chair", "desk", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0537_00", "objects": ["sofa", "armchair", "chair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0538_00", "objects": ["toilet", "sink", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0539_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "plant"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0540_00", "objects": ["sink", "refrigerator", "stove", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0541_00", "objects": ["bed", "nightstand", "wardrobe", "chest of drawers", "mirror", "coat rack"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0542_00", "objects": ["chair", "sink", "refrigerator", "oven", "stove", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0543_00", "objects": ["armchair", "coffee table"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0545_00", "objects": ["bed", "bookshelf", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0546_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0547_00", "objects": ["bed", "wardrobe", "chest of drawers", "sofa", "coffee table", "chair", "desk", "computer monitor", "sink", "mirror", "refrigerator"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0548_00", "objects": ["bed", "chest of drawers", "bookshelf", "chair", "desk", "mirror", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0550_00", "objects": ["toilet", "sink", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0552_00", "objects": ["chair", "sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0553_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0554_00", "objects": ["bed", "chest of drawers", "chair", "desk", "refrigerator"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0556_00", "objects": ["bed", "chest of drawers", "chair", "desk"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0557_00", "objects": ["bed", "nightstand", "chest of drawers", "sofa", "mirror"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0559_00", "objects": ["sofa"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0560_00", "objects": ["bed", "nightstand", "chest of drawers", "chair", "desk", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0564_00", "objects": ["toilet", "sink", "shower"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0567_00", "objects": ["bed", "nightstand", "chair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0568_00", "objects": ["sofa", "television", "bookshelf", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0570_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0571_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0572_00", "objects": ["armchair", "coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0573_00", "objects": ["sink", "refrigerator", "stove", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0574_00", "objects": ["sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0576_00", "objects": ["bed", "nightstand", "chest of drawers", "armchair", "bookshelf", "chair", "desk", "office chair", "mirror", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0577_00", "objects": ["bed", "mirror", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0579_00", "objects": ["sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0580_00", "objects": ["bed", "nightstand", "chest of drawers", "bookshelf", "chair", "mirror", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0581_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "plant"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0582_00", "objects": ["sofa", "bookshelf", "desk", "office chair", "computer monitor", "cabinet", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0583_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0586_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0587_00", "objects": ["sofa"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0588_00", "objects": ["sofa", "armchair", "coffee table", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0589_00", "objects": ["bed", "nightstand", "bookshelf", "chair", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0590_00", "objects": ["bed", "nightstand", "sofa", "television", "chair", "desk", "sink", "mirror", "refrigerator", "microwave", "cabinet", "countertop", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0591_00", "objects": ["sofa", "bookshelf", "chair", "desk", "computer monitor", "cabinet", "plant"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0593_00", "objects": ["sofa", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0594_00", "objects": ["coffee table", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0600_00", "objects": ["bed", "nightstand", "bookshelf"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0602_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0603_00", "objects": ["sofa", "television", "bookshelf", "chair", "desk", "computer monitor", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0604_00", "objects": ["bed", "nightstand", "sofa", "coffee table", "television", "chair", "cabinet", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0607_00", "objects": ["chair", "sink", "refrigerator", "oven", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0608_00", "objects": ["sofa", "armchair", "coffee table", "television", "plant", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0609_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0610_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0612_00", "objects": ["toilet", "sink", "mirror", "countertop"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0613_00", "objects": ["bed", "chest of drawers"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0614_00", "objects": ["bookshelf", "chair", "desk", "office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0615_00", "objects": ["bed", "nightstand", "chest of drawers", "chair", "desk", "plant", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0616_00", "objects": ["armchair", "chair", "lamp"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0617_00", "objects": ["sofa", "coffee table", "television", "cabinet", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0619_00", "objects": ["desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0620_00", "objects": ["bed", "chest of drawers", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0622_00", "objects": ["chair", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0623_00", "objects": ["sofa", "coffee table", "television", "chair", "computer monitor", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0625_00", "objects": ["toilet", "bathtub", "shower"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0626_00", "objects": ["sofa", "coffee table", "chair", "computer monitor"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0628_00", "objects": ["chair", "desk"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0630_00", "objects": ["bookshelf", "chair", "desk", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0631_00", "objects": ["toilet", "sink", "bathtub", "mirror", "plant"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0633_00", "objects": ["wardrobe", "chest of drawers", "armchair", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0638_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0639_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror", "cabinet"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0640_00", "objects": ["bed", "nightstand", "sofa", "chair", "desk", "sink", "refrigerator", "stove", "microwave", "dishwasher", "cabinet", "countertop", "lamp"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0642_00", "objects": ["bed", "nightstand", "armchair", "television", "desk", "office chair", "toilet", "sink", "bathtub", "shower", "mirror", "refrigerator", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0643_00", "objects": ["bookshelf", "chair", "desk", "computer monitor", "refrigerator"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0644_00", "objects": ["chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0645_00", "objects": ["bed", "nightstand", "sofa", "armchair", "coffee table", "television", "chair", "desk", "toilet", "sink", "bathtub", "shower", "mirror", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0646_00", "objects": ["sofa", "chair", "desk", "computer monitor", "lamp"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0647_00", "objects": ["sofa", "television", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0648_00", "objects": ["bed", "chest of drawers", "bookshelf", "chair", "desk", "cabinet", "plant", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0649_00", "objects": ["sink", "refrigerator", "stove", "microwave", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0651_00", "objects": ["dining table", "chair", "sink", "refrigerator", "stove", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0652_00", "objects": ["bed", "nightstand", "chest of drawers", "sofa", "television", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0653_00", "objects": ["chair", "desk", "office chair", "computer monitor"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0654_00", "objects": ["sofa", "armchair", "chair", "sink", "oven", "stove", "dishwasher", "hood", "cabinet", "countertop", "lamp"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0656_00", "objects": ["bed", "nightstand", "chest of drawers", "bookshelf"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0658_00", "objects": ["bed", "chair", "desk", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0659_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0660_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0662_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0663_00", "objects": ["chair", "desk", "office chair", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0664_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0668_00", "objects": ["sofa", "coffee table", "television", "chair", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0670_00", "objects": ["sink", "refrigerator", "stove", "dishwasher", "hood", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0672_00", "objects": ["sofa", "television", "bookshelf", "chair", "plant"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0673_00", "objects": ["nightstand", "sofa", "coffee table", "television", "bookshelf", "chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0674_00", "objects": ["bed", "nightstand", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0675_00", "objects": ["bed", "wardrobe", "desk", "office chair"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0676_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0677_00", "objects": ["bed", "nightstand", "armchair", "television", "desk", "office chair", "refrigerator", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0679_00", "objects": ["bed", "nightstand", "armchair", "television", "chair", "desk", "mirror", "refrigerator", "microwave", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0681_00", "objects": ["sink", "refrigerator", "stove", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0682_00", "objects": ["sink", "refrigerator", "microwave", "dishwasher", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0683_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0684_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0686_00", "objects": ["toilet", "sink", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0687_00", "objects": ["sink", "refrigerator", "microwave", "cabinet", "countertop"], "answer": "kitchen"}
+{"model": "gemma4:26b", "room": "scene0688_00", "objects": ["bed", "nightstand", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0693_00", "objects": ["toilet", "sink", "bathtub", "shower", "mirror"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0694_00", "objects": ["sofa", "armchair", "coffee table", "chair", "cabinet"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0695_00", "objects": ["bed", "bookshelf", "desk", "office chair", "computer monitor", "cabinet", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0697_00", "objects": ["bed", "nightstand", "chest of drawers", "television", "mirror", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0698_00", "objects": ["bed", "nightstand", "sofa", "television", "desk", "office chair", "refrigerator", "microwave", "cabinet", "countertop", "lamp"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0699_00", "objects": ["bed", "nightstand", "chair", "toilet", "cabinet"], "answer": "bedroom"}
+{"model": "gemma4:26b", "room": "scene0700_00", "objects": ["armchair", "bookshelf", "chair", "desk", "computer monitor", "cabinet"], "answer": "office"}
+{"model": "gemma4:26b", "room": "scene0701_00", "objects": ["sofa"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0702_00", "objects": ["toilet", "bathtub", "shower"], "answer": "bathroom"}
+{"model": "gemma4:26b", "room": "scene0703_00", "objects": ["chair"], "answer": "living room"}
+{"model": "gemma4:26b", "room": "scene0706_00", "objects": ["bed", "nightstand", "wardrobe", "television", "chair", "cabinet", "plant", "lamp"], "answer": "bedroom"}
