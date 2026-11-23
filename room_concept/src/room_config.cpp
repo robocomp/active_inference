@@ -148,6 +148,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     reader.opt<float, double>("StartupProto.EllPriorM", p.STARTUP_PROTO_ELL_PRIOR_M, "occupancy correlation length prior (m)");
     reader.opt<float, double>("StartupProto.EllPriorN", p.STARTUP_PROTO_ELL_PRIOR_N, "its weight, in rooms");
     reader.opt<std::string>("StartupProto.RoomOfferLog", p.ROOM_OFFER_LOG, "CSV of the room offer's gain components (\"\" = off)");
+    reader.opt<std::string>("EpistemicController.ChangeTestsLog", p.CHANGE_TESTS_LOG, "CSV of every change test (promised / delivered)");
+    reader.opt<std::string>("EpistemicController.ChangeMemory", p.CHANGE_MEMORY, "change record + posterior kept across runs (\"\" = off)");
     reader.opt<std::string>("RoomConcept.CalibStateFile", p.CALIB_STATE_FILE,
             "config: RoomConcept.CalibStateFile");
     reader.opt<float, double>("RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale,
@@ -1110,9 +1112,10 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "AuRo item B: change information (Poisson hazard, learnt) instead of the neglect drive");
     reader.opt<double>("EpistemicController.ChangeHazardMean", ep.change_hazard_mean, "prior mean λ, changes per m² per s");
     reader.opt<double>("EpistemicController.ChangeHazardShape", ep.change_hazard_shape, "prior Gamma shape of λ");
-    reader.opt<double>("EpistemicController.ChangeDetect", ep.change_detect, "P(re-observation shows a change | changed)");
-    reader.opt<double>("EpistemicController.ChangeFalseAlarm", ep.change_false_alarm, "P(it shows one | unchanged)");
-    reader.opt<double>("EpistemicController.ChangeUnseenAgeS", ep.change_unseen_age_s, "prior age (s) of a cell not observed this run");
+    reader.opt<double>("EpistemicController.ChangeDetect", ep.change_detect, "prior mean of d = P(flip | changed), learnt");
+    reader.opt<double>("EpistemicController.ChangeDetectN", ep.change_detect_n, "its prior strength, in tests");
+    reader.opt<double>("EpistemicController.ChangeFalseAlarm", ep.change_false_alarm, "prior mean of f = P(flip | unchanged), learnt");
+    reader.opt<double>("EpistemicController.ChangeFalseAlarmN", ep.change_false_n, "its prior strength, in tests");
     reader.opt<float, double>("EpistemicController.WPathInterest", ep.w_path_interest,
             "weight: bonus for paths that traverse unvisited cells");
     reader.opt<float, double>("EpistemicController.IorPathRadius", ep.ior_path_radius,

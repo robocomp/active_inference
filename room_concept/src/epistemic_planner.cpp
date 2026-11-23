@@ -32,17 +32,7 @@ void EpistemicPlanner::set_room_bounds(const Eigen::Vector2f& min_corner,
     room_bounds_set_ = true;
     if (changed) { grid_dirty_ = true; mask_dirty_ = true; }
     if (!visit_grid_.initialized)
-    {
         visit_grid_.init(room_min_, room_max_, params.ior_cell_size);
-        if (not change_made_)
-        {
-            change_ = rc::change::ChangeBelief({params.change_hazard_mean, params.change_hazard_shape, params.change_detect,
-                                                params.change_false_alarm, params.change_unseen_age_s});
-            change_made_ = true;
-        }
-        change_.init(visit_grid_.origin, visit_grid_.cols, visit_grid_.rows, visit_grid_.cell_size);
-        matter_hits_.assign(visit_grid_.cells.size(), 0);
-    }
 }
 
 void EpistemicPlanner::set_room_polygon(const std::vector<Eigen::Vector2f>& vertices)
@@ -382,21 +372,43 @@ float EpistemicPlanner::marginal_epistemic_gain(const Eigen::Vector2f& viewpoint
                        - info_gain_nats(Y, predicted_fim(robot_pos())));
 }
 
-double EpistemicPlanner::steady_s()
+double EpistemicPlanner::wall_s()
 {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+void EpistemicPlanner::make_change()
+{
+    if (change_made_) return;
+    change_ = rc::change::ChangeBelief({params.change_hazard_mean, params.change_hazard_shape, params.change_detect,
+                                        params.change_detect_n, params.change_false_alarm, params.change_false_n});
+    change_made_ = true;
+}
+
+void EpistemicPlanner::change_enter_room(const std::string& name, const Eigen::Vector2f& min_pub, const Eigen::Vector2f& max_pub,
+                                         const Eigen::Affine2f& T_pub_int)
+{
+    if (not params.use_change_belief or name.empty()) return;
+    make_change();
+    change_T_pub_int_ = T_pub_int;
+    if (name == change_.room() and change_.ready()) return;
+    const float cs = params.ior_cell_size;
+    const int cols = std::max(1, static_cast<int>(std::ceil((max_pub.x() - min_pub.x()) / cs)));
+    const int rows = std::max(1, static_cast<int>(std::ceil((max_pub.y() - min_pub.y()) / cs)));
+    change_.enter_room(name, min_pub, cols, rows, cs, wall_s());
+    matter_hits_.assign(static_cast<std::size_t>(change_.size()), 0);
 }
 
 std::vector<int> EpistemicPlanner::visible_cells(const Eigen::Vector2f& v) const
 {
     std::vector<int> out;
-    if (not visit_grid_.initialized) return out;
+    if (not change_.ready()) return out;
     const float r2 = params.fim_max_range * params.fim_max_range;
     const int N = static_cast<int>(room_corners_.size());
-    for (int k = 0; k < static_cast<int>(visit_grid_.cells.size()); ++k)
+    const Eigen::Affine2f T_int_pub = change_T_pub_int_.inverse();
+    for (int k = 0; k < change_.size(); ++k)
     {
-        if (not visit_grid_.is_observable(k)) continue;
-        const Eigen::Vector2f c = visit_grid_.cell_center(k);
+        const Eigen::Vector2f c = T_int_pub * change_.centre(k);   // the cell's centre, internal frame
         if ((c - v).squaredNorm() > r2) continue;
         if (N >= 3 and not corner_visibility::point_in_polygon(c, room_corners_)) continue;
         bool blocked = false;
@@ -410,7 +422,7 @@ std::vector<int> EpistemicPlanner::visible_cells(const Eigen::Vector2f& v) const
 float EpistemicPlanner::change_info(const Eigen::Vector2f& v) const
 {
     if (not params.use_change_belief or not change_.ready()) return 0.f;
-    const double now = steady_s();
+    const double now = wall_s();
     double s = 0.0;
     for (const int k : visible_cells(v)) s += change_.info(k, now, change_ell_);
     return static_cast<float>(s);
@@ -418,13 +430,18 @@ float EpistemicPlanner::change_info(const Eigen::Vector2f& v) const
 
 void EpistemicPlanner::observe_matter(const std::vector<Eigen::Vector2f>& xy_internal)
 {
-    if (not visit_grid_.initialized or matter_hits_.size() != visit_grid_.cells.size()) return;
+    if (not change_.ready() or matter_hits_.size() != static_cast<std::size_t>(change_.size())) return;
+    // the grid's own geometry, via its first cell's centre and cell size (published frame)
+    const float cs = params.ior_cell_size;
+    const Eigen::Vector2f o = change_.centre(0) - Eigen::Vector2f(0.5f * cs, 0.5f * cs);
+    const int cols = static_cast<int>(std::lround((change_.centre(change_.size() - 1).x() - change_.centre(0).x()) / cs)) + 1;
     for (const auto& p : xy_internal)
     {
-        const float fx = (p.x() - visit_grid_.origin.x()) / visit_grid_.cell_size;
-        const float fy = (p.y() - visit_grid_.origin.y()) / visit_grid_.cell_size;
-        if (fx < 0.f or fy < 0.f or fx >= visit_grid_.cols or fy >= visit_grid_.rows) continue;   // outside: not this room's
-        matter_hits_[visit_grid_.to_index(p)] = 1;
+        const Eigen::Vector2f q = change_T_pub_int_ * p;
+        const float fx = (q.x() - o.x()) / cs, fy = (q.y() - o.y()) / cs;
+        if (fx < 0.f or fy < 0.f or fx >= cols) continue;   // outside the grid: not this room's
+        const std::size_t k = static_cast<std::size_t>(fy) * cols + static_cast<std::size_t>(fx);
+        if (k < matter_hits_.size()) matter_hits_[k] = 1;
     }
 }
 
@@ -432,7 +449,7 @@ void EpistemicPlanner::change_sweep()
 {
     if (not params.use_change_belief or not change_.ready() or not robot_state_set_) return;
     const auto vis = visible_cells(robot_pos());
-    change_.sweep(vis, [this](int k) { return k < static_cast<int>(matter_hits_.size()) and matter_hits_[k] != 0; }, steady_s());
+    change_.sweep(vis, [this](int k) { return k < static_cast<int>(matter_hits_.size()) and matter_hits_[k] != 0; }, wall_s());
     std::ranges::fill(matter_hits_, 0);
 }
 

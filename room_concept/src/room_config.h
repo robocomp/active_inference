@@ -223,6 +223,9 @@ struct RoomConfig
     float STARTUP_PROTO_ELL_PRIOR_M    = 0.3f;    // config: StartupProto.EllPriorM
     float STARTUP_PROTO_ELL_PRIOR_N    = 1.f;     // config: StartupProto.EllPriorN
     std::string ROOM_OFFER_LOG = "etc/room_offer_log.csv";   // config: StartupProto.RoomOfferLog ("" = off)
+    /// AuRo item B: every change test (promised vs delivered), and the change record persisted across runs.
+    std::string CHANGE_TESTS_LOG = "etc/room_change_tests.csv";      // config: EpistemicController.ChangeTestsLog
+    std::string CHANGE_MEMORY    = "etc/room_change_memory.txt";     // config: EpistemicController.ChangeMemory ("" = off)
     /// Where the calibration WINDOW is kept between runs. Evidence (episodes + closed pivots), never
     /// the fitted parameters — restoring a fitted value as a prior mean is the ratchet that walked
     /// the gyro bias to the wrong sign. Delete the file, or press Reset in the calibration window,

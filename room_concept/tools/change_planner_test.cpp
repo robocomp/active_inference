@@ -21,6 +21,8 @@ int main()
         pl.set_room_polygon(L);
         Eigen::Affine2f pose = Eigen::Affine2f::Identity(); pose.translate(Eigen::Vector2f(5.f, 1.5f));
         pl.set_robot_state(pose, Eigen::Matrix3f::Identity() * 1e-4f);
+        pl.change_enter_room("room_L", {0.f, 0.f}, {6.f, 6.f}, Eigen::Affine2f::Identity());   // published = internal here
+        pl.set_change_unknown_nats(0.1);
         const auto t = pl.update_target();   // marks the robot's surroundings and runs one sweep
         std::printf("change belief %s\n", on ? "ON" : "OFF");
         const Eigen::Vector2f hidden(1.5f, 5.f), seen(4.5f, 1.5f);
@@ -37,7 +39,7 @@ int main()
         std::printf("     change information: from the hidden arm %.3f nats, from a visible spot %.3f nats (%d cells in view)\n",
                     g_hidden, g_seen, in_view);
         check(g_hidden > g_seen, "the hidden arm offers more than a spot whose view is already in view");
-        check(g_hidden > 0.f, "unseen cells carry information at the unseen-age prior");
+        check(g_hidden > 0.f, "cells with no observation on record carry their unknown state's information");
         if (t.has_value())
         {
             std::printf("     target (%.2f, %.2f)\n", t->position.x(), t->position.y());

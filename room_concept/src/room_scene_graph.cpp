@@ -3375,6 +3375,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     if (!epistemic_) return;
 
     auto& planner = epistemic_->epistemic_planner();
+    change_room_step(planner);   // AuRo item B: the room's change grid (per room, published frame), its record and log
 
     // Always update robot state so mark_and_refresh uses the correct position.
     epistemic_->set_robot_state(res.robot_pose, res.covariance);

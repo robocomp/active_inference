@@ -1571,13 +1571,17 @@ WIorDrive          = 0.5    # NATS per unit neglect information log(1 + age/τ).
                             # so the hand-off to inhibition-of-return happens continuously.
 # AuRo item B (2026-11-23): the known-room offer's second term = expected information of re-observing cells that may
 # have changed (change_belief.h), instead of the neglect drive above. Poisson hazard λ per m² per s with a learnt
-# posterior; d / f = the re-observation as a test of "changed?"; UnseenAge = prior age of a cell not seen this run.
+# posterior; d / f = the re-observation as a test of "changed?", both LEARNT with λ (joint grid posterior). A cell with
+# no observation on record (this run or the persisted memory) is valued as unknown state: n·h(P(occupied)).
 ChangeBelief       = true
-ChangeHazardMean   = 3e-6    # prior mean λ (~5 changes per 20 m² room per day)
+ChangeHazardMean   = 3e-6    # prior mean λ (~5 changes per 20 m² room per day) — class knowledge
 ChangeHazardShape  = 1.0     # weak prior (one change's worth)
-ChangeDetect       = 0.85
-ChangeFalseAlarm   = 0.05
-ChangeUnseenAgeS   = 86400.0 # s — the time since the last tour
+ChangeDetect       = 0.85    # prior mean of d — sensor, learnt
+ChangeDetectN      = 10.0    # its strength, in tests
+ChangeFalseAlarm   = 0.05    # prior mean of f — sensor, learnt
+ChangeFalseAlarmN  = 20.0    # its strength, in tests
+ChangeTestsLog     = "etc/room_change_tests.csv"
+ChangeMemory       = "etc/room_change_memory.txt"   # record + posterior kept across runs ("" = off)
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
 # ---- Execution-stall watchdog (liveness on the affordance handshake, not a model threshold) ----

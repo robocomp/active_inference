@@ -111,9 +111,10 @@ public:
         bool  use_change_belief   = false;
         double change_hazard_mean = 3e-6;    // prior mean λ, changes per m² per s (~5 per 20 m² per day)
         double change_hazard_shape = 1.0;    // prior Gamma shape (weak)
-        double change_detect      = 0.85;    // P(re-observation shows a change | changed)
-        double change_false_alarm = 0.05;    // P(it shows one | unchanged)
-        double change_unseen_age_s = 86400.0; // prior age of a cell not observed in this run (time since the last tour)
+        double change_detect      = 0.85;    // prior mean of d = P(re-observation flips | changed) — LEARNT
+        double change_detect_n    = 10.0;    // its prior strength, in tests
+        double change_false_alarm = 0.05;    // prior mean of f = P(it flips | unchanged) — LEARNT
+        double change_false_n     = 20.0;    // its prior strength, in tests
 
         // ---- FIM scoring ----
         float fim_corner_sigma  = 0.04f;     // isotropic corner detection noise σ (m)
@@ -247,8 +248,16 @@ public:
     /// AuRo item B: furniture returns of one sweep, INTERNAL frame (the low-obstacle stream).
     void observe_matter(const std::vector<Eigen::Vector2f>& xy_internal);
     /// AuRo item B: the occupancy correlation length (m) — regions per cell = cell² / ℓ² (coverage_info.h).
-    void set_change_ell(float ell_m) { change_ell_ = std::max(0.01f, ell_m); }
+    void set_change_ell(float ell_m) { change_ell_ = std::max(0.01f, ell_m); change_.set_ell(change_ell_); }
+    /// AuRo item B: the room the robot is in, its bounds in its PUBLISHED frame and the internal → published
+    /// transform. Called every cycle; switching room stashes the old grid and restores the new one's record.
+    void change_enter_room(const std::string& name, const Eigen::Vector2f& min_pub, const Eigen::Vector2f& max_pub,
+                           const Eigen::Affine2f& T_pub_int);
+    /// AuRo item B: nats per region of a cell with no observation on record (h(P(occupied)), coverage_info.h).
+    void set_change_unknown_nats(double nats) { change_.set_unknown_nats(nats); }
+    rc::change::ChangeBelief& change_belief() { make_change(); return change_; }
     const rc::change::ChangeBelief& change_belief() const { return change_; }
+    static double wall_s();
     float live_total_epistemic_gain(const Eigen::Vector2f& viewpoint,
                                     bool rotate_in_place = false) const;
 
@@ -397,7 +406,8 @@ private:
     std::vector<Eigen::Vector2f> room_corners_;
     // AuRo item B
     void change_sweep();                               ///< one observation sweep from the robot's pose
-    static double steady_s();
+    void make_change();                                ///< build the posterior once (kept across rooms)
+    Eigen::Affine2f change_T_pub_int_ = Eigen::Affine2f::Identity();
     rc::change::ChangeBelief change_;
     bool change_made_ = false;                         ///< λ's posterior is built once and kept across rooms
     float change_ell_ = 0.3f;

@@ -8,7 +8,11 @@
 // remembered room. tools/room_explored_selftest.cpp runs the same explorer calls on a synthetic room.
 #include "room_scene_graph.h"
 
+#include <charconv>
 #include <cmath>
+#include <cstdio>
+#include <limits>
+#include <map>
 
 #include <QDebug>
 
@@ -299,4 +303,105 @@ void RoomSceneGraph::log_room_offer(std::string_view source, const Eigen::Vector
     room_offer_log_.flush();
 }
 
+}   // namespace rc
+
+namespace rc
+{
+// ── AuRo item B (2026-11-23): the room's change belief — rooms, record, test log ─────────────────────────────────────
+void RoomSceneGraph::change_room_step(rc::EpistemicPlanner& planner)
+{
+    if (not planner.params.use_change_belief) return;
+    const std::string name = room_node_name();
+    if (name.empty() or planner.room_corners().size() < 3) return;
+    if (not change_memory_loaded_) change_memory_load(planner);
+    // the room's bounds in its own published frame (the frame its record lives in, restored by a recall)
+    Eigen::Vector2f lo(std::numeric_limits<float>::max(), std::numeric_limits<float>::max()), hi = -lo;
+    for (const auto& c : planner.room_corners())
+    {
+        const Eigen::Vector2f q = T_pub_int_ * c;
+        lo = lo.cwiseMin(q); hi = hi.cwiseMax(q);
+    }
+    planner.change_enter_room(name, lo, hi, T_pub_int_);
+    (void)floor_nats(0.f);
+    planner.set_change_unknown_nats(occ_prior_.nats_per_unit());
+    auto& cb = planner.change_belief();
+    if (not cb.on_test and not params_->CHANGE_TESTS_LOG.empty())
+    {
+        change_tests_log_.open(params_->CHANGE_TESTS_LOG, std::ios::out | std::ios::trunc);
+        change_tests_log_.imbue(std::locale::classic());
+        change_tests_log_ << "wall_s,room,cell,cx_pub,cy_pub,first,age_s,p_cell,flip,promised,delivered,hazard,detect,false_alarm\n";
+        cb.on_test = [this, &cb](const rc::change::Test& t)
+        {
+            const auto c = cb.centre(t.cell);
+            change_tests_log_ << std::fixed << t.t << ',' << cb.room() << ',' << t.cell << ',' << c.x() << ',' << c.y() << ','
+                              << int(t.first) << ',' << t.age << ',' << t.p_cell << ',' << int(t.flip) << ',' << t.promised << ',' << t.delivered << ','
+                              << cb.hazard() << ',' << cb.detect() << ',' << cb.false_alarm() << '\n';
+            change_tests_log_.flush();
+        };
+    }
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (now_ms - change_memory_saved_ms_ > 30000) { change_memory_save(planner); change_memory_saved_ms_ = now_ms; }
+}
+
+// Format (text, one record per line, '.' decimals): "posterior <n> <logw...>" then "cell <room> <cx> <cy> <t_obs> <matter>".
+void RoomSceneGraph::change_memory_load(rc::EpistemicPlanner& planner)
+{
+    change_memory_loaded_ = true;
+    if (params_->CHANGE_MEMORY.empty()) return;
+    std::ifstream f(params_->CHANGE_MEMORY);
+    if (not f) return;
+    std::map<std::string, std::vector<rc::change::ChangeBelief::Record>> recs;
+    std::vector<double> post;
+    std::string line;
+    const auto num = [](std::string_view s, double& v) { return std::from_chars(s.data(), s.data() + s.size(), v).ec == std::errc{}; };
+    while (std::getline(f, line))
+    {
+        std::vector<std::string_view> tok;
+        for (std::size_t i = 0; i < line.size();)
+        {
+            const auto j = line.find(' ', i);
+            tok.emplace_back(line.data() + i, (j == std::string::npos ? line.size() : j) - i);
+            i = j == std::string::npos ? line.size() : j + 1;
+        }
+        if (tok.empty()) continue;
+        if (tok[0] == "posterior")
+            for (std::size_t i = 2; i < tok.size(); ++i) { double v; if (num(tok[i], v)) post.push_back(v); }
+        else if (tok[0] == "cell" and tok.size() == 6)
+        {
+            double x, y, t, m;
+            if (num(tok[2], x) and num(tok[3], y) and num(tok[4], t) and num(tok[5], m))
+                recs[std::string(tok[1])].push_back({Eigen::Vector2f(float(x), float(y)), t, static_cast<std::int8_t>(m)});
+        }
+    }
+    auto& cb = planner.change_belief();
+    const bool ok = cb.import_posterior(post);
+    std::size_t n = 0;
+    for (const auto& [_, v] : recs) n += v.size();
+    cb.restore_records(std::move(recs));
+    qInfo().noquote() << QString("[room][change] memory %1: posterior %2 (λ %3 /m²/s, d %4, f %5), %6 cell records")
+                             .arg(QString::fromStdString(params_->CHANGE_MEMORY)).arg(ok ? "restored" : "prior")
+                             .arg(cb.hazard(), 0, 'e', 2).arg(cb.detect(), 0, 'f', 3).arg(cb.false_alarm(), 0, 'f', 3).arg(n);
+}
+
+void RoomSceneGraph::change_memory_save(const rc::EpistemicPlanner& planner)
+{
+    if (params_->CHANGE_MEMORY.empty()) return;
+    const auto& cb = planner.change_belief();
+    const std::string tmp = params_->CHANGE_MEMORY + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::out | std::ios::trunc);
+        if (not f) return;
+        f.imbue(std::locale::classic());
+        f.precision(17);
+        const auto post = cb.export_posterior();
+        f << "posterior " << post.size();
+        for (const double v : post) f << ' ' << v;
+        f << '\n';
+        for (const auto& [room, rs] : cb.all_records())
+            for (const auto& r : rs)
+                f << "cell " << room << ' ' << r.centre.x() << ' ' << r.centre.y() << ' ' << r.t_obs << ' ' << int(r.matter) << '\n';
+    }
+    std::rename(tmp.c_str(), params_->CHANGE_MEMORY.c_str());
+}
 }   // namespace rc

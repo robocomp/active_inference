@@ -35,11 +35,12 @@ int main()
 
     std::printf("information of a view\n");
     b.init({0.f, 0.f}, 4, 4, 0.5f);
-    b.observe(0, 1000.0, false, ell);
+    b.observe(0, 1000.0, false);
     check(b.info(0, 1000.0, ell) < 1e-12, "a cell observed now offers nothing (marginal by construction)");
     check(b.info(0, 1000.0 + 86400.0, ell) > b.info(0, 1000.0 + 3600.0, ell), "older observation, more information");
-    check(std::abs(b.info(1, 1000.0, ell) - b.info(0, 1000.0 + b.params().unseen_age_s, ell)) < 1e-12,
-          "a never-observed cell is valued at the unseen-age prior");
+    b.set_unknown_nats(0.2);
+    check(std::abs(b.info(1, 1000.0, ell) - (0.25 / (ell * ell)) * 0.2) < 1e-12,
+          "a cell with no observation on record is valued as unknown state (n x h(P(occ)) from the caller)");
     const double n = 0.25 / (ell * ell);
     check(b.info(1, 0.0, ell) <= n * ln2 + 1e-12, "at most ln 2 per region");
     std::printf("     a 0.5 m cell last seen 1 h ago: %.4f nats; 1 day ago: %.3f nats (prior λ %.1e /m²/s)\n",
@@ -52,44 +53,79 @@ int main()
         Params p; ChangeBelief lb(p); lb.init({0.f, 0.f}, 10, 10, 0.5f);
         std::mt19937 rng(7); std::uniform_real_distribution<double> U(0.0, 1.0);
         std::vector<bool> state(100, false);
-        for (int k = 0; k < 100; ++k) lb.observe(k, 0.0, false, ell);
-        const double dt = 7200.0, regions = 0.25 / (ell * ell);
-        for (double t = dt; t <= 30 * 86400.0; t += dt)
+        for (int k = 0; k < 100; ++k) lb.observe(k, 0.0, false);
+        // re-observation gaps vary as in a home: minutes (in one tour) to days (between tours), log-uniform
+        std::uniform_real_distribution<double> G(std::log(60.0), std::log(3 * 86400.0));
+        std::vector<double> last(100, 0.0);
+        for (int n = 0; n < 60; ++n)
             for (int k = 0; k < 100; ++k)
             {
-                const bool changed = U(rng) < 1.0 - std::exp(-lam_true * 0.25 * dt);   // a change somewhere in the cell
+                const double gap = std::exp(G(rng)), t = last[k] + gap; last[k] = t;
+                const bool changed = U(rng) < 1.0 - std::exp(-lam_true * 0.25 * gap);   // a change somewhere in the cell
                 const bool shows = changed ? U(rng) < d : U(rng) < f;
                 if (shows) state[k] = not state[k];
-                lb.observe(k, t, state[k], ell);
+                lb.observe(k, t, state[k]);
             }
-        (void)regions;
         std::printf("     prior λ %.1e, true %.1e, learnt %.2e\n", p.hazard_mean, lam_true, lb.hazard());
         check(lb.hazard() > 0.5 * lam_true and lb.hazard() < 2.0 * lam_true, "learnt λ within a factor 2 of the truth");
     }
     {
         // A home where nothing ever changes: only false alarms. λ must fall well below the prior.
+        const double f_true = 0.02;   // the real sensor flickers less than the prior says
         Params p; ChangeBelief lb(p); lb.init({0.f, 0.f}, 10, 10, 0.5f);
         std::mt19937 rng(3); std::uniform_real_distribution<double> U(0.0, 1.0);
         std::vector<bool> state(100, false);
-        for (int k = 0; k < 100; ++k) lb.observe(k, 0.0, false, ell);
-        for (double t = 7200.0; t <= 30 * 86400.0; t += 7200.0)
+        for (int k = 0; k < 100; ++k) lb.observe(k, 0.0, false);
+        std::uniform_real_distribution<double> G(std::log(60.0), std::log(3 * 86400.0));
+        std::vector<double> last(100, 0.0);
+        for (int n = 0; n < 60; ++n)
             for (int k = 0; k < 100; ++k)
             {
-                if (U(rng) < p.false_alarm) state[k] = not state[k];
-                lb.observe(k, t, state[k], ell);
+                last[k] += std::exp(G(rng));
+                if (U(rng) < f_true) state[k] = not state[k];
+                lb.observe(k, last[k], state[k]);
             }
-        std::printf("     static home: prior λ %.1e, learnt %.2e\n", p.hazard_mean, lb.hazard());
+        std::printf("     static home: prior λ %.1e, learnt %.2e; false alarm prior %.3f, true %.3f, learnt %.3f\n",
+                    p.hazard_mean, lb.hazard(), p.false_mean, f_true, lb.false_alarm());
         check(lb.hazard() < 0.5 * p.hazard_mean, "false alarms alone do not teach a high hazard");
+        check(std::abs(lb.false_alarm() - f_true) < 0.01, "the false-alarm rate is learnt");
     }
     ChangeBelief c; c.init({0.f, 0.f}, 2, 2, 0.5f);
     const double h0 = c.hazard();
-    c.observe(0, 0.0, true, ell); c.observe(1, 0.0, false, ell);
+    c.observe(0, 0.0, true); c.observe(1, 0.0, false);
     check(c.hazard() == h0 and c.tests() == 0, "a first observation teaches λ nothing");
-    c.observe(0, 3600.0, false, ell);
+    c.observe(0, 3600.0, false);
     const double h1 = c.hazard();
     check(h1 > h0 and c.tests() == 1, "a flip raises λ");
     c.clear_cells();
     check(c.cell(0).t_obs < 0.0 and c.hazard() == h1, "a new room forgets the cells, keeps λ");
+
+    std::printf("promised and delivered\n");
+    {
+        ChangeBelief t; t.init({0.f, 0.f}, 1, 1, 0.5f);
+        std::vector<rc::change::Test> log;
+        std::vector<rc::change::Test> firsts;
+        t.set_unknown_nats(0.2); t.set_ell(0.3);
+        t.on_test = [&](const rc::change::Test& x) { (x.first ? firsts : log).push_back(x); };
+        t.observe(0, 0.0, false); t.observe(0, 86400.0, false); t.observe(0, 2 * 86400.0, true);
+        check(firsts.size() == 1 and std::abs(firsts[0].promised - 0.25 / 0.09 * 0.2) < 1e-12 and firsts[0].delivered == firsts[0].promised,
+              "a first observation resolves the unknown state: promised = delivered = n x h(P(occ))");
+        check(log.size() == 2, "each re-observation reports one test");
+        if (log.size() == 2)
+        {
+            check(log[0].promised > 0.0 and log[0].delivered >= 0.0 and log[0].delivered < log[0].promised,
+                  "an expected no-change delivers less than promised (KL >= 0)");
+            check(log[1].flip and log[1].delivered > log[1].promised, "a surprising flip delivers more than promised");
+            std::printf("     no flip: promised %.4f delivered %.4f; flip: promised %.4f delivered %.4f nats\n",
+                        log[0].promised, log[0].delivered, log[1].promised, log[1].delivered);
+        }
+        ChangeBelief u; u.init({0.f, 0.f}, 2, 2, 0.5f);
+        u.observe(3, 50.0, true);
+        ChangeBelief v; v.init({0.f, 0.f}, 2, 2, 0.5f);
+        v.import_cells(u.export_cells());
+        check(v.cell(3).t_obs == 50.0 and v.cell(3).matter == 1 and v.cell(0).t_obs < 0.0, "the record round-trips");
+        check(v.import_posterior(u.export_posterior()) and std::abs(v.hazard() - u.hazard()) < 1e-15, "the posterior round-trips");
+    }
 
     std::printf("observation episodes\n");
     {

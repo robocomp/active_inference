@@ -406,6 +406,14 @@ private:
     /// One CSV row per afford_room publish: what the gain is made of (pose / neglect / coverage information).
     void log_room_offer(std::string_view source, const Eigen::Vector2f& target_pub, float pose_info, float neglect,
                         float change_info, float coverage_info, float total);
+    /// AuRo item B: enter the current room in the planner's change belief (bounds in the published frame), set the
+    /// unknown-cell value from the occupancy prior, log every change test, persist the record + posterior.
+    void change_room_step(rc::EpistemicPlanner& planner);
+    void change_memory_load(rc::EpistemicPlanner& planner);
+    void change_memory_save(const rc::EpistemicPlanner& planner);
+    bool change_memory_loaded_ = false;
+    std::int64_t change_memory_saved_ms_ = 0;
+    std::ofstream change_tests_log_;
     rc::coverage::BetaPrior occ_prior_, door_prior_;
     rc::coverage::LengthPrior ell_prior_;
     bool coverage_priors_set_ = false;
