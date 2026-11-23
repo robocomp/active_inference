@@ -253,10 +253,14 @@ before execution \cite{rana2023sayplan}. Others bias object search \cite{zhou202
 \cite{liang2023code, singh2023progprompt}. LLM-Modulo frameworks argue that a language model should
 generate candidates for external verifiers \cite{kambhampati2024llmmodulo}, KnowNo calibrates when a language-model
 planner should ask a person for help \cite{ren2023knowno}, Voyager stores successful programs in a skill library
-\cite{wang2023voyager}, and Reflexion turns failures into verbal lessons \cite{shinn2023reflexion}. The machine shares
-the pattern of generation followed by verification. It differs in that the verifier is the robot's probabilistic
-belief state, each step declares a change in belief that is monitored while the step runs, and stored missions are
-retrieved under expected free energy. Because probabilities stated by a model have known limits
+\cite{wang2023voyager}, and Reflexion turns failures into verbal lessons \cite{shinn2023reflexion}. ASPIRE carries
+this to robot manipulation: a coding agent repairs failed control programs from execution traces, keeps the repairs
+it validates as text skills, and retrieves them as context for later tasks, transferring them from simulation to a
+real robot \cite{lu2026aspire}. The machine shares the pattern of generation followed by verification. It differs in
+that the verifier is the robot's probabilistic belief state, each step declares a change in belief that is
+monitored while the step runs, and stored missions are retrieved under expected free energy. It also differs in
+where learned procedures end up: ASPIRE's skills are read by the language model on every task, whereas the
+machine compiles a procedure that recurs and succeeds into a habit that runs without it (Eq.~\eqref{eq:lh_habit}). Because probabilities stated by a model have known limits
 \cite{tian2023just, xiong2024can}, the robot measures the reliability $\beta$ instead of trusting them.
 
 Three-dimensional scene graphs layer a building into rooms, objects and the cameras that observed them
