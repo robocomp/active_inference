@@ -129,7 +129,7 @@ The scorers (`countable_concept/tools/lidar_measures_score.py`, `room_concept/es
     - LiDAR shared error, N, when the class uses rays;
     - fresh ego-motion shares for camera and LiDAR, N each (rev 3.3.13);
     - shape misfit, N, with ρ = 1.
-  - So K = 3 + 5N with LiDAR, 3 + 3N without.
+  - So K = 3 + 6N with LiDAR (shape latent per channel), 3 + 3N without.
 - **Hooks kept from today:** `sdf_prim`, `sdf_jacobian`, `responsibilities`, `common_mode_inv(_diag)`, `accumulate_extra` (θ-only channel), `apply_constraints`, `canonicalize`.
 - **New hooks:**
   - `beam_parts(θ)`: the convex parts the beam model intersects. Chair seat/back/legs, table top/legs and fridge/hood box are all boxes.
