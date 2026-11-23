@@ -141,6 +141,13 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m — explorer standpoints this far inside the ring (<0 = circumscribed body radius)");
     reader.opt<float, double>("StartupProto.ReplanS", p.STARTUP_PROTO_REPLAN_S,
             "s between layout-explorer re-evaluations");
+    reader.opt<float, double>("StartupProto.OccPriorA", p.STARTUP_PROTO_OCC_PRIOR_A, "Beta prior a: occupied unseen cell");
+    reader.opt<float, double>("StartupProto.OccPriorB", p.STARTUP_PROTO_OCC_PRIOR_B, "Beta prior b: free unseen cell");
+    reader.opt<float, double>("StartupProto.DoorPriorA", p.STARTUP_PROTO_DOOR_PRIOR_A, "Beta prior a: door-width segment is a door");
+    reader.opt<float, double>("StartupProto.DoorPriorB", p.STARTUP_PROTO_DOOR_PRIOR_B, "Beta prior b: door-width segment is wall");
+    reader.opt<float, double>("StartupProto.EllPriorM", p.STARTUP_PROTO_ELL_PRIOR_M, "occupancy correlation length prior (m)");
+    reader.opt<float, double>("StartupProto.EllPriorN", p.STARTUP_PROTO_ELL_PRIOR_N, "its weight, in rooms");
+    reader.opt<std::string>("StartupProto.RoomOfferLog", p.ROOM_OFFER_LOG, "CSV of the room offer's gain components (\"\" = off)");
     reader.opt<std::string>("RoomConcept.CalibStateFile", p.CALIB_STATE_FILE,
             "config: RoomConcept.CalibStateFile");
     reader.opt<float, double>("RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale,

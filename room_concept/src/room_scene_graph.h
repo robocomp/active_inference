@@ -54,6 +54,7 @@
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 #include "room_explored.h"           // rc::explored — P(room explored), room_explored_p
 #include "camera_coverage.h"         // rc::camcov — the boundary as the CAMERAS have seen it (Task 12)
+#include "coverage_info.h"           // rc::coverage — the room-building offer in nats (AuRo item A)
 #include "proposal_adoption.h"         // rc::proposal — ltsm's recognition proposal: admit, adopt in place, answer
 #include "entry_reloc.h"   // rc::entry::PoseReference (entry relocalisation value)
 
@@ -396,6 +397,20 @@ private:
                                        const rc::layout::Admissible& deferred);
     /// The robot's footprint area, m² — the coverage explorer's price of a trip (plan_coverage's min_gain).
     [[nodiscard]] float footprint_area() const;
+    // ── AuRo item A (2026-11-23): the room-building offer in NATS (coverage_info.h) ──
+    /// m² of unknown floor → nats under the occupancy prior; m of boundary wall → nats under the door prior.
+    [[nodiscard]] float floor_nats(float area_m2) const;
+    [[nodiscard]] float wall_nats(float length_m) const;
+    /// A finished room teaches both priors: its occupied vs free cells, its doors vs door-width segments of wall.
+    void learn_coverage_priors();
+    /// One CSV row per afford_room publish: what the gain is made of (pose / neglect / coverage information).
+    void log_room_offer(std::string_view source, const Eigen::Vector2f& target_pub, float pose_info, float neglect,
+                        float coverage_info, float total);
+    rc::coverage::BetaPrior occ_prior_, door_prior_;
+    rc::coverage::LengthPrior ell_prior_;
+    bool coverage_priors_set_ = false;
+    bool coverage_priors_learnt_ = false;   ///< once per room
+    std::ofstream room_offer_log_;
     /// The coverage plan of a partly remembered room: unseen space in the remembered outline, worth (1 − p_mem) of it.
     rc::layout::Plan plan_recalled_rest(const rc::layout::FeasibleGrid& grid, const Eigen::Vector2f& robot,
                                         const rc::layout::ExplorerParams& ep, const rc::layout::Admissible& standable,

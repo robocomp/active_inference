@@ -70,8 +70,8 @@ rc::layout::Plan RoomSceneGraph::plan_recalled_rest(const rc::layout::FeasibleGr
     const float p_mem = explored_.p_mem();
     return rc::layout::plan_coverage(grid, robot, ep, standable,
         [this, &countable, p_mem](const Eigen::Vector2f& v)
-        { return rc::explored::recalled_gain(p_mem, free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable)); },
-        footprint_area(), deferred);
+        { return rc::explored::recalled_gain(p_mem, floor_nats(free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable))); },
+        floor_nats(footprint_area()), deferred);   // item A: m^2 -> nats (occupancy prior), gain and price alike
 }
 
 // ── CAMERA COVERAGE OF THE BOUNDARY (camera_coverage.h; Task 12, 2026-10-29) ─────────────────────────────────────────
@@ -165,9 +165,9 @@ rc::layout::Plan RoomSceneGraph::plan_camera_cover(const rc::layout::FeasibleGri
         [this, r_pub](const Eigen::Vector2f& v)
         {
             const Eigen::Vector2f v_pub = T_pub_int_ * v;
-            return (v_pub - r_pub).squaredNorm() > 1e-9f ? cam_cover_.best_look(v_pub, cam_sensor_).first : 0.f;
+            return (v_pub - r_pub).squaredNorm() > 1e-9f ? wall_nats(cam_cover_.best_look(v_pub, cam_sensor_).first) : 0.f;
         },
-        cam_cover_.price(cam_sensor_), deferred);
+        wall_nats(cam_cover_.price(cam_sensor_)), deferred);   // item A: m of wall -> nats (door prior), gain and price alike
 }
 
 void RoomSceneGraph::latch_camera_phase()
@@ -178,6 +178,7 @@ void RoomSceneGraph::latch_camera_phase()
     if (camera_visits0_ < 0) camera_visits0_ = layout_visits_;   // the phase's own visits, not the survey's
     if (not layout_last_plan_.finished or camera_finished_) return;
     camera_finished_ = true;
+    learn_coverage_priors();   // item A: the finished room teaches the occupancy and door priors (once per room)
     float total = 0.f;
     for (const auto& c : cam_cover_.cells()) total += c.len;
     const float price = cam_cover_.price(cam_sensor_), residual = cam_cover_.residual_length(cam_sensor_);
@@ -222,6 +223,78 @@ void RoomSceneGraph::resume_camera_cover(const std::string& room)
     }
     else
         camera_finished_ = true;
+}
+
+}   // namespace rc
+
+namespace rc
+{
+// ── AuRo item A (2026-11-23): the room-building offer in NATS (coverage_info.h) ─────────────────────────────────────
+float RoomSceneGraph::floor_nats(float area_m2) const
+{
+    auto& self = const_cast<RoomSceneGraph&>(*this);
+    if (not coverage_priors_set_)
+    {
+        self.occ_prior_  = {params_->STARTUP_PROTO_OCC_PRIOR_A, params_->STARTUP_PROTO_OCC_PRIOR_B};
+        self.door_prior_ = {params_->STARTUP_PROTO_DOOR_PRIOR_A, params_->STARTUP_PROTO_DOOR_PRIOR_B};
+        self.ell_prior_  = {std::log(std::max(1e-3f, params_->STARTUP_PROTO_ELL_PRIOR_M)), std::max(1e-3f, params_->STARTUP_PROTO_ELL_PRIOR_N)};
+        self.coverage_priors_set_ = true;
+    }
+    const float cell = free_space_ ? free_space_->params().cell : params_->STARTUP_PROTO_CELL;
+    return rc::coverage::area_to_nats(area_m2, cell, occ_prior_, ell_prior_);
+}
+
+float RoomSceneGraph::wall_nats(float length_m) const
+{
+    (void)floor_nats(0.f);   // sets the priors on first use
+    return rc::coverage::wall_to_nats(length_m, cam_cover_.params().w_m, door_prior_);
+}
+
+void RoomSceneGraph::learn_coverage_priors()
+{
+    if (coverage_priors_learnt_ or not free_space_ or fs_published_.size() < 3 or not G_) return;
+    (void)floor_nats(0.f);
+    coverage_priors_learnt_ = true;
+    // occupancy: the finished room's own raster inside its outline (the same countable band the explorer counts in)
+    const auto mask = free_space_->countable_mask(fs_published_, 0.40f);
+    // the correlation length first: it also says how many INDEPENDENT observations the cell counts are worth
+    if (const auto ell = free_space_->occupancy_correlation_length(mask); ell.has_value()) ell_prior_.add(*ell);
+    const double cell = free_space_->params().cell, l = std::max(cell, ell_prior_.value()), per = cell * cell / (l * l);
+    const auto [n_free, n_occ] = free_space_->count_states(mask);
+    occ_prior_.add(static_cast<double>(n_occ) * per, static_cast<double>(n_free) * per);
+    // doors: door nodes hanging from this room vs the door-width segments of its boundary
+    double perimeter = 0.0;
+    for (std::size_t i = 0; i < fs_published_.size(); ++i)
+        perimeter += (fs_published_[(i + 1) % fs_published_.size()] - fs_published_[i]).norm();
+    const double w = std::max(1e-3f, cam_cover_.params().w_m);
+    long n_doors = 0;
+    for (const auto& n : G_->get_nodes())
+        if (n.name().starts_with("door") and G_->get_attrib_by_name<parent_att>(n).value_or(0) == dsr_room_id_) ++n_doors;
+    const double segments = std::max(static_cast<double>(n_doors), perimeter / w);
+    door_prior_.add(static_cast<double>(n_doors), segments - static_cast<double>(n_doors));
+    qInfo().noquote() << QString("[room][coverage] priors learnt from this room: occupancy %1 occupied / %2 free cells -> "
+                                 "P(occ) %3, %4 nats/region, correlation length %9 m; doors %5 of %6 segments -> P(door) %7, %8 nats/segment")
+                             .arg(n_occ).arg(n_free).arg(occ_prior_.mean(), 0, 'f', 3).arg(occ_prior_.nats_per_unit(), 0, 'f', 3)
+                             .arg(n_doors).arg(segments, 0, 'f', 1).arg(door_prior_.mean(), 0, 'f', 3)
+                             .arg(door_prior_.nats_per_unit(), 0, 'f', 3).arg(ell_prior_.value(), 0, 'f', 3);
+}
+
+void RoomSceneGraph::log_room_offer(std::string_view source, const Eigen::Vector2f& target_pub, float pose_info, float neglect,
+                                    float coverage_info, float total)
+{
+    if (params_->ROOM_OFFER_LOG.empty()) return;
+    if (not room_offer_log_.is_open())
+    {
+        room_offer_log_.open(params_->ROOM_OFFER_LOG, std::ios::out | std::ios::trunc);
+        room_offer_log_.imbue(std::locale::classic());
+        room_offer_log_ << "wall_ms,source,tx,ty,pose_info,neglect,coverage_info,total,p_occ,occ_a,occ_b,p_door,door_a,door_b,ell_m\n";
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    room_offer_log_ << now << ',' << source << ',' << target_pub.x() << ',' << target_pub.y() << ',' << pose_info << ','
+                    << neglect << ',' << coverage_info << ',' << total << ',' << occ_prior_.mean() << ',' << occ_prior_.a
+                    << ',' << occ_prior_.b << ',' << door_prior_.mean() << ',' << door_prior_.a << ',' << door_prior_.b << ',' << ell_prior_.value() << '\n';
+    room_offer_log_.flush();
 }
 
 }   // namespace rc

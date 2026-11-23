@@ -2020,3 +2020,12 @@ MaxVerts          = 64      # vertex budget of the published ring
 PublishPeriodMs   = 1000    # proto polygon republish throttle
 ExplorerClearance = 0.625   # m — 2026-10-09 (fable review): the CONTROLLER's standpoint test is the body hull + FootprintSafetyMarginM 0.05 + goal_threshold 0.25 (the arrival band: it may stop anywhere inside it) against live returns, i.e. 0.325 + 0.05 + 0.25 = 0.625 m from the centre, heading-free. At 0.45 every standpoint with matter between 0.45 and 0.625 m passed here and was refused there ('Standpoint moved to ..., 0.05-0.08 m away'). <0 = circumscribed body radius
 ReplanS           = 15.0    # s between layout-explorer re-evaluations while no claim is held
+# AuRo item A (2026-11-23): the room-building offer in NATS. Beta priors, learned from each finished room:
+# P(an unseen floor cell is occupied), P(a door-width segment of boundary is a door). Beta(1,1) = ln 2 per cell/segment.
+OccPriorA         = 1.0
+OccPriorB         = 1.0
+DoorPriorA        = 1.0
+DoorPriorB        = 1.0
+EllPriorM         = 0.3    # m — occupancy correlation length prior: unknown floor holds area/ℓ² independent regions
+EllPriorN         = 1.0    # its weight, in rooms (each finished room adds its measured ℓ)
+RoomOfferLog      = "etc/room_offer_log.csv"   # one row per afford_room publish: pose / neglect / coverage information

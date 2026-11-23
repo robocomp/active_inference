@@ -330,6 +330,52 @@ public:
         return static_cast<float>(std::distance(seen.begin(), last)) * p_.cell * p_.cell;
     }
 
+    /// (free, occupied) cells inside `mask` — what a finished room teaches the occupancy prior (coverage_info.h).
+    [[nodiscard]] std::pair<long, long> count_states(const std::vector<std::uint8_t>& mask) const
+    {
+        long f = 0, o = 0;
+        for (std::size_t k = 0; k < st_.size() and k < mask.size(); ++k)
+            if (mask[k]) { if (st_[k] == 1) ++f; else if (st_[k] == 2) ++o; }
+        return {f, o};
+    }
+    /// Occupancy CORRELATION LENGTH (m) inside `mask` (coverage_info.h LengthPrior): the lag at which the autocorrelation
+    /// of the occupied indicator, over pairs of observed cells both in the mask (along rows and columns), first falls
+    /// below 1/e, linearly interpolated. nullopt when the mask holds no occupied or no free observed cell; the largest
+    /// lag tried (max_lag_m) when it never falls that far.
+    [[nodiscard]] std::optional<float> occupancy_correlation_length(const std::vector<std::uint8_t>& mask, float max_lag_m = 3.f) const
+    {
+        if (not ready() or mask.size() != st_.size()) return std::nullopt;
+        const auto obs = [&](std::size_t k) { return mask[k] and (st_[k] == 1 or st_[k] == 2); };
+        double s = 0.0, n = 0.0;
+        for (std::size_t k = 0; k < st_.size(); ++k) if (obs(k)) { s += (st_[k] == 2); n += 1.0; }
+        if (n < 2.0) return std::nullopt;
+        const double mu = s / n, var = mu * (1.0 - mu);
+        if (var <= 0.0) return std::nullopt;
+        const int kmax = std::max(1, static_cast<int>(max_lag_m / p_.cell));
+        double prev = 1.0;
+        for (int lag = 1; lag <= kmax; ++lag)
+        {
+            double c = 0.0, m = 0.0;
+            for (int j = 0; j < n_; ++j)
+                for (int i = 0; i < n_; ++i)
+                {
+                    const std::size_t a = idx(i, j);
+                    if (not obs(a)) continue;
+                    const double xa = (st_[a] == 2) - mu;
+                    if (i + lag < n_) if (const std::size_t b = idx(i + lag, j); obs(b)) { c += xa * ((st_[b] == 2) - mu); m += 1.0; }
+                    if (j + lag < n_) if (const std::size_t b = idx(i, j + lag); obs(b)) { c += xa * ((st_[b] == 2) - mu); m += 1.0; }
+                }
+            if (m < 1.0) break;
+            const double rho = c / m / var, e1 = std::exp(-1.0);
+            if (rho < e1)
+            {
+                const double frac = prev > rho ? (prev - e1) / (prev - rho) : 1.0;
+                return static_cast<float>((lag - 1 + frac) * p_.cell);
+            }
+            prev = rho;
+        }
+        return static_cast<float>(kmax * p_.cell);
+    }
     /// Cells currently marked in the low-obstacle layer (diagnostics).
     [[nodiscard]] long low_cells() const
     { return static_cast<long>(std::ranges::count_if(low_, [](std::uint8_t v) { return v != 0; })); }

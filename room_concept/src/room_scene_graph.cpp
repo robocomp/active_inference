@@ -2000,6 +2000,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     unfound_openings_.clear();   // the hypotheses belong to the room they were cut in
     layout_finished_   = false;
     cam_cover_.reset();          // a new room: its boundary has been shown to no camera yet (camera_coverage.h)
+    coverage_priors_learnt_ = false;   // item A: a new room may teach the coverage priors once more
     camera_finished_    = false;
     camera_visits0_     = -1;
     camera_narrow_warned_ = false;
@@ -2647,8 +2648,8 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             }
             layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, standable,
                 [this, &countable](const Eigen::Vector2f& v)
-                { return free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable); },
-                footprint, deferred);
+                { return floor_nats(free_space_->visible_unknown_area(T_pub_int_ * v, 8.f, 180, &countable)); },
+                floor_nats(footprint), deferred);   // item A: m^2 -> nats (occupancy prior), gain and price alike
         }
         else if (startup_promoted_ and free_space_ and not refine_contested_.empty())
         {
@@ -2657,9 +2658,11 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             const auto mask = free_space_->cells_mask(refine_contested_);
             const auto& R = refiner_.last();
             const float cell2 = free_space_->params().cell * free_space_->params().cell;
-            const float min_gain = (R.kappa + std::log(float(std::max<std::size_t>(4, fs_published_.size())))) / std::max(R.w, 1e-3f) * cell2;
+            // item A: in NATS — the refiner's own w nats per contested cell; the price is the (kappa + ln n) nats one edit needs
+            const float w_cell = std::max(R.w, 1e-3f);
+            const float min_gain = R.kappa + std::log(float(std::max<std::size_t>(4, fs_published_.size())));
             layout_last_plan_ = rc::layout::plan_coverage(grid, robot, ep, standable,
-                [this, &mask](const Eigen::Vector2f& v) { return free_space_->visible_area(T_pub_int_ * v, 8.f, 180, mask); },
+                [this, &mask, w_cell, cell2](const Eigen::Vector2f& v) { return free_space_->visible_area(T_pub_int_ * v, 8.f, 180, mask) / cell2 * w_cell; },
                 min_gain, deferred);
         }
         else
@@ -2730,7 +2733,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
                               "outside ring {}, near furniture {}, refused area {}\n",
                               free_space_ ? free_space_->low_cells() : -1L, low_batches_stamped_, low_batches_too_old_,
                               rej_ring_, rej_furniture_, rej_refused_);
-            rc::status::print("[layout] plan: {} target={} gain={:.2f} nats ({:.3f}/m) candidates={} with_gain={} "
+            rc::status::print("[layout] plan: {} target={} gain={:.2f} nats (score {:.3f} = gain/(1+route m)) candidates={} with_gain={} "
                               "unknowns={} refused_held={}\n",
                               layout_last_plan_.why,
                               layout_target_ ? std::format("({:.2f},{:.2f})", layout_target_->x(), layout_target_->y())
@@ -2767,6 +2770,9 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         armed_at_ms_ = static_cast<std::uint64_t>(now);
         rc::status::print("[layout] afford_room OFFERED ({:.2f},{:.2f}) yaw={:.2f} gain={:.2f} nats (published frame)\n",
                           t_pub.x(), t_pub.y(), yaw_pub, layout_gain_);
+        // item A/C: the layout offer is all coverage information (unknown floor, contested floor, wall to show the
+        // cameras, or the wall-map EIG of plan()), none of it pose or neglect
+        log_room_offer(layout_plan_camera_ ? "layout_camera" : "layout", t_pub, 0.f, 0.f, layout_gain_, layout_gain_);
     }
 }
 
@@ -3651,6 +3657,9 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // cannot stall. rotate_in_place switches to the absolute reading — see live_total_epistemic_gain.
     const float gain = planner.live_total_epistemic_gain(target_opt->position,
                                                          target_opt->rotate_in_place);
+    // item C: the two parts of the known-room offer, logged apart (pose information; the rest is the neglect drive)
+    const float pose_info = target_opt->rotate_in_place ? planner.live_epistemic_gain(target_opt->position)
+                                                        : planner.marginal_epistemic_gain(target_opt->position);
 
     // Heading: face toward room centre so the robot maximises wall/corner visibility.
     const float cx  = (planner.room_min().x() + planner.room_max().x()) * 0.5f;
@@ -3693,6 +3702,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         gain,
         [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
+    if (published) log_room_offer("room", t_pub, pose_info, gain - pose_info, 0.f, gain);
 
     pub_tx_ = tx; pub_ty_ = ty; pub_ok_ = published;
     // A new arming is a new affordance instance: latch what is really on the node and re-open the

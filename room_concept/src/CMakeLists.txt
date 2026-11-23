@@ -208,6 +208,12 @@ target_compile_definitions(door_apertures_selftest PRIVATE SHADOW_JSON="${CMAKE_
 target_link_libraries(door_apertures_selftest ${LIBS})
 set_target_properties(door_apertures_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
+# ── coverage_info_test ────────────────────────────────────────────────────────
+# AuRo item A (2026-11-23): the room-building offer in nats. Header-only.
+add_executable(coverage_info_test EXCLUDE_FROM_ALL ../tools/coverage_info_test.cpp)
+target_include_directories(coverage_info_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(coverage_info_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
 # ── proto_frame_test ──────────────────────────────────────────────────────────
 # Task S: the proto-room frame comes from the aperture, not the nearest polygon edge. Header-only.
 add_executable(proto_frame_test EXCLUDE_FROM_ALL ../tools/proto_frame_test.cpp)

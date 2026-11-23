@@ -212,6 +212,17 @@ struct RoomConfig
     int   STARTUP_PROTO_PUBLISH_MS     = 1000;    // config: StartupProto.PublishPeriodMs (polygon republish throttle)
     float STARTUP_PROTO_EXPLORER_CLEARANCE = -1.f; // config: StartupProto.ExplorerClearance (m; <0 = circumscribed radius)
     float STARTUP_PROTO_REPLAN_S       = 15.f;    // config: StartupProto.ReplanS (s between explorer re-evaluations)
+    /// AuRo item A (2026-11-23): the room-building offer in NATS (coverage_info.h). Beta priors, learned online from
+    /// each finished room: P(an unseen floor cell is occupied) and P(a door-width segment of boundary is a door).
+    /// Beta(1,1) = no knowledge: ln 2 nats per unseen cell / segment until a room has been finished.
+    float STARTUP_PROTO_OCC_PRIOR_A    = 1.f;     // config: StartupProto.OccPriorA
+    float STARTUP_PROTO_OCC_PRIOR_B    = 1.f;     // config: StartupProto.OccPriorB
+    float STARTUP_PROTO_DOOR_PRIOR_A   = 1.f;     // config: StartupProto.DoorPriorA
+    float STARTUP_PROTO_DOOR_PRIOR_B   = 1.f;     // config: StartupProto.DoorPriorB
+    /// Occupancy correlation length prior (coverage_info.h LengthPrior): ℓ₀ in m, weighted as N rooms' worth.
+    float STARTUP_PROTO_ELL_PRIOR_M    = 0.3f;    // config: StartupProto.EllPriorM
+    float STARTUP_PROTO_ELL_PRIOR_N    = 1.f;     // config: StartupProto.EllPriorN
+    std::string ROOM_OFFER_LOG = "etc/room_offer_log.csv";   // config: StartupProto.RoomOfferLog ("" = off)
     /// Where the calibration WINDOW is kept between runs. Evidence (episodes + closed pivots), never
     /// the fitted parameters — restoring a fitted value as a prior mean is the ratchet that walked
     /// the gyro bias to the wrong sign. Delete the file, or press Reset in the calibration window,
