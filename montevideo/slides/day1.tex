@@ -42,14 +42,9 @@
 % =================================================================================================
 
 \begin{frame}{A robot is put down in an apartment it has never seen}
+  % Robolab: Actionable Scene Graphs (3 min 26 s). Click once in pympress to start.
   \centering
-  \vspace{1em}
-  {\color{muted}\fbox{\parbox[c][0.55\textheight][c]{0.8\textwidth}{\centering
-    \Large [ video: the full cycle, Webots / real apartment ]\\[0.5em]
-    \normalsize room estimated $\rightarrow$ localised $\rightarrow$ objects appear
-    $\rightarrow$ door crossed $\rightarrow$ second room}}}
-  \vspace{1em}
-
+  \movie[width=9.6cm, height=5.4cm, showcontrols=true]{\includegraphics[width=9.6cm]{actionable_scene_graphs_poster.png}}{media/actionable_scene_graphs.mp4}
   \vfill
   \lesson{Nothing in this video was programmed as a sequence of steps.}
 \end{frame}
@@ -320,46 +315,96 @@
   \lesson{Conditioning keeps the column that matches the reading and rescales it: $0.27/0.41 = 0.66$.}
 \end{frame}
 
-\begin{frame}{Factorisation: express the joint as factors}
-  \begin{center}\large $p(D, O) \;=\; p(O\given D)\,p(D) \;=\; p(D\given O)\,p(O)$\end{center}
-  \vfill
+\begin{frame}{Factorisation: a marginal times a conditional gives the joint}
   \centering
-  \begin{tikzpicture}[x=1.05cm, y=1.45cm, lab/.style={font=\small}, ttl/.style={font=\small, align=center},
-                      tgt/.style={draw=accent, very thick}]
-    % ---- left: rows first (D), then O inside each row. Colours as in the marginal frame: open pink, closed grey.
-    \mosaicbyD{accent!30}{muted!25}{accent!30}{muted!25}
-    \draw[tgt] (0,1.68) rectangle (2.88,2.4);
-    \node[lab] at (1.44,2.04) {0.27};  \node[lab, right] at (3.2,2.04) {0.03};
-    \node[lab] at (0.32,0.84) {0.14};  \node[lab] at (1.92,0.84) {0.56};
-    \node[lab, below] at (0.32,0) {gap}; \node[lab, below] at (1.92,0) {wall};
-    \node[lab, right] at (3.85,0.84) {closed};
-    \node[lab, right] at (3.85,2.04) {open};
-    \draw[|-|, thick, accent] (0,2.55) -- node[above, lab] {$p(\text{gap}\given\text{open})=0.9$} (2.88,2.55);
-    \draw[|-|, thick, cool] (-0.15,1.68) -- node[left, lab, align=right] {$p(\text{open})$\\$=0.30$} (-0.15,2.4);
-    \node[ttl] at (1.6,3.05) {\textbf{first $D$, then $O$}: \ $p(O\given D)\,p(D)$};
-    \node[ttl] at (1.6,-0.75) {$0.30 \times 0.9 = \alert{0.27}$};
-    % ---- right: columns first (O), then D inside each column: exactly the marginal frame's picture
-    \begin{scope}[shift={(7.6,0)}]
-      \mosaicbyO{accent!30}{muted!25}{accent!30}{muted!25}
-      \draw[tgt] (0,0.82) rectangle (1.312,2.4);
-      \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
-      \node[lab] at (2.256,1.14) {0.56}; \node[lab, right] at (3.2,2.34) {0.03};
-      \node[lab, above] at (0.656,2.4) {gap}; \node[lab, above] at (2.256,2.4) {wall};
-      \node[lab, right] at (3.2,0.41) {closed};  \node[lab, right] at (3.2,1.61) {open};
-      \draw[|-|, thick, good!70!black] (0,-0.15) -- node[below, lab, fill=white, inner sep=1pt, text=good!70!black] {$p(\text{gap})=0.41$} (1.312,-0.15);
-      \draw[|-|, thick, accent] (-0.15,0.82) -- node[left, lab, align=right] {$p(\text{open}\given\text{gap})$\\$=0.66$} (-0.15,2.4);
-      \node[ttl] at (1.6,3.05) {\textbf{first $O$, then $D$}: \ $p(D\given O)\,p(O)$};
-      \node[ttl] at (1.6,-0.75) {$0.41 \times 0.66 = \alert{0.27}$};
-    \end{scope}
-    \node[font=\Large, text=muted] at (5.4,1.2) {$=$};
+  \begin{tikzpicture}[x=1.2cm, y=0.85cm, v/.style={font=\footnotesize}, n/.style={font=\footnotesize}, t/.style={font=\normalsize}]
+\node[t] at (0.25,5.8) {$p(D)$};
+\fill[accent!35] (0,4.540) rectangle (0.5,5.050);
+\draw[accent, very thick] (0,4.540) rectangle (0.5,5.050);
+\node[v] at (0.25,4.795) {0.3};
+\fill[muted!30] (0,3.350) rectangle (0.5,4.540);
+\node[v] at (0.25,3.945) {0.7};
+\draw[black!50] (0,3.35) rectangle (0.5,5.05);
+\node[n, anchor=west] at (0.55,4.795) {open};
+\node[n, anchor=west] at (0.55,3.945) {closed};
+\node[font=\Large] at (2.05,4.2) {$\times$};
+\node[t] at (3.4,5.8) {$p(O\given D)$};
+\fill[good!40] (2.7,3.520) rectangle (3.2,5.050);
+\draw[accent, very thick] (2.7,3.520) rectangle (3.2,5.050);
+\node[v] at (2.95,4.285) {0.9};
+\fill[black!12] (2.7,3.350) rectangle (3.2,3.520);
+\node[v, anchor=west] at (3.22,3.435) {0.1};
+\draw[black!50] (2.7,3.35) rectangle (3.2,5.05);
+\node[n, below] at (2.95,3.35) {if open};
+\fill[good!40] (3.85,4.710) rectangle (4.35,5.050);
+\node[v] at (4.1,4.880) {0.2};
+\fill[black!12] (3.85,3.350) rectangle (4.35,4.710);
+\node[v] at (4.1,4.030) {0.8};
+\draw[black!50] (3.85,3.35) rectangle (4.35,5.05);
+\node[n, below] at (4.1,3.35) {if closed};
+\node[n, anchor=west] at (4.72,4.625) {gap};
+\node[n, anchor=west] at (4.72,3.775) {wall};
+\node[font=\Large] at (6.0,4.2) {$=$};
+\node[t] at (7.25,5.8) {$p(D,O)$};
+\draw[black!50, fill=white] (6.500,4.200) rectangle (7.350,5.050);
+\node[v] at (6.925,4.625) {0.27};
+\draw[black!50, fill=white] (7.350,4.200) rectangle (8.200,5.050);
+\node[v] at (7.775,4.625) {0.03};
+\draw[black!50, fill=white] (6.500,3.350) rectangle (7.350,4.200);
+\node[v] at (6.925,3.775) {0.14};
+\draw[black!50, fill=white] (7.350,3.350) rectangle (8.200,4.200);
+\node[v] at (7.775,3.775) {0.56};
+\draw[accent, very thick] (6.500,4.200) rectangle (7.350,5.050);
+\node[n, above] at (6.925,5.05) {gap}; \node[n, above] at (7.775,5.05) {wall};
+\node[n, anchor=west] at (8.250,4.625) {open}; \node[n, anchor=west] at (8.250,3.775) {closed};
+\node[font=\small, text=accent, anchor=west] at (9.0,4.625) {$0.30\times0.9 = 0.27$};
+\node[t] at (0.25,2.45) {$p(O)$};
+\fill[good!40] (0,1.003) rectangle (0.5,1.700);
+\draw[accent, very thick] (0,1.003) rectangle (0.5,1.700);
+\node[v] at (0.25,1.351) {0.41};
+\fill[black!12] (0,0.000) rectangle (0.5,1.003);
+\node[v] at (0.25,0.502) {0.59};
+\draw[black!50] (0,0) rectangle (0.5,1.7);
+\node[n, anchor=west] at (0.55,1.351) {gap};
+\node[n, anchor=west] at (0.55,0.502) {wall};
+\node[font=\Large] at (2.05,0.85) {$\times$};
+\node[t] at (3.4,2.45) {$p(D\given O)$};
+\fill[accent!35] (2.7,0.578) rectangle (3.2,1.700);
+\draw[accent, very thick] (2.7,0.578) rectangle (3.2,1.700);
+\node[v] at (2.95,1.139) {0.66};
+\fill[muted!30] (2.7,-0.000) rectangle (3.2,0.578);
+\node[v] at (2.95,0.289) {0.34};
+\draw[black!50] (2.7,0) rectangle (3.2,1.7);
+\node[n, below] at (2.95,0) {if gap};
+\fill[accent!35] (3.85,1.615) rectangle (4.35,1.700);
+\node[v, anchor=west] at (4.369999999999999,1.657) {0.05};
+\fill[muted!30] (3.85,0.000) rectangle (4.35,1.615);
+\node[v] at (4.1,0.807) {0.95};
+\draw[black!50] (3.85,0) rectangle (4.35,1.7);
+\node[n, below] at (4.1,0) {if wall};
+\node[n, anchor=west] at (4.72,1.275) {open};
+\node[n, anchor=west] at (4.72,0.425) {closed};
+\node[font=\Large] at (6.0,0.85) {$=$};
+\node[t] at (7.25,2.45) {$p(D,O)$};
+\draw[black!50, fill=white] (6.500,0.850) rectangle (7.350,1.700);
+\node[v] at (6.925,1.275) {0.27};
+\draw[black!50, fill=white] (7.350,0.850) rectangle (8.200,1.700);
+\node[v] at (7.775,1.275) {0.03};
+\draw[black!50, fill=white] (6.500,0.000) rectangle (7.350,0.850);
+\node[v] at (6.925,0.425) {0.14};
+\draw[black!50, fill=white] (7.350,0.000) rectangle (8.200,0.850);
+\node[v] at (7.775,0.425) {0.56};
+\draw[accent, very thick] (6.500,0.850) rectangle (7.350,1.700);
+\node[n, above] at (6.925,1.7) {gap}; \node[n, above] at (7.775,1.7) {wall};
+\node[n, anchor=west] at (8.250,1.275) {open}; \node[n, anchor=west] at (8.250,0.425) {closed};
+\node[font=\small, text=accent, anchor=west] at (9.0,1.275) {$0.41\times0.66 = 0.27$};
   \end{tikzpicture}
   \vfill
-  \vfill
-  \lesson{Either order rebuilds the same joint: $0.30\times0.9 = 0.41\times0.66 = 0.27$.}
+  \lesson{A marginal times a conditional rebuilds the joint, in either order.}
 \end{frame}
 
 \begin{frame}{A belief over a continuous variable: a density}
-  \begin{center}\large $s$: how far is the wall? \qquad $p(s)$\end{center}
+  \begin{center}\large $s$: the distance to the wall \qquad $p(s)$\end{center}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
       \centering
@@ -514,10 +559,9 @@
   \lesson{Conditioning on $o$ takes the slice of the joint at the reading and rescales it to area 1.}
 \end{frame}
 
-\begin{frame}{Conditioning a Gaussian: shift the mean, shrink the variance}
+\begin{frame}{Conditioning the wall on the reading: $p(s)$ becomes $p(s\given o = 2.6)$}
   \begin{center}\large
-    gain \ $k = \dfrac{\textcolor{cross}{\Sigma_{so}}}{\textcolor{good!70!black}{\Sigma_{oo}}} = \dfrac{\textcolor{cross}{0.25}}{\textcolor{good!70!black}{0.29}} = 0.86$\\[0.1em]
-    {\small\color{muted} how much the reading is trusted}
+    gain \ $k = \dfrac{\textcolor{cross}{\Sigma_{so}}}{\textcolor{good!70!black}{\Sigma_{oo}}} = \dfrac{\textcolor{cross}{0.25}}{\textcolor{good!70!black}{0.29}} = 0.86$
   \end{center}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
@@ -546,8 +590,8 @@
     \draw[good!70!black, very thick] (2.6,-0.08) node[below, lab, text=good!70!black] {$o$} -- (2.6,1.3);
     \draw[-{Stealth[length=2mm]}, very thick, accent] (2,1.4) -- node[above, lab, text=accent] {86\% of the way} (2.517,1.4);
     \draw[muted, densely dotted] (2,0) -- (2,1.4);  \draw[good!70!black, densely dotted] (2.6,1.3) -- (2.6,1.4);
-    \node[lab, text=cool!70!black, anchor=east] at (1.6,0.45) {before: $2.00 \pm 0.50$};
-    \node[lab, text=accent, anchor=west] at (2.85,0.7) {after: $2.52 \pm 0.19$};
+    \node[lab, text=cool!70!black, anchor=east] at (1.6,0.45) {before, $p(s)$: $2.00 \pm 0.50$};
+    \node[lab, text=accent, anchor=west] at (2.85,0.7) {after, $p(s\given o=2.6)$: $2.52 \pm 0.19$};
   \end{tikzpicture}
 
   \vfill
@@ -563,7 +607,8 @@
 \end{frame}
 
 \begin{frame}{The chain rule: $N$ variables, $N$ factors}
-  \begin{center}\large $p(A,B,C,D) = p(A\given B,C,D)\;p(B\given C,D)\;p(C\given D)\;p(D)$\end{center}
+  \begin{center}\large $p(X_1,X_2,X_3,X_4) = p(X_1\given X_2,X_3,X_4)\;p(X_2\given X_3,X_4)\;p(X_3\given X_4)\;p(X_4)$\end{center}
+  {\centering\small $X_1,\dots,X_4$: any four variables\par}
   \centering
   % peel one variable at a time: each step is the product rule of the factorisation frames
   \begin{tikzpicture}[v/.style={draw=muted, circle, minimum size=0.75cm, fill=muted!10, font=\small},
@@ -571,13 +616,13 @@
                       fac/.style={font=\normalsize, anchor=west},
                       stp/.style={-{Stealth[length=2mm]}, thick, muted}]
     \foreach \row/\vars/\peel/\rest/\f in {
-        0/{A,B,C,D}/A/{B,C,D}/{$p(A\given B,C,D)$},
-        1/{B,C,D}/B/{C,D}/{$p(B\given C,D)$},
-        2/{C,D}/C/{D}/{$p(C\given D)$},
-        3/{D}/D/{}/{$p(D)$}} {
+        0/{1,2,3,4}/1/{2,3,4}/{$p(X_1\given X_2,X_3,X_4)$},
+        1/{2,3,4}/2/{3,4}/{$p(X_2\given X_3,X_4)$},
+        2/{3,4}/3/{4}/{$p(X_3\given X_4)$},
+        3/{4}/4/{}/{$p(X_4)$}} {
       \begin{scope}[shift={(0.9*\row,-1.05*\row)}]
-        \node[pl] at (0,0) {\peel};
-        \foreach \v [count=\i] in \rest \node[v] at (0.9*\i,0) {\v};
+        \node[pl] at (0,0) {$X_{\peel}$};
+        \foreach \v [count=\i] in \rest \node[v] at (0.9*\i,0) {$X_{\v}$};
         \node[fac] at (5.4-0.9*\row,0) {\f};
       \end{scope}
     }
@@ -591,7 +636,7 @@
 
 \begin{frame}{One joint, $N!$ factorisations}
   \begin{center}
-    \textcolor{cool!80!black}{$S$: state} (door open?) \quad
+    \textcolor{cool!80!black}{$S$: state} (door open? the $D$ of frames 7--10) \quad
     \textcolor{good!70!black}{$O$: observation} (gap seen?) \quad
     $A$: action (LiDAR at the door?)
   \end{center}
@@ -623,7 +668,7 @@
   \end{tikzpicture}
 
   \vfill
-  \lesson{$3! = 6$ orderings, all \alert{exactly equal}; $N$ variables give $N!$. Which one do we write down?}
+  \lesson{$3! = 6$ orderings, all \alert{exactly equal}; $N$ variables give $N!$, and we must write down one.}
 \end{frame}
 
 \begin{frame}{Choose the order in which the world produces things}
@@ -686,7 +731,7 @@
       \node[vs] (S3) at (-0.9,0.5) {$S$}; \node[va] (A3) at (0.9,0.5) {$A$};
       \node[vo, densely dashed] (O3) at (0,-0.6) {$\hat O$};
       \draw[ar] (S3) -- (O3); \draw[ar] (A3) -- (O3);
-      \node[cpn] at (0,-1.55) {sample in order:\\what I would see if I did $A$};
+      \node[cpn, anchor=north] at (0,-1.15) {sample in order:\\what I would see if I did $A$\\{\color{muted}$\hat O$: a predicted, not a measured, $O$}};
     \end{scope}
   \end{tikzpicture}
   \vfill

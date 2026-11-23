@@ -21,7 +21,7 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 COOL, ACCENT, GOOD, INK, MUTED = (46, 109, 180), (192, 57, 43), (46, 139, 87), (35, 55, 59), (130, 130, 130)
 
-art = Image.open(HERE / "cortex_overview.png").convert("RGB")
+art = Image.open(HERE / "cortex_overview_nosem.png").convert("RGB")
 scale = H / art.height
 art = art.resize((round(art.width * scale), H), Image.LANCZOS)
 S = art.width / VIEW_W

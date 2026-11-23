@@ -319,6 +319,12 @@ axes[0, 1].annotate("", xy=(1.0, 3.4), xytext=(1.0, 0.55), arrowprops=dict(arrow
 axes[0, 1].text(1.12, 2.6, "each\ncolumn\nadds to 1", fontsize=11, color="0.2")
 axes[1, 1].annotate("", xy=(3.5, 1.0), xytext=(0.5, 1.0), arrowprops=dict(arrowstyle="<->", color="0.2", lw=1.5))
 axes[1, 1].text(1.9, 0.6, "each row adds to 1", fontsize=11, color="0.2")
+# why the bands are diagonal: the line each band follows
+axes[0, 1].plot(g, g, color="k", ls="--", lw=1.2)
+axes[0, 1].text(2.2, 0.85, "$o = s \\pm 0.2$", fontsize=15, color="k", bbox=dict(fc="white", ec="none", pad=1))
+cen = mu_s + k_so * (g - mu_s)
+axes[1, 1].plot(cen, g, color="k", ls="--", lw=1.2)
+axes[1, 1].text(0.6, 2.9, "$s \\approx o$", fontsize=15, color="k", bbox=dict(fc="white", ec="none", pad=1))
 fig.subplots_adjust(wspace=0.35, hspace=0.3)
 fig.savefig(OUT / "d1_gaussian_fact.pdf", bbox_inches="tight"); plt.close(fig)
 print("max |row1 - row2| =", float(np.abs(P_s * P_o_s - P_o * P_s_o).max()))

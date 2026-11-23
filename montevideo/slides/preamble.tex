@@ -33,11 +33,12 @@
 \newcommand{\wip}{{\scriptsize\color{white}\colorbox{accent}{\,work in progress\,}}}
 % \lesson{...}: the one sentence a frame exists to say.
 % one full-width band, no empty title bar above it
-\newcommand{\lesson}[1]{\par\begin{beamercolorbox}[wd=\linewidth, sep=0.45em, center]{block body alerted}#1\end{beamercolorbox}}
+\newcommand{\lesson}[1]{\par\vspace{0pt plus 1filll}\begin{beamercolorbox}[wd=\linewidth, sep=0.45em, center]{block body alerted}#1\end{beamercolorbox}}
+% space under every frame title, so content never starts flush against the title bar
+\addtobeamertemplate{frametitle}{}{\vspace*{0.8em minus 0.8em}}
 % a measurement story
 \newenvironment{measured}[1]{\begin{exampleblock}{Measured: #1}}{\end{exampleblock}}
 
-\author{Course built on the doctoral thesis of No\'e Zapata}
 \institute{Montevideo, 30 November -- 4 December 2026}
 
 % \cyclemap{n}: the course's five-stage cycle, stage n highlighted (1 room ... 5 memory).

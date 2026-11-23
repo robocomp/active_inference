@@ -15,6 +15,7 @@
   lab/.style={font=\scriptsize},
   dimcard/.style={draw=#1, thick, rounded corners=4pt, fill=#1!12, minimum width=4.5cm, minimum height=1.42cm, align=center, font=\footnotesize, inner sep=3pt},
   recbar/.style={rounded corners=2pt, draw=#1, thick, fill=#1!15, minimum height=0.56cm, font=\scriptsize, inner sep=1pt},
+  pr/.style={draw=#1, thick, rounded corners=4pt, fill=#1!10, align=center, font=\scriptsize, text width=3.6cm, minimum height=1.25cm, inner sep=3pt},
   lanebox/.style={draw=#1, thick, rounded corners=3pt, fill=#1!10, align=center, font=\footnotesize, minimum width=2.75cm, minimum height=1cm},
 }
 
@@ -48,7 +49,7 @@
 % =================================================================================================
 
 
-\begin{frame}{What yesterday's equation did not say}
+\begin{frame}{Yesterday's $F$ had one belief; a robot runs a dozen processes}
   \begin{columns}[c]
     \begin{column}{0.46\textwidth}
       \centering
@@ -74,18 +75,17 @@
         \item What happens when they must \textbf{agree} on what the world contains?
       \end{itemize}
       \vspace{0.4em}
-      The answer is an architecture, \textbf{CORTEX}. Its fabric is \textbf{concepts}, and
-      today's claim is that it is \alert{a factorisation of $q$}.
+      The answer is an architecture, \textbf{CORTEX}, built out of \textbf{concepts}.
     \end{column}
   \end{columns}
-  \src{cortex.tex l.107--109, l.377--378}
+  \lesson{Today's claim: CORTEX is a way of splitting the one belief $q$ into pieces, one per process.}
 \end{frame}
 
-\begin{frame}{CORTEX}
+\begin{frame}{CORTEX: memories as graphs, and agents attached to them}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
       \centering
-      \includegraphics[height=0.84\textheight]{cortex_overview.png}
+      \includegraphics[height=0.76\textheight]{cortex_overview_nosem.png}
     \end{column}
     \begin{column}{0.46\textwidth}
       \small
@@ -96,23 +96,21 @@
         \textcolor[HTML]{0B2F5C}{$\blacksquare$} & concept agents: one class, one belief \\
         \textcolor[HTML]{1B9BDD}{$\blacksquare$} & agents that manage the memories \\
         \textcolor[HTML]{8B0000}{$\blacksquare$} & agents that reach the body \\
-        \textcolor[HTML]{6A00FF}{$\blacksquare$} & RoboComp components \\
+        \textcolor[HTML]{6A00FF}{$\blacksquare$} & RoboComp components: robot drivers \\
       \end{tabular}\\[0.7em]
-      At the centre, the \textbf{working memory}: the current state, as one distributed graph.\\[0.4em]
-      \footnotesize This is the design: the semantic and procedural circles are not built yet.
+      \footnotesize This is the design. The procedural memory does not run in today's system.
     \end{column}
   \end{columns}
-  \src{cortex.tex l.110--113, l.154--170}
+  \lesson{At the centre is the working memory: the robot's current state, as one graph.}
 \end{frame}
 
-% CORTEX in action: click once in pympress to start; it loops. Rebuilt by figures/make_cortex_flow.py.
-\begin{frame}[plain,noframenumbering]
-  \begin{tikzpicture}[remember picture, overlay]
-    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, loop, showcontrols=false]{\includegraphics[width=\paperwidth]{cortex_flow_poster.png}}{media/cortex_flow.mp4}};
-  \end{tikzpicture}
-\end{frame}
 
-\begin{frame}{Modules that talk, or agents that share}
+% =================================================================================================
+\section{CORTEX infrastructure: distributed memories and high-speed sensor highways}
+% =================================================================================================
+
+
+\begin{frame}{Agents share a memory graph instead of sending messages to each other}
   \centering
   \begin{tikzpicture}
     \begin{scope}[shift={(-4,0)}]
@@ -125,7 +123,7 @@
     \end{scope}
     \draw[densely dashed, muted] (-0.65,-2.3) -- (-0.65,1.9);
     \begin{scope}[shift={(3.2,0)}]
-      \node[mem, minimum size=1.5cm] (w) at (0,0) {the\\graph};
+      \node[mem, minimum size=1.5cm] (w) at (0,0) {working\\memory};
       \node[ag] (r) at (0,1.5)      {room\_concept};
       \node[ag] (t) at (-2.5,0.75)   {table\_concept};
       \node[ag] (e) at (2.5,0.75)   {retina};
@@ -136,98 +134,170 @@
     \end{scope}
   \end{tikzpicture}
 
+  \vspace{0.4em}
+  {\footnotesize Each memory is a graph of its own: working, episodic, long-term spatial, long-term objects.\\
+  The system this course follows: about \textbf{340\,000} lines of agent code (C++ and Python) on
+  \textbf{38\,000} lines of CORTEX, not counting comments or blank lines.\par}
+  \lesson{Messages scatter the belief over the wires; each memory graph keeps its part in one place.}
+\end{frame}
+
+\begin{frame}{A distributed memory: each agent keeps a full copy, merged by a CRDT}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm,
+      gn/.style={circle, draw=black, fill=white, inner sep=0pt, minimum size=1.6mm}]
+    % the bus
+    \draw[cool, line width=3pt, rounded corners=6pt] (-6.2,-0.55) -- (6.2,-0.55);
+    \node[lab, text=cool, anchor=west] at (-6.2,-0.85) {DDS: each change travels as a small delta, to every copy};
+    \foreach \x/\n/\i in {-4.8/room\_concept/1, -1.6/chair\_concept/2, 1.6/controller/3, 4.8/retina/4} {
+      \node[ag, minimum width=2.3cm] (a\i) at (\x,1.95) {\n};
+      \node[mem, minimum size=1.25cm, fill=muted!12] (m\i) at (\x,0.7) {};
+      \node[gn] (r\i) at (\x,1.0) {};
+      \node[gn] (p\i) at ($(\x,0)+(-0.3,0.5)$) {};
+      \node[gn] (q\i) at ($(\x,0)+(0.3,0.5)$) {};
+      \draw (r\i) -- (p\i) (r\i) -- (q\i);
+      \node[lab, font=\tiny] at ($(\x,0)+(0.0,0.22)$) {its copy};
+      \draw[flow, muted] (a\i) -- (m\i);
+      \draw[{Stealth[length=2mm]}-{Stealth[length=2mm]}, thick, cool] (m\i) -- (\x,-0.55);
+    }
+    % properties
+    \node[pr=good]   at (-4.3,-2.05) {\textbf{no server, no lock}\\an agent writes to its own\\copy and goes on};
+    \node[pr=cool]   at (0,-2.05)    {\textbf{any order, same result}\\copies that received the same\\changes are equal};
+    \node[pr=accent] at (4.3,-2.05)  {\textbf{a tie has one winner}\\two writes to one value:\\the same one is kept everywhere};
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\footnotesize A \textbf{CRDT} (conflict-free replicated data type) is a data structure whose copies end up equal however the
+  changes arrive: in any order, and even if a change arrives twice. In CORTEX every node, edge and attribute is one.\par}
+  \lesson{Each agent writes to its own copy at once; the CRDT makes every copy end up equal.}
+\end{frame}
+
+\begin{frame}{Every agent holds a copy: copies disagree for a moment, then agree}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1.05cm,
+      v/.style={draw, rounded corners=2pt, fill=white, font=\scriptsize, inner sep=2.5pt, minimum width=0.72cm},
+      w/.style={v, draw=accent, very thick, fill=accent!15},
+      msg/.style={-{Stealth[length=2mm]}, thick, color=cool},
+      msg2/.style={-{Stealth[length=2mm]}, thick, color=good, densely dashed}]
+    \fill[accent!8] (2.4,-0.42) rectangle (8.25,2.75);
+    \fill[good!12] (8.25,-0.42) rectangle (11.4,2.75);
+    \node[lab, text=accent] at (5.15,2.95) {the copies disagree};
+    \node[lab, text=good!70!black] at (9.8,2.95) {all equal};
+    \foreach \y/\n in {2/agent 1, 1/agent 2, 0/agent 3} {
+      \draw[-{Stealth}, muted, thick] (1.5,\y) -- (11.4,\y);
+      \node[lab, left, font=\footnotesize] at (1.5,\y) {\n};
+    }
+    % the two writes, made without seeing each other
+    \draw[msg] (2.75,2) -- (7.0,1);
+    \draw[msg] (2.75,2) -- (8.25,0);
+    \draw[msg2] (3.3,1) -- (5.9,2);
+    \draw[msg2] (3.3,1) -- (5.0,0);
+    % values held by each copy
+    \node[v] at (1.95,2) {1.0}; \node[w] at (2.75,2) {2.0}; \node[v] at (5.9,2) {2.0}; \node[v] at (9.8,2) {2.0};
+    \node[v] at (1.95,1) {1.0}; \node[w] at (3.3,1) {2.4}; \node[v] at (7.0,1) {2.0}; \node[v] at (9.8,1) {2.0};
+    \node[v] at (1.95,0) {1.0}; \node[v] at (5.0,0) {2.4}; \node[v] at (8.25,0) {2.0}; \node[v] at (9.8,0) {2.0};
+    \node[lab, align=center] at (2.75,2.42) {writes $2.0$}; \node[lab, align=center] at (5.9,2.42) {keeps $2.0$};
+    \node[lab, align=center] at (2.42,0.44) {writes $2.4$, before receiving\\agent 1's change};
+  \end{tikzpicture}
+
   \vspace{0.5em}
-  \small There are no agent-to-agent messages. The count is the least of it:
-  \alert{there is one place that answers ``what does the robot currently believe?''}
-  \src{cortex.tex l.345--360}
+  \small For a while agent 3 believes $2.4$: no copy may assume another sees the same instant. When two agents
+  write the same node, the CRDT keeps one write in every copy and drops the other.
+  \lesson{Copies agree once the messages arrive; one owner per node means no write is ever dropped.}
 \end{frame}
 
-% =================================================================================================
-\section{Concepts: the fabric of CORTEX}
-% =================================================================================================
+\begin{frame}{A protocol keeps the graph consistent: owners, presence and cleanup}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \node[nd, fill=accent!15] (r) at (0,1.6) {room\_1};
+        \node[nd, fill=cool!20] (t) at (-1.3,0.4) {table\_1};
+        \node[nd, fill=muted!25, text=muted, densely dashed] (b) at (1.3,0.4) {bottle\_1};
+        \draw[flow, muted] (r) -- (t); \draw[flow, muted] (r) -- (b);
+        \node[ag] (ta) at (-1.3,-0.9) {table\_concept};
+        \node[ag, draw=muted, fill=muted!10, text=muted] (ba) at (1.3,-0.9) {bottle\_concept};
+        \draw[good!70!black, thick, -{Stealth[length=2mm]}] (ta) -- node[left, lab] {owns, updates} (t);
+        \draw[accent, line width=2pt] (0.85,-1.15) -- (1.75,-0.65); \draw[accent, line width=2pt] (0.85,-0.65) -- (1.75,-1.15);
+        \node[lab, text=accent, below=2pt] at (ba.south) {crashed};
+        \node[lab, text=muted, align=center, right=2pt] at (b.east) {last value,\\nothing moves it};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \footnotesize
+      The graph accepts any write. A \textbf{protocol} is a set of rules every agent agrees to follow:
+      \begin{enumerate}\footnotesize
+        \item \textbf{Ownership}: only the owner changes its node.
+        \item \textbf{Presence}: each agent announces itself in the graph and sends a heartbeat every second.
+        \item \textbf{Cleanup}: an agent deletes its nodes when it stops, and at start removes any it left
+              behind.
+      \end{enumerate}
+      A crashed agent cannot clean up: its node stays, and no evidence moves it.
+    \end{column}
+  \end{columns}
+  \lesson{The graph enforces nothing; the protocol keeps every node with a live owner.}
+\end{frame}
 
+\begin{frame}{Sensor data travels beside the graphs}
+  \vspace*{0.4em}
+  \begin{columns}[c]
+    \begin{column}{0.55\textwidth}
+      \centering
+      \begin{tikzpicture}[lane/.style={rounded corners=4pt, minimum width=7.2cm, minimum height=1.45cm}]
+        \node[lane, fill=cool!12] at (0,0.85) {};
+        \node[lane, fill=muted!14] at (0,-0.85) {};
+        \node[lab, anchor=north west, font=\scriptsize\bfseries, text=cool] at (-3.5,1.52) {DDS domain 7: the media plane};
+        \node[lab, anchor=north west, font=\scriptsize\bfseries, text=black!70] at (-3.5,-0.18) {DDS domain 0: the graphs};
+        \node[ag, minimum width=1.5cm] (s1) at (-2.5,0.6) {driver};
+        \node[ag, minimum width=1.5cm] (r1) at (2.5,0.6) {agents};
+        \draw[flow, cool, line width=2.4pt] (s1) -- node[above, lab, text=black] {$\approx 270$ MB/s} node[below, lab, text=black] {newest only} (r1);
+        \node[ag, minimum width=1.5cm] (s2) at (-2.5,-1.1) {agent};
+        \node[ag, minimum width=1.5cm] (r2) at (2.5,-1.1) {agents};
+        \draw[link, line width=1pt] (s2) -- node[above, lab, text=black] {$\approx 1$ MB/s} node[below, lab, text=black] {reliable, to everyone} (r2);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \footnotesize
+      \textbf{DDS}: publish--subscribe; a \textbf{domain} is a private channel.\\[0.35em]
+      \textbf{Shared memory}: on one computer, an image is written once; every reader maps it.
+      {\color{good}\scriptsize on}\\[0.2em]
+      \textbf{Zero-copy}: readers use it in place, with no copy.
+      {\color{good}\scriptsize on}\\[0.2em]
+      \textbf{Multicast}: one packet reaches every reader, with no separate connection per reader.
+      {\color{good}\scriptsize on}
+    \end{column}
+  \end{columns}
 
-\begin{frame}{A concept agent is neither a detector nor a service}
-  \centering
-  \begin{tikzpicture}[x=1cm, y=1cm]
-    \foreach \x/\ttl in {0/frame 1, 3/frame 2, 6/frame 3} {
-      \begin{scope}[shift={(\x,0)}]
-        \draw[muted, rounded corners=2pt] (-0.15,-0.15) rectangle (2.25,1.45);
-        \node[lab, above] at (1.05,1.45) {\ttl};
-      \end{scope}
-    }
-    \foreach \p in {0.25,0.5,...,1.75} \fill[accent] (\p,0.3) circle (1.3pt);
-    \foreach \p in {0.3,0.55,...,1.2} \fill[accent] (3+1.95,\p+0.05) circle (1.3pt);
-    \foreach \p in {0.75,1.0,...,1.75} \fill[accent] (6+\p,1.15) circle (1.3pt);
-    \draw[flow, line width=1.3pt] (8.4,0.65) -- (9.1,0.65);
-    \draw[cool, line width=7pt, opacity=0.2, rounded corners=2pt] (9.45,0.25) rectangle (11.15,1.15);
-    \draw[cool, very thick] (9.45,0.25) rectangle (11.15,1.15);
-    \node[lab, align=center] at (10.3,0.7) {table\_1};
-    \node[lab, above, align=center] at (10.3,1.45) {the belief: a shape,\\and how sure};
+  \vspace{0.3em}
+  {\centering\scriptsize
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    sensor & one frame & rate & bandwidth \\
+    \midrule
+    stereo camera, $1280{\times}720$, colour + depth & 6.5 MB & 15 Hz & $\approx 100$ MB/s \\
+    360\textdegree{} camera, $1920{\times}960$, colour & 5.5 MB & 30 Hz & $\approx 165$ MB/s \\
+    LiDAR, $900{\times}32$ points & 0.5 MB & 10 Hz & $\approx 5$ MB/s \\
+    \midrule
+    all sensors & & & $\approx 270$ MB/s \\
+    \bottomrule
+  \end{tabular}\\[0.2em]
+  {\color{muted} Estimates: simulator resolutions, uncompressed, typical rates. The graphs carry small beliefs and heartbeats.}\par}
+  \lesson{Images take their own channel; the working memory only says where each stream is.}
+\end{frame}
+
+% CORTEX in action: click once in pympress to start; it loops. Rebuilt by figures/make_cortex_flow.py.
+\begin{frame}[plain,noframenumbering]
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, loop, showcontrols=false]{\includegraphics[width=\paperwidth]{cortex_flow_poster.png}}{media/cortex_flow.mp4}};
   \end{tikzpicture}
-
-  \vspace{1em}
-  \small The camera only ever delivers fragments, one face at a time, never the object.\\[0.3em]
-  \alert{The object is a construct the agent maintains across fragments}, and each cycle's
-  belief is the next cycle's prior.
-  \src{concept\_agents.tex l.90--95, l.163--167}
 \end{frame}
 
-\begin{frame}{A concept has dimensions}
-  \centering
-  \begin{tikzpicture}[x=1cm, y=1cm]
-    \chairside{-0.55,-1.05}{1.1}{0.95}{1.0}{line width=2pt, black}
-    \node[lab] at (0,-1.35) {one chair};
-    \node[dimcard=cool]   (g) at (-4.4,0.95)  {\textbf{Geometry}\\where it is, what shape it has,\\and how sure\\{\scriptsize\color{muted} Day 4}};
-    \node[dimcard=muted]  (l) at (4.4,0.95)   {\textbf{Life cycle}\\is it still there? born, missed,\\forgotten, back again\\{\scriptsize\color{muted} Day 4}};
-    \node[dimcard=good]   (a) at (-4.4,-0.95) {\textbf{Aspect}\\what it looks like,\\how you would imagine one\\{\scriptsize\color{muted} Day 4}};
-    \node[dimcard=accent] (f) at (4.4,-0.95)  {\textbf{Function}\\what it offers,\\what can be done with it\\{\scriptsize\color{muted} Day 5}};
-    \draw[flow, muted] (-0.8,0.35) -- (g.east);
-    \draw[flow, muted] (0.9,0.35) -- (l.west);
-    \draw[flow, muted] (-0.8,-0.5) -- (a.east);
-    \draw[flow, muted] (0.9,-0.5) -- (f.west);
-  \end{tikzpicture}
-
-  \vspace{0.7em}
-  \small One kind of thing in the world, one concept agent, answering for all four.\\[0.2em]
-  \alert{Concepts are the fabric of CORTEX: every memory below is concepts, kept for longer.}
-  \src{the four dimensions are this course's way of laying out the thesis}
-\end{frame}
-
-\begin{frame}{The agent holds the class. The graph holds the instances.}
-  \centering
-  \begin{tikzpicture}[x=1cm, y=1cm, g/.style={thick, color=cool, opacity=0.55}]
-    \node[lab, font=\footnotesize\bfseries] at (-3.5,2.65) {what a chair is};
-    \foreach \w/\h/\b in {0.97/1.0/1.05, 1.06/1.05/1.15, 1.14/1.09/1.25, 1.0/1.06/1.23, 1.11/1.02/1.09} {
-      \chairside{-4.0,0}{\w}{\h}{\b}{g}
-    }
-    \node[lab, align=center] at (-3.5,-0.45) {inside \textsf{chair\_concept}: the class};
-    \draw[-{Stealth[length=3.5mm]}, line width=1.4pt, muted] (-1.6,1.3) -- node[above, lab, text=black, align=center] {it sees\\one} (0.2,1.3);
-    \node[lab, font=\footnotesize\bfseries] at (3.5,2.65) {this chair, that chair};
-    \node[nd, fill=accent!15] (r) at (3.5,2.0) {room};
-    \node[nd, fill=cool!20] (c1) at (2.2,1.0) {chair\_22};
-    \node[nd, fill=cool!20] (c2) at (4.8,1.0) {chair\_23};
-    \draw[flow, muted] (r) -- (c1); \draw[flow, muted] (r) -- (c2);
-    \node[lab, align=center, text=muted] at (2.2,0.35) {here, this sure,\\real};
-    \node[lab, align=center, text=muted] at (4.8,0.35) {there, that sure,\\real};
-    \node[lab, align=center] at (3.5,-0.45) {on the graph: the instances};
-  \end{tikzpicture}
-
-  \vspace{0.6em}
-  \small \textbf{The class is the prior} and stays in the agent. \textbf{An instance is a posterior}
-  and is published.\\[0.25em]
-  Asked ``how do you imagine a chair?'', the language agent samples the class, with no data.\\[0.25em]
-  \alert{How much the class does depends on the object:} a chair's shape comes from the class and only
-  its pose is inferred; a table's shape is fitted.
-  \src{common/concept\_manifest/chair.concept.toml; the tool \texttt{imagine\_view}}
-\end{frame}
 
 % =================================================================================================
-\section{The shared graph}
+\section{CORTEX functions: the working memory}
 % =================================================================================================
 
 
-\begin{frame}{The working memory: a scene, written as a graph}
+\begin{frame}{The working memory writes the scene as a graph, with the robot at the centre}
   \begin{columns}[c]
     \begin{column}{0.46\textwidth}
       \centering
@@ -260,30 +330,33 @@
     \end{column}
   \end{columns}
   \vspace{0.6em}
-  \small \alert{The robot is at the centre of everything.} Once the room is detected, it is hung
-  from the robot, and the objects from the room. Each is an instance, owned by its concept agent.\\[0.3em]
+  \small Each node is an instance, owned by its concept agent.\\[0.3em]
   \emph{Where is the table, seen from the lidar?} Name two nodes and ask the graph.
-  \src{cortex.tex l.231--246}
+  \lesson{The robot is at the centre: the room hangs from it once detected, and the objects from the room.}
 \end{frame}
 
-\begin{frame}{The whole graph, from a simulated run}
+\begin{frame}{A real working memory: the scene, the robot and the agents in one graph}
   \begin{columns}[c]
     \begin{column}{0.68\textwidth}
       \centering
-      \includegraphics[width=\textwidth]{full_graph.png}
+      \includegraphics[height=0.78\textheight]{d3_large_graph.jpg}
     \end{column}
-    \begin{column}{0.29\textwidth}
-      \small
-      Layered by what a node is about: robot and objects, structure and places, rooms, world.\\[0.5em]
-      Colour says \textbf{who wrote it}.\\[0.5em]
-      Top right, \textbf{Mind}: the agents are nodes too.\\[0.5em]
-      \footnotesize The bottom layer is the simulator's apartment, not a belief.
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textcolor[HTML]{800080}{\textbf{RT}}: where a node is, relative to its parent\\[0.3em]
+      \textcolor[HTML]{008000}{\textbf{has}}: a part, or a running agent\\[0.3em]
+      \textbf{has\_intention}: an offer the object makes to the robot\\[0.8em]
+      \textbf{Shadow}: the robot, its body and its sensors\\[0.3em]
+      \textbf{room}: chairs, a refrigerator, the floor, 33 walls and a door\\[0.3em]
+      \textbf{aff\_}: offers, such as \texttt{aff\_chair\_4}\\[0.3em]
+      \textbf{mind}: the eleven agents running, each in state \emph{Operating}
     \end{column}
   \end{columns}
-  \src{the 3D graph viewer}
+  \lesson{The working memory holds the scene, the robot, its offers and the agents that keep them.}
 \end{frame}
 
-\begin{frame}{Two kinds of change}
+\begin{frame}[t]{A belief changes in two ways: its numbers, or its structure}
+  \vspace{2.5em}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
       \centering
@@ -311,12 +384,844 @@
       \small The structure of the belief itself changes.
     \end{column}
   \end{columns}
-  \vspace{0.8em}
-  \centering Agents watch for one kind or the other. Tomorrow is about the second.
-  \src{cortex.tex l.248--253, l.659--671}
+  \lesson{Data change the numbers; a birth changes the structure. Tomorrow is about births.}
 \end{frame}
 
-\begin{frame}{Everyone holds a copy, and sends corrections}
+\begin{frame}{Nodes and edges are typed records of attributes}
+  \centering
+  \begin{tikzpicture}[rec/.style={draw, thick, rounded corners=3pt, align=left, font=\scriptsize, inner sep=4pt, anchor=north},
+                      hd/.style={font=\footnotesize\bfseries}]
+    \node[rec, draw=cool, fill=cool!8, text width=4.1cm] (n) at (0,0) {%
+      \textcolor{cool}{\textbf{Node}}\\[2pt]
+      \texttt{id}\hfill uint64, unique in the graph\\
+      \texttt{name}\hfill \texttt{"chair\_1"}\\
+      \texttt{type}\hfill \texttt{"chair"}\\
+      \texttt{agent\_id}\hfill who created it\\
+      \texttt{attrs}\hfill name $\to$ Attribute\\
+      \texttt{fano}\hfill (to, type) $\to$ Edge\\[3pt]
+      \textit{e.g.} \texttt{obj\_width\_m} float,\\ \texttt{obj\_exist\_prob} float, \texttt{level} int};
+    \node[rec, draw=good, fill=good!8, text width=4.1cm] (e) at (4.75,0) {%
+      \textcolor{good!70!black}{\textbf{Edge}}\\[2pt]
+      \texttt{from}, \texttt{to}\hfill node ids\\
+      \texttt{type}\hfill \texttt{"RT"}, \texttt{"has"}, \dots\\
+      \texttt{agent\_id}\hfill who created it\\
+      \texttt{attrs}\hfill name $\to$ Attribute\\[3pt]
+      an \textbf{RT} edge (a rigid transform) holds:\\
+      \texttt{rt\_translation}, \texttt{rt\_rotation\_euler\_xyz}\\
+      \texttt{rt\_covariance}\hfill 6$\times$6\\
+      \texttt{rt\_timestamps}, \texttt{rt\_head\_index}\\
+      \hfill a ring of past poses};
+    \node[rec, draw=accent, fill=accent!8, text width=3.8cm] (a) at (9.35,0) {%
+      \textcolor{accent}{\textbf{Attribute}}\\[2pt]
+      \texttt{value}\hfill one of 14 types\\
+      \texttt{timestamp}\hfill when written\\
+      \texttt{agent\_id}\hfill who wrote it\\[3pt]
+      types: string, int32, uint32, uint64, float, double, bool, vectors of float, uint64 and bytes, float arrays of 2, 3, 4, 6};
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\scriptsize A node keeps its outgoing edges inside it (\texttt{fano}). Each attribute name is declared once with its type
+  (\texttt{REGISTER\_TYPE(obj\_width\_m, float)}), so a wrong type is a compile error, not a crash at run time.\par}
+  \lesson{Everything in the working memory is a typed attribute, stamped with its writer and time.}
+\end{frame}
+
+\begin{frame}{The working memory is a graph; its RT edges are a tree inside it}
+  \centering
+  \begin{tikzpicture}[x=1.3cm, y=1.2cm,
+      tn/.style={draw, thick, rounded corners=2pt, font=\scriptsize, inner sep=3pt, fill=white},
+      on/.style={draw=muted, thick, rounded corners=2pt, font=\scriptsize, inner sep=3pt, fill=muted!12, text=muted!70!black},
+      rt/.style={good!70!black, line width=1.8pt},
+      ot/.style={muted, densely dashed, thick},
+      el/.style={font=\tiny, text=muted!80!black, fill=white, inner sep=1pt}]
+    % the RT tree
+    \node[tn] (room) at (0,3) {room};
+    \node[tn] (rob) at (-2,2) {Shadow};
+    \node[tn] (zed) at (-2.8,1) {zed};
+    \node[tn] (lid) at (-1.0,1) {lidar};
+    \node[tn, draw=cool] (ch) at (0.3,1.6) {chair\_1};
+    \node[tn, draw=accent] (tb) at (2.1,1.6) {table\_1};
+    \node[tn] (dr) at (3.3,2.3) {door\_1};
+    \draw[rt] (room) -- (rob); \draw[rt] (rob) -- (zed); \draw[rt] (rob) -- (lid);
+    \draw[rt] (room) -- (ch); \draw[rt] (room) -- (tb); \draw[rt] (room) -- (dr);
+    % nodes with no pose
+    \node[on] (cc) at (0.9,0.2) {chair\_concept};
+    \node[on] (rc) at (2.4,3.3) {room\_concept};
+    \node[on] (int) at (-1.9,0.2) {intention};
+    \node[on] (msk) at (-3.4,0.2) {mask};
+    % edges of other types
+    \draw[ot] (cc) -- node[el] {owns} (ch);
+    \draw[ot] (rc) -- node[el] {owns} (room);
+    \draw[ot] (rob) -- node[el, pos=0.55] {has\_intention} (int);
+    \draw[ot] (int.east) to[bend right=25] node[el, pos=0.45] {goto\_action} (ch.south);
+    \draw[ot] (zed) -- node[el] {visible} (msk);
+    \draw[ot] (ch) -- node[el] {close\_to} (tb);
+    \draw[ot] (rob) to[bend left=25] node[el] {current} (room);
+    % legend
+    \draw[rt] (3.9,1.2) -- (4.4,1.2); \node[lab, anchor=west] at (4.45,1.2) {RT edge: a pose};
+    \draw[ot] (3.9,0.85) -- (4.4,0.85); \node[lab, anchor=west] at (4.45,0.85) {any other edge type};
+    \node[on] at (4.15,0.5) {\phantom{x}}; \node[lab, anchor=west] at (4.45,0.5) {a node with no pose};
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\footnotesize Every node with a place in space hangs from exactly one parent by an RT edge, back to the root.
+  So between any two of them there is exactly one path of RT edges.\par}
+  \lesson{Many kinds of edges link the nodes; the RT edges alone form one tree of poses.}
+\end{frame}
+
+\begin{frame}{The RT edges form a tree inside the working memory}
+  \begin{columns}[c]
+  \begin{column}{0.58\textwidth}\centering
+  \begin{tikzpicture}[x=1.45cm, y=1.25cm,
+                      fr/.style={draw, thick, rounded corners=2pt, font=\scriptsize, inner sep=3pt, fill=white},
+                      rt/.style={thick, muted}, path/.style={-{Stealth[length=3.5mm, width=3mm]}, accent, line width=2.2pt, opacity=0.45, shorten >=1pt, shorten <=1pt},
+                      tl/.style={font=\footnotesize, text=accent}]
+    \node[fr] (room) at (0,2.4) {room};
+    \node[fr] (rob) at (-1.3,1.3) {Shadow};
+    \node[fr] (zed) at (-1.3,0.2) {zed};
+    \node[fr, draw=cool] (ch) at (1.3,1.3) {chair\_1};
+    \node[fr, draw=accent] (tb) at (1.3,0.2) {table\_1};
+    \node[fr] (lid) at (-2.3,0.2) {lidar};
+    \draw[rt] (room) -- (rob); \draw[rt] (rob) -- (zed); \draw[rt] (room) -- (ch); \draw[rt] (room) -- (tb.north west);
+    \draw[rt] (rob) -- (lid);
+    \draw[muted, densely dashed, thick] (ch.east) to[bend left=50] node[right, lab, text=muted!80!black, align=left] {another edge\\type, not RT} (tb.east);
+    % each edge's uncertainty
+    \foreach \x/\y/\a/\b in {-0.65/1.85/0.24/0.12, -1.3/0.75/0.12/0.07, 0.65/1.85/0.2/0.1}
+      {\draw[good, thick] (\x,\y) ellipse (\a cm and \b cm);}
+    % the path: up from zed to room, down to chair_1, each step labelled with the transform it applies
+    \draw[path] (zed) -- (rob); \draw[path] (rob) -- (room); \draw[path] (room) -- (ch);
+    \node[tl, anchor=west] at (-1.18,0.75) {1. up: $T_{\text{Shadow}\leftarrow\text{zed}}$};
+    \node[tl, anchor=east] at (-0.8,2.05) {2. up: $T_{\text{room}\leftarrow\text{Shadow}}$};
+    \node[tl, anchor=west] at (0.8,2.05) {3. down: $T^{-1}_{\text{room}\leftarrow\text{chair\_1}}$};
+    \fill[cool] (-0.75,-0.25) circle (2pt); \draw[cool, thick] (-0.75,-0.25) ellipse (0.16 and 0.09);
+    \node[lab, anchor=west, text=cool] at (-0.62,-0.27) {$p$: a point seen by the zed};
+    \node[lab, align=center] at (0,-0.75) {where is $p$ in chair\_1's frame?\\$p' = T\,p$, with $T$ = step 3 $\times$ step 2 $\times$ step 1};
+  \end{tikzpicture}
+  \end{column}
+  \begin{column}{0.4\textwidth}\small
+    Each edge stores the child's pose in its parent's frame, so going down an edge uses its inverse.
+    \[ \Sigma' = J_T\,\Sigma_T\,J_T^\top + J_p\,\Sigma_p\,J_p^\top \]
+    {\scriptsize
+    $\Sigma_p$: the covariance of $p$ itself, in the zed's frame (from the depth noise of that pixel).\\[2pt]
+    $\Sigma_T$: the covariance of $T$: each edge's 6$\times$6 covariance on the path, carried to one frame and added.\\[2pt]
+    $J_T$, $J_p$: how $p'$ moves when $T$ or $p$ moves.\par}
+  \end{column}
+  \end{columns}
+  \lesson{The robot computes where a point is, and how sure, by composing RT edges.}
+\end{frame}
+
+\begin{frame}{An RT edge keeps its last poses, each with its time}
+  \centering
+  \begin{tikzpicture}
+    % left: the ring of blocks on one edge
+    \begin{scope}
+      \node[font=\footnotesize\bfseries] at (0,1.6) {one RT edge: a ring of 5 blocks};
+      \foreach \k/\lab/\col in {0/{$t_5$}/good, 1/{$t_1$}/muted, 2/{$t_2$}/muted, 3/{$t_3$}/muted, 4/{$t_4$}/muted}{
+        \pgfmathsetmacro{\a}{90-72*\k}
+        \fill[\col!20, draw=\col!70!black, thick] (0,0) -- (\a+36:1.15) arc (\a+36:\a-36:1.15) -- cycle;
+        \node[font=\scriptsize] at (\a:0.8) {\lab};}
+      \fill[white] (0,0) circle (0.38); \node[lab, align=center] at (0,0) {pose\\twist};
+      \draw[-{Stealth}, accent, very thick] (1.75,0.95) node[right, lab, text=accent, align=left] {head: the next write\\replaces the oldest} to[bend right=30] (0.95,0.35);
+      \node[lab, align=center] at (0,-1.45) {each block: translation, rotation,\\twist (velocity), time $t_k$};
+    \end{scope}
+    % right: time axis with the blocks and three kinds of query
+    \begin{scope}[xshift=3.6cm, yshift=-0.3cm]
+      \draw[->, muted, thick] (0,0) -- (6.8,0) node[right, lab, text=black] {time};
+      \foreach \x/\l in {0.5/1, 1.7/2, 2.9/3, 4.1/4, 5.3/5}
+        {\fill[good] (\x,0) circle (2.5pt); \node[lab, below=3pt] at (\x,0) {$t_\l$};}
+      \node[lab, text=good!70!black, anchor=west] at (0.3,-0.65) {stored poses};
+      % interpolated
+      \draw[cool, very thick] (3.5,0) -- (3.5,1.0) node[above, lab, text=cool, align=center] {capture time\\inside the ring:\\interpolated};
+      \draw[cool, thick, densely dotted] (2.9,0.35) -- (4.1,0.35);
+      % extrapolated
+      \draw[accent, very thick] (6.1,0) -- (6.1,1.0) node[above, lab, text=accent, align=center] {newer than $t_5$:\\extrapolated\\along the twist};
+      \draw[accent, thick, -{Stealth}, densely dotted] (5.3,0.35) -- (6.05,0.35);
+      % nearest
+      \draw[muted!70!black, very thick] (1.25,0) -- (1.25,0.6) node[above, lab, align=center] {or the\\nearest block};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  {\scriptsize Interpolated: the translation blended linearly, the rotation along the shortest arc. A LiDAR sweep placed with the
+  newest pose instead of its own is shifted by (pose age $\times$ speed). A time outside the ring, not extrapolated,
+  returns the end block, marked as clamped.\par}
+  \lesson{Each reading is paired with the pose the robot held when it was captured.}
+\end{frame}
+
+% =================================================================================================
+\section{CORTEX functions: concepts}
+% =================================================================================================
+
+
+\begin{frame}{A concept has four dimensions, and one agent answers for all of them}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm]
+    \chairside{-0.55,-1.05}{1.1}{0.95}{1.0}{line width=2pt, black}
+    \node[lab] at (0,-1.35) {one chair};
+    \node[dimcard=cool]   (g) at (-4.4,0.95)  {\textbf{Geometry}\\where it is, what shape it has,\\and how sure\\{\scriptsize\color{muted} Day 4}};
+    \node[dimcard=muted]  (l) at (4.4,0.95)   {\textbf{Life cycle}\\is it still there? born, missed,\\forgotten, back again\\{\scriptsize\color{muted} Day 4}};
+    \node[dimcard=good]   (a) at (-4.4,-0.95) {\textbf{Aspect}\\what it looks like,\\how you would imagine one\\{\scriptsize\color{muted} Day 4}};
+    \node[dimcard=accent] (f) at (4.4,-0.95)  {\textbf{Function}\\what it offers,\\what can be done with it\\{\scriptsize\color{muted} Day 4}};
+    \draw[flow, muted] (-0.8,0.35) -- (g.east);
+    \draw[flow, muted] (0.9,0.35) -- (l.west);
+    \draw[flow, muted] (-0.8,-0.5) -- (a.east);
+    \draw[flow, muted] (0.9,-0.5) -- (f.west);
+  \end{tikzpicture}
+
+  \vfill
+  \lesson{One agent per kind of thing answers for its geometry, life cycle, aspect and function.}
+\end{frame}
+
+\begin{frame}{Sensor data go through the retina, into the working memory, to the agents}
+  \centering
+  \vspace*{-0.4em}
+  \begin{tikzpicture}[x=1cm, y=0.82cm,
+      sen/.style={draw=black, thick, rounded corners=3pt, fill=muted!12, align=center, font=\scriptsize, minimum width=2.1cm, minimum height=0.85cm},
+      med/.style={-{Stealth[length=2.5mm]}, cool, line width=2.2pt},
+      grf/.style={-{Stealth[length=2.2mm]}, thick, black!70}]
+    % column headings
+    \foreach \x/\t in {-5.6/sensors, -2.2/the retina, 1.35/working memory, 4.95/concept agents}
+      \node[font=\footnotesize\bfseries, text=black!70] at (\x,2.2) {\t};
+    % sensors
+    \node[sen] (zed) at (-5.6,1.3)  {stereo camera\\colour + depth};
+    \node[sen] (ric) at (-5.6,0)    {360\textdegree{} camera\\colour};
+    \node[sen] (lid) at (-5.6,-1.5) {3-D LiDAR\\point cloud};
+    % retina
+    \node[ag, minimum width=2.6cm, minimum height=1.9cm, text width=2.4cm] (ret) at (-2.2,0.65)
+      {\textbf{retina}\\[2pt] neural networks:\\objects and their pixels\\room surfaces\\people's poses};
+    \draw[med] (zed) -- (ret.west |- zed);
+    \draw[med] (ric) -- (ret.west |- ric);
+    % graph
+    \node[draw=black, very thick, ellipse, fill=muted!15, minimum width=3.3cm, minimum height=2.3cm] (g) at (1.35,0.5) {};
+    \node[nd, fill=muted!45, font=\scriptsize\bfseries] (rb) at (1.35,1.35) {robot};
+    \node[nd] (mz) at (0.8,0.5) {masks\_zed};
+    \node[nd] (mr) at (1.8,-0.32) {masks\_ricoh};
+    \draw[thick] (rb) -- (mz.north) (rb) -- (mr.north);
+    \draw[grf] (ret.east |- mz) -- (mz);
+    \draw[grf] (ret.east |- mr) -- (mr);
+    \node[lab, align=center] at (1.35,-1.12) {one mask node per camera};
+    % concept agents
+    \node[ag, minimum width=2.4cm] (ch) at (4.95,1.7) {chair\_concept};
+    \node[ag, minimum width=2.4cm] (dr) at (4.95,0.85) {door\_concept};
+    \node[font=\large] at (4.95,0.22) {$\vdots$};
+    \node[ag, minimum width=2.4cm] (tb) at (4.95,-0.5) {table\_concept};
+    \foreach \a in {ch,dr,tb} \draw[grf] (g.east) -- (\a.west);
+    \node[ag, minimum width=2.4cm, draw=good, fill=good!10] (rm) at (4.95,-1.5) {room\_concept};
+    \draw[med] (lid) -- (rm);
+    \draw[med] (ret.south |- lid.east) -- (ret.south) node[midway, lab, left, text=black, align=right] {3-D points for\\the 360\textdegree{} masks};
+    \fill[cool] (ret.south |- lid.east) circle (2.2pt);
+    % legend
+    \draw[med] (-6.4,-2.3) -- (-5.6,-2.3); \node[lab, anchor=west] at (-5.5,-2.3) {sensor channel: images and clouds, newest only};
+    \draw[grf] (0.6,-2.3) -- (1.4,-2.3); \node[lab, anchor=west] at (1.5,-2.3) {in the working memory: small nodes, read by all};
+  \end{tikzpicture}
+
+  \vspace{0.1em}
+  \begin{minipage}{0.95\textwidth}\footnotesize
+  A \textbf{mask} is the set of pixels of one object, with a class (\emph{chair}) and a score (0.82), and its
+  3-D points: from the camera's depth, or from the LiDAR hits that fall inside it. Each agent reads the masks of
+  its own class, moves their points into the room as it was when the image was taken, and updates its objects.
+  \end{minipage}
+  \vfill
+  \lesson{The retina only labels pixels; each concept agent turns the masks of its class into beliefs.}
+\end{frame}
+
+\begin{frame}{A concept agent builds one object out of many fragments}
+  \centering
+  \only<1>{%
+    \vspace{0.6em}
+    \input{figures/d3_fig_mask_room.tex}\\[0.8em]
+    {\footnotesize The chair agent moves the points of its masks into the room frame. Points that no chair explains
+    feed a provisional chair, which is born when its evidence $w$ reaches a fixed count. Illustrative, not data.\par}}%
+  \only<2>{%
+  \includegraphics[height=0.64\textheight]{d3_mask_real.pdf}\\[0.1em]
+  {\footnotesize Measured, simulated kitchen: (a) the camera image, (b) its masks. (c) Top view: the door mask's
+  3180 points land on the box of \texttt{door\_1}, the belief the door agent keeps.\par}}\vspace{0.2em}
+  \vfill
+  \lesson{A mask is evidence, not an object; a chair is born only when evidence adds up over frames.}
+\end{frame}
+
+\begin{frame}{The agent holds the class. The working memory holds the instances.}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm, g/.style={thick, color=cool, opacity=0.55}]
+    \node[lab, font=\footnotesize\bfseries] at (-3.5,2.65) {what a chair is};
+    \foreach \w/\h/\b in {0.97/1.0/1.05, 1.06/1.05/1.15, 1.14/1.09/1.25, 1.0/1.06/1.23, 1.11/1.02/1.09} {
+      \chairside{-4.0,0}{\w}{\h}{\b}{g}
+    }
+    \node[lab, align=center] at (-3.5,-0.45) {inside \textsf{chair\_concept}: the class};
+    \draw[-{Stealth[length=3.5mm]}, line width=1.4pt, muted] (-1.6,1.3) -- node[above, lab, text=black, align=center] {it sees\\one} (0.2,1.3);
+    \node[lab, font=\footnotesize\bfseries] at (3.5,2.65) {this chair, that chair};
+    \node[nd, fill=accent!15] (r) at (3.5,2.0) {room};
+    \node[nd, fill=cool!20] (c1) at (2.2,1.0) {chair\_22};
+    \node[nd, fill=cool!20] (c2) at (4.8,1.0) {chair\_23};
+    \draw[flow, muted] (r) -- (c1); \draw[flow, muted] (r) -- (c2);
+    \node[lab, align=center, text=muted] at (2.2,0.35) {here, this sure,\\real};
+    \node[lab, align=center, text=muted] at (4.8,0.35) {there, that sure,\\real};
+    \node[lab, align=center] at (3.5,-0.45) {in the working memory: the instances};
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  \small Day 4 explores these details for one concept, the chair.
+  \lesson{The class is a prior kept in the agent; an instance is a posterior in the working memory.}
+\end{frame}
+
+% =================================================================================================
+\section{CORTEX functions: memories}
+% =================================================================================================
+
+
+\begin{frame}{Memories keep the same concepts for longer}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm,
+      box/.style={draw=cool, thick, rounded corners=3pt, align=center, font=\scriptsize, fill=cool!10, inner sep=2pt, minimum width=2.08cm, minimum height=1.3cm},
+      todo/.style={box, draw=muted, densely dashed, fill=white, text=muted}]
+    \draw[-{Stealth}, very thick, muted] (-0.1,0) -- (13.4,0) node[lab, text=black, pos=0.5, below=15pt] {how long it lasts};
+    \foreach \x/\t in {1.1/now, 3.35/this deployment, 6.72/across missions, 10.1/a lifetime, 12.35/compiled outside} {
+      \draw[muted, thick] (\x,0.08) -- (\x,-0.08); \node[lab, below=3pt] at (\x,0) {\t};
+    }
+    \node[box, draw=accent, fill=accent!12] (w) at (1.1,0.95) {\textbf{Working}\\the concepts\\of now};
+    \node[box] (e) at (3.35,0.95) {\textbf{Episodic}\\what it undertook,\\what came of it};
+    \node[box] (o) at (5.6,0.95) {\textbf{Long-term object}\\this chair, again\\[1pt]{\tiny\color{accent}work in progress}};
+    \node[box] (s) at (7.85,0.95) {\textbf{Long-term spatial}\\rooms and passages};
+    \node[todo] (p) at (10.1,0.95) {\textbf{Procedural}\\skills\\not running yet};
+    \node[box, draw=good, fill=good!12] (v) at (12.35,0.95) {\textbf{Common sense}\\social, cultural:\\a vision-language\\model};
+    \node[lab, text=good!70!black, font=\scriptsize\bfseries, above=1pt] at (o.north) {semantic};
+    \node[lab, text=good!70!black, font=\scriptsize\bfseries, above=1pt] at (v.north) {semantic/VLM};
+    \draw[flow, accent, densely dashed] (e.north) to[out=38, in=142] node[above, lab, text=accent, pos=0.5] {learned habits: to do} (p.north);
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  \small Each memory has an agent that fills it by watching the working memory.\\
+  The semantic memory has two parts: the robot's own objects, and knowledge compiled outside.
+  \lesson{Memories fill by watching the working memory; common sense arrives compiled from outside.}
+\end{frame}
+
+\begin{frame}{Episodic memory records what the robot undertook, and what came of it}
+  \begin{columns}[c]
+    \begin{column}{0.54\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm]
+        \node[recbar=accent, minimum width=6.4cm] at (3.2,2.2) {mission: go to the kitchen};
+        \node[recbar=cool, minimum width=2.9cm] at (1.45,1.45) {step: reach the door};
+        \node[recbar=cool, minimum width=3.3cm] at (4.75,1.45) {step: cross it};
+        \node[recbar=good, minimum width=2.3cm] at (1.75,0.7) {claims: approach};
+        \node[recbar=good, minimum width=2.7cm] at (4.75,0.7) {claims: cross};
+        \draw[-{Stealth}, thick, muted] (0,0.15) -- (6.5,0.15) node[below left, lab, text=black] {time};
+        \draw[densely dashed, muted] (3.4,0.42) -- (3.4,-0.42);
+        \node[draw, thick, rounded corners=3pt, fill=white, align=left, font=\scriptsize, inner sep=5pt, minimum width=6.3cm] at (3.2,-1.3)
+          {\textbf{one record}\\what was asked\\when it began and ended\\the outcome its owner reported\\the target's belief, before and after};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \small
+      Its unit is one thing the robot undertook to do, at any level.\\[0.6em]
+      The start and the end are read from the controller's journal, not guessed from the
+      world.\\[0.6em]
+      At the turn of the day, records fold into \textbf{track records}: how often crossing this door
+      has worked, and how long it takes.
+    \end{column}
+  \end{columns}
+  \lesson{One record per thing undertaken; the records fold into how often each action has worked.}
+\end{frame}
+
+\begin{frame}{One episode, as the episodic memory stores it}
+  \begin{columns}[c]
+    \begin{column}{0.62\textwidth}
+      \centering
+      \includegraphics[width=\linewidth]{d3_em.png}
+    \end{column}
+    \begin{column}{0.36\textwidth}
+      \footnotesize
+      \textbf{Start and end}: when and where the robot began and stopped; here it acted on its own, and the
+      episode closed when it entered another room.\\[0.5em]
+      \textbf{What happened}: the changes the working memory saw meanwhile, in time order.\\[0.5em]
+      \textbf{Consequences}: each instance replaced by its type, so that what is learned holds for any door
+      or chair.\\[0.5em]
+      \textbf{Meanwhile}: what changed but had nothing to do with the episode, kept apart.
+    \end{column}
+  \end{columns}
+  \lesson{An episode is one thing the robot undertook, with what changed while it lasted.}
+\end{frame}
+
+\begin{frame}{The episodic memory as a graph: one record per episode, in time order}
+  \centering
+  \begin{tikzpicture}
+    \node[anchor=south west, inner sep=0pt] (im) at (0,0) {\includegraphics[width=7.2cm]{d3_em_graph.png}};
+    \begin{scope}[x={(im.south east)}, y={(im.north west)}]
+      \draw[accent, very thick] (0.139,0.927) circle (0.018);
+      \node[lab, text=accent, font=\scriptsize\bfseries, anchor=south] at (0.139,0.96) {root};
+      \draw[cool, very thick, -{Stealth[length=2.5mm]}] (0.2,1.02) -- (0.95,1.02);
+      \node[lab, text=cool, font=\scriptsize\bfseries, anchor=south] at (0.575,1.03) {one node per record, in time order};
+      \draw[cool, thick] (0.42,0.88) -- (0.6,0.76);
+      \node[lab, text=cool, anchor=north west, align=left] at (0.45,0.74) {a record's steps\\hang below it};
+    \end{scope}
+  \end{tikzpicture}
+  \lesson{Each thing the robot undertook is one record, hung from the root in time order.}
+\end{frame}
+
+\begin{frame}{Long-term spatial memory keeps the rooms the robot has left}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm]
+        \fill[accent!14] (0,0) rectangle (3,2.1);
+        \draw[very thick, accent] (0,0) rectangle (3,2.1);
+        \fill[muted!14] (3,0) rectangle (5.7,2.1);
+        \draw[very thick, muted] (3,0) rectangle (5.7,2.1);
+        \fill[muted!14] (1.7,-1.8) rectangle (4.3,0);
+        \draw[very thick, muted] (1.7,-1.8) rectangle (4.3,0);
+        \foreach \a/\b in {{3,0.75}/{3,1.35}, {2.1,0}/{2.7,0}, {3.5,0}/{4.1,0}} {
+          \draw[white, line width=3.4pt] (\a) -- (\b);
+          \draw[good, line width=2.2pt] (\a) -- (\b);
+        }
+        \robot{1.1,1.1}{20}
+        \node[lab, text=accent, font=\scriptsize\bfseries] at (1.5,1.85) {in working memory};
+        \node[lab, align=center, font=\scriptsize\bfseries, text=black!65] at (4.4,1.2) {kept in\\long-term};
+        \node[lab, align=center, font=\scriptsize\bfseries, text=black!65] at (3,-1) {kept in long-term};
+        \node[lab, text=good!70!black] at (4.85,-0.3) {passages};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      The room the robot leaves moves out of working memory, and goes back in when the robot
+      returns.\\[0.6em]
+
+      It plans routes across rooms and predicts a room before entering it.\\[0.6em]
+      It holds rooms and passages only. Objects now have a memory of their own.
+    \end{column}
+  \end{columns}
+  \lesson{Working memory stays small, and the map is bounded only by storage.}
+\end{frame}
+
+\begin{frame}{Rooms are joined where the same door is seen from both sides}
+  \begin{columns}[c]
+    \begin{column}{0.48\textwidth}\centering
+      \begin{tikzpicture}[x=0.7cm, y=0.7cm]
+        % before: each room estimated on its own; room 2's copy of the door misses room 1's
+        \draw[very thick, muted, fill=muted!12] (0,0) rectangle (3,2.2);
+        \begin{scope}[rotate around={6:(3,1.1)}]
+          \draw[very thick, cool, fill=cool!10] (3.25,0.35) rectangle (5.6,2.4);
+          \draw[accent, line width=2.4pt] (3.25,1.05) -- (3.25,1.65);
+        \end{scope}
+        \draw[good, line width=2.4pt] (3,0.8) -- (3,1.4);
+        \node[lab] at (1.5,1.1) {room 1};
+        \node[lab] at (4.5,1.5) {room 2};
+        \node[lab, text=accent] at (3.2,-0.4) {two copies of one door};
+        \node[lab, font=\small\bfseries] at (2.8,2.85) {before};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}\centering
+      \begin{tikzpicture}[x=0.7cm, y=0.7cm]
+        \draw[very thick, muted, fill=muted!12] (0,0) rectangle (3,2.2);
+        \draw[very thick, cool, fill=cool!10] (3,0.2) rectangle (5.35,2.25);
+        \draw[good, line width=2.4pt] (3,0.8) -- (3,1.4);
+        \node[lab] at (1.5,1.1) {room 1};
+        \node[lab] at (4.2,1.5) {room 2};
+        \node[lab, text=good!70!black] at (3,-0.4) {one opening};
+        \node[lab, font=\small\bfseries] at (2.7,2.85) {after};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+
+  \vspace{-0.2em}
+  \centering
+  \begin{tikzpicture}[node distance=1.1cm, every node/.style={font=\scriptsize}]
+    \node[draw=muted, thick, rounded corners] (r1) {room 1};
+    \node[draw=good, thick, circle, inner sep=1.5pt, right=of r1] (d1) {door};
+    \node[draw=accent, thick, fill=accent!12, rounded corners, right=of d1] (p) {passage};
+    \node[draw=good, thick, circle, inner sep=1.5pt, right=of p] (d2) {door};
+    \node[draw=cool, thick, rounded corners, right=of d2] (r2) {room 2};
+    \draw[thick] (r1) -- (d1) (d2) -- (r2);
+    \draw[accent, thick] (d1) -- (p) -- (d2);
+  \end{tikzpicture}
+
+  \vspace{-0.1em}
+  {\small $F(X) \;=\; \underbrace{-\ln p(z \given X)}_{\substack{\text{likelihood}\\ \text{each door's two copies coincide}}}
+  \quad\underbrace{-\;\ln p(X)}_{\substack{\text{priors (constraints)}\\ \text{rooms do not overlap, walls are square,}\\ \text{a door's two sides lie in one wall, joined rooms touch}}}$\par}
+  \vspace{0.1em}
+  {\scriptsize $X$: the pose of every room in the map, $(x, y, \text{yaw})$. $z$: each door as seen from either side,
+  with its covariance. The robot computes the minimum of $F$ and its Laplace covariance.
+  Each door match is an \textbf{inlier} (right) or an \textbf{outlier} (wrong), a mixture of the two, so a wrong match stops pulling, with no threshold.\par}
+  \lesson{The map of rooms is a belief: a likelihood from the doors, priors from buildings.}
+\end{frame}
+
+\begin{frame}{The long-term spatial memory: three rooms, joined by passages}
+  \begin{columns}[t]
+    \begin{column}{0.49\textwidth}
+      \centering
+      \includegraphics[height=0.56\textheight]{d3_ltsm.png}\\[0.3em]
+      \footnotesize The rooms in one frame. An optimiser places them so that the two sides of each door
+      meet; the layout's free energy $F$ falls from 152 to 26.
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \centering
+      \includegraphics[height=0.56\textheight]{d3_ltsm_graph.png}\\[0.3em]
+      \footnotesize The memory as a graph. Each room keeps its walls and doors; a \textbf{passage} node
+      joins a door seen from one room to the same door seen from the other.
+    \end{column}
+  \end{columns}
+  \lesson{After a three-room tour: three whole rooms, joined by passages.}
+\end{frame}
+
+% =================================================================================================
+\section{One belief, cut among many agents}
+% =================================================================================================
+
+
+
+\begin{frame}{The global belief $q$ is a product of factors, each kept by one agent}
+  \centering
+  \[
+    q(\text{everything}) \;\approx\;
+    \underbrace{\colorbox{good!18}{$q(X,\mathcal R)$}}_{\text{room\_concept}}
+    \;\;\underbrace{\colorbox{cool!18}{$q(\theta_{c1})\,q(\theta_{c2})$}}_{\text{chair\_concept}}
+    \;\;\underbrace{\colorbox{accent!18}{$q(\theta_{t1})$}}_{\text{table\_concept}}
+    \;\cdots
+  \]
+  \vspace{0.2em}
+  \begin{tikzpicture}[x=1cm, y=1cm,
+      wn/.style={draw, rounded corners=2pt, font=\scriptsize, inner sep=3pt, thick}]
+    \node[draw=black, very thick, ellipse, fill=muted!10, minimum width=7.6cm, minimum height=2.5cm] at (0,0) {};
+    \node[lab, font=\scriptsize\bfseries, text=black!70] at (0,-1.45) {working memory};
+    \node[wn, draw=good, fill=good!18] (r) at (0,0.6) {room};
+    \node[wn, draw=good, fill=good!18] (rb) at (-2.1,0.1) {robot};
+    \node[wn, draw=cool, fill=cool!18] (c1) at (-1.0,-0.6) {chair\_1};
+    \node[wn, draw=cool, fill=cool!18] (c2) at (0.4,-0.75) {chair\_2};
+    \node[wn, draw=accent, fill=accent!18] (t1) at (1.9,-0.4) {table\_1};
+    \foreach \n in {rb,c1,c2,t1} \draw[muted, thick] (r) -- (\n);
+    \node[ag, draw=good, fill=good!10] (ar) at (-5.6,0.5) {room\_concept};
+    \node[ag] (ac) at (-5.6,-0.7) {chair\_concept};
+    \node[ag, draw=accent, fill=accent!10] (at) at (5.6,-0.4) {table\_concept};
+    \draw[good!70!black, thick, -{Stealth[length=2mm]}] (ar) -- (rb);
+    \draw[good!70!black, thick, -{Stealth[length=2mm]}] (ar) to[bend left=12] (r);
+    \draw[cool, thick, -{Stealth[length=2mm]}] (ac) -- (c1);
+    \draw[cool, thick, -{Stealth[length=2mm]}] (ac) to[bend right=12] (c2.south west);
+    \draw[accent, thick, -{Stealth[length=2mm]}] (at) -- (t1);
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\footnotesize $X$: the robot's path; $\mathcal R$: the room; $\theta_{c1}, \theta_{c2}, \theta_{t1}$: the pose and shape of
+  chair\_1, chair\_2, table\_1. Which mask belongs to which object is not a factor: each agent fixes it to its best
+  guess. Agents see each other's factors only through the graph.\par}
+  \lesson{Day 2's one $q$ becomes a product; each factor is a node one agent keeps.}
+\end{frame}
+
+\begin{frame}{Inside its factor, an agent estimates, reads, and guesses}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm,
+      wn/.style={draw, rounded corners=2pt, font=\scriptsize, inner sep=3pt, thick, align=center},
+      vb/.style={font=\footnotesize\bfseries}]
+    \node[ag, minimum width=2.6cm, minimum height=0.9cm] (a) at (0,0) {chair\_concept};
+    % read: the robot's factor, with its covariance
+    \node[wn, draw=good, fill=good!18] (rb) at (-4.6,0) {robot pose\\$\pm$ covariance};
+    \draw[good, thick] (-4.6,-0.75) ellipse (0.55 and 0.22);
+    \draw[good!70!black, very thick, -{Stealth[length=2.5mm]}] (rb) -- (a);
+    \node[vb, text=good!70!black] at (-2.35,0.45) {read};
+    \node[lab, align=center] at (-2.35,-0.5) {its doubt is\\carried along};
+    % estimate: its own factor
+    \node[wn, draw=cool, fill=cool!18] (c1) at (4.6,0) {chair\_1\\pose, and is it real};
+    \draw[cool, very thick, -{Stealth[length=2.5mm]}] (a) -- (c1);
+    \node[vb, text=cool] at (2.35,0.45) {estimate};
+    \node[lab, align=center] at (2.35,-0.5) {published with\\how sure};
+    % guess: the matching
+    \foreach \x/\c in {-1.1/cool, 0/muted, 1.1/cool} \node[draw=\c, thick, fill=\c!15, minimum width=0.8cm, minimum height=0.45cm, font=\tiny] at (\x,1.75) {mask};
+    \draw[muted, very thick, -{Stealth[length=2.5mm]}] (0,1.45) -- (a);
+    \node[vb, text=black!60] at (2.0,1.75) {guess};
+    \node[lab, align=left, anchor=west] at (2.6,1.75) {which mask is which chair:\\one best matching, kept};
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  {\footnotesize The guess has no principled defence: trying every matching is impossible. A SLAM system would
+  estimate objects and path together, as one factor.\par}
+  \lesson{Its own factor is estimated, the robot's is read with its doubt, the matching is guessed once.}
+\end{frame}
+
+\begin{frame}{Each agent lowers Day 2's $F$ for its own factor}
+  \centering
+  \begin{tikzpicture}[x=2.3cm, y=1.15cm,
+      fr/.style={very thick, cool, fill=cool!10}]
+    % one refrigerator, side view, in metres: front face on the left (towards the camera), back against the wall
+    \begin{scope}
+      \node[font=\footnotesize\bfseries] at (0.4,2.3) {1. misfit to the masks};
+      \draw[muted, thick] (-0.7,0) -- (1.1,0); \fill[muted!40] (0.8,0) rectangle (0.86,1.95);
+      \draw[fr] (0,0) rectangle (0.8,1.8);
+      \draw[cool] (0,1.25) -- (0.8,1.25); \draw[cool, line width=1.6pt] (0.04,1.35) -- (0.04,1.6) (0.04,0.8) -- (0.04,1.1);
+      \foreach \x/\y in {-0.18/0.2, -0.07/0.5, -0.12/0.95, -0.06/1.45, -0.2/1.7}
+        {\draw[accent, thick] (\x,\y) -- (0,\y); \fill[muted] (\x,\y) circle (1.8pt);}
+      \foreach \x/\y in {0.2/1.95, 0.45/1.68, 0.65/1.92}
+        {\draw[accent, thick] (\x,\y) -- (\x,1.8); \fill[muted] (\x,\y) circle (1.8pt);}
+      \node[lab, align=center] at (0.3,-0.4) {grey: mask points; red: each point's\\distance $r_k$ to the refrigerator};
+    \end{scope}
+    \begin{scope}[xshift=5.6cm]
+      \node[font=\footnotesize\bfseries] at (0.4,2.3) {2. distance from a typical one};
+      \draw[muted, thick] (-0.6,0) -- (1.1,0); \fill[muted!40] (0.8,0) rectangle (0.86,1.95);
+      \draw[fr] (0,0) rectangle (0.8,1.8);
+      \draw[muted, very thick, dashed] (0.2,0) rectangle (0.8,1.8);
+      \node[lab, text=muted!70!black, align=center] at (0.5,0.9) {typical\\0.60 m};
+      \node[lab, text=cool, anchor=east, align=right] at (-0.05,0.9) {this one\\0.80 m};
+      \draw[accent, very thick, |-|] (0,-0.1) -- (0.2,-0.1);
+      \node[lab, text=accent, align=center] at (0.3,-0.4) {$\theta_i - \mu$, counted in spreads $s = 0.08$ m};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\small $F_i(\theta_i) \;=\; \underbrace{\textstyle\sum_k r_k^2 / \sigma^2}_{\text{1. misfit to the masks}}
+  \;+\; \underbrace{(\theta_i - \mu)^2 / s^2}_{\text{2. distance from the class}}$\par}
+  \vspace{0.2em}
+  {\scriptsize $\theta_i$: object $i$'s pose and size (here, the depth). $r_k$: distance from mask point $k$ to the shape placed at $\theta_i$;
+  $\sigma$: a point's noise. $\mu, s$: mean and spread of the depth of refrigerators, written by us.
+  Term 1 is Day 2's accuracy (with a minus sign), term 2 its complexity. The agent moves $\theta_i$ to lower $F_i$:
+  with few points term 2 decides, with many points term 1.\par}
+  \lesson{Each agent fits its own object to the masks, held near what its class is like.}
+\end{frame}
+
+\begin{frame}{Across a cut, a pose must travel with its covariance}
+  \centering
+  \begin{tikzpicture}[rb/.style={circle, draw=good, thick, fill=good!25, inner sep=0pt, minimum size=3.5mm},
+                      tc/.style={accent, very thick}]
+    % the cut: room_concept owns the robot pose, chair_concept reads it
+    \node[draw=good, thick, rounded corners=2pt, fill=good!18, font=\scriptsize] (rc) at (-1.2,2.4) {room\_concept};
+    \node[draw=cool, thick, rounded corners=2pt, fill=cool!15, font=\scriptsize] (cc) at (5.2,2.4) {chair\_concept};
+    \draw[-{Stealth}, thick, good!70!black] (rc) -- node[lab, above, pos=0.6] {robot pose: mean and covariance} (cc);
+    \draw[densely dashed, muted] (0.35,2.0) -- (0.35,2.85) node[lab, above, text=muted] {the cut};
+    % two scenes, same data: the robot's position is uncertain (green ellipse), the true chair is the red cross
+    \foreach \sx/\ttl/\ea/\eb/\nees/\col/\bh in {0/{pose taken as exact}/0.22/0.14/{5.57: five times too sure}/accent/0.13, 4.6/{pose covariance added}/0.72/0.46/{1.09: right}/good/0.3}{
+      \begin{scope}[xshift=\sx cm]
+        \node[font=\footnotesize\bfseries] at (0.9,1.75) {\ttl};
+        \draw[good, thick, dashed] (-0.4,0.3) ellipse (0.38 and 0.22);
+        \node[rb] at (-0.4,0.3) {};
+        \draw[muted, densely dotted] (-0.4,0.3) -- (1.9,1.0);
+        \draw[cool, very thick, fill=cool!12] (1.9,1.0) ellipse (\ea cm and \eb cm);
+        \fill[cool] (1.9,1.0) circle (1.4pt);
+        \draw[tc] (2.2,0.7) ++(-0.07,-0.07) -- ++(0.14,0.14) ++(-0.14,0) -- ++(0.14,-0.14);
+        % claimed spread (blue) against the real spread of the error (red, dashed)
+        \draw[muted] (0.0,-0.75) -- (1.8,-0.75);
+        \draw[cool, thick, domain=0:1.8, samples=50] plot (\x, {-0.75+0.55*exp(-((\x-0.9)^2)/(2*\bh*\bh))});
+        \draw[accent, thick, dashed, domain=0:1.8, samples=50] plot (\x, {-0.75+0.55*exp(-((\x-0.9)^2)/(2*0.3*0.3))});
+        \node[font=\footnotesize, text=\col] at (0.9,-1.0) {NEES $=$ \nees};
+      \end{scope}}
+    \node[lab, align=center] at (3.2,-1.5) {green: where the robot may be;\quad blue: where the chair claims to be;\quad red: where the chair is\\curves: the spread the chair claims (blue) and the real spread of its error (red, dashed)};
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  {\scriptsize \textbf{NEES}: the true squared error divided by the variance the belief claims, i.e.\ (width of the red curve
+  / width of the blue)$^2$. 1 means the claim is right. Numbers from a lab experiment.\par}
+  \lesson{A pose that crosses a cut is a mean and a covariance, never a mean alone.}
+\end{frame}
+
+\begin{frame}{The cost of cutting: one pose error moves every object together}
+  \centering
+  \begin{tikzpicture}[dl/.style={-{Stealth[length=2mm]}, black, line width=1.2pt}]
+    % left: one image. The robot is wrong by delta_t, so everything it sees is placed wrong by the same delta_t
+    \begin{scope}
+      \node[font=\footnotesize\bfseries] at (2.4,2.7) {1. one image, one pose error};
+      \begin{scope}[color=good!70!black]\robot{0.5,0.9}{0}\end{scope}
+      \node[lab, below=5pt] at (0.5,0.9) {where it is};
+      \begin{scope}[opacity=0.55]\robot{1.1,1.35}{0}\end{scope}
+      \node[lab, above=5pt] at (1.1,1.35) {where it thinks};
+      \draw[dl] (0.62,0.99) -- (0.98,1.26);
+      \fill[accent!35, draw=accent, thick] (2.8,1.5) rectangle ++(0.9,0.5);
+      \draw[accent, dashed, thick] (3.4,1.95) rectangle ++(0.9,0.5);
+      \draw[dl] (3.25,1.75) -- (3.85,2.2);
+      \node[lab, below] at (3.25,1.5) {table\_1};
+      \fill[cool!35, draw=cool, thick] (3.7,0.3) rectangle ++(0.4,0.4);
+      \draw[cool, dashed, thick] (4.3,0.75) rectangle ++(0.4,0.4);
+      \draw[dl] (3.9,0.5) -- (4.5,0.95);
+      \node[lab, below] at (3.9,0.3) {chair\_1};
+      \node[lab, align=center] at (2.4,-0.45) {solid: where they are; dashed: where they are placed.\\The same arrow $\delta_t$ moves both.};
+    \end{scope}
+    % right: the two errors, many images
+    \begin{scope}[xshift=7.6cm, yshift=0.95cm]
+      \node[font=\footnotesize\bfseries] at (0,1.75) {2. the two errors, over many images};
+      \draw[->, muted] (-1.4,0) -- (1.5,0) node[right, lab] {table\_1 error};
+      \draw[->, muted] (0,-1.3) -- (0,1.4) node[left, lab] {chair\_1 error};
+      \draw[muted, very thick, fill=muted!20, rotate=45] (0,0) ellipse (1.2 and 0.35);
+      \draw[cool, very thick, dashed] (0,0) circle (0.85);
+      \node[lab, text=muted!60!black, anchor=west] at (0.75,1.05) {one $q$: tilted, they move together};
+      \node[lab, text=cool, anchor=west] at (0.55,-0.95) {product of factors: no tilt};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\small We write: object $i$, seen in image $t$, is placed at\quad
+  $z_{it} = \underbrace{\theta_i}_{\text{where it is}} + \underbrace{\delta_t}_{\substack{\text{the robot's pose error,}\\\text{shared by all}}} + \underbrace{\varepsilon_{it}}_{\text{its own noise}}$\par}
+  \vspace{0.2em}
+  {\scriptsize The tilt is the link that $\delta_t$ creates between chair\_1 and table\_1. Each factor holds one object, so the product of factors has no place for it.\par}
+  \lesson{A shared pose error links the objects; cutting $q$ into factors drops the link.}
+\end{frame}
+
+% =================================================================================================
+\section{No thresholds}
+% =================================================================================================
+
+
+\begin{frame}{Replace a threshold by a precision that follows the physics}
+  \begin{columns}[c]
+    \begin{column}{0.33\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \fill[accent!18] (0,0) circle (1.25);
+        \draw[accent, very thick, densely dashed] (0,0) circle (1.25);
+        \robot{0,0}{20}
+        \foreach \a/\r in {40/0.8, 150/1.05, 260/0.7} \fill[black] (\a:\r) circle (1.6pt);
+        \foreach \a/\r in {15/1.5, 200/1.65} \draw[black] (\a:\r) circle (1.6pt);
+      \end{tikzpicture}\\[0.3em]
+      \footnotesize\textbf{a threshold}\\``ignore anything beyond 5 m''
+    \end{column}
+    \begin{column}{0.33\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \shade[inner color=cool!70, outer color=white] (0,0) circle (1.7);
+        \robot{0,0}{20}
+        \foreach \a/\r in {40/0.8, 150/1.05, 260/0.7} \fill[black] (\a:\r) circle (1.6pt);
+        \foreach \a/\r in {15/1.5, 200/1.65} \fill[black, opacity=0.35] (\a:\r) circle (1.6pt);
+      \end{tikzpicture}\\[0.3em]
+      \footnotesize\textbf{a precision}\\every sighting counts, as much as it can be trusted
+    \end{column}
+    \begin{column}{0.3\textwidth}
+      \footnotesize
+      \textbf{far away:} less sure about direction\\[0.5em]
+      \textbf{moving:} the image is blurred, so a larger variance\\[0.5em]
+      \textbf{many points:} they share one error, so they stop helping
+    \end{column}
+  \end{columns}
+  \vspace{0.7em}
+  \lesson{No rule on top of the inference: the behaviour falls out of the model.}
+\end{frame}
+
+\begin{frame}{A tuned threshold fails on the next pass; a sensor model does not}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.33cm, y=0.33cm]
+        % the object, and the threshold circle tuned on the near pass (k = 2 m)
+        \fill[accent!12] (0,0) circle (2);
+        \draw[accent, thick, densely dashed] (0,0) circle (2);
+        \node[lab, text=accent, anchor=north] at (0,-2.05) {threshold $k = 2$ m};
+        \fill[cool] (-0.3,-0.3) rectangle (0.3,0.3);
+        \node[lab, text=cool, anchor=west] at (2.2,-0.9) {object};
+        % near pass: sightings inside the circle are used
+        \foreach \x in {-8,-7,...,8} {
+          \pgfmathsetmacro{\r}{sqrt(\x*\x+1)}
+          \ifdim \r pt < 2pt \fill[good] (\x,1) circle (3pt); \else \fill[muted!60] (\x,1) circle (3pt); \fi}
+        \node[lab, anchor=west] at (8.6,1) {near pass, 1 m};
+        % far pass: all outside
+        \foreach \x in {-8,-7,...,8} {\fill[muted!60] (\x,6) circle (3pt);}
+        \node[lab, anchor=west] at (8.6,6) {far pass, 6 m};
+        \node[lab, text=accent] at (0,7.2) {no sighting inside $k$: nothing is used};
+        \fill[good] (-8,-3.6) circle (3pt); \node[lab, anchor=west] at (-7.5,-3.6) {used by the threshold};
+        \fill[muted!60] (1.5,-3.6) circle (3pt); \node[lab, anchor=west] at (2,-3.6) {ignored};
+      \end{tikzpicture}\\[0.4em]
+      \raggedright\scriptsize
+      \textbf{Threshold}: average the sightings closer than $k$. Tuned on the near pass, the best is $k = 2$ m. On the far
+      pass it uses nothing, and the estimate stays at its 3 m starting guess.\\[3pt]
+      \textbf{Precision}: use every sighting, weighted by $1/\sigma(\rho)^2$, with $\sigma(\rho)$ the noise at range $\rho$,
+      written once. Nothing to tune.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d2_gate.pdf}\\[0.2em]
+      {\scriptsize rmse: root mean square error. Dashed: the precision, 0.86 cm near and 4.22 cm far, below the
+      \emph{best} threshold of each pass (1.01 and 4.79 cm). From a lab experiment.\par}
+    \end{column}
+  \end{columns}
+  \lesson{A precision is a sensor model, written once; a threshold is a number tuned to one scene.}
+\end{frame}
+
+\begin{frame}{One threshold stays: a bias the per-frame model has no place for}
+  \begin{columns}[c]
+    \begin{column}{0.47\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm, tc/.style={accent, very thick}]
+        % independent errors: scattered around the truth, the average lands on it
+        \node[font=\footnotesize\bfseries, anchor=west] at (-0.2,2.6) {independent errors};
+        \foreach \x/\y in {0.55/1.95, 1.25/2.2, 0.8/1.55, 1.5/1.7, 1.0/2.35, 0.65/2.3, 1.35/1.45}
+          {\fill[muted] (\x,\y) circle (1.6pt);}
+        \draw[tc] (0.95,1.85) ++(-0.09,-0.09) -- ++(0.18,0.18) ++(-0.18,0) -- ++(0.18,-0.18);
+        \draw[cool, thick] (0.95,1.85) circle (0.16);
+        \node[lab, anchor=west, align=left] at (1.9,1.9) {the average lands\\on the truth};
+        % shared bias: every frame shifted by the same b
+        \node[font=\footnotesize\bfseries, anchor=west] at (-0.2,1.0) {one bias shared by all frames};
+        \foreach \x/\y in {0.55/0.35, 1.25/0.6, 0.8/-0.05, 1.5/0.1, 1.0/0.75, 0.65/0.7, 1.35/-0.15}
+          {\fill[muted] ({\x+1.1},\y) circle (1.6pt);}
+        \draw[tc] (0.95,0.25) ++(-0.09,-0.09) -- ++(0.18,0.18) ++(-0.18,0) -- ++(0.18,-0.18);
+        \draw[cool, thick] (2.05,0.25) circle (0.16);
+        \draw[-{Stealth}, black, thick] (1.05,0.25) -- (1.87,0.25) node[midway, below=1pt, lab] {$b$};
+        \node[lab, anchor=west, align=left] at (2.8,0.25) {the average lands\\$b$ away};
+        \node[lab, align=center] at (1.6,-0.65) {red: the truth;\ grey: one estimate per frame;\ blue: their average};
+      \end{tikzpicture}\\[0.3em]
+      {\scriptsize Frames taken while the robot moves fast are all smeared the same way: a shared bias $b$.\par}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \centering
+      \includegraphics[width=0.92\textwidth]{d2_bias.pdf}\\[0.2em]
+      {\scriptsize $n$: the number of smeared frames; $\alpha$: how much each one counts (1 = fully).
+      With any $\alpha > 0$, enough frames move the estimate by the whole bias. Only $\alpha = 0$, ignoring those
+      frames, keeps it at 0.\par}
+    \end{column}
+  \end{columns}
+  \lesson{Down-weighting cannot remove a shared bias; only ignoring those frames can.}
+\end{frame}
+
+% =================================================================================================
+\section{Lab}
+% =================================================================================================
+
+
+\begin{frame}{Lab 3: agents on a shared graph}
+  \texttt{labs/day3.ipynb}, about two hours.
+  \begin{enumerate}\small
+    \item \textbf{The graph}: an ownership contract, and a sweep for the nodes of dead processes.
+    \item \textbf{Agents that only read and write}: an object agent that reads the robot's belief
+          from the edge. Then remove the covariance and measure the NEES.
+    \item \textbf{One $F$, many owners}: when the sum of $F_i$ is the global $F$; the marginal
+          against the relation; the price of the boundary in nats.
+    \item \textbf{No thresholds}: a range threshold against a precision, on two passes.
+    \item \textbf{The threshold that stays}: a bias no precision can bound.
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Tomorrow}
+  \begin{columns}[c]
+    \begin{column}{0.55\textwidth}
+      Today a concept was one box. Tomorrow we open it:
+      \begin{itemize}
+        \item \textbf{geometry}: the room, the pose, the objects;
+        \item \textbf{life cycle}: birth as model comparison, absence as evidence, forgetting as
+              a rate of change the robot infers;
+        \item \textbf{aspect}: what a thing looks like, and why it matters on a second sight.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \begin{block}{Reading for Day 4}\small
+        Thesis chapters:
+        \begin{itemize}
+          \item \emph{The Life Cycle of a Concept Agent};
+          \item \emph{The Room Concept Agent and Robot Localisation}.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\appendix
+
+\begin{frame}{Backup: The whole graph of a simulated run: every node has one writer}
+  \begin{columns}[c]
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{full_graph.png}
+    \end{column}
+    \begin{column}{0.29\textwidth}
+      \small
+      Layered by what a node is about: robot and objects, structure and places, rooms, world.\\[0.5em]
+      Colour says \textbf{who wrote it}.\\[0.5em]
+      Top right, \textbf{Mind}: the agents are nodes too.\\[0.5em]
+      \footnotesize The bottom layer is the simulator's apartment, not a belief.
+    \end{column}
+  \end{columns}
+  \lesson{Every agent writes its own nodes; colour shows who wrote each one.}
+\end{frame}
+
+\begin{frame}{Backup: Every agent holds a copy of the graph and sends its changes}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
       \centering
@@ -340,45 +1245,10 @@
       \end{itemize}
     \end{column}
   \end{columns}
-  \src{cortex.tex l.255--272}
+  \lesson{Changes merge by themselves; no copy may assume it sees the same instant as another.}
 \end{frame}
 
-\begin{frame}{Copies may disagree for a moment, and then they agree}
-  \centering
-  \begin{tikzpicture}[x=1cm, y=1.05cm,
-      v/.style={draw, rounded corners=2pt, fill=white, font=\scriptsize, inner sep=2.5pt, minimum width=0.72cm},
-      w/.style={v, draw=accent, very thick, fill=accent!15},
-      msg/.style={-{Stealth[length=2mm]}, thick, color=cool},
-      msg2/.style={-{Stealth[length=2mm]}, thick, color=good, densely dashed}]
-    \fill[accent!8] (2.4,-0.42) rectangle (8.25,2.75);
-    \fill[good!12] (8.25,-0.42) rectangle (11.4,2.75);
-    \node[lab, text=accent] at (5.15,2.95) {the copies disagree};
-    \node[lab, text=good!70!black] at (9.8,2.95) {all equal};
-    \foreach \y/\n in {2/agent 1, 1/agent 2, 0/agent 3} {
-      \draw[-{Stealth}, muted, thick] (1.5,\y) -- (11.4,\y);
-      \node[lab, left, font=\footnotesize] at (1.5,\y) {\n};
-    }
-    % the two writes, made without seeing each other
-    \draw[msg] (2.75,2) -- (7.0,1);
-    \draw[msg] (2.75,2) -- (8.25,0);
-    \draw[msg2] (3.3,1) -- (5.9,2);
-    \draw[msg2] (3.3,1) -- (5.0,0);
-    % values held by each copy
-    \node[v] at (1.95,2) {1.0}; \node[w] at (2.75,2) {2.0}; \node[v] at (5.9,2) {2.0}; \node[v] at (9.8,2) {2.0};
-    \node[v] at (1.95,1) {1.0}; \node[w] at (3.3,1) {2.4}; \node[v] at (7.0,1) {2.0}; \node[v] at (9.8,1) {2.0};
-    \node[v] at (1.95,0) {1.0}; \node[v] at (5.0,0) {2.4}; \node[v] at (8.25,0) {2.0}; \node[v] at (9.8,0) {2.0};
-    \node[lab, align=center] at (2.75,2.42) {writes $2.0$}; \node[lab, align=center] at (5.9,2.42) {keeps $2.0$};
-    \node[lab, align=center] at (2.42,0.44) {writes $2.4$, before receiving\\agent 1's change};
-  \end{tikzpicture}
-
-  \vspace{0.5em}
-  \small Nobody waited, and nobody locked. For a while agent 3 believes $2.4$.
-  \alert{``Eventually consistent'' means only that, once the messages have arrived, every copy holds
-  the same value.}
-  \src{cortex.tex l.255--272}
-\end{frame}
-
-\begin{frame}{Same letters, any order, same result}
+\begin{frame}{Backup: Same changes, any order, same result: a fixed rule decides}
   \begin{columns}[c]
     \begin{column}{0.62\textwidth}
       \centering
@@ -426,45 +1296,13 @@
       \end{tikzpicture}\\[0.5em]
       \raggedright\footnotesize
       The id picks \emph{who} wins, never \emph{whether} the copies agree: every copy ranks the same
-      two letters the same way.\\[0.4em]
-      \alert{The rule buys agreement, not the better value.}\\[0.4em]
-      One of the two writes is always lost. That is why \textbf{each node has a single owner}:
-      with one writer, there is nothing to collide with.
+      two letters the same way. The rule gives agreement, not the better value.
     \end{column}
   \end{columns}
-  \src{cortex.tex l.255--272; cortex, core/crdt/delta\_crdt.h}
+  \lesson{One of two colliding writes is always lost, so each node has a single owner.}
 \end{frame}
 
-\begin{frame}{Sensor data travels beside the graph}
-  \begin{columns}[c]
-    \begin{column}{0.56\textwidth}
-      \centering
-      \begin{tikzpicture}[lane/.style={rounded corners=4pt, minimum width=7.2cm, minimum height=1.32cm}]
-        \node[lane, fill=cool!12] at (0,0.8) {};
-        \node[lane, fill=muted!14] at (0,-0.8) {};
-        \node[lab, anchor=north west, font=\scriptsize\bfseries, text=cool] at (-3.5,1.42) {DDS domain 7: the media plane};
-        \node[lab, anchor=north west, font=\scriptsize\bfseries, text=black!70] at (-3.5,-0.18) {DDS domain 0: the graph};
-        \node[ag, minimum width=1.5cm] (s1) at (-2.5,0.62) {driver};
-        \node[ag, minimum width=1.5cm] (r1) at (2.5,0.62) {agents};
-        \draw[flow, cool, line width=2.4pt] (s1) -- node[above, lab, text=black] {pixels, point clouds} node[below, lab, text=black] {best effort, newest only} (r1);
-        \node[ag, minimum width=1.5cm] (s2) at (-2.5,-1.0) {agent};
-        \node[ag, minimum width=1.5cm] (r2) at (2.5,-1.0) {agents};
-        \draw[link, line width=1pt] (s2) -- node[above, lab, text=black] {beliefs, heartbeats} node[below, lab, text=black] {reliable, reaches everyone} (r2);
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.4\textwidth}
-      \small
-      A \textbf{DDS domain} is a private channel: processes in different domains never discover
-      each other.\\[0.5em]
-      Images written into the graph starve it, and the first symptom is \alert{a missed heartbeat:
-      an agent declared dead because a camera was busy.}\\[0.5em]
-      The graph holds a sensor's \emph{existence}, and where to find its stream.
-    \end{column}
-  \end{columns}
-  \src{cortex.tex l.375--381, l.386--402, l.410--415}
-\end{frame}
-
-\begin{frame}{On one computer: pass the place, not the image}
+\begin{frame}{Backup: On one computer: pass the place, not the image}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
       \centering
@@ -487,15 +1325,15 @@
           \draw[flow, muted] (q.west) -- (m.east);
         }
       \end{tikzpicture}\\[0.3em]
-      \footnotesize Readers look at the same bytes in place. The cost does not grow with readers.
+      \footnotesize Readers look at the same bytes in place.
     \end{column}
     \begin{column}{0.46\textwidth}
       \centering
       \begin{tikzpicture}[x=1.05cm, y=0.62cm]
         \node[lab, font=\scriptsize\bfseries] at (2.9,4.05) {moving one 2.8 MB frame (log scale)};
         \foreach \y/\v/\c/\l/\tm in {
-            3/1.52/good/{DDR5, 85 GB/s}/33 \textmu s at best,
-            2/2.28/cool/{measured, zero copy}/0.19 ms,
+            3/1.52/good/{one copy in DDR5, in theory}/33 \textmu s,
+            2/2.28/cool/{zero copy, measured end to end}/0.19 ms,
             1/3.35/muted/{10 Gb Ethernet}/2.2 ms,
             0/4.35/muted/{1 Gb Ethernet}/22 ms} {
           \node[lab, anchor=east] at (2.3,\y+0.31) {\l};
@@ -504,107 +1342,15 @@
         }
       \end{tikzpicture}\\[0.5em]
       \raggedright\small
-      DDR5 typically moves 80--90 GB/s. Two cameras at 30 Hz are only about $0.2\,$GB/s.
-      \alert{Most of the 0.19 ms is not moving bytes.}
+      DDR5 moves 80--90 GB/s. One RGB-D camera, colour and depth at 30 Hz, is about $0.2\,$GB/s.
+      Most of the measured 0.19 ms is notifying and mapping, not moving bytes; a real copy pays that
+      too, once per reader.
     \end{column}
   \end{columns}
-  \src{cortex.tex l.400--406, l.432--435; arithmetic: 2.8 MB at each rate}
+  \lesson{Every reader shares one copy of the image: the cost does not grow with readers.}
 \end{frame}
 
-% =================================================================================================
-\section{Memories}
-% =================================================================================================
-
-
-\begin{frame}{Memories: the same concepts, kept for longer}
-  \centering
-  \begin{tikzpicture}[x=1cm, y=1cm,
-      box/.style={draw=cool, thick, rounded corners=3pt, align=center, font=\scriptsize, fill=cool!10, inner sep=2pt, minimum width=2.08cm, minimum height=1.3cm},
-      todo/.style={box, draw=muted, densely dashed, fill=white, text=muted}]
-    \draw[-{Stealth}, very thick, muted] (-0.1,0) -- (13.4,0) node[lab, text=black, pos=0.5, below=15pt] {how long it lasts};
-    \foreach \x/\t in {1.1/now, 3.35/this deployment, 6.72/across missions, 11.22/a lifetime} {
-      \draw[muted, thick] (\x,0.08) -- (\x,-0.08); \node[lab, below=3pt] at (\x,0) {\t};
-    }
-    \node[box, draw=accent, fill=accent!12] (w) at (1.1,0.95) {\textbf{Working}\\the concepts\\of now};
-    \node[box] (e) at (3.35,0.95) {\textbf{Episodic}\\what it undertook,\\what came of it};
-    \node[box] (o) at (5.6,0.95) {\textbf{Long-term object}\\this chair, again\\[1pt]{\tiny\color{accent}work in progress}};
-    \node[box] (s) at (7.85,0.95) {\textbf{Long-term spatial}\\rooms and passages};
-    \node[todo] (m) at (10.1,0.95) {\textbf{Semantic}\\categories\\not built yet};
-    \node[todo] (p) at (12.35,0.95) {\textbf{Procedural}\\skills\\not built yet};
-    \draw[flow, muted, densely dashed] (o.north) to[out=40, in=140] node[above, lab, text=muted, pos=0.5] {from individuals to kinds} (m.north);
-    \draw[flow, accent, densely dashed] (e.north) to[out=38, in=142] node[above, lab, text=accent, pos=0.5] {amortisation: to do} (p.north);
-  \end{tikzpicture}
-
-  \vspace{0.6em}
-  \small Each memory has an agent that manages it, and fills it by watching the working memory.\\[0.2em]
-  \alert{Agents still only talk through memories.} For now, the classes stay inside the concept
-  agents.
-  \src{cortex.tex l.519--537, as built on 2026-11-09}
-\end{frame}
-
-\begin{frame}{Episodic memory: what it undertook, and what came of it}
-  \begin{columns}[c]
-    \begin{column}{0.54\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1cm, y=1cm]
-        \node[recbar=accent, minimum width=6.4cm] at (3.2,2.2) {mission: go to the kitchen};
-        \node[recbar=cool, minimum width=2.9cm] at (1.45,1.45) {step: reach the door};
-        \node[recbar=cool, minimum width=3.3cm] at (4.75,1.45) {step: cross it};
-        \node[recbar=good, minimum width=2.3cm] at (1.75,0.7) {claims: approach};
-        \node[recbar=good, minimum width=2.7cm] at (4.75,0.7) {claims: cross};
-        \draw[-{Stealth}, thick, muted] (0,0.15) -- (6.5,0.15) node[below left, lab, text=black] {time};
-        \draw[densely dashed, muted] (3.4,0.42) -- (3.4,-0.42);
-        \node[draw, thick, rounded corners=3pt, fill=white, align=left, font=\scriptsize, inner sep=5pt, minimum width=6.3cm] at (3.2,-1.3)
-          {\textbf{one record}\\what was asked\\when it began and ended\\the outcome its owner reported\\the target's belief, before and after};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.42\textwidth}
-      \small
-      Its unit is one thing the robot undertook to do, at any level.\\[0.6em]
-      The start and the end are \alert{read from the controller's journal}, not guessed from the
-      world.\\[0.6em]
-      At the turn of the day, records fold into \textbf{track records}: how often crossing this door
-      has worked, and how long it takes.
-    \end{column}
-  \end{columns}
-  \src{cortex.tex l.539--547; the example mission is illustrative}
-\end{frame}
-
-\begin{frame}{Long-term spatial memory: rooms and passages}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1cm, y=1cm]
-        \fill[accent!14] (0,0) rectangle (3,2.1);
-        \draw[very thick, accent] (0,0) rectangle (3,2.1);
-        \fill[muted!14] (3,0) rectangle (5.7,2.1);
-        \draw[very thick, muted] (3,0) rectangle (5.7,2.1);
-        \fill[muted!14] (1.7,-1.8) rectangle (4.3,0);
-        \draw[very thick, muted] (1.7,-1.8) rectangle (4.3,0);
-        \foreach \a/\b in {{3,0.75}/{3,1.35}, {2.1,0}/{2.7,0}, {3.5,0}/{4.1,0}} {
-          \draw[white, line width=3.4pt] (\a) -- (\b);
-          \draw[good, line width=2.2pt] (\a) -- (\b);
-        }
-        \robot{1.1,1.1}{20}
-        \node[lab, text=accent, font=\scriptsize\bfseries] at (1.5,1.85) {in working memory};
-        \node[lab, align=center, font=\scriptsize\bfseries, text=black!65] at (4.4,1.2) {kept in\\long-term};
-        \node[lab, align=center, font=\scriptsize\bfseries, text=black!65] at (3,-1) {kept in long-term};
-        \node[lab, text=good!70!black] at (4.85,-0.3) {passages};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \small
-      The room the robot leaves moves out of working memory, and goes back in when the robot
-      returns.\\[0.6em]
-      \alert{Working memory stays small, and the map is bounded only by storage.}\\[0.6em]
-      It plans routes across rooms and predicts a room before entering it.\\[0.6em]
-      It holds rooms and passages only. Objects now have a memory of their own.
-    \end{column}
-  \end{columns}
-  \src{cortex.tex l.558--564; ltsm\_agent on main, a2baaebe (the objects moved out after the thesis text)}
-\end{frame}
-
-\begin{frame}{Long-term object memory: this chair, again \wip}
+\begin{frame}{Backup: Long-term object memory recognises this chair, again \wip}
   \centering
   \begin{tikzpicture}[x=1cm, y=1cm, pcap/.style={font=\scriptsize\bfseries, anchor=south}, pan/.style={draw=muted, rounded corners=3pt}]
     \foreach \x/\t in {0/seen in room 1, 3.5/the robot leaves, 7/it comes back, 10.5/seen again} {
@@ -638,20 +1384,19 @@
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
       \small The memory only \textbf{offers}. The concept agent \textbf{decides}, and the object
-      appears only once it is detected.\\[0.3em]
-      \alert{Today the comparison uses position alone.} The chair's look is the missing term.
+      appears only once it is detected. The chair's look is the missing term.
     \end{column}
     \begin{column}{0.44\textwidth}
       \begin{measured}{chairs only, so far}
-        \small Room 1, room 2, room 1: two chairs came back with their own identities,
-        $p = .945$ and $.969$.
+        \small Room 1, room 2, room 1: two chairs came back with their own identities, with belief
+        0.945 and 0.969 that each is the same chair.
       \end{measured}
     \end{column}
   \end{columns}
-  \src{ltom\_agent/README.md; run ltom\_chair2, 2026-11-08}
+  \lesson{The memory offers and the concept agent decides; today the comparison uses position alone.}
 \end{frame}
 
-\begin{frame}{Still to build: amortisation}
+\begin{frame}{Backup: Still to build: a habit distilled from past missions (amortisation)}
   \centering
   \begin{tikzpicture}[x=1cm, y=1cm]
     \node[lab, anchor=west, font=\footnotesize\bfseries] at (-1.4,1.95) {today: worked out afresh, every cycle};
@@ -668,17 +1413,11 @@
 
   \vspace{0.7em}
   \small Missions run today, and their results are kept. Nothing generalises from them yet.\\[0.2em]
-  $p(a\mid o)$ is the factor from Day 1 that control and RL learn directly.\\[0.2em]
-  \alert{The open question: does a learned habit know when it no longer applies?}
-  \src{a plan, not a result; Day 1, ``Three things you can build from one joint''}
+  $p(a\mid o)$ is the factor from Day 1 that control and RL learn directly.
+  \lesson{The open problem: a learned habit must also know when it no longer applies.}
 \end{frame}
 
-% =================================================================================================
-\section{One free energy, many owners}
-% =================================================================================================
-
-
-\begin{frame}{One big belief about everything}
+\begin{frame}{Backup: One belief about everything asks four questions at once}
   \centering
   \begin{tikzpicture}[card/.style={rounded corners=4pt, minimum width=2.9cm, minimum height=2.7cm}]
     \foreach \x/\c/\q/\o in {0/cool/{What objects\\are here?}/object agents,
@@ -701,355 +1440,13 @@
   \end{tikzpicture}
 
   \vspace{0.7em}
-  \small Before any data, the four are independent: objects do not know where the robot is.\\[0.2em]
-  Once data arrive they are \alert{tangled}: the scan that locates the wall also hits the
+  \small Before any data, the objects and the robot's pose are independent: objects do not know where the
+  robot is. The matching and the masks depend on both.\\[0.2em]
+  Once data arrive, objects and pose are tangled: the scan that locates the wall also hits the
   refrigerator standing against it.
-  \src{concept\_agents.tex l.255--293}
+  \lesson{Objects and pose start independent and become tangled by the data: splitting them has a price.}
 \end{frame}
 
-\begin{frame}{Not everything unknown is worth reporting}
-  \centering
-  \begin{tikzpicture}[card/.style={rounded corners=4pt, minimum width=3.8cm, minimum height=2.5cm, align=center, font=\small, inner sep=5pt}]
-    \node[card, fill=cool!15] at (0,0) {\textbf{Answer it}\\[0.5em]\footnotesize the table's shape,\\whether it is real\\[0.5em]\scriptsize published on the graph,\\with how sure};
-    \node[card, fill=good!15] at (4.3,0) {\textbf{Allow for it}\\[0.5em]\footnotesize the robot's exact path,\\the exact room\\[0.5em]\scriptsize needed to read the data,\\its doubt is carried along};
-    \node[card, fill=accent!15] at (8.6,0) {\textbf{Just guess it}\\[0.5em]\footnotesize which mask belongs\\to which object\\[0.5em]\scriptsize one best guess, because\\trying all is impossible};
-  \end{tikzpicture}
-
-  \vspace{0.8em}
-  \small The third has no principled defence, and the thesis says so.\\[0.3em]
-  A SLAM system would also \emph{report} the path. That one change is what separates this design
-  from a monolithic one.
-  \src{concept\_agents.tex l.395--420}
-\end{frame}
-
-\begin{frame}{Cut the belief into pieces, one process per piece}
-  \centering
-  \begin{tikzpicture}
-    \node[draw=accent, very thick, fill=accent!10, ellipse, minimum width=3.4cm, minimum height=2.3cm, align=center, font=\small] (q) at (0,0)
-         {one belief\\about everything};
-    \draw[-{Stealth[length=3.5mm]}, line width=1.4pt, muted] (2.1,0) -- (3.4,0);
-    \node[draw=good, thick, fill=good!15, ellipse, minimum width=2.4cm, minimum height=1.3cm, align=center, font=\scriptsize] (r) at (5.2,0.75) {robot and room};
-    \foreach \x/\y/\l in {7.9/1.05/table 1, 9.9/1.05/table 2, 7.9/-0.3/chair 1, 9.9/-0.3/bottle 1} {
-      \node[draw=cool, thick, fill=cool!15, ellipse, minimum width=1.65cm, minimum height=0.95cm, font=\scriptsize] at (\x,\y) {\l};
-    }
-    \node[draw=muted, thick, fill=muted!12, ellipse, minimum width=2.4cm, minimum height=0.95cm, align=center, font=\scriptsize] at (5.2,-0.75) {whose mask is whose};
-    \draw[densely dashed, accent, thick] (6.75,-1.1) -- (6.75,1.65);
-    \draw[densely dashed, accent, thick] (8.9,-1.1) -- (8.9,1.65);
-    \node[lab, text=accent] at (7.8,1.85) {each cut is an assumption};
-  \end{tikzpicture}
-
-  \vspace{0.6em}
-  \small Across a cut, two beliefs no longer inform each other, except through what is published.\\[0.2em]
-  \alert{A process boundary is a statement about the world, not only about the software.}
-  \src{concept\_agents.tex l.114--123, l.447--455}
-\end{frame}
-
-\begin{frame}{What each agent minimises: yesterday's trade, once per object}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \fill[muted!60] (0,0) -- (-0.32,-0.6) -- (0.32,-0.6) -- cycle;
-        \draw[very thick] (-2.7,0.28) -- (2.7,-0.28);
-        \node[draw=accent, thick, rounded corners=3pt, fill=accent!12, align=center, font=\footnotesize, minimum width=2.1cm, minimum height=0.95cm, anchor=south] at (-1.95,0.28) {fit what\\I have seen};
-        \node[draw=cool, thick, rounded corners=3pt, fill=cool!12, align=center, font=\footnotesize, minimum width=2.1cm, minimum height=0.95cm, anchor=south] at (1.95,-0.2) {stay a plausible\\refrigerator};
-        \node[lab, below] at (-1.95,0.1) {accuracy};
-        \node[lab, below] at (1.95,-0.35) {complexity};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      Exactly Day 2's $F$, for one instance:
-      \[ F_i = \text{misfit} + \text{distance from the class} \]
-      A refrigerator is about $0.60\pm0.08$ m deep before it is ever seen: the class does a lot of
-      the work.
-    \end{column}
-  \end{columns}
-  \vspace{0.8em}
-  \centering\small The agent takes the robot's published pose as given, and classes never add their
-  $F$ together.
-  \src{concept\_agents.tex l.347--351, l.496--516}
-\end{frame}
-
-\begin{frame}{The smallest scene that shows the price}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \draw[very thick, muted] (0,0) -- (5.2,0);
-        \robot{0.8,1.1}{0}
-        \node[lab, below=5pt] at (0.8,1.1) {where it is};
-        \begin{scope}[opacity=0.55]\robot{1.5,1.5}{0}\end{scope}
-        \node[lab, above=5pt] at (1.5,1.5) {where it thinks};
-        \draw[flow, accent, line width=1.3pt] (0.92,1.17) -- (1.38,1.43);
-        \fill[cool!35, draw=cool, thick] (3.2,1.8) rectangle ++(0.9,0.5);
-        \node[lab, below] at (3.65,1.8) {table};
-        \fill[cool!35, draw=cool, thick] (4.5,0.65) circle (0.17);
-        \node[lab, below=3pt] at (4.5,0.48) {bottle};
-        \draw[cool, dashed, thick] (3.9,2.2) rectangle ++(0.9,0.5);
-        \draw[cool, dashed, thick] (5.2,1.05) circle (0.17);
-        \draw[flow, accent, line width=1.3pt] (4.1,2.3) -- (4.56,2.56);
-        \draw[flow, accent, line width=1.3pt] (4.67,0.72) -- (5.03,0.95);
-      \end{tikzpicture}\\[0.4em]
-      \footnotesize the same arrow, for everything in this frame
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      The robot places what it sees using its own pose. If the pose is off, \alert{every object in
-      that frame is off by the same amount}:
-      \[ z_{it} = \underbrace{\theta_i}_{\text{true place}} + \underbrace{\delta_t}_{\text{shared}} + \underbrace{\varepsilon_{it}}_{\text{its own}} \]
-      Without a shared error, the sum of the agents' $F_i$ \alert{is} the global $F$. With one,
-      dividing the work is an assumption.
-    \end{column}
-  \end{columns}
-  \src{lab 2, part C; the shared offset: concept\_agents.tex l.64--70}
-\end{frame}
-
-\begin{frame}{Each belief is right. The relation between them is wrong.}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1cm, y=1.1cm]
-        \draw[-{Stealth}, muted] (0,0) -- (0,4.1) node[right, lab, text=black] {sd (cm)};
-        \draw[muted] (0,0) -- (6.2,0);
-        \fill[cool!45] (0.5,0) rectangle (1.3,2.50);
-        \fill[accent!45] (1.4,0) rectangle (2.2,2.50);
-        \fill[cool!45] (3.6,0) rectangle (4.4,1.58);
-        \fill[accent!45] (4.5,0) rectangle (5.3,3.54);
-        \node[lab, above] at (0.9,2.5) {2.50}; \node[lab, above] at (1.8,2.5) {2.50};
-        \node[lab, above] at (4.0,1.58) {1.58}; \node[lab, above] at (4.9,3.54) {3.54};
-        \node[lab, below=2pt] at (1.35,0) {one object, $\theta_0$};
-        \node[lab, below=2pt] at (4.45,0) {the relation, $\theta_0-\theta_1$};
-        \fill[cool!45] (1.6,3.9) rectangle ++(0.25,0.14); \node[lab, right] at (1.85,3.97) {exact};
-        \fill[accent!45] (2.9,3.9) rectangle ++(0.25,0.14); \node[lab, right] at (3.15,3.97) {agents};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      The shared error cancels in a difference. So the robot knows how far the bottle is from the
-      table far better than it knows where either is.\\[0.6em]
-      Two independent beliefs on a graph cannot say that. \alert{The price is paid in
-      relations.}
-    \end{column}
-  \end{columns}
-  \src{lab 2, exercise C2 ($r=(5\,\text{cm})^2$, $s^2=(10\,\text{cm})^2$, 20 frames, 3 objects)}
-\end{frame}
-
-\begin{frame}{The price of a boundary, in nats}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \includegraphics[width=\textwidth]{d2_price.pdf}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \small
-      How far the agents' beliefs are from the exact one, in Day 2's units:
-      \[ F[\text{agents}] - F[\text{exact}] \]
-      \begin{itemize}
-        \item grows with shared error and with the number of objects;
-        \item \alert{does not fall with more data}: $2.56$ nats at 10, 40 and 160 frames.
-      \end{itemize}
-      Data sharpen each factor. They cannot restore a correlation the family has no place to hold.
-    \end{column}
-  \end{columns}
-  \src{lab 2, exercise C3}
-\end{frame}
-
-\begin{frame}{A mean is half a belief}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \node[ag, draw=good, fill=good!12, minimum width=2cm, minimum height=1cm] (l) at (0,0) {room\_concept};
-        \node[ag, minimum width=2cm, minimum height=1cm] (o) at (5,0) {table\_concept};
-        \draw[flow, good, line width=1.4pt] (l) -- node[above, font=\scriptsize, text=black, align=center] {pose,\\and how sure} (o);
-        \draw[densely dashed, muted] (2.5,-0.62) -- (2.5,0.75);
-        \node[lab, text=muted, above] at (2.5,0.75) {the boundary};
-        \draw[muted] (0.7,-1.95) -- (5.2,-1.95);
-        \fill[good!45] (0.9,-1.95) rectangle (1.9,-1.776);
-        \fill[accent!45] (3.2,-1.95) rectangle (4.2,-1.059);
-        \node[lab, above] at (1.4,-1.776) {$1.09$};
-        \node[lab, above] at (3.7,-1.059) {$5.57$};
-        \node[lab, left] at (0.7,-1.5) {mean NEES};
-        \node[lab, below=1pt] at (1.4,-1.95) {reads how sure};
-        \node[lab, below=1pt] at (3.7,-1.95) {ignores it};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      The NEES compares a belief's real errors with the errors it claims: \textbf{1 is honest}.\\[0.5em]
-      An agent that reads \emph{how sure} the robot is stays honest. One that takes the pose as
-      truth claims five times too small a variance.\\[0.5em]
-      \alert{The covariance travels with the mean}, so any process can use the estimate as
-      evidence and not as ground truth.
-    \end{column}
-  \end{columns}
-  \src{lab 2, exercise B2; concept\_agents.tex l.90--95}
-\end{frame}
-
-\begin{frame}{The architecture carries its failures on its face}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \textbf{Pooling eight frames into one}\\[0.4em]
-      \centering
-      \begin{tikzpicture}[x=3.6cm, y=0.55cm]
-        \fill[good!45] (0,1.5) rectangle (0.669,2.1); \node[lab, right] at (0.669,1.8) {0.669 m};
-        \fill[accent!45] (0,0.5) rectangle (0.915,1.1); \node[lab, right] at (0.915,0.8) {0.915 m};
-        \node[lab, above right] at (0,2.05) {one frame, $\sigma_H=0.300$};
-        \node[lab, below right] at (0,0.5) {pooled, $\sigma_H=0.190$};
-      \end{tikzpicture}\\[0.5em]
-      \raggedright\small
-      Each frame brings its own offset, the fit has nowhere to put eight of them, so they land in
-      the shape. \alert{More confident about a worse answer.}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \textbf{A cabinet labelled as a fridge}\\[0.4em]
-      \centering
-      \begin{tikzpicture}
-        \node[ag] (f) at (0,0) {refrigerator\\agent};
-        \node[ag, draw=muted, fill=muted!10] (c) at (3.3,0) {cabinet\\agent};
-        \node[nd, fill=accent!20] (m) at (0,1.15) {the mask};
-        \draw[flow] (m) -- (f);
-        \draw[flow, muted, densely dashed] (m) -- node[above right, lab, text=muted] {never sees it} (c);
-      \end{tikzpicture}\\[0.5em]
-      \raggedright\small
-      The comparison that would settle it, how well each class explains the same pixels, is never
-      made.
-    \end{column}
-  \end{columns}
-  \src{concept\_agents.tex l.73--85; agents\_life\_cycle.tex l.808--809}
-\end{frame}
-
-% =================================================================================================
-\section{No thresholds}
-% =================================================================================================
-
-
-\begin{frame}{A gate is what a model looks like before the modelling is done}
-  \begin{columns}[c]
-    \begin{column}{0.33\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \fill[accent!18] (0,0) circle (1.25);
-        \draw[accent, very thick, densely dashed] (0,0) circle (1.25);
-        \robot{0,0}{20}
-        \foreach \a/\r in {40/0.8, 150/1.05, 260/0.7} \fill[black] (\a:\r) circle (1.6pt);
-        \foreach \a/\r in {15/1.5, 200/1.65} \draw[black] (\a:\r) circle (1.6pt);
-      \end{tikzpicture}\\[0.3em]
-      \footnotesize\textbf{a gate}\\``ignore anything beyond 5 m''
-    \end{column}
-    \begin{column}{0.33\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \shade[inner color=cool!70, outer color=white] (0,0) circle (1.7);
-        \robot{0,0}{20}
-        \foreach \a/\r in {40/0.8, 150/1.05, 260/0.7} \fill[black] (\a:\r) circle (1.6pt);
-        \foreach \a/\r in {15/1.5, 200/1.65} \fill[black, opacity=0.35] (\a:\r) circle (1.6pt);
-      \end{tikzpicture}\\[0.3em]
-      \footnotesize\textbf{a precision}\\every sighting counts, as much as it can be trusted
-    \end{column}
-    \begin{column}{0.3\textwidth}
-      \footnotesize
-      \textbf{far away:} less sure about direction\\[0.5em]
-      \textbf{moving:} the image is blurred, so a larger variance\\[0.5em]
-      \textbf{many points:} they share one error, so they stop helping
-    \end{column}
-  \end{columns}
-  \vspace{0.7em}
-  \lesson{No rule on top of the inference: the behaviour falls out of the model.}
-  \src{concept\_agents.tex l.552--562}
-\end{frame}
-
-\begin{frame}{A gate is a parameter the scene can invalidate}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \includegraphics[width=\textwidth]{d2_gate.pdf}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \centering
-      \begin{tikzpicture}[x=0.32cm, y=0.32cm]
-        \fill[accent!15] (0,0) circle (2*0.32cm);
-        \draw[accent, densely dashed] (0,0) circle (2*0.32cm);
-        \fill[cool] (0,0) circle (2.5pt);
-        \draw[flow, muted] (-8,1) -- (8,1);
-        \draw[flow, muted] (-8,6) -- (8,6);
-        \node[lab, right] at (8,1) {near pass};
-        \node[lab, right] at (8,6) {far pass};
-      \end{tikzpicture}\\[0.5em]
-      \raggedright\small
-      Tuned on the near pass (2 m), the gate admits nothing on the far one: \alert{3 m} of error.\\[0.4em]
-      The precision needs no tuning and wins on both: $0.86$ against $1.01$ cm, $4.22$ against
-      $4.79$ cm, each against the \emph{best} gate for that pass.
-    \end{column}
-  \end{columns}
-  \src{lab 2, part D}
-\end{frame}
-
-\begin{frame}{The gate that survives}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \includegraphics[width=\textwidth]{d2_bias.pdf}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \small
-      \begin{center}
-      \begin{tikzpicture}
-        \foreach \x in {0,1.15,2.3} {
-          \draw[muted, rounded corners=2pt] (\x,0) rectangle ++(1,0.65);
-          \draw[flow, accent] (\x+0.2,0.33) -- ++(0.6,0);
-        }
-      \end{tikzpicture}\\[0.2em]
-      {\scriptsize a run of frames, all wrong the same way}
-      \end{center}
-      Turning their weight $\alpha$ down only slows it. In the end the estimate is off by the whole
-      bias. Only ignoring those frames stops it.\\[0.4em]
-      A variance handles errors that average. \alert{This one does not average.}
-    \end{column}
-  \end{columns}
-  \src{agents\_life\_cycle.tex l.783--791; lab 2, part E}
-\end{frame}
-
-% =================================================================================================
-\section{Lab}
-% =================================================================================================
-
-
-\begin{frame}{Lab 3: agents on a shared graph}
-  \texttt{labs/day3.ipynb}, about two hours.
-  \begin{enumerate}\small
-    \item \textbf{The graph}: an ownership contract, and a sweep for the nodes of dead processes.
-    \item \textbf{Agents that only read and write}: an object agent that reads the robot's belief
-          from the edge. Then remove the covariance and measure the NEES.
-    \item \textbf{One $F$, many owners}: when the sum of $F_i$ is the global $F$; the marginal
-          against the relation; the price of the boundary in nats.
-    \item \textbf{No thresholds}: a range gate against a precision, on two passes.
-    \item \textbf{The gate that survives}: a bias no precision can bound.
-  \end{enumerate}
-\end{frame}
-
-\begin{frame}{Tomorrow}
-  \begin{columns}[c]
-    \begin{column}{0.55\textwidth}
-      Today a concept was one box. Tomorrow we open it:
-      \begin{itemize}
-        \item \textbf{geometry}: the room, the pose, the objects;
-        \item \textbf{life cycle}: birth as model comparison, absence as evidence, forgetting as
-              inferred volatility;
-        \item \textbf{aspect}: what a thing looks like, and why it matters on a second sight.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.4\textwidth}
-      \begin{block}{Reading for Day 4}\small
-        Thesis chapters:
-        \begin{itemize}
-          \item \emph{The Life Cycle of a Concept Agent};
-          \item \emph{The Room Concept Agent and Robot Localisation}.
-        \end{itemize}
-      \end{block}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\appendix
 
 
 \begin{frame}{Backup: the whole scene, in causal order}
@@ -1075,7 +1472,6 @@
     \item Once data arrive they are coupled twice: through the masks, and through the LiDAR sweep,
           which hits the fridge as well as the wall behind it.
   \end{itemize}
-  \src{concept\_agents.tex l.255--293}
 \end{frame}
 
 \begin{frame}{Backup: from the exact posterior to what actually runs}
@@ -1102,7 +1498,6 @@
     A1 objects as landmarks\ \ $\cdot$\ \ A2 pose error integrates per frame\ \ $\cdot$\ \ A3 hard matching\ \ $\cdot$\ \
     A4 classes apart\ \ $\cdot$\ \ A5 instances apart\ \ $\cdot$\ \ A6 geometry / existence\ \ $\cdot$\ \ A7 Markov time
   \end{center}
-  \src{concept\_agents.tex l.568--613, l.626--1019}
 \end{frame}
 
 \begin{frame}{Backup: the factorised belief, and one agent's objective}
@@ -1115,11 +1510,10 @@
     \underbrace{q(\ell_i)}_{\text{log-odds}}
   \]
   \[
-    F_i = \underbrace{\E_q\!\big[-\ln P(\bar Z_i\given\theta_i,\hat X)\big]}_{\text{accuracy}}
+    F_i = \underbrace{\E_q\!\big[-\ln P(\bar Z_i\given\theta_i,\hat X)\big]}_{\text{misfit} \,=\, -\text{accuracy}}
     + \underbrace{\KL{q(\theta_i)}{P(\theta_i\given\ell_i)}}_{\text{complexity}}
   \]
   \small The localisation block is held fixed; the matching contributes nothing to $F$.
-  \src{concept\_agents.tex l.447--455, l.468--516}
 \end{frame}
 
 \begin{frame}{Backup: the shared error, as a matrix}
@@ -1143,7 +1537,6 @@
       \end{tikzpicture}
     \end{column}
   \end{columns}
-  \src{lab 2, part C}
 \end{frame}
 
 \begin{frame}{Backup: An outlier costs a bounded amount, and nobody rejects it}
@@ -1169,7 +1562,6 @@
       Nobody decided to reject it. The bound is a \alert{probability in the model}.
     \end{column}
   \end{columns}
-  \src{concept\_agents.tex l.518--524}
 \end{frame}
 
 \begin{frame}{Backup: The rule is: declare it, justify it, or remove it}
@@ -1177,19 +1569,18 @@
     \begin{column}{0.54\textwidth}
       \centering
       \begin{tikzpicture}[r/.style={rounded corners=3pt, minimum width=6.7cm, minimum height=1.05cm, align=left, font=\footnotesize, inner sep=4pt}]
-        \node[r, fill=good!15] at (0,2.3) {\textbf{ignoring a bad frame: stays}\\[-0.1em]{\scriptsize no precision can bound that bias}};
+        \node[r, fill=good!15] at (0,2.3) {\textbf{ignoring a bad frame: stays}\\[-0.1em]{\scriptsize no per-frame precision can bound that bias}};
         \node[r, fill=accent!15] at (0,1.1) {\textbf{birth after $N$ sightings: must go}\\[-0.1em]{\scriptsize a count standing in for nats}};
         \node[r, fill=muted!18] at (0,-0.1) {\textbf{waiting a few seconds for a peer: a debt}\\[-0.1em]{\scriptsize whether a peer is alive is a belief too}};
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.42\textwidth}
-      \begin{measured}{a test that graded itself}
+      \begin{measured}{a test that used its own estimate}
         \small A chair's ``can I see its yaw?'' was computed from its own yaw. The yaw was about
         $45^\circ$ wrong, so the test said no, and the wrong yaw froze.
       \end{measured}
     \end{column}
   \end{columns}
-  \src{agents\_life\_cycle.tex l.1276--1282; cortex.tex l.796--804; CONCEPT\_AGENT\_LIFECYCLE.md l.75--79}
 \end{frame}
 
 \end{document}

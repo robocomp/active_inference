@@ -8,8 +8,8 @@
 # - **B. Agents that only read and write.** What has to cross the boundary: a mean is not enough.
 # - **C. One free energy, many owners.** When the sum of the agents' objectives is the global one,
 #   when it is not, and what the difference costs, in nats.
-# - **D. No thresholds.** A range gate against a precision that grows with range.
-# - **E. The gate that survives.** The one case where a precision provably cannot do the job.
+# - **D. No thresholds.** A range threshold against a precision that falls with range.
+# - **E. The threshold that stays.** A bias shared across frames, which no per-frame precision can hold.
 #
 # Every part is small on purpose. The robot's real agents are C++ processes on a distributed graph,
 # but the questions are exactly these.
@@ -146,7 +146,7 @@ assert [n.name for n in g.by_type("object")] == ["table_1"]
 # ### B1. The object agent
 #
 # Complete `ObjectAgent.step`: read the robot's pose and variance from the graph, form $z$, and do
-# Day 1's Kalman update (precisions add) with noise $R = r + s^2$ if `use_cov`, or $R = r$ if the
+# Day 2's update (precisions add) with noise $R = r + s^2$ if `use_cov`, or $R = r$ if the
 # agent ignores the published covariance. Write the new `mu` and `var` to its **own** node.
 
 # %%
@@ -212,7 +212,7 @@ print("published means:", np.round(mu, 3), " sd:", np.round(np.sqrt(var), 3))
 # ### B2. Is the published covariance needed?
 #
 # Over many runs, compute the mean NEES $(\mu_i-\theta_i)^2/\mathrm{var}_i$ with and without
-# `use_cov`. An honest belief gives 1. Before running: **how far off do you expect the agent that
+# `use_cov`. A belief whose claimed spread is right gives 1. Before running: **how far off do you expect the agent that
 # ignores the published covariance to be?**
 
 # %%
@@ -387,7 +387,7 @@ print("3 objects, 10/40/160 frames:", [round(float(v), 2) for v in PRICE_FRAMES]
 #
 # $$ \sigma(\rho) = 0.02\,\big(1+(\rho/2)^2\big)\ \text{m}. $$
 #
-# The classical move is a **gate**: "ignore detections beyond $k$ metres". Complete both estimators.
+# The classical move is a **threshold**: "ignore detections beyond $k$ metres". Complete both estimators.
 # `gated` averages the sightings closer than $k$, and returns the prior guess 3.0 m when none
 # qualifies. `weighted` uses every sighting, with precision $1/\sigma(\rho)^2$.
 
@@ -425,32 +425,32 @@ for lateral in (1.0, 6.0):
     rho, y = sightings(rng, lateral)
     GATE_RMSE[lateral] = np.array([np.sqrt(np.mean((gated(y, rho, k) - lateral) ** 2)) for k in GATES])
     WEIGHTED_RMSE[lateral] = float(np.sqrt(np.mean((weighted(y, rho) - lateral) ** 2)))
-    ax.semilogy(GATES, GATE_RMSE[lateral], label=f"gate, lateral {lateral:.0f} m")
+    ax.semilogy(GATES, GATE_RMSE[lateral], label=f"threshold, lateral {lateral:.0f} m")
     ax.axhline(WEIGHTED_RMSE[lateral], ls="--", color="0.4")
     best = GATES[np.argmin(GATE_RMSE[lateral])]
-    print(f"lateral {lateral:.0f} m: best gate {best:.2f} m, rmse {GATE_RMSE[lateral].min() * 100:.2f} cm;"
+    print(f"lateral {lateral:.0f} m: best threshold {best:.2f} m, rmse {GATE_RMSE[lateral].min() * 100:.2f} cm;"
           f"  precision {WEIGHTED_RMSE[lateral] * 100:.2f} cm")
-ax.set_xlabel("gate $k$ (m)"); ax.set_ylabel("rmse (m)"); ax.legend(frameon=False); fig.tight_layout(); plt.show()
+ax.set_xlabel("threshold $k$ (m)"); ax.set_ylabel("rmse (m)"); ax.legend(frameon=False); fig.tight_layout(); plt.show()
 BEST_1 = float(GATES[np.argmin(GATE_RMSE[1.0])])
 BEST_6 = float(GATES[np.argmin(GATE_RMSE[6.0])])
 CROSS = float(GATE_RMSE[6.0][np.argmin(np.abs(GATES - BEST_1))])
-print(f"the gate tuned on the near pass, used on the far pass: rmse {CROSS * 100:.1f} cm")
+print(f"the threshold tuned on the near pass, used on the far pass: rmse {CROSS * 100:.1f} cm")
 
 # %% [markdown]
 # Answer in the notebook:
 # 1. Why is the curve U-shaped on the near pass?
-# 2. Which gate would you ship, without knowing which pass the robot will make?
+# 2. Which threshold would you ship, without knowing which pass the robot will make?
 # 3. What had to be known for `weighted` to work, and where would it fail?
 
 # %% [markdown] solution
-# 1. A small gate throws away useful sightings; a large one lets in sightings that are far noisier
-#    than the rest but count the same. 2. None: the best gate on one scene returns no sightings at all
+# 1. A small threshold throws away useful sightings; a large one lets in sightings that are far noisier
+#    than the rest but count the same. 2. None: the best threshold on one scene returns no sightings at all
 #    on the other. 3. It needs $\sigma(\rho)$, a model of how the sensor degrades. That is the
-#    modelling the gate was postponing. A wrong $\sigma(\rho)$ is a wrong model, and Day 4 shows how
-#    to test one with NEES; a gate gives you nothing to test.
+#    modelling the threshold was postponing. A wrong $\sigma(\rho)$ is a wrong model, and part B showed how
+#    to test one with NEES; a threshold gives you nothing to test.
 
 # %% [markdown]
-# ## E. The gate that survives
+# ## E. The threshold that stays
 #
 # Variances handle errors that average out. Now take a run of $n$ frames that all share **one bias**
 # $b$ (the robot's motion smears consecutive frames in the same direction). With prior precision
@@ -495,6 +495,6 @@ print({a: round(float(displacement(2000, a)) * 100, 2) for a in ALPHAS})
 
 # %% [markdown] solution
 # Attenuation changes the rate and not the limit: for every $\alpha>0$ the mean ends displaced by the
-# whole of $b$. Only $\alpha=0$, a gate, bounds it. So the rule is not "never a gate": it is that a
-# gate must be declared and justified, and the justification here is that the model has no coordinate
+# whole of $b$. Only $\alpha=0$, a threshold, bounds it. So the rule is not "never a threshold": it is that a
+# threshold must be declared and justified, and the justification here is that the model has no coordinate
 # for a bias shared across frames.

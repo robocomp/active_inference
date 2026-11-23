@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Figure for E2 (paper §5.3): six ScanNet rooms, the frame the image baseline saw, the annotated objects, and the
-top function under each source. Reads tools/e2_out/e2_per_room_scannet.csv (tools/e2_per_room.py) and the frames
+"""Figure for E2 (paper §5.3): six ScanNet rooms in one strip (the frame the image baseline saw, the annotated
+objects), and below them a grid of the top function under each source (✓, or ✗ and the wrong answer). Reads tools/e2_out/e2_per_room_scannet.csv (tools/e2_per_room.py) and the frames
 cached in tools/e2_out/image_answers.jsonl; writes paper/figures/e2_rooms.pdf.
 
     python3 tools/mosaic_e2.py
@@ -32,24 +32,35 @@ def main() -> None:
     frame = {r["scan"]: r["frames"][0] for r in map(json.loads, (HERE / "e2_out/image_answers.jsonl").open())
              if r["k"] == 1 and r.get("num_ctx") is None}
     plt.rcParams.update({"font.size": 7, "font.family": "DejaVu Sans", "pdf.fonttype": 42})
-    fig, axs = plt.subplots(2, 3, figsize=(6.9, 5.2), gridspec_kw={"hspace": 1.2, "wspace": 0.06})
-    for ax, room in zip(axs.flat, ROOMS):
+    # one strip of six rooms (fits a two-column page width), then a source x room grid of the top functions
+    fig = plt.figure(figsize=(6.9, 2.2))
+    gs = fig.add_gridspec(2, 7, width_ratios=[0.5] + [1] * 6, height_ratios=[1, 0.78], hspace=0.42, wspace=0.06)
+    for c, room in enumerate(ROOMS, start=1):
         r = per[room]
+        ax = fig.add_subplot(gs[0, c])
         ax.imshow(plt.imread(FRAMES / room / "color" / frame[room]))
         ax.set_xticks([]), ax.set_yticks([])
         for s in ax.spines.values():
             s.set_visible(False)
-        ax.set_title(f"{r['truth']}", fontsize=8, fontweight="bold", color=INK, loc="left", pad=3)
-        objs = textwrap.fill(r["objects"].replace(";", ", "), 36)
-        ax.text(0, -0.03, objs, transform=ax.transAxes, va="top", fontsize=6.3, color=MUTED, style="italic",
-                linespacing=1.1)
-        for i, (k, name) in enumerate(SOURCES):
-            k = "objects_answer" if k == "objects" else k
-            ok = r[k] == r["truth"]
-            y = -0.21 - 0.1 * i
-            ax.text(0, y, "✓" if ok else "✗", transform=ax.transAxes, va="top", fontsize=7.5,
-                    color=GOOD if ok else BAD, fontweight="bold")
-            ax.text(0.07, y, f"{name}: {r[k]}", transform=ax.transAxes, va="top", fontsize=6.8, color=INK)
+        ax.set_title(r["truth"], fontsize=7.5, fontweight="bold", color=INK, loc="left", pad=2)
+        objs = textwrap.fill(r["objects"].replace(";", ", "), 21)
+        ax.text(0, -0.04, objs, transform=ax.transAxes, va="top", fontsize=4.9, color=MUTED, style="italic",
+                linespacing=1.05)
+    g = fig.add_subplot(gs[1, :])
+    g.set_xlim(0, 6.5), g.set_ylim(len(SOURCES), 0)
+    g.axis("off")
+    for i, (k, name) in enumerate(SOURCES):
+        y = i + 0.5
+        g.text(0.48, y, name, ha="right", va="center", fontsize=6.3, color=INK)
+        for c, room in enumerate(ROOMS):
+            r = per[room]
+            kk = "objects_answer" if k == "objects" else k
+            ok = r[kk] == r["truth"]
+            x = 0.5 + c * 1.0 + 0.03
+            g.text(x, y, "✓" if ok else "✗", ha="left", va="center", fontsize=7, color=GOOD if ok else BAD,
+                   fontweight="bold")
+            if not ok:
+                g.text(x + 0.13, y, r[kk], ha="left", va="center", fontsize=6, color=BAD)
     out = HERE.parent / "paper/figures/e2_rooms.pdf"
     fig.savefig(out, bbox_inches="tight", dpi=200)
     print(f"wrote {out}")

@@ -58,7 +58,9 @@ joint in two orders; a robot whose action depends on the world only through what
   curvature, the form everything later takes; Gauss–Newton to find it;
 - free energy as the price of a model;
 - free energy differentiated with respect to the belief and with respect to the action:
-  perception and action as two ways to lower the same quantity.
+  perception and action as two ways to lower the same quantity;
+- expected free energy: how to choose an action before its reading exists, as what a look would
+  teach plus how far it leaves the goal.
 
 *Lab:* meet the toy world, fit a wall from a LiDAR scan as a Laplace belief, test whether its
 covariance is right, and choose between two models of it by free energy.
@@ -80,41 +82,44 @@ covariance is right, and choose between two models of it by free energy.
 published covariance is ignored; when the sum of the agents' objectives is the global one and what the
 difference costs; a range gate against a precision; a bias that no precision can bound.
 
-### Day 4 — Concepts: geometry, life cycle, aspect
+### Day 4 — One concept, from birth to action: the chair
 What a concept agent is: a residual and a Jacobian on a shared engine, what it publishes, a common contract.
-Then three of a concept's dimensions:
-- Geometry: the room as the first belief born, with description length as its price; localisation as one
-  more belief, with symmetry as a discrete search; data association; and what changes when errors are
-  shared rather than independent, the common-mode ceiling.
+Then one concept, the chair, through all it does:
+- The room it stands in, briefly: the room as a probability model, its outline chosen by free energy with a
+  price per corner, and the robot localised against it on a distance field.
+- Geometry: the chair's pose as a Laplace belief from its masks; data association; the common-mode ceiling.
 - Life cycle: birth as a comparison between two models rather than a count of detections; absence as
   evidence, weighted by the probability of having detected the object, with walls in the line of sight;
   forgetting as inferred volatility rather than a constant process noise.
-- Aspect: what a chair looks like at two levels, the class that can be imagined and the instance that
-  can be recognised; a second sight as a comparison in which "new" is one of the candidates.
-  Work in progress, marked as such.
+- Aspect: how a chair's look is captured and stored, at two levels: the class that can be imagined
+  (sampled from the prior and rendered) and the instance, measured one viewing direction at a time.
+  Work in progress.
+- Function: expected free energy, recalled from Day 2, and the identity of information gain, mutual
+  information and D-optimal design. The chair publishes two offers, a look priced in nats and an approach;
+  the controller is a selector that compares every offer in one currency, then follows a route to the
+  winner. Offers from different agents compete fairly only when each agent's covariance is calibrated
+  and no point is counted twice; how to put preferences on the same scale is still open.
 
-*Lab:* an object is born by a free-energy comparison, removed by evidence of absence and held when it
-is occluded; a constant process noise is replaced by an inferred one. Then estimate the toy room's
-walls and localise in it, meet the room's symmetry, and watch a thousand points with a shared offset
-refuse to shrink the uncertainty. Finally, decide whether a chair is one you remember or a new one,
-by position and by look, and see what a wrong variance does.
+*Lab:* an object is born by a free-energy comparison, removed by evidence of absence and held when it is
+occluded; a constant process noise is replaced by an inferred one. Localise in the toy room, meet its
+symmetry, and watch a thousand points with a shared offset refuse to shrink the uncertainty. Then choose
+viewpoints by expected information, and let agents publish priced offers on the toy graph and watch the
+controller hand over between them.
 
-### Day 5 — Action
-Why action needs a second functional: expected free energy, its pragmatic and epistemic terms, and the identity
-of information gain, mutual information and D-optimal design.
-- Affordances as published, priced offers: what an object can do for the robot's uncertainty, measured in nats.
-- Selection by expected free energy, with hand-offs that follow from the values rather than from a rule.
-- The next best view as optimal experiment design, and the trap of predicting through what is already known.
-- Control: routes as optimisation, path tracking as pole assignment, and why a well-posed geometry lets the
-  follower do without an obstacle term.
-- Talking to the robot: the language model proposes plans and the controller runs them; a question is a query on
-  a belief the robot already holds; imagining is the same model run on a changed copy of the world; every claim
-  must come from a tool that read a belief. Where it is going: an inner voice, the chat turned inward on the
-  robot's own surprises (proposed, not built).
+### Day 5 — Talking to the robot, and what comes next
+- Which chair do you mean? Recognition from the look stored on Day 4: a second sight as a comparison in
+  which "new" is one of the candidates. Work in progress.
+- The language agent: a language model that sees a digest of the graph and acts only through tools; it
+  proposes plans and the controller runs them; a question is a query on a belief the robot already holds;
+  imagining is the same model run on a changed copy of the world; every claim must come from a tool that
+  read a belief.
+- The inner voice and open directions, as a discussion: the chat turned inward on the robot's own
+  surprises (proposed, not built), procedural memory, amortisation, a model of who is speaking, deciding
+  when to act by expected free energy, and common sense from a vision-language model as a prior.
 
-*Lab:* choose viewpoints by expected information; let agents publish priced offers on the toy graph and watch
-the controller hand over between them; explore a room with an occupancy grid that knows when to stop; follow a
-route with a double pole and deform it around an obstacle.
+*Lab:* decide whether a chair is one you remember or a new one, by position and by look, and see what a
+wrong variance does. Then build a toy language agent: tools that read beliefs, a check that refuses every
+claim no tool returned, and a plan whose condition reads a belief when it runs.
 
 ## Throughout
 
