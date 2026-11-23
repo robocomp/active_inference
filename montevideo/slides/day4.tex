@@ -1002,6 +1002,50 @@
   \lesson{Fair prices need calibrated covariances and no point counted twice.}
 \end{frame}
 
+\begin{frame}{Measured: the covariances are not calibrated, so the prices are not fair}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \centering
+      {\small first visit: error against the claimed covariance\par}\vspace{0.3em}
+      \begin{tikzpicture}[lab/.style={font=\scriptsize}]
+\fill[good!12] (0.31,-2.75) rectangle (1.24,0.22);
+\node[lab, text=good!60!black] at (0.78,-2.95) {calibrated};
+\draw[muted] (0.31,0.3) -- (0.31,0.22); \node[lab, above] at (0.31,0.28) {0.5};
+\draw[muted] (0.78,0.3) -- (0.78,0.22); \node[lab, above] at (0.78,0.28) {1};
+\draw[muted] (1.24,0.3) -- (1.24,0.22); \node[lab, above] at (1.24,0.28) {2};
+\draw[muted] (2.33,0.3) -- (2.33,0.22); \node[lab, above] at (2.33,0.28) {10};
+\draw[muted] (3.41,0.3) -- (3.41,0.22); \node[lab, above] at (3.41,0.28) {50};
+\fill[accent!55] (0,-0.15) rectangle (3.33,0.15); \node[lab, anchor=east] at (-0.05,-0.00) {toilet}; \node[lab, anchor=west] at (3.38,-0.00) {44.4};
+\fill[accent!55] (0,-0.57) rectangle (3.06,-0.27); \node[lab, anchor=east] at (-0.05,-0.42) {hood}; \node[lab, anchor=west] at (3.11,-0.42) {29.8};
+\fill[accent!55] (0,-0.99) rectangle (1.95,-0.69); \node[lab, anchor=east] at (-0.05,-0.84) {nightstand}; \node[lab, anchor=west] at (2.00,-0.84) {5.7};
+\fill[accent!55] (0,-1.41) rectangle (1.34,-1.11); \node[lab, anchor=east] at (-0.05,-1.26) {table}; \node[lab, anchor=west] at (1.39,-1.26) {2.33};
+\fill[good!45] (0,-1.83) rectangle (0.95,-1.53); \node[lab, anchor=east] at (-0.05,-1.68) {bed}; \node[lab, anchor=west] at (1.00,-1.68) {1.3};
+\fill[good!45] (0,-2.25) rectangle (0.62,-1.95); \node[lab, anchor=east] at (-0.05,-2.10) {refrigerator}; \node[lab, anchor=west] at (0.67,-2.10) {0.79};
+\fill[cool!45] (0,-2.67) rectangle (0.27,-2.37); \node[lab, anchor=east] at (-0.05,-2.52) {chair}; \node[lab, anchor=west] at (0.32,-2.52) {0.47};
+      \end{tikzpicture}\\[0.2em]
+      {\scriptsize NEES/DOF: 1 = calibrated; above 1, too sure.\par}
+    \end{column}
+    \begin{column}{0.47\textwidth}
+      \centering
+      {\small a look, once the robot reaches it\par}\vspace{0.3em}
+      \begin{tikzpicture}[x=1cm, y=0.5cm, lab/.style={font=\scriptsize}]
+        \draw[muted] (-0.2,0) -- (3.9,0);
+        \foreach \x/\p/\d/\n in {0.3/3.19/1.94/{chair ($n{=}7$)}, 2.3/5.06/-0.97/{refrigerator ($n{=}2$)}} {
+          \fill[cool!45] (\x,0) rectangle (\x+0.5,\p); \node[lab, above] at (\x+0.25,\p) {\p};
+          \fill[accent!55] (\x+0.6,0) rectangle (\x+1.1,\d);
+          \node[lab, anchor=south] at (\x+0.85,{max(\d,0)}) {\d};
+          \node[lab] at (\x+0.55,-1.4) {\n};
+        }
+        \fill[cool!45] (-0.2,6.1) rectangle (0.05,6.4); \node[lab, anchor=west] at (0.1,6.25) {promised (nats)};
+        \fill[accent!55] (2.3,6.1) rectangle (2.55,6.4); \node[lab, anchor=west] at (2.6,6.25) {delivered};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+  \vspace{0.3em}
+  {\footnotesize Simulated tours, few runs. Each frame is counted as independent, though one standpoint's error is shared. \wip\par}
+  \lesson{Nats are a common currency only if every agent's covariance is calibrated; today they are not.}
+\end{frame}
+
 \begin{frame}{The controller selects one offer, then follows a route to it}
   \centering
   \begin{tikzpicture}[s/.style={box4, minimum width=2.45cm, minimum height=1.05cm}]
