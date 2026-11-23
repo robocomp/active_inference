@@ -1,8 +1,8 @@
 # %% [markdown]
-# # Day 4 — Concepts: geometry, life cycle, aspect
+# # Day 4 — One concept, from birth to action
 #
 # Yesterday's agents each own a belief on the shared graph. Today we follow one belief through its
-# life, look at what it stands on, and ask how the robot knows a thing it has seen before.
+# life, look at what it stands on, and then let it act: what is a look worth, and who chooses.
 #
 # **Life cycle: how a belief begins and ends.**
 # - **A. Birth.** An object is born by comparing two worlds in nats, not by counting detections.
@@ -18,11 +18,14 @@
 # The thesis calls D the **acquisition** regime, where the room is a variable, and E the
 # **operating** regime, where the room is a constant. Part H says why the split matters.
 #
-# **Aspect: a second sight.**
-# - **I.** Is this the chair I saw, or a new one? Position against appearance.
+# **Action: what a belief offers.**
+# - **I. Where to look.** One belief, a few candidate viewpoints, expected information against the
+#   price of a trip.
+# - **J. Priced offers.** Many beliefs on the shared graph, one body. Producers publish, the controller
+#   chooses, and hand-offs happen without a rule.
 #
-# About two hours. Parts A to C, D to G and I are independent of each other; if time runs short, do
-# A, B, E, G and I.
+# About two hours. The three groups are independent of each other; if time runs short, do A, B, E, G
+# and J. Route following and the occupancy-grid explorer are in `day4_extra.ipynb`.
 
 # %%
 import sys
@@ -877,127 +880,465 @@ for N, a, n_, w_ in zip(Ns, rms, naive, wood):
 # estimated through.**
 
 # %% [markdown]
-# ## I. Aspect: is this the chair I saw?
+# ## Action: setup
 #
-# The robot left a room with three chairs in it, and has come back. A chair is detected. Long-term
-# memory holds what it knew about the three, and the question is the same kind of question as a
-# birth: which of several worlds explains this detection in fewer nats? The worlds are *it is
-# chair 0*, *chair 1*, *chair 2*, or **it is a chair I have never met**. "New" has to be on the
-# list, or every detection is forced onto some remembered chair.
-#
-# **Where it is.** A remembered chair either stayed where it was, or was moved and could be anywhere
-# in the room, with probability $\pi$. A new chair could be anywhere:
-#
-# $$ p(x\mid k) = (1-\pi)\,\mathcal N(x;\mu_k, 2\sigma_p^2 I) + \frac{\pi}{A},
-#    \qquad p(x\mid\text{new}) = \frac1A. $$
-#
-# The covariance is $2\sigma_p^2$ because both the memory and the new detection carry the position
-# error $\sigma_p$. This is the form the robot uses, in `common/recall_match/recall_match.h`.
-#
-# **What it looks like.** A view is summarised as a vector $a$ of 16 numbers. Chairs differ: each
-# has its own look $m$, drawn from the class, $m\sim\mathcal N(c,\tau^2 I)$. A view of a chair
-# scatters around its look, $a\sim\mathcal N(m,\sigma_a^2 I)$. So the instance and the class make
-# different predictions, and their ratio is the evidence:
-#
-# $$ r_k = \ln\mathcal N(a; m_k,\sigma_a^2 I) - \ln\mathcal N(a; c,(\tau^2+\sigma_a^2) I). $$
-#
-# The score of chair $k$ is $\ln p(x\mid k) + r_k$, the score of "new" is $\ln(1/A)$, and the highest
-# wins. A candidate must be strictly better than "new"; a tie goes to "new". This toy is cleaner than
-# the robot: its look vectors are made up, and the robot's acting recall today uses **position only**.
-#
-# **Exercise 16.** Write `log_location` and `decide`. **Exercise 17.** Write `log_app_ratio`.
+# Parts I and J work in the living room with the pose known: the operating regime.
 
 # %%
-ROOM_W, ROOM_H, ROOM_A = 6.0, 4.0, 24.0
-DIM, TAU, SIG_A, SIG_P, PI_MOVE = 16, 1.0, 0.5, 0.15, 0.5
-CLASS_LOOK = np.zeros(DIM)
-LOW, HIGH = np.array([0.5, 0.5]), np.array([ROOM_W - 0.5, ROOM_H - 0.5])
+from toyworld import Gaussian, Grid, Lidar, Robot, draw, laplace, se2, two_room_apartment
+from toyworld.beliefs import binary_entropy, linear_gaussian_update, numeric_jacobian, sigmoid
+from toyworld.geometry import distance_to_polygon, point_in_polygon, polygon_area, segments_of
+from toyworld.grid import expected_gain
+from toyworld.robot import Body, hidden_body, integrate
+
+world = two_room_apartment()
+lidar = Lidar(n_beams=360, sigma=0.02, max_range=12.0)
+SIGMA = 0.02
+room = world.room("living").polygon     # today the room is given: the operating regime, world frame
+START = np.array([1.0, 0.8, 0.0])
+
+# %% [markdown]
+# ## I. Where to look at one wall
+#
+# The smallest case of choosing a viewpoint: Day 2's north wall, held as a Laplace
+# belief after one scan. The cell below rebuilds that belief exactly as Day 2 left it (90° LiDAR,
+# known pose, ground-truth labels to pick the wall's points, per-beam incidence noise).
+
+# %%
+from toyworld import info_gain
+from toyworld.geometry import point_segment_distance
+
+rng_w = np.random.default_rng(0)
+wall_lidar = Lidar(n_beams=90, fov=np.deg2rad(90), sigma=0.02)
+oracle = Lidar(n_beams=90, fov=np.deg2rad(90), sigma=0.0)
+pose0 = np.array([4.5, 1.0, np.deg2rad(110)])
+NORTH = np.array([[[0.0, 4.0], [6.0, 4.0]]])
 
 
-def log_gauss_iso(x, mu, var):
-    return -0.5 * (np.sum((x - mu) ** 2) / var + len(x) * np.log(2 * np.pi * var))
+def wall_points(scan, wall=NORTH, tol=0.15):
+    pts = se2.transform_points(scan.pose, scan.points())
+    bearings = scan.pose[2] + scan.angles[scan.hit]
+    on_wall = (scan.labels[scan.hit] == "wall") & (point_segment_distance(pts, wall)[:, 0] < tol)
+    return pts[on_wall], bearings[on_wall]
 
 
-def log_location(x, mu):
-    """ln p(x | k): stayed near mu, or moved and uniform over the room."""
+def residual(pts):
+    return lambda t: np.cos(t[0]) * pts[:, 0] + np.sin(t[0]) * pts[:, 1] - t[1]
+
+
+def jacobian(pts):
+    return lambda t: np.stack([-np.sin(t[0]) * pts[:, 0] + np.cos(t[0]) * pts[:, 1], -np.ones(len(pts))], axis=1)
+
+
+def incidence_sigma(p, bearings, alpha=np.pi / 2):
+    u = np.stack([np.cos(bearings), np.sin(bearings)], axis=1)
+    return 0.02 * np.abs(u @ np.array([np.cos(alpha), np.sin(alpha)]))
+
+
+pts0, bear0 = wall_points(wall_lidar.scan(world, pose0, rng_w))
+wall0 = laplace(residual(pts0), [np.pi / 2, 4.0], incidence_sigma(pts0, bear0), jacobian=jacobian(pts0)).belief
+print(f"Day 2's wall: alpha = {np.degrees(wall0.mu[0]):.3f}° ± {np.degrees(wall0.sd[0]):.3f}°,  d = {wall0.mu[1]:.4f} ± {wall0.sd[1]:.4f} m")
+
+# %% [markdown]
+# ### I1. Information gain
+#
+# At decision time the current scan has already happened, so $\partial F / \partial a = 0$.
+# Actions are scored by the free energy they are *expected* to produce. For a Gaussian belief and
+# a linear-Gaussian measurement, the epistemic part of the expected free energy is the expected
+# entropy drop, which equals the mutual information, which equals the D-optimal design criterion:
+#
+# $$ \Delta H(v) = \tfrac12 \ln\frac{|\Lambda + J_v^\top R_v^{-1} J_v|}{|\Lambda|}. $$
+#
+# `info_gain(Lambda, J, R)` computes this. To predict *which* points a viewpoint $v$ would see we
+# cheat: we ray-cast the true world (with zero noise). In C2 below the robot predicts it from its
+# own beliefs instead.
+#
+# **Exercise 16.** Compute $\Delta H$ for each candidate below and rank them. Before running, guess
+# which wins.
+
+# %%
+views = {
+    "stay here":     [4.5, 1.0, np.deg2rad(110)],
+    "under the wall": [3.0, 3.3, np.deg2rad(90)],
+    "far west":      [0.8, 1.0, np.deg2rad(60)],
+    "behind table":  [2.2, 1.4, np.deg2rad(90)],
+    "east corner":   [5.5, 0.5, np.deg2rad(135)],
+}
+
+
+def predicted_gain(belief, view):
+    s = oracle.scan(world, np.asarray(view), rng_w)
+    p, b = wall_points(s)
+    if len(p) == 0:
+        return 0.0, 0
     # BEGIN SOLUTION
-    stayed = np.log(1 - PI_MOVE) + log_gauss_iso(x, mu, 2 * SIG_P ** 2)
-    moved = np.log(PI_MOVE) - np.log(ROOM_A)
-    return np.logaddexp(stayed, moved)
+    J = jacobian(p)(belief.mu)
+    R = np.diag(incidence_sigma(p, b, belief.mu[0]) ** 2)
+    return info_gain(belief.precision, J, R), len(p)
     # END SOLUTION
 
 
-def log_app_ratio(a, m):
-    """r_k: nats by which this chair's look explains the view better than the class does."""
+fig, ax = plt.subplots(figsize=(9, 3.6))
+draw.world(world, ax)
+for name, v in views.items():
+    g, n = predicted_gain(wall0, v)
+    print(f"{name:15s} sees {n:3d} wall points   ΔH = {g:.3f} nats   distance {np.hypot(v[0] - pose0[0], v[1] - pose0[1]):.2f} m")
+    draw.robot(v, ax, color="0.4"); ax.annotate(f"{name}\n{g:.2f}", v[:2], fontsize=7, xytext=(4, -14), textcoords="offset points")
+draw.robot(pose0, ax); ax.set_xlim(-0.5, 6.5); ax.set_ylim(-0.3, 4.4)
+
+# %% [markdown]
+# **Questions.**
+# - "Stay here" gains almost exactly $\ln 2 = 0.693$ nats. Why that number?
+# - "Far west" sees *fewer* points than "under the wall" but gains more. Why?
+
+# %% [markdown] solution
+# *Answers.*
+# - A second identical scan doubles the information matrix: $|2\Lambda| / |\Lambda| = 2^2$ for a
+#   two-parameter belief, so $\Delta H = \tfrac12 \ln 4 = \ln 2$.
+# - The first scan saw the east part of the wall ($x \gtrsim 2$). The west end adds **lever arm**
+#   on the angle: points far from those already seen constrain $\alpha$ in a direction the current
+#   information matrix is weak in. Information depends on where the new data sit relative to what
+#   is already known, not on how many points there are.
+
+# %% [markdown]
+# **Exercise 17 (diminishing returns).** If the robot stays and scans again and again, what is the
+# $k$-th look worth? Compute it with `info_gain` and compare with $\ln\frac{k+1}{k}$.
+
+# %%
+s = oracle.scan(world, pose0, rng_w)
+p, b = wall_points(s)
+J1 = jacobian(p)(wall0.mu)
+R1 = np.diag(incidence_sigma(p, b) ** 2)
+L1 = J1.T @ np.linalg.solve(R1, J1)   # the information in one look
+ks = np.arange(1, 11)
+# BEGIN SOLUTION
+gains = [info_gain(k * L1, J1, R1) for k in ks]
+# END SOLUTION
+plt.figure(figsize=(5, 3))
+plt.plot(ks, gains, "o", label="info_gain")
+plt.plot(ks, np.log((ks + 1) / ks), "-", label=r"$\ln\frac{k+1}{k}$")
+plt.xlabel("look number k"); plt.ylabel("ΔH (nats)"); plt.legend()
+
+# %% [markdown]
+# ### I2. Paying for travel in the same currency
+#
+# The expected free energy has a **pragmatic** term too. The simplest one is a preference for not
+# driving far: $G(v) = \beta\,\lVert v - x\rVert - \Delta H(v)$, with $\beta$ in nats per metre.
+#
+# **Exercise 18.** For $\beta \in [0, 0.2]$ nats/m, which candidate minimises $G$? Find the $\beta$
+# at which the robot stops moving and simply scans again.
+
+# %%
+gains = {name: predicted_gain(wall0, v)[0] for name, v in views.items()}
+dists = {name: np.hypot(v[0] - pose0[0], v[1] - pose0[1]) for name, v in views.items()}
+for beta in np.linspace(0, 0.2, 21):
     # BEGIN SOLUTION
-    return log_gauss_iso(a, m, SIG_A ** 2) - log_gauss_iso(a, CLASS_LOOK, TAU ** 2 + SIG_A ** 2)
+    G = {name: beta * dists[name] - gains[name] for name in views}
+    best = min(G, key=G.get)
     # END SOLUTION
+    print(f"beta = {beta:.2f} nats/m  ->  {best}")
+
+# %% [markdown]
+# **Question (the key one of this part).** For any $\beta$ above about 0.07, the robot prefers to
+# stay and re-scan, because a repeat look is "worth" $\ln 2$ nats for free. What does the model
+# *assume* that makes the repeat look so valuable? Would that assumption hold on a real robot?
+
+# %% [markdown] solution
+# *Answer.* The value $\ln 2$ assumes the second scan's errors are **independent** of the first's.
+# On a real robot, both scans share the same pose error, the same sensor-mount error and the same
+# calibration error. Those common-mode errors do not average away, so the second look is worth far
+# less than $\ln 2$. Averaging removes independent error, not shared error. Day 4 put a number on
+# this (the common-mode ceiling). The robot's real layout explorer takes the opposite extreme: its
+# map keeps one point per voxel, so a repeat look adds nothing at all, and its "precision" term
+# turned out to be inert. What carries that explorer is credit for what a viewpoint can *resolve*,
+# not for how often it has been seen (post-thesis result, work in progress).
+
+# %% [markdown]
+# ### I3. Go there and look
+#
+# **Exercise 19.** Move to "far west", scan, and update the belief. The update is another Laplace
+# fit, with the current belief as the **prior**. Compare the realised entropy drop with the
+# prediction.
+
+# %%
+view = np.asarray(views["far west"])
+s = wall_lidar.scan(world, view, rng_w)
+p, b = wall_points(s)
+# BEGIN SOLUTION
+fit1 = laplace(residual(p), wall0.mu, incidence_sigma(p, b, wall0.mu[0]), jacobian=jacobian(p), prior=wall0)
+wall1 = fit1.belief
+# END SOLUTION
+print(f"predicted ΔH = {gains['far west']:.3f} nats,  realised ΔH = {wall0.entropy() - wall1.entropy():.3f} nats")
+print(f"alpha sd: {np.degrees(wall0.sd[0]):.4f}° -> {np.degrees(wall1.sd[0]):.4f}°")
+
+# %% [markdown]
+# Prediction and realisation agree because the problem is close to linear. Note *what* agreed:
+# the entropy drop of a Gaussian depends on **where** you look, not on **what** you see, so it can
+# be computed before the robot moves. That is what makes an expected free energy computable.
+
+# %% [markdown]
+# ## J. Priced offers on the shared graph
+#
+# Part I let one belief choose. A real robot has many beliefs, and a single body to serve them. Each
+# concept agent knows what *it* would gain from a look; only the controller knows what a trip costs.
+# So the agents publish **offers** in the shared graph and the controller compares them. No agent
+# calls another. The currency is the nat.
+#
+# - A **producer** owns what view it wants, *expressed relative to its object*, what that view is
+#   worth, and when it has learnt enough.
+# - The **executor** owns feasibility, the cost of getting there, and which offer wins.
+#
+# The toy: two objects with position beliefs and a sensor that measures range well and bearing badly,
+# so *where you stand* decides which direction you learn. A door offers a **pragmatic** value: nothing
+# to learn, but the robot's task is to end up there.
+#
+# ### J1. What a view is worth
+#
+# Pointing the sensor from viewpoint $c$ at an object believed at $\mu$, with $u$ the unit vector
+# from $c$ to $\mu$ and $r$ the distance, gives a position measurement with
+# $R = \sigma_r^2\,uu^\top + (\sigma_b r)^2\,u_\perp u_\perp^\top$. But a detector also has to
+# *fire*. The fraction of the image the object fills is $f = \text{size}/(2r)$, and the thesis models
+# detection as a soft band,
+#
+# $$ P(\text{detect}\mid c) = \mathrm{sigm}\!\Big(\frac{f-f_{\min}}{w}\Big)\,\mathrm{sigm}\!\Big(\frac{f_{\max}-f}{w}\Big), $$
+#
+# too small to segment on one side, truncated on the other.
+#
+# **Exercise 20.** Write `view_gain`: the expected entropy drop of one look,
+# $\mathbb E[\Delta H] = P(\text{detect})\cdot\tfrac12\ln\big(|\Lambda+R^{-1}|/|\Lambda|\big)$.
+
+# %%
+from toyworld import Graph
+
+F_MIN, F_MAX, F_W = 0.10, 0.60, 0.06       # the thesis's envelope: a prior, not a measurement
+SIGMA_R, SIGMA_B = 0.02, 0.03              # range sd (m), bearing sd (rad)
 
 
-def decide(x, a, mus, looks, use_look=True, allow_new=True):
-    """Index of the winning chair, or len(mus) for 'new'."""
+def p_detect(f):
+    return sigmoid((f - F_MIN) / F_W) * sigmoid((F_MAX - f) / F_W)
+
+
+def sensor_R(c, mu):
+    d = np.asarray(mu) - np.asarray(c)
+    r = np.hypot(*d)
+    u, n = d / r, np.array([-d[1], d[0]]) / r
+    return SIGMA_R ** 2 * np.outer(u, u) + (SIGMA_B * r) ** 2 * np.outer(n, n)
+
+
+def view_gain(belief, c, size):
+    r = np.hypot(*(np.asarray(c) - belief.mu))
     # BEGIN SOLUTION
-    score = np.array([log_location(x, mu) + (log_app_ratio(a, m) if use_look else 0.0) for mu, m in zip(mus, looks)])
-    best = int(np.argmax(score))
-    if not allow_new or score[best] > -np.log(ROOM_A):
-        return best
-    return len(mus)
+    return p_detect(size / (2 * r)) * info_gain(belief.precision, np.eye(2), sensor_R(c, belief.mu))
     # END SOLUTION
 
 
 # %% [markdown]
-# **Exercise 18.** Run the table below and predict each number before you read it. There are three
-# situations (the chair stayed, the chair was moved, the chair is new), two kinds of room (every
-# chair looks different, or all three are the same model) and three rules (always take the nearest
-# candidate; position only; position and look).
-
-# %%
-def trial(r_, case, twins, use_look, allow_new, inflate=1.0):
-    mus = r_.uniform(LOW, HIGH, (3, 2))
-    looks = (np.tile(CLASS_LOOK + TAU * r_.standard_normal(DIM), (3, 1)) if twins
-             else CLASS_LOOK + TAU * r_.standard_normal((3, DIM)))
-    k = int(r_.integers(3))
-    if case == "new":
-        where, look, truth = r_.uniform(LOW, HIGH), (looks[0] if twins else CLASS_LOOK + TAU * r_.standard_normal(DIM)), 3
-    else:
-        where, look, truth = (mus[k] if case == "stayed" else r_.uniform(LOW, HIGH)), looks[k], k
-    x = where + SIG_P * r_.standard_normal(2)
-    a = look + inflate * SIG_A * r_.standard_normal(DIM)         # inflate: this view is noisier than the model assumes
-    return decide(x, a, mus, looks, use_look, allow_new) == truth
-
-
-def rate(case, twins, use_look, allow_new, inflate=1.0, n=4000):
-    r_ = np.random.default_rng(0)
-    return np.mean([trial(r_, case, twins, use_look, allow_new, inflate) for _ in range(n)])
-
-
-for twins in (False, True):
-    print("three chairs of the same model" if twins else "three chairs that look different")
-    for case in ("stayed", "moved", "new"):
-        print(f"  {case:7s} nearest {rate(case, twins, False, False):5.1%}   position {rate(case, twins, False, True):5.1%}"
-              f"   position + look {rate(case, twins, True, True):5.1%}")
-
-# %% [markdown]
-# Read the table against the equations. On position alone, a chair that was moved scores
-# $\ln(\pi/A)$ and "new" scores $\ln(1/A)$, so with $\pi<1$ it **cannot** win unless it happens to land
-# near a remembered place: it is born again under a new name. A new chair set down near a remembered
-# place takes that chair's identity. Only the look can tell those apart, and only if chairs differ:
-# three chairs of one model give it nothing to work with, and a new chair of that model is confidently
-# mistaken for an old one.
+# ### J2. A producer writes to the graph
 #
-# **Exercise 19.** A chair seen from the other side does not look like the view in memory. Model that
-# crudely: the true scatter of the view is `inflate` times what the model assumes. Run `inflate` from
-# 1 to 3, in the room where the chairs look different, and compare with the position-only row above.
+# `Producer` below is a concept agent in miniature. It owns a node for its object and, while it still
+# wants something, a child node of type `affordance` holding a ranked list of offers. An offer says
+# "from this bearing and stand-off, relative to my object, a look is worth this many nats". It does
+# *not* name a world pose: the producer cannot know a table is in the way. When the belief meets
+# its **precision demand** $\Sigma^\ast$, the producer removes its own offer.
+#
+# Read it. Nothing is hidden in it, and nothing in it mentions any other agent.
 
 # %%
-for f in (1.0, 1.5, 2.0, 3.0):
-    print(f"view noise x{f:.1f}:  stayed {rate('stayed', False, True, True, f):5.1%}   moved {rate('moved', False, True, True, f):5.1%}"
-          f"   new {rate('new', False, True, True, f):5.1%}")
+BEARINGS = np.deg2rad(np.arange(0, 360, 45))
+FILLS = (0.15, 0.30, 0.50)                 # the stand-off band, as image fills
+
+
+class Producer:
+    def __init__(self, g, name, size, mu, sd, demand=0.025, truth=None):
+        self.g, self.name, self.size, self.demand = g, name, size, demand
+        self.belief = Gaussian(mu, np.eye(2) * sd ** 2)
+        self.truth = np.asarray(truth, float)
+        self.owner = name + "_agent"
+        g.add_node(name, "object", parent="living", pose=[*self.belief.mu, 0.0], owner=self.owner)
+        g.add_node("aff_" + name, "affordance", parent=name, owner=self.owner, offers=[], pragmatic=0.0)
+        self.withdrawn = False
+        self.publish()
+
+    def publish(self):
+        if self.withdrawn:
+            return
+        if np.sqrt(np.linalg.eigvalsh(self.belief.Sigma).max()) <= self.demand:     # Σ* reached
+            self.g.remove("aff_" + self.name)
+            self.withdrawn = True
+            return
+        offers = []
+        for bearing in BEARINGS:
+            for f in FILLS:
+                standoff = self.size / (2 * f)
+                c = self.belief.mu + standoff * np.array([np.cos(bearing), np.sin(bearing)])
+                offers.append(dict(bearing=bearing, standoff=standoff, gain=view_gain(self.belief, c, self.size)))
+        self.g.update("aff_" + self.name, offers=sorted(offers, key=lambda o: -o["gain"]))
+        self.g.set_rt("living", self.name, [*self.belief.mu, 0.0], np.diag([*np.diag(self.belief.Sigma), 0.0]))
+
+    def observe(self, x, rng):
+        """One look from x. A miss teaches nothing about position."""
+        r = np.hypot(*(x - self.truth))
+        if rng.random() < p_detect(self.size / (2 * r)):
+            R = sensor_R(x, self.truth)
+            y = rng.multivariate_normal(self.truth, R)
+            self.belief = linear_gaussian_update(self.belief, np.eye(2), R, y)
+        self.publish()
+
 
 # %% [markdown]
-# **Lesson.** Evidence that is too sure of itself vetoes the right answer. At twice the assumed scatter
-# the look throws away chairs that never moved, and position alone would have kept them. This is why
-# an instance's look has to be stored **per viewing direction**, compared only with views from a
-# similar direction, and given an honest variance before it is allowed to count. The class and the
-# instance are both in the ratio $r_k$: the instance predicts the view, and the class is what a
-# stranger would have looked like.
+# ### J3. The controller reads offers and chooses
+#
+# The executor sees only the graph. For each offer it resolves the object-relative request into a
+# standpoint, tests it against what only *it* knows (the room polygon and the footprint), and scores
+#
+# $$ G = \lambda\,\text{dist} - \mathbb E[\Delta H] - \text{pragmatic}, \qquad \lambda = 0.2\ \text{nats/m}. $$
+#
+# The offer in hand is re-scored with everything else, every cycle. A challenger takes over only if
+# it is better by more than a **switching margin** $m$, the price of abandoning work under way.
+#
+# **Exercise 21.** Complete `select`: score every feasible offer, find the best, and apply the margin.
+
+# %%
+LAMBDA, MARGIN, CLEAR = 0.2, 0.5, 0.3
+TABLE_OUTLINE = world.things[0].outline()
+
+
+def feasible(c):
+    c = np.asarray(c)[None]
+    in_room = point_in_polygon(c, room)[0] and distance_to_polygon(c, room)[0] >= CLEAR
+    return bool(in_room and not point_in_polygon(c, TABLE_OUTLINE)[0] and distance_to_polygon(c, TABLE_OUTLINE)[0] >= CLEAR)
+
+
+def resolve(g, aff):
+    """Every feasible standpoint of an affordance, as (standpoint, gain)."""
+    centre = g.world_pose(g.parent(aff.id))[:2]
+    out = []
+    for o in aff.attrs["offers"]:
+        c = centre + o["standoff"] * np.array([np.cos(o["bearing"]), np.sin(o["bearing"])])
+        if feasible(c):
+            out.append((c, o["gain"]))
+    return out
+
+
+def select(g, x, incumbent):
+    """Returns (affordance name or None, standpoint, G of that choice, the scores of this cycle)."""
+    scores = {}
+    for aff in g.by_type("affordance"):
+        best = None
+        for c, gain in resolve(g, aff):
+            # BEGIN SOLUTION
+            G = LAMBDA * np.hypot(*(c - x)) - gain - aff.attrs["pragmatic"]
+            if best is None or G < best[0]:
+                best = (G, c)
+            # END SOLUTION
+        if best is not None:
+            scores[aff.name] = best
+    if not scores:
+        return None, None, 0.0, scores
+    # BEGIN SOLUTION
+    name = min(scores, key=lambda n: scores[n][0])
+    if incumbent in scores and scores[name][0] > scores[incumbent][0] - MARGIN:
+        name = incumbent
+    # END SOLUTION
+    return name, scores[name][1], scores[name][0], scores
+
+
+# %% [markdown]
+# ### J4. Run it
+#
+# Each cycle the controller selects, the robot moves up to 0.4 m towards the chosen standpoint in a
+# straight line (routes are Part D's business), and the camera, pointed at the object of the offer
+# being served, takes one look at whatever falls within ±45° of that direction. The door's offer is one standpoint
+# in front of it, worth 1.0 nat of preference. Reaching it ends the run.
+#
+# **Exercise 22.** Run the loop. Then, in one plot, trace each affordance's best $\mathbb E[\Delta H]$
+# against the cycle, and mark who held the robot on each cycle. Find the moment each hand-off happens.
+# What in the code decided it?
+
+# %%
+def run_offers(seed=0, lam=None, margin=None, door_value=1.0, max_cycles=60):
+    global LAMBDA, MARGIN
+    saved = LAMBDA, MARGIN
+    LAMBDA, MARGIN = saved[0] if lam is None else lam, saved[1] if margin is None else margin
+    rng_ = np.random.default_rng(seed)
+    g = Graph()
+    g.add_node("living", "room", parent="world")
+    table_t, bottle_t = world.things[0], world.things[1]
+    prods = [Producer(g, "table", 1.2, table_t.pose[:2] + [0.25, -0.2], 0.30, truth=table_t.pose[:2]),
+             Producer(g, "bottle", 0.2, bottle_t.pose[:2] + [-0.3, 0.3], 0.50, truth=bottle_t.pose[:2])]
+    g.add_node("door", "object", parent="living", pose=[5.5, 2.05, 0.0], owner="door_agent")
+    g.add_node("aff_door", "affordance", parent="door", owner="door_agent",
+               offers=[dict(bearing=0.0, standoff=0.0, gain=0.0)], pragmatic=door_value)
+    x, incumbent, trace = START[:2].copy(), None, []
+    for t in range(max_cycles):
+        name, c, G, scores = select(g, x, incumbent)
+        if name is None or G >= 0:
+            break
+        step = c - x
+        if np.hypot(*step) > 0.4:
+            step *= 0.4 / np.hypot(*step)
+        x = x + step
+        aim = g.world_pose(g.parent(g.node(name).id))[:2] - x      # the camera looks at the held object
+        heading = np.arctan2(aim[1], aim[0])
+        for p in prods:
+            to_obj = p.truth - x
+            if abs(se2.wrap(np.arctan2(to_obj[1], to_obj[0]) - heading)) <= np.pi / 4:
+                p.observe(x, rng_)
+            else:
+                p.publish()
+        trace.append(dict(t=t, holder=name, x=x.copy(), G=G,
+                          **{p.name: (0.0 if p.withdrawn else g.node("aff_" + p.name).attrs["offers"][0]["gain"]) for p in prods},
+                          sd=[np.sqrt(np.linalg.eigvalsh(p.belief.Sigma).max()) for p in prods]))
+        incumbent = name
+        if name == "aff_door" and np.hypot(*(x - c)) < 1e-6:
+            break
+    LAMBDA, MARGIN = saved
+    return g, prods, trace
+
+
+g_offers, prods_offers, trace = run_offers()
+holders = [tr["holder"] for tr in trace]
+print("who held the robot:", " ".join(h.replace("aff_", "")[0].upper() for h in holders))
+for p in prods_offers:
+    e = np.hypot(*(p.belief.mu - p.truth))
+    print(f"{p.name:7s} error {e * 100:.1f} cm   sd max {np.sqrt(np.linalg.eigvalsh(p.belief.Sigma).max()) * 100:.1f} cm   offer withdrawn: {p.withdrawn}")
+print("graph at the end:\n" + repr(g_offers))
+
+# BEGIN SOLUTION
+fig, ax = plt.subplots(figsize=(7, 2.8))
+ts = [tr["t"] for tr in trace]
+ax.plot(ts, [tr["table"] for tr in trace], "-", label="table")
+ax.plot(ts, [tr["bottle"] for tr in trace], "--", label="bottle")
+for t, h in zip(ts, holders):
+    ax.text(t, -0.35, h.replace("aff_", "")[0].upper(), ha="center", fontsize=7)
+ax.set_xlabel("cycle"); ax.set_ylabel("best offer (nats)"); ax.legend(frameon=False)
+# END SOLUTION
+
+# %% [markdown]
+# **Questions.**
+# - Nothing in `select` says "the table is done, go to the bottle". What makes the robot move on?
+# - Re-run with `lam=1.0`, and separately with `margin=0.0`. What changes?
+# - Suppose the bottle's producer published a *world* pose instead of a bearing and a stand-off. What
+#   could the controller no longer do?
+
+# %% [markdown] solution
+# *Answers.*
+# - Looking shrinks the covariance that priced the look. An offer loses value by succeeding, and at
+#   some cycle another offer is better by more than the margin. The hand-off is a consequence of the
+#   values, and no rule was written for it. The withdrawal at $\Sigma^\ast$ is the producer's own decision
+#   about its own belief.
+# - At $\lambda = 1$ nat/m nothing across the room is worth the trip: the robot stops after a few
+#   cycles with both beliefs unfinished and never reaches the door. That is a legitimate answer: "not
+#   worth it". With no margin the number of hand-offs barely changes here; what changes is that the
+#   door overtakes the table's last small gain, and in most seeds the robot leaves with the table's
+#   offer still open. The margin's job is to finish what was started.
+# - Negotiate. A world pose may be infeasible and leaves no vocabulary to say so. An object-relative
+#   request has many resolutions, and the executor can pick one it can actually reach. The thesis puts
+#   the split of knowledge in those words.
+
+# %% [markdown]
+# ## Today's lesson
+#
+# A belief is born, kept and removed by comparisons in nats, it stands on a room and a pose whose
+# shared errors no number of points can average away, and it offers the robot what a look would teach
+# it, in the same nats. Choosing between offers needed nothing but that one currency.

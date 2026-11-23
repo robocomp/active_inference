@@ -202,6 +202,7 @@
 \end{frame}
 
 \begin{frame}{The part we can compute: the variational free energy $F$}
+  \label{d2f:9}
   \centering
   \vspace{1.5em}
   {\Large $\KL{q}{p(s\given o)} \;=\; \underbrace{\int q\ln\frac{q}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s}_{\textstyle F[q,o]\text{: free energy}}
@@ -218,7 +219,61 @@
   \lesson{Lower $F$ and the KL drops by the same amount: the closest $q$, without $p(o)$.}
 \end{frame}
 
+\begin{frame}{Surprise is $-\ln p(o)$: a rare reading costs many nats}
+  \label{d2f:surprise}
+  \begin{columns}[c]
+    \begin{column}{0.55\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.6cm, lab/.style={font=\scriptsize, align=center}]
+        % top: p(o)
+        \begin{scope}[y=1.5cm]
+          \draw[-{Stealth}, muted] (-0.3,0) -- (2.5,0) node[right, lab, text=black] {$o$ (m)};
+          \draw[cool, very thick, domain=-0.3:2.4, samples=60] plot (\x, {0.74*exp(-0.5*(\x-1)^2/0.29)});
+          \node[lab, text=cool, anchor=west] at (1.55,0.75) {$p(o)$: how likely};
+          \draw[densely dashed, muted] (1,0) -- (1,0.74);
+          \draw[densely dashed, accent] (1.5,0) -- (1.5,0.48);
+          \fill[accent] (1.5,0.48) circle (2pt);
+          \node[lab, below] at (1,0) {1.0};
+          \node[lab, below, text=accent] at (1.5,0) {1.5};
+        \end{scope}
+        % bottom: -ln p(o)
+        \begin{scope}[shift={(0,-2.9)}, y=0.75cm]
+          \draw[-{Stealth}, muted] (-0.3,0) -- (2.5,0) node[right, lab, text=black] {$o$ (m)};
+          \draw[-{Stealth}, muted] (-0.3,0) -- (-0.3,2.6) node[right, lab, text=black] {nats};
+          \draw[accent, very thick, domain=-0.12:2.12, samples=60] plot (\x, {0.5*(\x-1)^2/0.29});
+          \node[lab, text=accent] at (1,1.85) {surprise\\$-\ln p(o)$};
+          \draw[densely dashed, accent] (1.5,0) -- (1.5,0.43);
+          \fill[accent] (1.5,0.43) circle (2pt);
+          \node[lab, text=accent, anchor=west] at (1.55,0.38) {0.43};
+          \fill[black] (1,0) circle (1.5pt);
+          \node[lab, below] at (1,0) {0};
+        \end{scope}
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \small
+      The robot expects to read 1.0\,m; it reads 1.5\,m. That reading costs 0.43\,nats more than the
+      expected one.\\[0.8em]
+      \textbf{Nats}: the unit of $\ln$ (with $\log_2$, bits: 1 bit = 0.69 nats).\\[0.3em]
+      \renewcommand{\arraystretch}{1.15}
+      \begin{tabular}{@{}l r@{}}
+        \toprule
+        a reading with probability & surprise \\
+        \midrule
+        $1$ & 0 nats \\
+        $1/2$ & 0.69 nats \\
+        $1/e \approx 0.37$ & 1 nat \\
+        $1/100$ & 4.6 nats \\
+        \bottomrule
+      \end{tabular}\\[0.4em]
+    \end{column}
+  \end{columns}
+  {\footnotesize $p(o)$: how likely the reading is under the robot's model, $\N(1,\,0.29)$ (derived on frame~\ref{d2f:26}).\par}
+  \lesson{Surprise is minus the log of how likely the reading was: the rarer, the more nats.}
+\end{frame}
+
 \begin{frame}{$F$ = surprise + how wrong the belief is}
+  \label{d2f:10}
   \begin{center}\large $\boxed{\; F[q,o] = \textcolor{accent}{\KL{q(s)}{p(s\given o)}} \;+\; \textcolor{muted!80!black}{\big(-\ln p(o)\big)} \;}$\end{center}
   \centering
   \begin{tikzpicture}[x=1.6cm, y=0.88cm, lab/.style={font=\small}]
@@ -243,7 +298,8 @@
   \lesson{Minimise $F$: the best belief, and a bound on how surprising the data were.}
 \end{frame}
 
-\begin{frame}{Complexity minus accuracy}
+\begin{frame}{$F$ = complexity $-$ accuracy: leaving the prior costs, explaining the reading pays}
+  \label{d2f:11}
   \centering
   \vspace{1em}{\small the same $F$, split the other way:}\\[0.6em]
   {\large $\displaystyle\int q\ln\frac{q}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s
@@ -252,19 +308,51 @@
     $F[q,o] = \underbrace{\textcolor{cool!80!black}{\KL{q(s)}{p(s)}}}_{\text{complexity: far from the prior}}
              \;-\; \underbrace{\textcolor{good!70!black}{\E_q\!\left[\ln p(o\given s)\right]}}_{\text{accuracy: explains the reading}}$
   \end{center}
-  {\footnotesize\color{muted} $\E_q[f] = \int q\,f\,\mathrm{d}s$: the average of $f$ under the belief $q$ (more on frame 16).}
+  {\footnotesize\color{muted} $\E_q[f] = \int q\,f\,\mathrm{d}s$: the average of $f$ under the belief $q$ (more on frame \ref{d2f:16}).}
   \vfill
   \lesson{Complexity: how far the belief moved from the prior. Accuracy: how well it fits $o$.}
 \end{frame}
 
 \begin{frame}{$F$ as the energy of two springs: the wall}
+  \label{d2f:12}
   \centering
   \includegraphics[width=0.68\textwidth]{d1_complexity.pdf}
 
   {\footnotesize\color{muted} $\mu$: the centre of the belief $q$; we slide it and watch $F$. Spring energy $=\frac12\,$stiffness$\,\times\,$stretch$^2$,\\
-  stiffness = precision = $1/\text{variance}$ ($1/0.5^2 = 4$ and $1/0.2^2 = 25$). Nats: the unit of $\ln$. Inaccuracy $= -$accuracy.}
+  stiffness = precision = $1/\text{variance}$ ($1/0.5^2 = 4$ and $1/0.2^2 = 25$). Inaccuracy $= -$accuracy.}
   \vfill
   \lesson{$F$ is the energy of two springs: the belief rests where they balance, near the stiffer one.}
+\end{frame}
+
+\begin{frame}{$F$ has two handles: the belief and the reading}
+  \label{d2f:handles}
+  \centering
+  $F[q,o] \;=\; \underbrace{\textcolor{accent}{\KL{q(s)}{p(s\given o)}}}_{\text{how wrong the belief is}}
+   \;+\; \underbrace{\textcolor{black!60}{-\ln p(o)}}_{\text{surprise}}
+$\qquad{\small\color{muted}(frame~\ref{d2f:10})}\\[1.2em]
+  \begin{tikzpicture}[x=1.45cm, y=1cm, lab/.style={font=\small, anchor=east}, nt/.style={font=\footnotesize, anchor=west}]
+    % lengths in nats: the wall of frame \ref{d2f:25}, o = 1.5 m, mu = 1.0 m
+    \node[lab] at (-0.15,0) {start};
+    \fill[accent!45] (0,-0.25) rectangle (2.67,0.25);
+    \fill[black!30] (2.67,-0.25) rectangle (3.1,0.25);
+    \node[font=\scriptsize, text=accent!80!black] at (1.33,0) {how wrong: 2.67};
+    \node[font=\scriptsize, anchor=south] at (2.9,0.25) {surprise: 0.43};
+    \node[nt] at (3.2,0) {$F = 3.1$};
+    \node[lab, text=accent] at (-0.15,-1.1) {\textbf{perception}: change $q$};
+    \draw[accent!60, densely dashed] (0,-1.35) rectangle (2.67,-0.85);
+    \node[font=\scriptsize, text=accent!70] at (1.33,-1.1) {removed};
+    \fill[black!30] (2.67,-1.35) rectangle (3.1,-0.85);
+    \node[nt] at (3.2,-1.1) {$F = 0.43$: only the surprise is left};
+    \node[lab, text=good!70!black] at (-0.15,-2.2) {\textbf{action}: drive, so $o$ changes};
+    \draw[accent!60, densely dashed] (0,-2.45) rectangle (2.67,-1.95);
+    \draw[black!50, densely dashed] (2.67,-2.45) rectangle (3.1,-1.95);
+    \node[font=\scriptsize, text=muted] at (1.55,-2.2) {both removed};
+    \node[nt] at (3.2,-2.2) {$F = 0$: the reading matches the goal};
+  \end{tikzpicture}\\[1.0em]
+  {\footnotesize $q$: the belief;\; $o$: the reading;\; $a$: the action, which moves the sensor and so changes the next
+  reading. Bar lengths in nats: the robot of frame~\ref{d2f:25}, reading 1.5\,m from a goal of 1\,m.\par}
+  \vfill
+  \lesson{Perception lowers $F$ by changing the belief; action lowers it by changing the reading.}
 \end{frame}
 
 % removed for now (user, 2026-11-15); bring back by deleting the \iffalse/\fi
@@ -285,6 +373,7 @@
 % =================================================================================================
 
 \begin{frame}[t]{Why the posterior is not Gaussian: a nonlinear likelihood}
+  \label{d2f:13}
   \centering
   \begin{columns}[c]
     \begin{column}{0.30\textwidth}
@@ -315,6 +404,7 @@
 \end{frame}
 
 \begin{frame}{The Laplace approximation: a Gaussian fitted at the peak}
+  \label{d2f:14}
   \centering
   Any curve $g(s)$ with one peak. Its $-\ln g(s)$ is a bowl, lowest at the peak $\mu$:\\[0.2em]
   \includegraphics[width=0.78\textwidth]{d1_laplace_generic.pdf}\\[0.2em]
@@ -327,9 +417,9 @@
   \lesson{Laplace: the peak gives the mean; the curvature of $-\ln g$ gives the precision $1/\sigma^2$.}
 \end{frame}
 
-\begin{frame}{Laplace on frame 13: nearly exact far from the landmark, not near it}
+\begin{frame}{Laplace on frame \ref{d2f:13}: nearly exact far from the landmark, not near it}
   \centering
-  {\small $g$ = the posterior of frame 13, for a reading far from the landmark and one near it}\\[0.2em]
+  {\small $g$ = the posterior of frame \ref{d2f:13}, for a reading far from the landmark and one near it}\\[0.2em]
   \includegraphics[width=0.82\textwidth]{d1_laplace.pdf}
   \vfill
   \lesson{Near the landmark $h$ bends: the bowl is lopsided and Laplace's $\sigma$ comes out too small.}
@@ -340,6 +430,7 @@
 % =================================================================================================
 
 \begin{frame}{Two tools: the expectation and the entropy}
+  \label{d2f:16}
   \centering
   \begin{columns}[T]
     \begin{column}{0.49\textwidth}\centering
@@ -374,10 +465,11 @@
   \lesson{Expectation: an average weighted by the belief. Entropy: how spread out the belief is.}
 \end{frame}
 
-\begin{frame}[t]{Free Energy with $q$ as a Gaussian Belief}
+\begin{frame}[t]{With a Gaussian belief, $F$ becomes a formula in $\mu$ and $\sigma$}
+  \label{d2f:17}
   \centering
   $F = \displaystyle\int q\ln\frac{q}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s$
-  \quad {\small (frame 9)}
+  \quad {\small (frame \ref{d2f:9})}
   \qquad {\small with $q(s) = \N(\mu,\sigma^2)$: centre $\mu$, spread $\sigma$}\\[0.2em]
   {\small Split the log, $\ln\frac{a}{b} = \ln a - \ln b$, and write $p(o,s) = \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$ (the joint):}\\[0.1em]
   $F = \displaystyle\textcolor{cool!80!black}{\int q\ln q\,\mathrm{d}s} \;+\; \textcolor{accent}{\int q\,\big[-\ln p(o,s)\big]\,\mathrm{d}s}$\\[0.1em]
@@ -389,7 +481,7 @@
   \only<2>{%
   \begin{tikzpicture}
     \node[draw=cool!80!black, thick, rounded corners, fill=cool!6, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
-      \textbf{first integral: minus the entropy of $q$} (frame 16).\\[0.4em]
+      \textbf{first integral: minus the entropy of $q$} (frame \ref{d2f:16}).\\[0.4em]
       For our Gaussian: $\ln q(s) = -\tfrac12\ln(2\pi\sigma^2) - \dfrac{(s-\mu)^2}{2\sigma^2}$\\[0.3em]
       Take the expectation $\E_q$; $\E_q[(s-\mu)^2] = \sigma^2$, so\\[0.2em]
       \hspace*{1em}$\textstyle\int q\ln q\,\mathrm{d}s = -\tfrac12\ln(2\pi\sigma^2) - \tfrac12 = \textcolor{cool!80!black}{-\tfrac12\ln\sigma^2} + \text{const}$};
@@ -402,9 +494,9 @@
   \only<3>{%
   \begin{tikzpicture}
     \node[draw=accent, thick, rounded corners, fill=accent!5, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
-      \textbf{second integral.} Replace the bowl by its Taylor expansion around $\mu$ (Laplace, frame 14):\\[0.2em]
+      \textbf{second integral.} Replace the bowl by its Taylor expansion around $\mu$ (Laplace, frame \ref{d2f:14}):\\[0.2em]
       \hspace*{1em}$-\ln p(o,s) \approx -\ln p(o,\mu) + \text{slope}\cdot(s-\mu) + \tfrac12\Hess\,(s-\mu)^2$, \quad $\Hess$: curvature at $\mu$\\[0.1em]
-      The integral is the expectation $\E_q$ of the bowl (frame 16). Take it term by term:\\[0.2em]
+      The integral is the expectation $\E_q$ of the bowl (frame \ref{d2f:16}). Take it term by term:\\[0.2em]
       \hspace*{1em}$\E_q[\text{constant}] = \text{constant}$,\quad $\E_q[s-\mu] = 0$ ($q$ is centred at $\mu$),\quad $\E_q[(s-\mu)^2] = \sigma^2$, so\\[0.2em]
       \hspace*{1em}$\textstyle\int q\,\big[-\ln p(o,s)\big]\,\mathrm{d}s \approx -\ln p(o,\mu) + 0 + \textcolor{accent}{\tfrac12\Hess\,\sigma^2}$};
   \end{tikzpicture}}\par
@@ -412,7 +504,7 @@
   \vspace{0.8em}
   {\Large $\boxed{\;F(\mu,\sigma) \approx \underbrace{-\ln p(o,\mu) \;+\; \textcolor{accent}{\tfrac12\Hess\,\sigma^2}}_{\textstyle\text{\normalsize\textcolor{accent}{second integral}}} \;\underbrace{\textcolor{cool!80!black}{-\;\tfrac12\ln\sigma^2}}_{\textstyle\text{\normalsize\textcolor{cool!80!black}{first integral}}} \;+\; \text{const}\;}$}}
   \vfill
-  \only<4->{\lesson{With a Gaussian belief, $F$ is a formula in two numbers: its centre $\mu$ and its spread $\sigma$.}}
+  \uncover<4->{\lesson{Two integrals became three terms: the bowl at $\mu$, $\tfrac12\Hess\sigma^2$, and minus the entropy of $q$.}}
 \end{frame}
 
 % removed for now (user, 2026-11-15)
@@ -452,7 +544,8 @@
 \section{\texorpdfstring{Finding the bottom of $F$ in practice\\[0.4em]{\normalsize\mdseries\color{muted} Gauss--Newton, then a real wall}}{Finding the bottom of F in practice}}
 % =================================================================================================
 
-\begin{frame}{The starting point: frame 13's landmark, read from far away, and its bowl}
+\begin{frame}{The starting point: frame \ref{d2f:13}'s landmark, read from far away, and its bowl}
+  \label{d2f:18}
   \begin{columns}[c]
     \begin{column}{0.44\textwidth}
       \centering
@@ -469,7 +562,7 @@
 
       \vspace{0.2em}
       \raggedright\small
-      \textbf{we write} (frame 13)\\
+      \textbf{we write} (frame \ref{d2f:13})\\
       likelihood: \textcolor{good!70!black}{$p(o\given s) = \N\big(o;\, h(s),\, 0.2^2\big)$}\\
       \hspace*{1em}$h(s) = \sqrt{s^2+0.8^2}$\\
       prior: \textcolor{cool!80!black}{$p(s) = \N(s;\, 1.0,\, 0.5^2)$}
@@ -483,7 +576,7 @@
   \[
     F(\mu,\sigma) \approx \underbrace{-\ln p(o,\mu)}_{\text{bowl}(\mu)\text{: only the mean moves it}}
       + \underbrace{\tfrac12\Hess\sigma^2 - \tfrac12\ln\sigma^2}_{\text{with } \Hess \text{ held fixed, only the spread moves it}} + \text{const}
-    \qquad\text{\small (frame 17)}
+    \qquad\text{\small (frame \ref{d2f:17})}
   \]
   \vspace{-0.8em}
   \[
@@ -495,6 +588,7 @@
 \end{frame}
 
 \begin{frame}{Gauss--Newton: find the bottom of the bowl one parabola at a time}
+  \label{d2f:19}
   \centering
   \begin{columns}[c]
     \begin{column}{0.40\textwidth}
@@ -505,7 +599,7 @@
       \begin{tikzpicture}
         \node[inner sep=0pt] (alg) {\begin{minipage}{0.93\linewidth}
       \begin{enumerate}
-        \item at the guess $s_k$, read the bowl's height and slope $b_k$, and a curvature $\Hess_k$ that is always $>0$ (frame 20)\\[0.4em]
+        \item at the guess $s_k$, read the bowl's height and slope $b_k$, and a curvature $\Hess_k$ that is always $>0$ (frame \ref{d2f:20})\\[0.4em]
         \item $P_k$: a parabola with that height, slope and curvature at $s_k$\\[0.2em]
               {\small $P_k(s) = \text{bowl}(s_k) + b_k\,(s-s_k) + \tfrac12\Hess_k\,(s-s_k)^2$}\\[0.4em]
         \item jump to the bottom of $P_k$ (not of the bowl):\\[0.2em]
@@ -525,10 +619,11 @@
 \end{frame}
 
 \begin{frame}[t]{Gauss--Newton in numbers: the last parabola is the belief}
+  \label{d2f:20}
   \centering
   \vspace{-1.6em}
   \[ \begin{gathered}
-    \text{bowl}(s) = \tfrac12\,\textcolor{good!70!black}{25}\,\big(o-h(s)\big)^2 + \tfrac12\,\textcolor{cool!80!black}{4}\,(s-1)^2 + \text{const} \qquad \text{\small (frame 18)}
+    \text{bowl}(s) = \tfrac12\,\textcolor{good!70!black}{25}\,\big(o-h(s)\big)^2 + \tfrac12\,\textcolor{cool!80!black}{4}\,(s-1)^2 + \text{const} \qquad \text{\small (frame \ref{d2f:18})}
   \\[0.05em]
     \text{slope:}\;\; b_k = -\textcolor{good!70!black}{25}\,J_k\,\big(o-h(s_k)\big) + \textcolor{cool!80!black}{4}\,(s_k-1)
   \\[0.05em]
@@ -537,7 +632,7 @@
   \end{gathered} \]
   \vspace{-0.2em}
   {\footnotesize \textcolor{good!70!black}{$25 = 1/0.2^2$}, \textcolor{cool!80!black}{$4 = 1/0.5^2$}: the two precisions.\;
-   $J_k = h'(s_k)$: slope of $h$. $J_k^2$: that slope \emph{squared}.\par}\vspace{0.3em}
+   $J_k = h'(s_k)$: slope of $h$; $J_k^2$: that slope \emph{squared}; $h''(s_k)$: curvature of $h$.\par}\vspace{0.3em}
   \renewcommand{\arraystretch}{1.0}
   \begin{tabular}{@{}l@{\qquad}c@{\qquad}c@{\qquad}c@{\qquad}c@{\qquad}c@{\qquad}l@{}}
     \toprule
@@ -556,7 +651,7 @@
 \begin{frame}{Why $\sigma^2 = 1/\Hess$: the spread of the belief that makes $F$ smallest}
   \centering
   $F(\mu,\sigma) \approx
-   \;\underbrace{-\ln p(o,\mu)}_{\substack{\text{misfit of } \mu \text{ to the reading}\\ \text{and the prior (frame 12)}}}
+   \;\underbrace{-\ln p(o,\mu)}_{\substack{\text{misfit of } \mu \text{ to the reading}\\ \text{and the prior (frame \ref{d2f:12})}}}
    \quad+\quad \underbrace{\textcolor{accent}{\tfrac12\Hess\sigma^2}}_{\text{grows with } \sigma}
    \quad\textcolor{cool!80!black}{-}\quad \underbrace{\textcolor{cool!80!black}{\tfrac12\ln\sigma^2}}_{\substack{\text{entropy of } q\text{:}\\ \text{grows with } \sigma}}
    \quad+\; \text{const}$\\[0.3em]
@@ -596,6 +691,7 @@
 \end{frame}
 
 \begin{frame}{A real wall: two numbers, one belief that tilts}
+  \label{d2f:23}
   \centering
   \includegraphics[width=0.72\textwidth]{d1_wall_belief.pdf}\\[0em]
   \footnotesize
@@ -604,7 +700,7 @@
       robot's frame: $\alpha$, direction of the wall's normal; $d$, robot--wall distance. Point $i$ at $(x_i,y_i)$\\
     & (forward, left) is off the line by $r_i = \cos\alpha\,x_i + \sin\alpha\,y_i - d$; right line: only LiDAR noise, \textcolor{good!70!black}{$\epsilon = 2$\,cm}.\\[0.1em]
     \textbf{the robot} &
-      minimises the bowl $F \approx \tfrac12\sum_{i=1}^{82} (r_i/\epsilon)^2$ over $(\alpha, d)$ with Gauss--Newton (frame 19):\\
+      minimises the bowl $F \approx \tfrac12\sum_{i=1}^{82} (r_i/\epsilon)^2$ over $(\alpha, d)$ with Gauss--Newton (frame \ref{d2f:19}):\\
     \textbf{computes} & mean: its bottom; covariance: $\Hess^{-1}$, its curvature now a $2\times2$ matrix $\Hess$. Belief \textcolor{accent}{$q(\alpha,d)$}\\
     & {\color{muted} ellipses: 68\%, 95\% of $q$;\; $\rho$: how much $\alpha$ and $d$ move together ($-1$ to $1$; $0$: not at all)}
   \end{tabular}
@@ -617,6 +713,7 @@
 % =================================================================================================
 
 \begin{frame}[t]{Gradient descent on $F$: one rule for $\mu$ and $a$}
+  \label{d2f:24}
   \centering
   {\small The robot can change two things:\quad \textcolor{accent}{$\mu$}, its estimate of $s$\quad and\quad \textcolor{good!70!black}{$a$}, its action.\\[0.2em]
   $a$ moves the sensor, so it changes the reading: $o = o(a)$.\par}\vspace{1.5em}
@@ -640,7 +737,7 @@
         $\textcolor{accent}{\dot\mu} = -\dfrac{\partial F}{\partial\mu}$ & \small\textbf{perception}\\[1.4em]
         $\textcolor{good!70!black}{\dot a} = -\dfrac{\partial F}{\partial o}\,\dfrac{\partial o}{\partial a}$ & \small\textbf{action}
       \end{tabular}\\[0.8em]
-      {\footnotesize $\dot x$: rate of change of $x$ in time.}
+      {\footnotesize $\dot x$: rate of change of $x$ in time. $\partial o/\partial a$: how much the reading changes per unit of action (frame \ref{d2f:27}: 0.1\,s).}
     \end{column}
   \end{columns}
   \par\vspace*{\fill}
@@ -661,7 +758,8 @@
       \node[draw=accent, rounded corners, fill=accent!8, font=\footnotesize, inner sep=2pt] at (0.75,-0.75) {#5};
     \end{scope}}
 
-\begin{frame}{Perception and action, for the robot at the wall}
+\begin{frame}{Perception moves the belief, action moves the robot: both lower $F$}
+  \label{d2f:25}
   \centering
   $F = \underbrace{\tfrac12\,\textcolor{good!70!black}{\tfrac{1}{0.2^2}}\,(o-\mu)^2}_{\text{\scriptsize we write: the sensor's noise, 0.2\,m}}
      + \underbrace{\tfrac12\,\textcolor{cool!80!black}{\tfrac{1}{0.5^2}}\,(\mu-1)^2}_{\text{\scriptsize we write: the goal, 1\,m from the wall, }\pm0.5\,\text{m}} + \text{const}$\\[0.1em]
@@ -686,13 +784,14 @@
   \lesson{Perception lowers $F$ to the surprise, 0.43; driving 0.5\,m lowers the surprise itself, to 0.}
 \end{frame}
 
-\begin{frame}{Frame 25 worked out: where the robot's $F$ and its numbers come from}
+\begin{frame}{Where frame \ref{d2f:25}'s numbers come from: 3.1, 0.43 and 0}
+  \label{d2f:26}
   \centering
   {\small\textbf{we write}: $s$: distance to the wall; prior = \emph{the goal}, \textcolor{cool!80!black}{$p(s) = \N(1.0,\, 0.5^2)$};
    likelihood \textcolor{good!70!black}{$p(o\given s) = \N(o;\, s,\, 0.2^2)$}}\\[0.1em]
   \[
   \begin{array}{r@{\;}l@{\qquad}l}
-    F &\approx -\ln p(o,\mu) + (\text{terms in } \sigma \text{ only}) & \text{\small frame 17}\\[0.3em]
+    F &\approx -\ln p(o,\mu) + (\text{terms in } \sigma \text{ only}) & \text{\small frame \ref{d2f:17}}\\[0.3em]
     \uncover<2->{&= -\ln \textcolor{good!70!black}{p(o\given\mu)} - \ln \textcolor{cool!80!black}{p(\mu)} + \dots & \\[0.3em]}
     \uncover<3->{&= \underbrace{\tfrac12\,\textcolor{good!70!black}{25}\,(o-\mu)^2}_{\text{reading vs belief}}
              + \underbrace{\tfrac12\,\textcolor{cool!80!black}{4}\,(\mu-1)^2}_{\text{belief vs goal}} + \dots & \text{\small $25 = \tfrac{1}{0.2^2}$,\; $4 = \tfrac{1}{0.5^2}$}}
@@ -714,6 +813,7 @@
 \end{frame}
 
 \begin{frame}{Put the goal in the prior: the robot drives until it comes true}
+  \label{d2f:27}
   \begin{columns}[c]
     \begin{column}{0.48\textwidth}
       \small
@@ -727,7 +827,7 @@
           \hspace*{1.2em}{\footnotesize a little towards 1\,m (4)}\\[0.2em]
           3. \textcolor{good!70!black}{action}: change the speed $a$ downhill on $F$\\
           \hspace*{1.2em}{\footnotesize driving at $a$ for 0.1\,s changes the}\\
-          \hspace*{1.2em}{\footnotesize next reading by $a\cdot 0.1$\,s: $o = o(a)$}};
+          \hspace*{1.2em}{\footnotesize next reading by $a\cdot 0.1$\,s: $\partial o/\partial a = 0.1$\,s}};
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.52\textwidth}
@@ -737,6 +837,66 @@
   \end{columns}
   \vfill
   \lesson{The prior keeps $\mu$ a little nearer 1\,m than $o$; driving closes the gap until both reach 1\,m.}
+\end{frame}
+
+\begin{frame}{To choose a look, the robot scores a reading it does not have yet}
+  \label{d2f:efe1}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.15cm, y=1cm]
+        \foreach \y in {0.9,-0.9} {
+          \foreach \h in {-0.5,-0.25,...,0.4} \draw[black!50] (-0.1,\y+\h) -- (0,\y+\h+0.12);
+          \draw[very thick] (0,\y-0.55) -- (0,\y+0.55);
+        }
+        \node[font=\scriptsize] at (0,1.75) {wall};
+        \foreach \d/\y/\c/\w/\t in {1/0.9/good/0.2/{from 1 m},2/-0.9/accent/0.6/{from 2 m}} {
+          \draw[thick, fill=muted!20, rounded corners=1pt] (\d,\y-0.17) rectangle (\d+0.32,\y+0.17);
+          \draw[muted, densely dashed] (0,\y) -- (\d,\y);
+          \fill[\c!30, draw=\c!80!black, thick, domain={-2.5*\w}:{2.5*\w}, samples=40, shift={(0,\y-0.55)}]
+            plot (\x, {0.45*exp(-0.5*(\x/\w)^2)}) -- cycle;
+          \node[font=\scriptsize, text=\c!80!black, anchor=west] at (\d+0.38,\y) {\t};
+        }
+        \node[font=\scriptsize, align=center] at (0.9,-2.05) {shaded: where each look predicts\\it would read the wall};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \small
+      Frames \ref{d2f:24}--\ref{d2f:27}: the reading arrives every 0.1\,s and changes smoothly with $a$, so
+      the robot follows the slope of $F$.\\[0.6em]
+      To choose \emph{between} places, each must be scored before its reading exists. The robot averages
+      $F$ over the readings it predicts:
+      \[ G(a) = \E_{q(o,s\given a)}\big[\ln q(s\given a) - \ln p(o,s)\big] \]
+      {\footnotesize $q(o,s\given a)$: what the robot predicts it would read, and believe, after $a$.
+      $p(o,s)$: the model we write, with the goal as a prior over readings, $p(o)$.\par}
+    \end{column}
+  \end{columns}
+  \lesson{To choose an action, the robot scores the free energy it expects: $G$, the expected free energy.}
+\end{frame}
+
+\begin{frame}{$G$ = what a look would teach + how far it leaves the goal}
+  \label{d2f:efe2}
+  \centering
+  \[
+    G(a) \;\approx\; \underbrace{-\,I(s;o\given a)}_{\substack{\text{epistemic: minus the information}\\ \text{the reading would carry about } s}}
+    \;+\; \underbrace{\E\big[-\ln p(o)\big]}_{\substack{\text{pragmatic: how far the predicted}\\ \text{reading is from the goal}}}
+    \qquad
+    I = \tfrac12\ln\!\Big(1+\frac{\sigma_s^2}{\sigma_o^2}\Big)
+  \]
+  {\footnotesize $s$: distance to the wall, believed to $\sigma_s = 0.5$\,m.\; $\sigma_o$: the sensor's noise, 0.2\,m from 1\,m away,
+  0.6\,m from 2\,m.\; Goal $p(o) = \N(1,\,0.5^2)$.\par}\vspace{0.6em}
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{@{}l r r r@{}}
+    \toprule
+    look from & epistemic & pragmatic & $G$ (nats) \\
+    \midrule
+    1\,m & $-0.99$ & $0.58$ & \textcolor{good!70!black}{$\mathbf{-0.41}$} \\
+    2\,m & $-0.26$ & $3.22$ & $2.96$ \\
+    \bottomrule
+  \end{tabular}\\[0.4em]
+  {\footnotesize Pragmatic up to a constant: $\tfrac12\,\E[(o-1)^2]/0.5^2$. The dropped term of $G$ is zero when inference is good (Day 4).\par}
+  \vfill
+  \lesson{$G$ adds what a look would teach and how far it leaves the goal, both in nats.}
 \end{frame}
 
 \begin{frame}[plain]
@@ -757,7 +917,7 @@
       job/.style={font=\footnotesize, align=left, text width=2.8cm, anchor=north west}]
     % B1 the wall as a belief
     \node[tile] (t1) at (0,0) {};
-    \node[ttl] at (t1.north west) {1\; a wall as a belief\\[-1pt]{\mdseries\scriptsize frames 18--23}};
+    \node[ttl] at (t1.north west) {1\; a wall as a belief\\[-1pt]{\mdseries\scriptsize frames \ref{d2f:18}--\ref{d2f:23}}};
     \begin{scope}[shift={(0,2.1)}, xscale=0.9]
       \foreach \k in {-3,...,3} \draw[accent!50] (-1.4,{-0.55+0.05*\k}) -- (1.4,{-0.55-0.05*\k});
       \draw[black!80, line width=1.5pt] (-1.4,-0.55) -- (1.4,-0.55);
@@ -780,7 +940,7 @@
     \node[chk] at ($(t2.south west)+(0.15,0.1)$) {first off by about 10\%,\\ then they agree};
     % B4 perception and action
     \node[tile] (t4) at (3.35,0) {};
-    \node[ttl] at (t4.north west) {4\; perception, action\\[-1pt]{\mdseries\scriptsize frames 24--27}};
+    \node[ttl] at (t4.north west) {4\; perception, action\\[-1pt]{\mdseries\scriptsize frames \ref{d2f:24}--\ref{d2f:efe2}}};
     \begin{scope}[shift={(3.35,1.75)}]
       \draw[black!80, line width=1.5pt] (-1.2,0.1) -- (-1.2,-1.0);
       \fill[black!70] (0.9,-0.45) circle (0.1);
@@ -810,13 +970,14 @@
 \begin{frame}{Tomorrow}
   \begin{columns}[c]
     \begin{column}{0.55\textwidth}
-      Today there was one robot, one belief and one $F$. A real robot runs a dozen processes:
+      Today there was one robot, one belief and one $F$. A real robot runs a dozen processes.
+      Tomorrow:
       \begin{itemize}
-        \item where does the belief live, and who holds it?
-        \item how is one free energy divided among processes that never talk to each other?
+        \item where each belief lives, and which process holds it;
+        \item how one free energy is divided among processes that never talk to each other.
       \end{itemize}
-      And the commitment that runs through the rest of the week:
-      \alert{a gate is what a model looks like before the modelling has been done.}
+      And a rule for the rest of the week: \alert{no thresholds}. Where code would write
+      \texttt{if x > k}, we write a term in the model and let lowering $F$ decide.
     \end{column}
     \begin{column}{0.4\textwidth}
       \begin{block}{Reading for Day 3}\small
@@ -834,7 +995,7 @@
 
 \begin{frame}{Backup: is the belief's spread right? Scan 400 times from the same place}
   \centering
-  {\small $d$: robot--wall distance from one scan (frame 23).\; $\sigma$: its spread, $\sigma^2 = 1/\Hess$.\\
+  {\small $d$: robot--wall distance from one scan (frame \ref{d2f:23}).\; $\sigma$: its spread, $\sigma^2 = 1/\Hess$.\\
    $\sigma$ claims how much $d$ typically moves between scans. Fit 400 scans and look.}\par\vspace{0.1em}
   \begin{columns}[c]
     \begin{column}{0.54\textwidth}
@@ -868,19 +1029,19 @@
   \lesson{The belief's spread is only as right as the noise model we write.}
 \end{frame}
 
-\begin{frame}{Backup: $F$ also compares models: an extra parameter must pay for itself}
+\begin{frame}{Backup: $F$ also compares models: an extra parameter stays only if it lowers $F$}
   \centering
   {\small\begin{tabular}{@{}r@{\;\;}l@{}}
     \textbf{we write two models:} & \textbf{fixed}: $\alpha = 90^\circ$, known; it estimates only $d$\\
     & \textbf{free}: prior $\alpha \sim \N\big(90^\circ, (5^\circ)^2\big)$; it estimates $\alpha$ and $d$
   \end{tabular}}\\[0.1em]
-  {\footnotesize $\alpha$: direction of the wall's normal;\; $d$: robot--wall distance (frame 23).}\par\vspace{0.3em}
+  {\footnotesize $\alpha$: direction of the wall's normal;\; $d$: robot--wall distance (frame \ref{d2f:23}).}\par\vspace{0.3em}
   {\small$\displaystyle
     F(\text{free}) - F(\text{fixed}) \;=\; \underbrace{\Delta\,\text{misfit}}_{\substack{-\ln p(o\given\mu)\text{: how badly the fit}\\ \text{explains the scan}}}
-      \;+\; \underbrace{\Delta\,\text{complexity}}_{\substack{\text{how far the belief moved}\\ \text{from its prior (frame 11)}}}$}\par\vspace{0.2em}
+      \;+\; \underbrace{\Delta\,\text{complexity}}_{\substack{\text{how far the belief moved}\\ \text{from its prior (frame \ref{d2f:11})}}}$}\par\vspace{0.2em}
   \includegraphics[width=0.62\textwidth]{d2_model_compare.pdf}
   \vfill
-  \lesson{Lower $F$ wins: an extra parameter stays only if the data pay for it.}
+  \lesson{Lower $F$ wins: an extra parameter stays only if its better fit outweighs its complexity.}
 \end{frame}
 
 \end{document}

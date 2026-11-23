@@ -1,0 +1,26 @@
+% Panel (c) of d3_fig_mask.tex alone: the agent moves mask points into the room frame (illustrative, not data).
+\colorlet{conceptc}{cool}\colorlet{conceptf}{cool!8}\colorlet{memc}{good}
+\colorlet{bodyc}{accent}\colorlet{bodyf}{accent!15}\colorlet{arrowc}{muted}
+\resizebox{!}{0.5\textheight}{%
+\begin{tikzpicture}[
+  >=Latex, font=\footnotesize,
+  ttl/.style={font=\bfseries\small, anchor=south west},
+  sub/.style={font=\scriptsize, align=center, text width=52mm, anchor=north},
+  lab/.style={font=\scriptsize, fill=white, fill opacity=0.85, text opacity=1, inner sep=1.5pt, rounded corners=1pt},
+  pt/.style={circle, fill=conceptc, inner sep=0pt, minimum size=1.2mm},
+  field/.style={font=\scriptsize, anchor=west, inner sep=1pt}]
+
+\begin{scope}
+    \draw[gray!55, line width=1pt] (0,0.2) -- (5.0,0.2) -- (5.0,3.2) -- (0,3.2) -- cycle;
+  \node[font=\scriptsize, gray, anchor=north west] at (0.05,3.15) {room};
+  % robot and camera cone
+  \node[circle, draw=bodyc, fill=bodyf, thick, inner sep=0pt, minimum size=3.2mm] (rb) at (0.6,0.75) {};
+  \draw[bodyc!60, dashed] (0.6,0.75) -- (2.9,2.95) (0.6,0.75) -- (3.6,1.15);
+  % support points with their uncertainty
+  \foreach \p in {(2.35,1.85),(2.5,2.05),(2.62,1.8),(2.45,1.62),(2.7,2.0),(2.55,1.55),(2.8,1.72)}
+    {\draw[conceptc!45] \p ellipse (0.12 and 0.07); \node[pt] at \p {};}
+  % provisional instance
+  \draw[conceptc, dashed, thick, rotate around={20:(2.58,1.8)}] (2.2,1.48) rectangle (2.96,2.12);
+  \node[font=\scriptsize, conceptc!80!black, align=left, anchor=west] at (3.1,2.3) {provisional chair\\evidence $w=3.4$};
+\end{scope}
+\end{tikzpicture}}

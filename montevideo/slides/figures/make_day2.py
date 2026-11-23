@@ -1,4 +1,4 @@
-"""Figures for day2.tex. Runs the Day 2 lab solution source, then plots its own variables. Run from slides/."""
+"""Figures for day3.tex (named d2_ for history). Runs the Day 3 lab solution source, then plots its own variables. Run from slides/."""
 import sys
 from pathlib import Path
 
@@ -13,9 +13,9 @@ sys.path.insert(0, str(LABS))
 plt.rcParams.update({"pdf.fonttype": 42, "font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
 COOL, ACCENT, GOOD, MUTED = "#2E6DB4", "#C0392B", "#2E8B57", "#7A7A7A"
 
-src = (LABS / "src" / "day2.py").read_text()
-g = {"__name__": "day2"}
-exec(compile(src, "day2.py", "exec"), g)
+src = (LABS / "src" / "day3.py").read_text()
+g = {"__name__": "day3"}
+exec(compile(src, "day3.py", "exec"), g)
 plt.close("all")
 
 # 1. the price of the boundary
@@ -42,15 +42,15 @@ for lateral, c, ls in ((1.0, COOL, "-"), (6.0, ACCENT, "-")):
     ax.plot(G[i], r[i], "o", color=c, ms=8, mec="white", mew=1.5, zorder=5)
 ax.text(11.8, g["GATE_RMSE"][1.0][-1] * 100 * 0.62, "near pass", ha="right", fontsize=10)
 ax.text(1.6, 110, "far: none admitted", ha="left", fontsize=9)
-ax.text(11.8, g["WEIGHTED_RMSE"][1.0] * 100 * 0.68, "dashed: precision, no knob", ha="right", fontsize=9, color="0.25"); ax.set_ylim(0.4, 500)
+ax.text(11.8, g["WEIGHTED_RMSE"][1.0] * 100 * 0.68, "dashed: precision, nothing to tune", ha="right", fontsize=9, color="0.25"); ax.set_ylim(0.4, 500)
 ax.text(9.0, g["GATE_RMSE"][6.0][-1] * 100 * 1.35, "far pass", ha="left", fontsize=10)
-ax.set_xlabel("gate $k$ (m)"); ax.set_ylabel("rmse (cm)")
+ax.set_xlabel("threshold $k$: ignore sightings beyond $k$ (m)"); ax.set_ylabel("rmse (cm)")
 fig.tight_layout(); fig.savefig(HERE / "d2_gate.pdf"); plt.close(fig)
 
 # 3. a bias shared across frames
 fig, ax = plt.subplots(figsize=(4.6, 3.0))
 n = g["N_FRAMES"][1:]
-for a, c, ls, lab in ((1.0, ACCENT, "-", r"$\alpha=1$"), (0.3, COOL, "--", r"$\alpha=0.3$"), (0.05, MUTED, ":", r"$\alpha=0.05$"), (0.0, GOOD, "-", r"$\alpha=0$: a gate")):
+for a, c, ls, lab in ((1.0, ACCENT, "-", r"$\alpha=1$"), (0.3, COOL, "--", r"$\alpha=0.3$"), (0.05, MUTED, ":", r"$\alpha=0.05$"), (0.0, GOOD, "-", r"$\alpha=0$: ignore them")):
     ax.semilogx(n, g["displacement"](n, a) * 100, color=c, ls=ls, lw=2.2, label=lab)
 ax.axhline(g["BIAS"] * 100, color="0.3", lw=0.8)
 ax.text(1.2, g["BIAS"] * 100 + 0.07, "the whole bias $b$", fontsize=10)

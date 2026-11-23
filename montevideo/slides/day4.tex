@@ -2,7 +2,7 @@
 \input{preamble}
 
 \title{A robot that acts to know}
-\subtitle{Day 4 --- Concepts: geometry, life cycle, aspect}
+\subtitle{Day 4 --- One concept, from birth to action: the chair}
 \date{Thursday 3 December}
 
 \tikzset{bx/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize,
@@ -13,6 +13,9 @@
          flow/.style={-{Stealth[length=2.5mm]}, thick},
          mtag/.style={draw, thick, rounded corners=2pt, font=\scriptsize, inner sep=3pt, fill=white, align=center, minimum height=0.85cm, text width=#1, anchor=north},
          mtag/.default=2.6cm,
+         box4/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize, minimum height=0.8cm},
+         arr4/.style={-{Stealth[length=2.5mm]}, thick},
+         lab4/.style={font=\scriptsize},
          dimcard/.style={draw=#1, thick, rounded corners=4pt, fill=#1!12, minimum width=4.5cm, minimum height=1.42cm, align=center, font=\footnotesize, inner sep=3pt}}
 
 \usepackage{appendixnumberbeamer}
@@ -42,24 +45,24 @@
 
 \maketitle
 
-\begin{frame}{Yesterday: a concept has dimensions. Today: three of them}
+\begin{frame}{Today: one concept from birth to action, the chair}
   \centering
   \begin{tikzpicture}[x=1cm, y=1cm]
     \chairside{-0.55,-1.05}{1.1}{0.95}{1.0}{line width=2pt, black}
     \node[lab] at (0,-1.35) {one chair};
-    \node[dimcard=cool]   (g) at (-4.4,0.95)  {\textbf{Geometry}\\the room, the pose it gives,\\and the error they share\\{\scriptsize\color{accent} today}};
-    \node[dimcard=muted]  (l) at (4.4,0.95)   {\textbf{Life cycle}\\birth, absence,\\forgetting\\{\scriptsize\color{accent} today}};
-    \node[dimcard=good]   (a) at (-4.4,-0.95) {\textbf{Aspect}\\how you imagine one,\\how you recognise this one\\{\scriptsize\color{accent} today}};
-    \node[dimcard=muted, opacity=0.5, text opacity=0.7] (f) at (4.4,-0.95)  {\textbf{Function}\\what it offers,\\what can be done with it\\{\scriptsize tomorrow}};
+    \node[dimcard=cool]  (g) at (-4.4,0.95)  {\textbf{Geometry}\\where it is, and how sure,\\on the room the robot built\\{\scriptsize\color{accent} today}};
+    \node[dimcard=muted] (l) at (4.4,0.95)   {\textbf{Life cycle}\\birth, absence,\\forgetting\\{\scriptsize\color{accent} today}};
+    \node[dimcard=accent] (f) at (4.4,-0.95)  {\textbf{Function}\\what it offers the robot,\\and who chooses\\{\scriptsize\color{accent} today}};
+    \node[dimcard=good] (a) at (-4.4,-0.95) {\textbf{Aspect}\\how its look is\\captured and stored\\{\scriptsize\color{accent} today}};
     \draw[flow, muted] (-0.8,0.35) -- (g.east);
     \draw[flow, muted] (0.9,0.35) -- (l.west);
+    \draw[flow, muted] (0.9,-0.5) -- (f.west);
     \draw[flow, muted] (-0.8,-0.5) -- (a.east);
-    \draw[flow, black!25] (0.9,-0.5) -- (f.west);
   \end{tikzpicture}
 
   \vspace{0.7em}
-  \small First, the thing that answers for all of them: the concept agent.
-  \src{the dimensions are this course's way of laying out the thesis}
+  \small First the agent that answers for the chair, then the room the chair stands in.
+  \lesson{One agent per kind of thing: today we follow the chair agent through all it does.}
 \end{frame}
 
 % =================================================================================================
@@ -90,7 +93,6 @@
       objects.
     \end{column}
   \end{columns}
-  \src{concept\_agents.tex l.534--537, l.136--138, l.1196--1203}
 \end{frame}
 
 \begin{frame}{Each publishes what only it can compute}
@@ -115,38 +117,6 @@
 
   \vspace{0.7em}
   \small Nobody asks anybody. Everything an agent knows about another's work is on the graph.
-  \src{concept\_agents.tex l.1209--1216, l.1533--1544}
-\end{frame}
-
-\begin{frame}{\textsf{residual\_concept}: whatever nobody else explains}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \centering
-      \begin{tikzpicture}[x=0.42cm, y=0.42cm]
-        \foreach \i in {0,...,13} \foreach \j in {0,...,8}
-          \draw[muted!30] (\i,\j) rectangle ++(1,1);
-        \draw[very thick, muted] (0,0) rectangle (14,9);
-        \fill[cool!35, draw=cool, thick] (1.5,5.5) rectangle (5,8);
-        \node[lab] at (3.25,6.75) {near table};
-        \fill[cool!10] (8,4.5) rectangle (13.5,8.5);
-        \fill[cool!20] (8.8,5.2) rectangle (12.7,7.8);
-        \fill[cool!35] (9.5,5.8) rectangle (12,7.2);
-        \node[lab] at (10.75,6.5) {far table};
-        \foreach \i/\j in {5/1,6/1,5/2,6/2,7/2} \fill[accent!65] (\i,\j) rectangle ++(1,1);
-        \node[lab, right] at (8,1.5) {not explained};
-      \end{tikzpicture}\\[0.3em]
-      \footnotesize a sure table claims its cells tightly; an unsure one loosely
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \small
-      A grid of what the sensors hit, minus what every other agent claims to explain. What is left
-      is what the robot must avoid.\\[0.6em]
-      \alert{Nothing has to be recognised for the robot not to hit it.}\\[0.6em]
-      No safety margin anywhere: each claim is as wide as the claimant's own published uncertainty.
-      That is why the others must publish it.
-    \end{column}
-  \end{columns}
-  \src{concept\_agents.tex l.1497--1538}
 \end{frame}
 
 \begin{frame}{Every agent answers to a common contract}
@@ -171,38 +141,12 @@
       \textbf{Next:} UPDATE is geometry; CREATE and REMOVE are the life cycle.
     \end{column}
   \end{columns}
-  \src{concept\_agents.tex l.169--180; CONCEPT\_AGENT\_LIFECYCLE.md l.7--13}
-\end{frame}
-
-\begin{frame}{The factorisation is only true while its owners are alive}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}[st/.style={draw, thick, rounded corners=8pt, minimum width=1.8cm, minimum height=0.8cm, font=\footnotesize}]
-        \node[st, fill=muted!12] (w) at (0,0) {waiting};
-        \node[st, fill=good!15] (o) at (3.7,0) {operating};
-        \node[st, fill=accent!15] (d) at (1.85,-1.8) {degraded};
-        \draw[flow] (w) to[bend left=15] node[above, lab, align=center] {required peers\\ready} (o);
-        \draw[flow] (o) to[bend left=15] node[below, lab] {a peer is lost} (w);
-        \draw[flow, muted] (o) -- (d); \draw[flow, muted] (w) -- (d);
-      \end{tikzpicture}\\[0.6em]
-      \footnotesize Specified in \textsc{tla}$^+$ and model-checked: 8 safety and 4 liveness
-      properties, no counterexample.
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      A process crashes and its node stays. It looks like any other data, and
-      \alert{nobody is keeping it true any more}.\\[0.5em]
-      A peer that is present is \emph{running}, which is not the same as \emph{able to serve}.
-      Heartbeats are ordinary graph nodes.
-    \end{column}
-  \end{columns}
-  \src{cortex.tex l.732--741, l.757--775, l.780--785}
 \end{frame}
 
 % =================================================================================================
-\section{Geometry}
+\section{The room, and the robot in it}
 % =================================================================================================
+
 
 \begin{frame}{The world: three rooms the robot has never seen}
   \begin{columns}[c]
@@ -235,7 +179,999 @@
   \end{columns}
 \end{frame}
 
-\begin{frame}{The room as a probability model (1/4): what is unknown, what is given}
+\begin{frame}{The room as a probability model: the chain rule, then what we cross out}
+  \centering
+  {\footnotesize\makebox[\linewidth][c]{%
+  \begin{tabular}{@{}l@{\ \ }l@{\qquad}l@{\ \ }l@{}}
+    $o$ & the laser scans & $m$ & the room's \emph{structure}: how many corners, which turns\\[1pt]
+    $X$ & the robot's poses, step by step & $\theta_m$ & the corners' coordinates, for that structure\\[1pt]
+    $\delta$ & what the wheels measured, each step $\tau$ & & \\
+  \end{tabular}}\par}
+  \vspace{0.3em}
+  \setlength{\abovedisplayskip}{3pt}\setlength{\belowdisplayskip}{3pt}
+  \[
+    p(o,X,\theta_m,m\given\delta) =
+    \underbrace{p(o\given X,\theta_m,m,\xcancel{\delta})}_{\text{the scans}}\,
+    \underbrace{p(X\given \xcancel{\theta_m,m},\delta)}_{\text{the path}}\,
+    \underbrace{p(\theta_m\given m,\xcancel{\delta})}_{\text{the corners}}\,
+    \underbrace{p(m\given \xcancel{\delta})}_{\text{the shape}}
+  \]
+  {\footnotesize Day 1's chain rule, exact in any order; we write the causal one. Crossing out is the model:
+  once the poses are known the wheels add nothing about the scans, the corners or the shape, and the path
+  follows the wheels, one step at a time.\par}
+  \[
+    p(X,\theta_m,m\given o,\delta)\;\propto\;
+    \underbrace{p(o\given X,\theta_m,m)}_{\textbf{likelihood}}\;
+    \underbrace{\textstyle\prod_\tau p(X_\tau\given X_{\tau-1},\delta_\tau)\;p(\theta_m\given m)\;p(m)}_{\textbf{prior}}
+  \]
+  {\footnotesize $\propto$: equal up to a factor that is the same for every room. Its $-\ln$ is the free energy that step~5 compares.\par}
+  \lesson{The chain rule is exact; the model is what we choose to cross out.}
+\end{frame}
+
+\begin{frame}{Estimating a room: the whole procedure}
+  \centering
+  \begin{tikzpicture}[st/.style={bx, minimum width=2.15cm, minimum height=1.05cm},
+                      fr/.style={font=\scriptsize\bfseries, text=accent}]
+    \node[font=\small\bfseries, anchor=west] at (-1.1,2.0) {1. The room is unknown: build it while driving};
+    \node[st] (s) at (0,0.9)    {laser scan};
+    \node[st] (p) at (2.75,0.9) {where am I?\\hidden SLAM};
+    \node[st] (g) at (5.5,0.9)  {what part of the\\floor is free?};
+    \node[st, draw=cool, fill=cool!10] (o) at (8.25,0.9) {outline,\\redrawn every second};
+    \node[st] (d) at (11.0,0.9) {drive where\\most is unseen};
+    \foreach \a/\b in {s/p, p/g, g/o, o/d} \draw[arr] (\a) -- (\b);
+    \draw[arr, muted] (d.south) -- ++(0,-0.35) -| node[pos=0.25, below, lab, text=muted] {a new place, new scans} (s.south);
+    \foreach \n/\f in {p/1, g/2, o/3, d/4} \node[fr, above=1pt of \n.north east, anchor=south east] {step \f};
+    % promotion
+    \draw[muted, densely dashed] (-1.1,-0.75) -- (12.2,-0.75);
+    \node[lab, fill=white, text=accent, font=\scriptsize\bfseries] at (5.5,-0.75)
+         {step 5: nothing left worth seeing, so keep the best outline};
+    \node[font=\small\bfseries, anchor=west] at (-1.1,-1.3) {2. The room is known: use it};
+    \node[st, draw=cool, fill=cool!10] (r) at (1.4,-2.25) {room polygon,\\now fixed};
+    \node[st] (l) at (4.6,-2.25) {where am I?\\against the walls};
+    \node[st, draw=muted] (sh) at (8.6,-2.25) {the hidden SLAM keeps running:\\if it disagrees,\\the room may be wrong};
+    \draw[arr] (r) -- (l);
+    \node[fr, above=1pt of l.north east, anchor=south east] {next};
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  \small While the room is unknown, the outline never corrects the pose: a wrong wall would pull
+  the pose, and the pulled pose would confirm the wrong wall.
+\end{frame}
+
+\begin{frame}{Step 5: which outline becomes the room? Bayes, on the structure}
+  \centering
+  \begin{tikzpicture}[x=0.245cm, y=0.245cm,
+      hit/.style={fill=black!55},
+      cand/.style={very thick, line join=round},
+      mis/.style={fill=cool!55, draw=white},
+      cpx/.style={fill=accent!65, draw=white}]
+    \begin{scope}[shift={(0,0)}]
+      \hits \draw[cand, muted] (0,0) rectangle (8,7);
+      \node[lab, anchor=north west] at (0,-0.4) {rectangle, 4 corners};
+      \bars{0}{60}{23} \node[lab, anchor=west] at (9.4,-2.75) {83};
+    \end{scope}
+    \begin{scope}[shift={(13,0)}]
+      \hits \draw[cand, good!70!black] (0,0) -- (8,0) -- (8,4) -- (4,4) -- (4,7) -- (0,7) -- cycle;
+      \node[lab, anchor=north west] at (0,-0.4) {L, 6 corners};
+      \bars{0}{20}{35} \node[lab, anchor=west, text=good!70!black] at (6.4,-2.75) {\textbf{55}: wins};
+    \end{scope}
+    \begin{scope}[shift={(26,0)}]
+      \hits \draw[cand, muted] (0,0) -- (8,0) -- (8,4) -- (4,4) -- (4,7) -- (3,7) -- (3,6.6) -- (2,6.6) -- (2,7) -- (0,7) -- cycle;
+      \node[lab, anchor=north west] at (0,-0.4) {L + a bump, 10 corners};
+      \bars{0}{18}{58} \node[lab, anchor=west] at (8.6,-2.75) {76};
+    \end{scope}
+    \fill[mis] (4,-4.3) rectangle ++(0.8,-0.8); \node[lab, anchor=west] at (4.9,-4.7) {misfit};
+    \fill[cpx] (11,-4.3) rectangle ++(0.8,-0.8); \node[lab, anchor=west] at (11.9,-4.7) {$5.8$ nats per corner};
+    \node[lab, anchor=west, text=muted] at (23,-4.7) {numbers illustrative};
+  \end{tikzpicture}
+
+  \vspace{-1.1em}
+  \setlength{\abovedisplayskip}{0pt}\setlength{\belowdisplayskip}{2pt}\setlength{\abovedisplayshortskip}{0pt}
+  \[
+    p(m\given o)\;\propto\;p(o\given m)\,p(m),
+    \qquad
+    p(o\given m)=\int p(o\given\theta_m,m)\,p(\theta_m\given m)\,d\theta_m
+  \]
+  \[
+    -\ln p(o\given m)\;\approx\;
+    \underbrace{-\ln p(o\given\hat\theta_m,m)}_{\substack{\text{misfit of the best-placed}\\\text{outline ($\hat\theta_m$)}}}
+    \;+\;
+    \underbrace{5.8\nats\times\text{corners}}_{\substack{\text{the price of averaging over}\\\text{where the corners could be}}}
+    \;=\;F(m)
+  \]
+  {\footnotesize Bayes as for the room, now over the \emph{structure} $m$: lowest $F$ = most probable structure.\\
+  \textbf{nat}: the unit of $-\ln p$. A difference of $k$ nats is odds of $e^k$ to 1 (5.8 nats $\approx$ 333 to 1).\par}
+\end{frame}
+
+\begin{frame}{The room supplies the likelihood: a distance field}
+  \centering
+  \begin{tikzpicture}[mstep/.style={->, very thick, draw=muted, shorten <=3pt, shorten >=3pt}]
+    \node[inner sep=0] (a) at (0,0)   {\includegraphics[width=4.2cm]{figures/d3_sdf_a.pdf}};
+    \node[inner sep=0] (b) at (6.2,0) {\includegraphics[width=4.2cm]{figures/d3_sdf_b.pdf}};
+    \draw[mstep] (a.east) -- node[above, lab] {place a scan} (b.west);
+    \node[lab, anchor=north, align=center, text width=4.8cm] at ([yshift=-3pt]a.south)
+      {\textbf{1. Once per room}: at every point $p$, $d(p)$ = distance to the nearest wall
+       (white lines: 25, 50, 75 cm)};
+    \node[lab, anchor=north, align=center, text width=4.8cm] at ([yshift=-3pt]b.south)
+      {\textbf{2. Every scan}: put its returns where pose $X$ says; each one reads
+       $d_n(X)=d(\text{return } n \text{ placed at } X)$};
+  \end{tikzpicture}\\[0.2em]
+  \raggedright\small
+  \begin{itemize}
+    \item $d_n(X)$ \alert{is} the prediction error: a return should sit on a wall, $d=0$.
+          No expected scan is ever drawn.
+    \item The slope of $d$ (red arrows) says which way to move each return: it gives the gradient for free.
+  \end{itemize}
+  {\footnotesize The code calls it \texttt{sdf}, \emph{signed distance function}; on a polygon it is unsigned, just the distance.\par}
+\end{frame}
+
+\begin{frame}{Localising: Kalman's structure, but optimised}
+  \small
+  With a Gaussian prior and a linear sensor, minimising $F$ (Day 2) gives exactly the Kalman update.
+  Localising has the same two parts:
+  \[
+    F(X) \;=\; \underbrace{\tfrac12\,(X-\bar X)^{\!\top}\bar P^{-1}(X-\bar X)}_{\text{predict: where the wheels say}}
+    \;+\; \underbrace{\tfrac{1}{2\sigma^2}\textstyle\sum_n d_n(X)^2}_{\text{update: every return onto its wall}}
+  \]
+  \vspace{-0.8em}
+  {\footnotesize\makebox[\linewidth][c]{%
+  \begin{tabular}{@{}l@{\ \ }l@{\qquad}l@{\ \ }l@{}}
+    $X$ & the pose: $x$, $y$, heading & $d_n(X)$ & distance from return $n$, placed at $X$, to its wall\\
+    $\bar X,\ \bar P$ & pose predicted by odometry, its covariance & $\sigma$ & noise of one such distance
+  \end{tabular}}\par}
+  \vspace{0.5em}
+  \vspace{0.5em}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      \textbf{Kalman (extended)}: linearise $d_n$ once, at $\bar X$, and take one step.\\[0.3em]
+      \footnotesize That single Gauss--Newton step from $\bar X$ \emph{is} the EKF update: the same
+      gain, the same covariance.
+    \end{column}
+    \begin{column}{0.49\textwidth}
+      \textbf{Here}: keep stepping, re-linearising at each new pose, until $F$ stops falling. It
+      matters when the heading is off: a wall distance turns with it.\\[0.3em]
+      \footnotesize Covariance $P=\Hess^{-1}$, with $\Hess=\bar P^{-1}+J^{\top}J/\sigma^2$ the
+      curvature of $F$ at its minimum and $J$ how each $d_n$ changes with the pose: Day 2's Laplace.
+    \end{column}
+  \end{columns}
+  \vspace{0.6em}
+  \centering\alert{Prior from motion, likelihood from the sensor: optimised, not linearised once.}
+\end{frame}
+
+% =================================================================================================
+\section{The chair: where it is}
+% =================================================================================================
+
+
+\begin{frame}{What an object agent sees: a mask}
+  \centering
+  \begin{tikzpicture}[mimg/.style={inner sep=0, draw=muted!60},
+                      mstep/.style={->, very thick, draw=muted, shorten <=3pt, shorten >=3pt},
+                      mcap/.style={font=\scriptsize, align=center, text width=4cm, inner sep=1pt}]
+    \node[mimg] (a) at (0,0)   {\includegraphics[width=3.8cm]{figures/d3_mask_a.pdf}};
+    \node[mimg] (b) at (5.1,0) {\includegraphics[width=3.8cm]{figures/d3_mask_b.pdf}};
+    \node[inner sep=0] (c) at (9.9,0.25) {\includegraphics[width=2.8cm]{figures/d3_mask_c.pdf}};
+    \draw[mstep] (a.east) -- node[above, lab] {segment} (b.west);
+    \draw[mstep] (b.east) -- node[above, lab, align=center] {depth\\+ pose $\hat X$} ++(1.2,0);
+    \node[lab, text=muted, anchor=north east] at (c.north east) {sketch};
+    \node[mcap, anchor=north] at ([yshift=-3pt]a.south) {\textbf{1. The camera}\\colour and depth, every frame};
+    \node[mcap, anchor=north] at ([yshift=-3pt]b.south) {\textbf{2. Retina's segmenter}\\one mask per object,
+          with a \alert{label} and a \alert{score}};
+    \node[mcap, anchor=north] at ([yshift=-3pt]b.south -| c.south) {\textbf{3. A chair's mask in 3-D}\\
+          \textcolor{cool}{dots: the chair};\\ \textcolor{accent}{crosses: spill onto floor, wall}};
+    % what travels with every mask
+    \node[mtag=2.9cm, draw=cool]   at (-0.3,-2.6) {\textbf{label + score}\\a guess: table 0.75,\\or desk 0.55};
+    \node[mtag=2.9cm, draw=good]   at (2.9,-2.6)  {\textbf{points}\\one $\sigma$ per frame, wider\\far, moving, off-centre};
+    \node[mtag=2.9cm, draw=accent] at (6.1,-2.6)  {\textbf{variance}\\blur and jitter, zero mean:\\it averages out};
+    \node[mtag=3.3cm, draw=accent] at (9.6,-2.6)  {\textbf{bias}\\the camera turned: all points\\shift one way, and it does\\not average out};
+  \end{tikzpicture}
+
+  \small
+  A mask says ``chair'', not \emph{which} chair: each one is handed to an instance, or starts a new
+  one. What instance $i$ was handed is its data $\bar Z_i$, and \alert{the handing is one best guess} (two frames on).
+\end{frame}
+
+\begin{frame}{The chair: the same free energy}
+  \small
+  \setlength{\abovedisplayskip}{4pt}\setlength{\belowdisplayskip}{4pt}
+  Now the robot's pose is known, from the localiser, and the chair's is not. Bayes as for the room: posterior $\propto$ prior $\times$ likelihood, and $F$ is its $-\ln$:
+  \[
+    F(\theta) \;=\; \underbrace{\tfrac12\,(\theta-\bar\theta)^{\!\top}\bar P^{-1}(\theta-\bar\theta)}_{\text{prior: where I believed the chair was}}
+    \;+\; \underbrace{\textstyle\sum_n \rho\big(d_n(\theta)/\sigma\big)}_{\text{likelihood: every mask point onto the chair}}
+  \]
+  {\footnotesize\makebox[\linewidth][c]{%
+  \begin{tabular}{@{}l@{\ \ }l@{\qquad}l@{\ \ }l@{}}
+    $\theta$ & the chair's pose: $x$, $y$, heading &
+    $d_n(\theta)$ & mask point $n$'s distance to the chair\\[2pt]
+    $\bar\theta,\ \bar P$ & last belief, covariance; widened when unseen &
+    $\sigma$ & the frame's noise, shared by its points
+  \end{tabular}}\par}
+  \vspace{0.3em}
+  {\footnotesize $\rho(u)=-\ln p(u)$: a point's cost at $u$ standard deviations. A Gaussian gives
+  $u^2/2$; ``chair or clutter'' stops growing, so a stray point pulls with bounded force.\par}
+  \vspace{0.6em}
+  \textbf{The shape is not fitted}: it is the class template, seat $60\times52$ cm with its top at
+  0.60 m and a backrest 0.66 m above it. Only the pose is estimated.\\[0.3em]
+  Minimised by the same Gauss--Newton steps as the robot's pose; the covariance is again the inverse
+  curvature, $P=\Hess^{-1}$ (Day 2's Laplace).
+\end{frame}
+
+\begin{frame}{The chair's likelihood: signed distance, mixture, reprojection}
+  \begin{columns}[c]
+    \begin{column}{0.47\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm]
+        % camera and image plane
+        \fill[black!60] (0,0) circle (0.12);
+        \node[lab, above, align=center] at (0,0.15) {camera, at the\\robot's pose};
+        \draw[thick, muted] (0.9,-1.0) -- (0.9,1.4);
+        \node[lab, above] at (0.9,1.4) {image};
+        % believed object
+        \coordinate (ch) at (3.45,-0.55);
+        \chairside{ch}{1.0}{0.6}{0.7}{cool, very thick}
+        \node[lab, text=cool] at (4.0,-0.85) {the chair, at pose $\theta$};
+        % deprojection of a mask pixel
+        \draw[accent, thick] (0,0) -- (3.1,0.42);
+        \fill[accent] (0.9,0.122) circle (1.6pt);
+        \fill[accent] (3.1,0.42) circle (2.2pt);
+        \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, thick] (3.13,0.3) -- (3.37,0.3);
+        \node[lab, below, text=accent] at (2.55,0.43) {point $p_n$};
+        \node[lab] at (3.25,0.15) {$d_n$};
+        % reprojection of the silhouette
+        \draw[good, densely dashed] (3.31,0.75) -- (0,0);
+        \draw[good, densely dashed] (3.35,-0.55) -- (0,0);
+        \draw[good, line width=2.2pt] (0.9,0.199) -- (0.9,-0.146);
+        \draw[good, thin] (0.9,-0.1) -- (1.3,-1.3); \node[lab, text=good, anchor=north] at (1.3,-1.3) {predicted outline};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \footnotesize
+      \textbf{Signed distance.} Each mask pixel, with its depth, is placed in the room through the
+      robot's pose: a 3-D point $p_n$. Its error $d_n$ is its distance to the chair's surface:
+      $0$ on it, $+$ outside, $-$ inside.\\[0.3em]
+      \textbf{Mixture.} The chair is a seat, a backrest and four legs. A point is either on the chair
+      or clutter, $\rho=-\ln(\text{chair}+\text{clutter})$, so a stray point costs a bounded amount.\\[0.3em]
+      \textbf{Precision.} One $\sigma$ per frame (blur, depth, range, off-centre), plus one error
+      \emph{shared} by all its points, counted once (next frames): the robot's pose, wider far away or
+      moving. No gate: a poor view counts, for little.\\[0.3em]
+      \textbf{Reprojection.} The reverse path: the believed silhouette, projected into the image with its
+      predicted depth, is checked against the edges there. \alert{On the robot it feeds existence, not the fit.}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Association: the mistake the free energy cannot see}
+  \begin{columns}[c]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[cool, thick, fill=cool!10, rotate around={25:(0,0)}] (0,0) ellipse (1.25 and 0.65);
+        \fill[cool] (0,0) circle (2pt); \node[lab, below] at (0,-0.05) {poorly known};
+        \draw[cool, thick, fill=cool!10] (2.9,0.15) ellipse (0.45 and 0.4);
+        \fill[cool] (2.9,0.15) circle (2pt); \node[lab, above] at (2.9,0.55) {precise};
+        \fill[accent] (0.85,0.55) circle (2.5pt);
+        \fill[accent] (3.0,0.05) circle (2.5pt);
+        \fill[accent] (1.9,-0.75) circle (2.5pt);
+        \node[lab, right, text=accent] at (1.95,-0.75) {starts a new candidate};
+      \end{tikzpicture}\\[0.4em]
+      {\small a poorly known object accepts detections from further away}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \small
+      An object may claim only detections inside its own uncertainty (the ellipse). Then each mask goes
+      to the object whose shape explains it best: lowest $-\ln p$ first, one each.\\[0.5em]
+      That is still one best guess: it has no uncertainty to pay for, so it adds nothing to $F$.
+      \alert{A wrong match is invisible to the quantity that would have registered it.}\\[0.5em]
+      The repair comes later and from elsewhere: merging, and the existence belief.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{The common-mode ceiling}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[very thick, muted] (0,0) -- (5,0);
+        \node[lab, below] at (1.1,0) {the true surface};
+        \foreach \x/\e in {0.3/.04,0.65/-.05,1.0/.06,1.35/-.03,1.7/.05,2.05/-.06,2.4/.03,2.75/-.04,3.1/.06,3.45/-.05,3.8/.04,4.15/-.03,4.5/.05} {
+          \fill[cool] (\x,\e) circle (1.5pt);
+          \fill[accent] (\x+0.25,0.75+\e) circle (1.5pt);
+        }
+        \draw[-{Stealth[length=2.5mm]}, very thick, accent] (1.0,0.1) -- (1.25,0.65);
+        \draw[-{Stealth[length=2.5mm]}, very thick, accent] (3.45,0.1) -- (3.7,0.65);
+        \node[lab, text=accent, above] at (2.5,1.05) {one pose error moves them all together};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      The same arrow as yesterday, now on a thousand points.\\[0.5em]
+      Averaging points removes their small independent jitter. It cannot touch the arrow.\\[0.5em]
+      \alert{A denser mask eventually stops helping}: the limit is set by the shared error (the robot's
+      pose, the range, the motion), not by the number of pixels. And the data cannot tell a displaced object from a displaced robot.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% =================================================================================================
+\section{The chair: its life}
+% =================================================================================================
+
+
+\begin{frame}{The life of an instance}
+  \centering
+  \begin{tikzpicture}
+    \node[bx, draw=muted, densely dashed, minimum width=2.5cm] (p) at (0,0) {\textbf{pending}\\no node, no belief};
+    \node[bx, draw=cool, fill=cool!10, minimum width=2.5cm] (l) at (4.4,0) {\textbf{live}\\on the graph};
+    \node[bx, draw=cool, fill=cool!4, minimum width=2.5cm] (f) at (4.4,-2.1) {\textbf{frozen}\\held, less and less sure};
+    \node[bx, draw=accent, fill=accent!10, minimum width=2.5cm] (d) at (8.8,0) {\textbf{dead}\\owner removes the node};
+    \draw[arr] (p) -- node[above, lab] {evidence} node[below, lab] {matures} (l);
+    \draw[arr] (l) -- node[above, lab] {absence} node[below, lab] {where visible} (d);
+    \draw[arr] (l.-110) -- node[left, lab] {frame unfit} (f.110);
+    \draw[arr] (f.70) -- node[right, lab] {next good frame} (l.-70);
+    \draw[arr, muted, densely dashed] (d.north) -- ++(0,0.65) -| node[above, lab, pos=0.25, text=black] {seen again: a \emph{new} node, a new birth stamp} (p.north);
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  \small Pending exists so that a wrong hypothesis costs nothing: nobody has read it yet.\\
+  Frozen suppresses an instance's \emph{intake}, not the instance.
+  \lesson{Other agents read only live instances; a wrong guess dies while still pending.}
+\end{frame}
+
+\begin{frame}{Birth is a comparison between two worlds}
+  \centering
+  \begin{tikzpicture}
+    \foreach \x/\ttl in {0/{world A: nothing new here}, 6.1/{world B: one more object}} {
+      \begin{scope}[shift={(\x,0)}]
+        \draw[muted, rounded corners=2pt] (0,0) rectangle (4.6,1.7);
+        \node[lab, above, font=\footnotesize\bfseries] at (2.3,1.7) {\ttl};
+        \foreach \p/\q in {1.5/0.55, 1.75/0.95, 2.05/0.6, 2.3/1.05, 2.6/0.7, 2.85/1.0} \fill[accent] (\p,\q) circle (2pt);
+      \end{scope}
+    }
+    \node[lab, align=center] at (2.3,0.25) {these points are unexplained};
+    \draw[cool, very thick, fill=cool!15, fill opacity=0.6] (7.4,0.4) rectangle (9.15,1.25);
+    \node[lab, align=center] at (8.4,0.15) {explained, by a new object};
+    \begin{scope}[shift={(5.3,-1.45)}, x=0.55cm, y=0.55cm]
+      \draw[very thick] (-5.5,0) -- (5.5,0);
+      \fill[muted] (0,0) -- (-0.3,-0.5) -- (0.3,-0.5) -- cycle;
+      \fill[cool!45, draw=white, very thick] (-4.5,0.05) rectangle (-0.9,1.1);
+      \node[lab] at (-2.7,0.58) {what it explains};
+      \fill[accent!40, draw=white, very thick] (0.9,0.05) rectangle (2.9,1.1);
+      \node[lab] at (1.9,0.58) {its cost};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  \small The room's corners faced the same trade. \alert{The cost is not a penalty added on top}:
+  every live object already pays it.
+  \lesson{An object is born when what it explains outweighs what it costs, both in nats.}
+\end{frame}
+
+\begin{frame}{A streak cannot read evidence}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d3_birth.pdf}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \small
+      \begin{tabular}{@{}l r r@{}}
+        \toprule
+        300 runs & streak of 3 & $\Delta F<0$ \\
+        \midrule
+        2 sharp views & 0\% & 98\% \\
+        10 reflections & 94\% & 0\% \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.8em}
+      A streak counts frames. $\Delta F$ reads what each frame says: how sharp it was, and how well
+      the frames agree.
+    \end{column}
+  \end{columns}
+  \lesson{Two sharp views are worth more than ten reflections, and only nats can say so.}
+\end{frame}
+
+\begin{frame}{A miss is evidence only where the object would have been seen}
+  \centering
+  \begin{tikzpicture}[scale=0.8]
+    \foreach \x/\t/\c/\v in {0/occupancy: a return/good/confirms, 5.3/{predicted visible, absent}/accent/removes, 10.6/occluded or out of view/muted/holds} {
+      \begin{scope}[shift={(\x,0)}]
+        \fill[black!55] (0,0.8) circle (0.17);
+        \fill[cool!18, draw=cool!40] (0,0.8) -- (3.6,1.9) -- (3.6,-0.3) -- cycle;
+        \node[lab, align=center] at (1.8,-0.9) {\t};
+        \node[font=\small\bfseries, text=\c!85!black] at (1.8,-1.45) {\v};
+      \end{scope}
+    }
+    \node[obj, fill=cool!40] at (2.8,0.8) {};
+    \foreach \y in {0.62,0.8,0.98} \fill[good] (2.5,\y) circle (1.5pt);
+    \node[obj, draw=accent, densely dashed] at (8.1,0.8) {};
+    \draw[very thick, muted] (13.0,-0.2) -- (13.0,1.8);
+    \node[obj, fill=muted!25] at (13.8,0.8) {};
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  \small
+  The whole stage lies between the middle panel and the right one. Existence is one running number,
+  evidence for and against simply adds to it, and it never reaches certainty, so it can always recover.
+  \lesson{Absence removes an object only where the robot would have seen it.}
+\end{frame}
+
+\begin{frame}{Four rules, one tour}
+  \begin{columns}[c]
+    \begin{column}{0.46\textwidth}
+      \includegraphics[width=\textwidth]{d3_existence.pdf}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \footnotesize
+      \begin{tabular}{@{}l l@{}}
+        \toprule
+        rule & removes (frame) \\
+        \midrule
+        \textbf{evidence} & vase (68) \\
+        no walls in line of sight & vase (68), \alert{chair} (174) \\
+        weight the count & vase (13) \\
+        miss counter & \alert{everything} by frame 44 \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.6em}
+      \small
+      Never resolvable? No decay constant. The instance is routed to a \textbf{verification
+      pull}: uncertainty that cannot be resolved from here is a reason to move.
+    \end{column}
+  \end{columns}
+  \lesson{Only absence weighted by visibility, with walls in the line of sight, removes just the vase.}
+\end{frame}
+
+\begin{frame}{A constant $Q$ forgets on the agent's clock}
+  \begin{columns}[c]
+    \begin{column}{0.47\textwidth}
+      \includegraphics[width=\textwidth]{d3_constq.pdf}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \small
+      Every frame, seen or not, a fixed amount of doubt is added.
+      \begin{itemize}
+        \item A table known to 3 cm loses half its precision in \textbf{3.6 s}.
+        \item It is back at the prior after about \textbf{5.9 minutes}, whether it was tracked for
+              thirty seconds or for three hours.
+      \end{itemize}
+      \begin{measured}{a real table, 1320 blind cycles}
+        Predicted error 0.184 m; logged 0.170 m. The next sparse mask re-cut the table.
+      \end{measured}
+    \end{column}
+  \end{columns}
+  \lesson{A constant process noise forgets at one rate, whatever the robot has learnt.}
+\end{frame}
+
+\begin{frame}{The forgetting rate becomes something the object infers}
+  \centering
+  \begin{tikzpicture}[needle/.style={-{Stealth[length=2.5mm]}, very thick, color=accent}]
+    \foreach \x/\ang/\ttl/\txt in {0/150/{views keep agreeing}/{it forgets more slowly,\\precision accumulates}, 6.7/35/{a sustained surprise}/{it forgets faster\\and adapts}} {
+      \begin{scope}[shift={(\x,0)}]
+        \draw[muted, line width=5pt] (180:1.25) arc (180:0:1.25);
+        \draw[needle] (0,0) -- (\ang:1.1);
+        \fill[black!60] (0,0) circle (3pt);
+        \node[lab] at (-1.55,-0.15) {slow};
+        \node[lab] at (1.55,-0.15) {fast};
+        \node[font=\footnotesize\bfseries, above] at (0,1.45) {\ttl};
+        \node[lab, align=center, below] at (0,-0.35) {\txt};
+      \end{scope}
+    }
+  \end{tikzpicture}
+
+  \vspace{0.7em}
+  \small Each object turns its own dial, by how surprised it has been against how surprised it
+  expected to be. One outrageous frame moves it only a bounded amount, and a gentle pull keeps it
+  from sticking: \textbf{stiff, but never locked}.\\[0.4em]
+  \alert{Design only: no agent runs this yet.}
+  \lesson{Each object infers how fast to forget from its own surprise.}
+\end{frame}
+
+% =================================================================================================
+\section{The chair: what it looks like}
+% =================================================================================================
+
+
+\begin{frame}{Aspect: the class can be imagined, the instance can be recognised}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm, g/.style={thick, color=good, opacity=0.6}]
+    \node[font=\footnotesize\bfseries] at (-3.5,2.7) {``How do you imagine a chair?''};
+    \foreach \w/\h/\b in {0.97/1.0/1.05, 1.06/1.05/1.15, 1.14/1.09/1.25, 1.0/1.06/1.23, 1.11/1.02/1.09} {
+      \chairside{-4.0,0}{\w}{\h}{\b}{g}
+    }
+    \node[lab, align=center] at (-3.5,-0.5) {the class: what any chair might look like\\held inside \textsf{chair\_concept}};
+    \draw[muted, densely dashed] (0,-0.9) -- (0,2.9);
+    \node[font=\footnotesize\bfseries] at (3.5,2.7) {``Is this the one I saw?''};
+    \chairside{1.75,0}{1.05}{1.03}{1.15}{line width=2pt, accent!80}
+    \chairside{4.35,0}{1.05}{1.03}{1.15}{line width=2pt, cool}
+    \node[lab] at (2.3,-0.2) {chair\_22};
+    \node[lab] at (4.9,-0.2) {chair\_23};
+    \node[lab, align=center] at (3.5,-0.72) {the instances: what these two looked like, kept with each};
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  \small The same split as geometry: the class is a prior inside the agent, an instance is a posterior
+  of its own.\\[0.2em]
+  \alert{Aspect is a dimension of the concept, and it exists as properties of its instances.}
+\end{frame}
+
+\begin{frame}{How do you imagine a chair? Sample the prior and render it}
+  \centering
+  \begin{tikzpicture}[st/.style={draw=good, thick, rounded corners=3pt, fill=good!10, align=center, font=\scriptsize, minimum width=3.0cm, minimum height=1.5cm, inner sep=3pt}, g/.style={thick, color=good}]
+    \node[st] (c) at (0,0) {\textbf{the card}\\[0.15em]seat $0.60\pm0.05$ m wide\\seat $0.595\pm0.03$ m high\\back $0.655\pm0.06$ m\\free or against a wall};
+    \node[st] (s) at (4.0,0) {\textbf{sample}\\[0.15em]sizes, place, heading;\\drop the impossible ones};
+    \node[st] (r) at (8.0,0) {\textbf{render}\\[0.15em]through the ZED model\\and the LiDAR models};
+    \draw[flow] (c) -- (s); \draw[flow] (s) -- (r);
+    \draw[flow] (r.east) -- (10.15,0);
+    \begin{scope}[shift={(10.3,-0.55)}, x=0.75cm, y=0.75cm]
+      \foreach \w/\h/\b in {0.97/1.0/1.05, 1.06/1.05/1.15, 1.14/1.09/1.25} { \chairside{0.1,0}{\w}{\h}{\b}{g} }
+    \end{scope}
+    \node[lab, align=center] at (11.0,-1.15) {drawn on the chat canvas};
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  \begin{itemize}\small
+    \item It asks the question ``could I see one from there?'' of something that is not in the room:
+          the same samples give a probability of detection.
+    \item A chair on the graph is fitted as a pose of a fixed template. Imagination also draws how
+          real chairs vary.
+    \item \alert{Today the class's look is a shape, written by hand.} No colour, and nothing learned from
+          the chairs it has met.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{An instance's look is measured one direction at a time \wip}
+  \begin{columns}[c]
+    \begin{column}{0.36\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \foreach \a in {0,30,...,330} \draw[muted!60] (0,0) -- (\a:1.95);
+        \draw[muted!60] (0,0) circle (1.95);
+        \foreach \a in {90,120,210} {
+          \fill[good!35, draw=good, thick] (0,0) -- (\a-30:1.95) arc (\a-30:\a:1.95) -- cycle;
+          \node[draw=good, fill=white, minimum size=0.42cm, inner sep=0pt, rounded corners=1pt] at (\a-15:1.42) {};
+        }
+        \fill[white, draw=black, thick] (-0.3,-0.27) rectangle (0.3,0.27);
+        \draw[very thick] (-0.3,-0.27) -- (0.3,-0.27);
+        \node[lab, above] at (0,1.98) {front};
+      \end{tikzpicture}\\[0.3em]
+      \footnotesize 12 directions of $30^\circ$; the best view of each is kept
+    \end{column}
+    \begin{column}{0.6\textwidth}
+      \footnotesize
+      \begin{tabular}{@{}p{3.4cm} p{4.6cm}@{}}
+        \toprule
+        what is kept & where it stands \\
+        \midrule
+        colour of each instance & runs, for display only; deliberately in no fit \\
+        a small crop per direction & on a branch; stored by long-term memory across lives \\
+        a learned descriptor per direction (the atlas) & runs in the chair agent in shadow mode; not in long-term memory \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.7em}
+      \small
+      A view from the front says little about the back, so a look is a set of views, each tagged with
+      where it was seen from.\\[0.4em]
+      \alert{Still unreliable:} near-identical crops have been filed in far-apart directions.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% =================================================================================================
+\section{The chair: what it offers}
+% =================================================================================================
+
+
+\begin{frame}{Recap from Day 2: $G$ scores an action before its reading exists}
+  For a policy $\pi$, with predicted states and readings $\tilde s,\tilde o$, and the goal as a prior over readings $p(\tilde o)$:
+  \[
+    G(\pi) = \E_{q(\tilde s,\tilde o\given\pi)}\Big[
+      \underbrace{\ln q(\tilde s\given\pi) - \ln q(\tilde s\given\tilde o,\pi)}_{\text{epistemic}}
+      \;\underbrace{-\ln p(\tilde o)}_{\text{pragmatic}}
+      + \underbrace{\ln q(\tilde s\given\tilde o,\pi)-\ln p(\tilde s\given\tilde o)}_{\to 0 \text{ if inference is good}}
+    \Big]
+  \]
+  \centering
+  \includegraphics[width=0.86\textwidth]{d4_terms.pdf}
+  \lesson{Both terms are in nats; the balance moves as the beliefs sharpen.}
+\end{frame}
+
+\begin{frame}{For Gaussian beliefs, three names for one number}
+  \begin{columns}[c]
+    \begin{column}{0.36\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[cool, very thick, rotate=25] (0,0) ellipse (1.7cm and 0.95cm);
+        \draw[accent, very thick, rotate=70, fill=accent!25] (0,0) ellipse (0.85cm and 0.42cm);
+        \node[font=\scriptsize, text=cool] at (0.15,1.25) {$\Lambda$: before};
+        \node[font=\scriptsize] at (0,-1.45) {$\Lambda + J^\top R^{-1}J$: after};
+      \end{tikzpicture}\\[0.3em]
+      {\small $\Delta H$ is the log of the area ratio.}
+    \end{column}
+    \begin{column}{0.6\textwidth}
+      \[
+        \underbrace{H[q]-\E H[q\given o]}_{\text{expected entropy drop}}
+        = \underbrace{I(s;o)}_{\text{mutual information}}
+      \]
+      \[
+        = \underbrace{\tfrac12\ln\frac{|\Lambda + J^\top R^{-1}J|}{|\Lambda|}}_{\text{D-optimal design}}
+      \]
+      \small
+      The epistemic term, the information gain of active sensing and the criterion of optimal
+      experiment design are \alert{one quantity}. It depends on \emph{where} you look, not on
+      \emph{what} you will see, so it can be computed before moving.
+    \end{column}
+  \end{columns}
+  \lesson{Information gain depends on where the robot would look, so it is computed before moving.}
+\end{frame}
+
+\begin{frame}{Each term of $G$ belongs to the process that can compute it}
+  \centering
+  \begin{tikzpicture}[p/.style={box4, minimum width=2.6cm}]
+    \node[p] (t) at (0,1.5) {table agent\\{\scriptsize holds $\Sigma_{\theta_1}$}};
+    \node[p] (f) at (0,0) {refrigerator agent\\{\scriptsize holds $\Sigma_{\theta_2}$}};
+    \node[p] (r) at (0,-1.5) {room agent\\{\scriptsize holds $\Sigma_X$}};
+    \node[box4, very thick, fill=muted!12, minimum width=3.6cm, minimum height=1.3cm] (c) at (6.0,0) {controller\\{\scriptsize assembles $G$, resolves, optimises}};
+    \node[box4, minimum width=1.9cm] (m) at (10.2,0) {motion};
+    \foreach \a in {t,f,r} \draw[arr4] (\a) -- (c);
+    \draw[arr4] (c) -- node[above, lab4] {$\argmin G$} (m);
+    \node[lab4, align=center, fill=white, inner sep=1.5pt] at (2.95,1.27) {$\Delta H$ in nats, ranked faces,\\stand-off band, $\Sigma^\ast$};
+    \draw[arr4, densely dashed, accent] (m.south) -- ++(0,-1.75) -| (r.south);
+    \node[lab4, text=accent, align=center, fill=white] at (6.0,-2.32) {what the motion observes shrinks the very $\Sigma$ that priced it};
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  \small An offer is a node in the graph. Add a class of object and you add terms to $G$;
+  the controller does not change.
+  \lesson{Each agent prices its own term of $G$; the controller only adds and compares.}
+\end{frame}
+
+\begin{frame}{A chair publishes two offers: a look, and an approach}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm]
+        \fill[cool!15, draw=cool, very thick] (-0.6,-0.55) rectangle (0.6,0.55);
+        \fill[cool, draw=cool] (-0.6,0.45) rectangle (0.6,0.6);
+        \node[lab] at (0,0) {chair};
+        \foreach \a/\n in {0/right, 90/back, 180/left}
+          {\draw[densely dashed, muted] (\a:0.65) -- (\a:1.55); \fill[muted] (\a:1.55) circle (2.5pt);
+           \node[lab, text=muted] at (\a:1.9) {\n};}
+        \fill[accent!20, draw=accent, thick] (0,-1.6) -- (-0.45,-0.6) -- (0.45,-0.6) -- cycle;
+        \fill[accent] (0,-1.6) circle (2.5pt);
+        \node[lab, text=accent, anchor=west, align=left] at (0.2,-1.75) {front: the best face\\to look from};
+        \draw[accent, very thick, -{Stealth}] (-2.0,-2.3) -- (-0.15,-1.7);
+        \fill[accent!50, draw=black] (-2.1,-2.35) circle (5pt);
+        \node[lab] at (-2.1,-2.75) {robot};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \small
+      \textbf{Look} (epistemic): the face from which a view would shrink the chair's covariance most,
+      worth $P(\text{detect}\given\mathbf v)\,\Delta H$ nats. A face the detector cannot see from is worth
+      almost nothing.\\[0.5em]
+      \textbf{Approach} (pragmatic): front, left, back or right; the front (the seat side) first, once the
+      heading is known. It counts only when a person or a mission asks for this chair.\\[0.5em]
+      {\footnotesize Both are graph nodes, children of the chair. $\mathbf v$: where the robot would stand;
+      $\Delta H$: the entropy the look would remove.\par}
+    \end{column}
+  \end{columns}
+  \lesson{The chair prices what a look would teach it; where to drive is the controller's choice.}
+\end{frame}
+
+\begin{frame}{The split of knowledge}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[thick, fill=muted!20] (-1.05,-0.6) rectangle (1.05,0.6);
+        \node[font=\small] at (0,0) {table};
+        \foreach \a/\r/\col in {-90/1.6/accent, 90/1.9/muted, 0/2.45/muted} {
+          \draw[densely dashed, color=\col] (\a:0.95) -- (\a:\r);
+          \fill[color=\col] (\a:\r) circle (2.5pt);
+        }
+        \node[lab4, text=accent] at (-90:1.92) {long face: 0.8 nats};
+        \node[lab4] at (90:2.15) {0.2 nats};
+        \draw[very thick, accent!40] (-90:1.25) -- (-90:1.6);
+        \fill[accent!50, draw=black] (-2.45,-1.1) circle (5pt);
+        \node[lab4] at (-2.45,-1.5) {robot};
+        \draw[very thick] (1.65,-0.85) -- (1.65,1.15);
+        \node[lab4, align=center] at (2.35,0.15) {chair: only\\the executor\\knows};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \renewcommand{\arraystretch}{1.5}
+      \small
+      \begin{tabular}{@{}p{2.1cm} p{4.5cm}@{}}
+        \toprule
+        \textbf{producer} & which view, \emph{relative to its object}; what it is worth; when it has learnt enough ($\Sigma^\ast$) \\
+        \textbf{executor} & feasibility; the cost of getting there; how to move and stop \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.8em}
+      A producer cannot publish a world pose. A demand that may be impossible has no vocabulary for
+      saying so; a constraint can be negotiated.
+    \end{column}
+  \end{columns}
+  \lesson{The object says what a view is worth; the controller says whether it can get there.}
+\end{frame}
+
+\begin{frame}{The price of a view}
+  \centering
+  \[
+    \E[\Delta H](\mathbf v) \;=\; P(\text{detect}\given\mathbf v)\;\sum_j\tfrac12\ln\!\Big(1+\frac{I_j(\mathbf v)}{Y_j}\Big)
+  \]
+  \includegraphics[width=0.74\textwidth]{d4_currency.pdf}
+
+  \raggedright\small
+  $f_{\min}{=}0.10$, $f_{\max}{=}0.60$, $w_f{=}0.06$ are a prior, not a measurement. And because the
+  band is unimodal, a robot unsure of an object's size stands further back: no margin was set.
+  \lesson{A view is worth its information gain times the chance of detecting the object from there.}
+\end{frame}
+
+\begin{frame}{The controller is a selector: one comparison, every cycle}
+  \[
+    a^\star = \argmin_a\big[\lambda\cdot\mathrm{dist}(a) - \Delta H(a) - \text{pragmatic}(a)\big],
+    \qquad \lambda = 0.2\ \text{nats/m}
+  \]
+  \begin{columns}[c]
+    \begin{column}{0.56\textwidth}
+      \centering
+      \begin{tikzpicture}[x=3.0cm, y=0.95cm, lab/.style={font=\scriptsize}]
+        \draw[muted] (0,-0.3) -- (0,2.1);
+        \foreach \y/\n/\g/\c in {1.5/table long face/0.8/0.6, 0.3/room's wall/0.3/0.2} {
+          \fill[good!40] (0,\y) rectangle (-\g,\y+0.5);
+          \fill[accent!45] (0,\y) rectangle (\c,\y+0.5);
+          \node[lab, above] at (-0.4,\y+0.5) {\n};
+          \node[lab] at (-\g/2,\y+0.25) {gain $\g$};
+        }
+        \node[lab, right] at (0.6,1.75) {3 m: cost 0.6};
+        \node[lab, right] at (0.2,0.55) {1 m: cost 0.2};
+        \node[lab, align=center] at (0,-0.75) {$G_{\text{table}} = -0.2$ \quad beats \quad $G_{\text{wall}} = -0.1$};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \small
+      Illustrative gains.\\[0.3em]
+      Already driving to the wall? The table must win by a \textbf{switching margin},
+      $0.5$ nats: the price of work already invested.
+      \begin{itemize}
+        \item It is inside $G$, not a gate on it.
+        \item The offer in hand is re-scored with the rest.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \lesson{Every cycle, one comparison of every offer; distance and switching are priced in nats.}
+\end{frame}
+
+\begin{frame}{An offer loses value by succeeding}
+  \centering
+  \includegraphics[width=0.66\textwidth]{d4_handoff.pdf}
+
+  \raggedright\small
+  The toy of today's lab: two producers and a door worth 1 nat of preference. Nobody wrote
+  ``the table is done, go to the bottle''. Each look shrinks the covariance that priced the look,
+  until another offer is better by more than the margin.
+  \lesson{Interruption is a consequence of the values, not a rule in the executor.}
+\end{frame}
+
+\begin{frame}{Offers compete fairly only if every agent prices them on one scale}
+  \centering
+  \begin{tikzpicture}[lab/.style={font=\scriptsize}, ttl/.style={font=\footnotesize\bfseries, align=center}]
+    % panel 1: covariance too small
+    \begin{scope}[shift={(0,0)}]
+      \node[ttl] at (0,1.75) {1. covariance\\claimed too small};
+      \draw[accent, thick, densely dashed, rotate=20] (0,0) ellipse (1.25cm and 0.7cm);
+      \draw[cool, very thick, fill=cool!15, rotate=20] (0,0) ellipse (0.55cm and 0.3cm);
+      \node[lab, text=cool] at (0,-1.1) {claimed $\Sigma$};
+      \node[lab, text=accent] at (0,-1.4) {real spread};
+      \node[lab, align=center] at (0,-2.0) {its looks are\\priced too low};
+    \end{scope}
+    % panel 2: points counted as independent
+    \begin{scope}[shift={(4.1,-0.9)}, x=0.55cm, y=0.55cm]
+      \node[ttl] at (2,4.8) {2. points counted\\as independent};
+      \draw[-{Stealth}, muted] (0,0) -- (4.6,0) node[below left, lab, text=black] {points $N$};
+      \draw[-{Stealth}, muted] (0,0) -- (0,3.6) node[left, lab, text=black] {$\Delta H$};
+      \draw[accent, very thick, domain=0.05:4.4, samples=40] plot (\x, {0.75*ln(1+6*\x)});
+      \draw[good, very thick, domain=0:4.4, samples=40] plot (\x, {1.3*(1-exp(-1.6*\x))});
+      \node[lab, text=accent, anchor=west] at (2.4,3.05) {independent};
+      \node[lab, text=good!70!black, anchor=west] at (2.4,1.65) {shared error};
+      \node[lab, align=center] at (2.2,-2.0) {a dense mask\\outbids a sparse one};
+    \end{scope}
+    % panel 3: preferences written by us
+    \begin{scope}[shift={(9.4,0)}]
+      \node[ttl] at (0,1.75) {3. preference\\written by us};
+      \fill[good!40] (-0.9,0.1) rectangle (-0.15,0.9);
+      \node[lab] at (-0.52,-0.15) {look};
+      \node[lab] at (-0.52,1.1) {computed};
+      \fill[accent!40] (0.15,0.1) rectangle (0.9,1.0);
+      \node[lab] at (0.52,-0.15) {door};
+      \node[lab] at (0.52,1.2) {chosen};
+      \draw[muted] (-1.1,0.1) -- (1.1,0.1);
+      \node[lab, align=center] at (0,-2.0) {both in nats,\\not on one scale};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  \small Each agent prices a look with its own covariance $\Sigma$; the controller only compares the
+  numbers. $\Delta H$: the entropy a look would remove.
+  \lesson{Fair prices need calibrated covariances and no point counted twice.}
+\end{frame}
+
+\begin{frame}{The controller selects one offer, then follows a route to it}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=2.45cm, minimum height=1.05cm}]
+    \node[s, very thick, fill=accent!10, minimum width=3.0cm] (z) at (0,2.0) {selector\\{\scriptsize $\argmin G$ over all offers}};
+    \node[lab4, align=center, draw=muted, rounded corners=2pt, inner sep=4pt] (o) at (4.4,2.0) {offers on the graph:\\chair, table, door, room};
+    \draw[arr4] (o) -- (z);
+    \node[s, fill=cool!10] (a) at (0,0) {grid planner\\{\scriptsize the room}};
+    \node[s, fill=cool!10] (b) at (3.3,0) {route optimiser\\{\scriptsize the route}};
+    \node[s, fill=cool!10] (c) at (6.6,0) {head re-solved\\{\scriptsize what sensors see}};
+    \node[s, fill=good!12] (d) at (9.9,0) {follower\\{\scriptsize no obstacle term}};
+    \draw[arr4] (z) -- node[right, lab4] {the chosen goal} (a);
+    \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c); \draw[arr4] (c) -- (d);
+    \draw[thick] (-1.2,-0.8) -- (7.8,-0.8);
+    \node[font=\small] at (3.3,-1.12) {obstacles are handled here, at three scales};
+    \node[font=\small, align=center] at (9.9,-1.12) {handed a curve};
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  \small Every cycle the selector re-scores every offer. The follower turns a curve into wheel speeds with a
+  law we write down; its gains come from one length, $L = 0.5$ m (backup).
+  \lesson{The controller chooses by $G$; obstacles live in the route, not in the follower.}
+\end{frame}
+
+\begin{frame}{What is not established}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \begin{measured}{derived objective against a heuristic}
+        \small
+        The explorer written in nats, no free weights, against the hand-tuned scorer, over a
+        population of simulated rooms: \textbf{indistinguishable in the mean}. It made a majority of
+        rooms slightly worse and rescued a few outright failures.
+      \end{measured}
+      \small
+      The explorer running now scores unseen floor per metre: a coverage rule.
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      \textbf{Still design, not mechanism:}
+      \begin{itemize}
+        \item the horizon is one affordance deep: the next look, not the best order;
+        \item the pragmatic channel is thin;
+        \item an offer completes on a detection, not on reaching $\Sigma^\ast$.
+      \end{itemize}
+      \alert{The case for the derived form rests on its having no free parameters, not on performance.}
+    \end{column}
+  \end{columns}
+  \lesson{The derived objective has no free weights; it has not yet beaten the heuristic.}
+\end{frame}
+
+% =================================================================================================
+\section{Lab}
+% =================================================================================================
+
+
+\begin{frame}{Lab 4: the chair's life, its footing, its offers}
+  \texttt{labs/day4.ipynb}, about two hours.
+  \begin{columns}[T]
+    \begin{column}{0.31\textwidth}
+      \small
+      \textbf{Life cycle}
+      \begin{enumerate}
+        \item[A.] \textbf{Birth}: $\Delta F$ against a streak of three.
+        \item[B.] \textbf{Absence}: line of sight through walls; four rules on one tour.
+        \item[C.] \textbf{Forgetting}: constant $Q$ against inferred volatility.
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.33\textwidth}
+      \small
+      \textbf{Geometry}
+      \begin{enumerate}
+        \item[D.] \textbf{The room}: the vote, the band, four walls.
+        \item[E.] \textbf{The pose}: drive the route; NEES on three maps.
+        \item[F.] \textbf{Symmetry}: $F$ at the true pose and its half-turn.
+        \item[G.] \textbf{Ceiling}: independent against Woodbury.
+      \end{enumerate}
+    \end{column}
+    \begin{column}{0.31\textwidth}
+      \small
+      \textbf{Action}
+      \begin{enumerate}
+        \item[I.] \textbf{Where to look}: $\Delta H$ on one wall, travel priced in nats.
+        \item[J.] \textbf{Priced offers}: producers publish, the controller selects; the hand-offs nobody coded.
+      \end{enumerate}
+    \end{column}
+  \end{columns}
+  \vspace{0.5em}
+  \small Short of time: A, B, E, G and J. Route following and the explorer are in \texttt{day4\_extra.ipynb}.
+  \lesson{Each part checks one claim from this morning against a toy where the truth is known.}
+\end{frame}
+
+\begin{frame}{Tomorrow}
+  \begin{columns}[c]
+    \begin{column}{0.55\textwidth}
+      Today the chair was born, located, forgotten and offered. Tomorrow: the person talks about it.
+      \begin{itemize}
+        \item aspect: which chair the person means, and when ``a new one'' is the better answer;
+        \item the language agent: a language model that may only read beliefs and propose plans;
+        \item the inner voice: questions the robot would put to itself, and the open problems.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \begin{block}{Reading for Day 5}\small
+        \begin{itemize}
+          \item \emph{The Vygotskian Machine} (draft), \S3;
+          \item the mission language:\\ \texttt{\scriptsize language\_agent/etc/skills/missions.md}.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \lesson{Language will read and change the same beliefs we built this week.}
+\end{frame}
+
+\appendix
+
+\begin{frame}{Backup: \textsf{residual\_concept}: whatever nobody else explains}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.42cm, y=0.42cm]
+        \foreach \i in {0,...,13} \foreach \j in {0,...,8}
+          \draw[muted!30] (\i,\j) rectangle ++(1,1);
+        \draw[very thick, muted] (0,0) rectangle (14,9);
+        \fill[cool!35, draw=cool, thick] (1.5,5.5) rectangle (5,8);
+        \node[lab] at (3.25,6.75) {near table};
+        \fill[cool!10] (8,4.5) rectangle (13.5,8.5);
+        \fill[cool!20] (8.8,5.2) rectangle (12.7,7.8);
+        \fill[cool!35] (9.5,5.8) rectangle (12,7.2);
+        \node[lab] at (10.75,6.5) {far table};
+        \foreach \i/\j in {5/1,6/1,5/2,6/2,7/2} \fill[accent!65] (\i,\j) rectangle ++(1,1);
+        \node[lab, right] at (8,1.5) {not explained};
+      \end{tikzpicture}\\[0.3em]
+      \footnotesize a sure table claims its cells tightly; an unsure one loosely
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      A grid of what the sensors hit, minus what every other agent claims to explain. What is left
+      is what the robot must avoid.\\[0.6em]
+      \alert{Nothing has to be recognised for the robot not to hit it.}\\[0.6em]
+      No safety margin anywhere: each claim is as wide as the claimant's own published uncertainty.
+      That is why the others must publish it.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Backup: The factorisation is only true while its owners are alive}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}[st/.style={draw, thick, rounded corners=8pt, minimum width=1.8cm, minimum height=0.8cm, font=\footnotesize}]
+        \node[st, fill=muted!12] (w) at (0,0) {waiting};
+        \node[st, fill=good!15] (o) at (3.7,0) {operating};
+        \node[st, fill=accent!15] (d) at (1.85,-1.8) {degraded};
+        \draw[flow] (w) to[bend left=15] node[above, lab, align=center] {required peers\\ready} (o);
+        \draw[flow] (o) to[bend left=15] node[below, lab] {a peer is lost} (w);
+        \draw[flow, muted] (o) -- (d); \draw[flow, muted] (w) -- (d);
+      \end{tikzpicture}\\[0.6em]
+      \footnotesize Specified in \textsc{tla}$^+$ and model-checked: 8 safety and 4 liveness
+      properties, no counterexample.
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      A process crashes and its node stays. It looks like any other data, and
+      \alert{nobody is keeping it true any more}.\\[0.5em]
+      A peer that is present is \emph{running}, which is not the same as \emph{able to serve}.
+      Heartbeats are ordinary graph nodes.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Backup: The room as a probability model (1/4): what is unknown, what is given}
   \centering
   \setlength{\abovedisplayskip}{2pt}\setlength{\belowdisplayskip}{4pt}
   {\footnotesize\makebox[\linewidth][c]{%
@@ -254,13 +1190,13 @@
     \node[why] at (0.4,0) {\textbf{why}: $\delta$ is the robot's own wheel reading. It is always
       there, and nothing in the room explains it. Conditioning means: take it as given, and spend no
       factor on how likely it was.};
-    \node[pc, draw=accent, text width=3.9cm] (u) at (-4.6,-1.7) {\textbf{unknown}: $X$, $\theta_m$, $m$\\{\scriptsize to be inferred; for $m$, even\\how many corners (frame 12)}};
+    \node[pc, draw=accent, text width=3.9cm] (u) at (-4.6,-1.7) {\textbf{unknown}: $X$, $\theta_m$, $m$\\{\scriptsize to be inferred; for $m$, even\\how many corners (step 5)}};
     \node[pc, draw=cool, text width=3.9cm] (o) at (0,-1.7) {\textbf{observed}, left of the bar: $o$\\{\scriptsize measured, and the model\\must say how likely it is}};
     \node[pc, draw=muted, text width=3.9cm] (d) at (4.6,-1.7) {\textbf{given}, right of the bar: $\delta$\\{\scriptsize measured, and never\\explained}};
   \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{The room as a probability model (2/4): factorise, exactly}
+\begin{frame}{Backup: The room as a probability model (2/4): factorise, exactly}
   \setlength{\abovedisplayskip}{2pt}\setlength{\belowdisplayskip}{4pt}
   \small
   \textbf{Day 1's rule, with something known.} A known $E$ stays behind the bar in every factor:
@@ -287,7 +1223,7 @@
   {\centering\alert{Still exact: nothing has been assumed yet.}\par}
 \end{frame}
 
-\begin{frame}{The room as a probability model (3/4): assume, by crossing out}
+\begin{frame}{Backup: The room as a probability model (3/4): assume, by crossing out}
   \centering
   \setlength{\abovedisplayskip}{4pt}\setlength{\belowdisplayskip}{2pt}
   {\footnotesize\makebox[\linewidth][c]{%
@@ -310,10 +1246,9 @@
   \]
   \vspace{0.7em}
   \alert{The chain rule is always exact. The model is what we choose to cross out.}
-  \src{layout\_acquisition.tex l.101--124 (eq.\ la-joint); AuRo paper eq.\ joint, the ``robot and room'' block}
 \end{frame}
 
-\begin{frame}{The room as a probability model (4/4): Bayes turns the question around}
+\begin{frame}{Backup: The room as a probability model (4/4): Bayes turns the question around}
   \centering
   \begin{tikzpicture}[x=1cm, y=1cm]
     % left: a room and a path
@@ -336,7 +1271,7 @@
     \node[lab] at (4.1,-0.9) {the scans ($o$), as read};
     % the two directions
     \draw[-{Stealth[length=3mm]}, very thick, cool] (-2.2,0.55) -- node[above, font=\footnotesize, align=center, text=cool]
-      {\textbf{the model} (frames 8--10): how a room, a path\\and their scans come about together} (2.4,0.55);
+      {\textbf{the model} (previous frames): how a room, a path\\and their scans come about together} (2.4,0.55);
     \draw[-{Stealth[length=3mm]}, very thick, accent] (2.4,-0.05) -- node[below, font=\footnotesize, align=center, text=accent]
       {\textbf{inference}: these scans were read;\\which rooms and paths explain them?} (-2.2,-0.05);
   \end{tikzpicture}\\[-0.6em]
@@ -360,7 +1295,7 @@
   {\footnotesize\color{muted} $\propto$: equal up to a constant factor. Its $-\ln$ is step~5's free energy.}
 \end{frame}
 
-\begin{frame}{What could the room be?}
+\begin{frame}{Backup: What could the room be?}
   \centering
   \begin{tikzpicture}
     \begin{scope}[shift={(0.0,0.0)}, x=0.62cm, y=0.45cm]
@@ -412,38 +1347,7 @@
   choose the shape, not just fit its numbers. Step 5 prices each corner.
 \end{frame}
 
-\begin{frame}{Estimating a room: the whole procedure}
-  \centering
-  \begin{tikzpicture}[st/.style={bx, minimum width=2.15cm, minimum height=1.05cm},
-                      fr/.style={font=\scriptsize\bfseries, text=accent}]
-    \node[font=\small\bfseries, anchor=west] at (-1.1,2.0) {1. The room is unknown: build it while driving};
-    \node[st] (s) at (0,0.9)    {laser scan};
-    \node[st] (p) at (2.75,0.9) {where am I?\\hidden SLAM};
-    \node[st] (g) at (5.5,0.9)  {what part of the\\floor is free?};
-    \node[st, draw=cool, fill=cool!10] (o) at (8.25,0.9) {outline,\\redrawn every second};
-    \node[st] (d) at (11.0,0.9) {drive where\\most is unseen};
-    \foreach \a/\b in {s/p, p/g, g/o, o/d} \draw[arr] (\a) -- (\b);
-    \draw[arr, muted] (d.south) -- ++(0,-0.35) -| node[pos=0.25, below, lab, text=muted] {a new place, new scans} (s.south);
-    \foreach \n/\f in {p/1, g/2, o/3, d/4} \node[fr, above=1pt of \n.north east, anchor=south east] {step \f};
-    % promotion
-    \draw[muted, densely dashed] (-1.1,-0.75) -- (12.2,-0.75);
-    \node[lab, fill=white, text=accent, font=\scriptsize\bfseries] at (5.5,-0.75)
-         {step 5: nothing left worth seeing, so keep the best outline};
-    \node[font=\small\bfseries, anchor=west] at (-1.1,-1.3) {2. The room is known: use it};
-    \node[st, draw=cool, fill=cool!10] (r) at (1.4,-2.25) {room polygon,\\now fixed};
-    \node[st] (l) at (4.6,-2.25) {where am I?\\against the walls};
-    \node[st, draw=muted] (sh) at (8.6,-2.25) {the hidden SLAM keeps running:\\if it disagrees,\\the room may be wrong};
-    \draw[arr] (r) -- (l);
-    \node[fr, above=1pt of l.north east, anchor=south east] {next};
-  \end{tikzpicture}
-
-  \vspace{0.6em}
-  \small While the room is unknown, the outline never corrects the pose: a wrong wall would pull
-  the pose, and the pulled pose would confirm the wrong wall.
-  \src{layout\_acquisition.tex l.68--82, l.162--199}
-\end{frame}
-
-\begin{frame}{Step 1: a hidden SLAM. Where am I, before any wall exists?}
+\begin{frame}{Backup: Step 1: a hidden SLAM. Where am I, before any wall exists?}
   \centering
   \begin{tikzpicture}[capt/.style={font=\footnotesize, align=center, text width=4.6cm, anchor=north},
                       st/.style={-{Stealth[length=2.5mm]}, very thick, muted}]
@@ -460,10 +1364,9 @@
   \small \textbf{Correct} = find the pose $X$ that minimises
   $\sum_n D\big(\text{return } n \text{ placed at } X\big)^2$, with $D$ the middle map.\\
   Gauss--Newton: the slope of $D$ under each return says which way to move $X$.
-  \src{layout\_acquisition.tex l.344--416; computed in \texttt{figures/make\_d3\_slam.py}}
 \end{frame}
 
-\begin{frame}{Step 2: the same grid also counts passes. What part of the floor is free?}
+\begin{frame}{Backup: Step 2: the same grid also counts passes. What part of the floor is free?}
   \begin{columns}[c]
     \begin{column}{0.44\textwidth}
       \centering
@@ -496,10 +1399,9 @@
       \footnotesize Step 1 reads only the hits; the outline reads both.
     \end{column}
   \end{columns}
-  \src{layout\_acquisition.tex l.507--524}
 \end{frame}
 
-\begin{frame}{Step 3: from the grid to an outline, every second}
+\begin{frame}{Backup: Step 3: from the grid to an outline, every second}
   \centering
   \begin{tikzpicture}[capt/.style={font=\scriptsize, align=center, text width=3.35cm, anchor=north},
                       st/.style={-{Stealth[length=2mm]}, thick, muted}]
@@ -517,10 +1419,9 @@
   \vspace{0.5em}
   \small A simulated L room, turned $12^\circ$, with cabinet fronts along one wall and a wardrobe.\\[0.3em]
   Redrawn from scratch every second, with no memory: \alert{a proposal, not yet the room} (step 5 judges it).
-  \src{layout\_acquisition.tex l.526--560; free\_space\_polygon.h l.433--620; \texttt{figures/make\_d3\_outline.py}}
 \end{frame}
 
-\begin{frame}{Step 4: drive where most is unseen; stop when nothing is}
+\begin{frame}{Backup: Step 4: drive where most is unseen; stop when nothing is}
   \centering
   \begin{tikzpicture}[capt/.style={font=\footnotesize, align=center, text width=4.2cm, anchor=north},
                       st/.style={-{Stealth[length=2.5mm]}, very thick, muted}]
@@ -537,57 +1438,10 @@
   \alert{The non-convexity problem:} the walls that jut into the room hide floor, so no single place
   sees it all. To know the room, the robot has to move.\\[0.3em]
 
-  {\footnotesize\color{muted} The epistemic term of Day 5 in its simplest form: unseen floor stands in for information.\par}
-  \src{room R1, layouts/apartamento\_layout.svg; layout\_acquisition.tex l.663--720; figures/make\_d3\_explore.py}
+  {\footnotesize\color{muted} The epistemic term in its simplest form: unseen floor stands in for information.\par}
 \end{frame}
 
-\begin{frame}{Step 5: which outline becomes the room? Bayes, on the structure}
-  \centering
-  \begin{tikzpicture}[x=0.245cm, y=0.245cm,
-      hit/.style={fill=black!55},
-      cand/.style={very thick, line join=round},
-      mis/.style={fill=cool!55, draw=white},
-      cpx/.style={fill=accent!65, draw=white}]
-    \begin{scope}[shift={(0,0)}]
-      \hits \draw[cand, muted] (0,0) rectangle (8,7);
-      \node[lab, anchor=north west] at (0,-0.4) {rectangle, 4 corners};
-      \bars{0}{60}{23} \node[lab, anchor=west] at (9.4,-2.75) {83};
-    \end{scope}
-    \begin{scope}[shift={(13,0)}]
-      \hits \draw[cand, good!70!black] (0,0) -- (8,0) -- (8,4) -- (4,4) -- (4,7) -- (0,7) -- cycle;
-      \node[lab, anchor=north west] at (0,-0.4) {L, 6 corners};
-      \bars{0}{20}{35} \node[lab, anchor=west, text=good!70!black] at (6.4,-2.75) {\textbf{55}: wins};
-    \end{scope}
-    \begin{scope}[shift={(26,0)}]
-      \hits \draw[cand, muted] (0,0) -- (8,0) -- (8,4) -- (4,4) -- (4,7) -- (3,7) -- (3,6.6) -- (2,6.6) -- (2,7) -- (0,7) -- cycle;
-      \node[lab, anchor=north west] at (0,-0.4) {L + a bump, 10 corners};
-      \bars{0}{18}{58} \node[lab, anchor=west] at (8.6,-2.75) {76};
-    \end{scope}
-    \fill[mis] (4,-4.3) rectangle ++(0.8,-0.8); \node[lab, anchor=west] at (4.9,-4.7) {misfit};
-    \fill[cpx] (11,-4.3) rectangle ++(0.8,-0.8); \node[lab, anchor=west] at (11.9,-4.7) {$5.8$ nats per corner};
-    \node[lab, anchor=west, text=muted] at (23,-4.7) {numbers illustrative};
-  \end{tikzpicture}
-
-  \vspace{-1.1em}
-  \setlength{\abovedisplayskip}{0pt}\setlength{\belowdisplayskip}{2pt}\setlength{\abovedisplayshortskip}{0pt}
-  \[
-    p(m\given o)\;\propto\;p(o\given m)\,p(m),
-    \qquad
-    p(o\given m)=\int p(o\given\theta_m,m)\,p(\theta_m\given m)\,d\theta_m
-  \]
-  \[
-    -\ln p(o\given m)\;\approx\;
-    \underbrace{-\ln p(o\given\hat\theta_m,m)}_{\substack{\text{misfit of the best-placed}\\\text{outline ($\hat\theta_m$)}}}
-    \;+\;
-    \underbrace{5.8\nats\times\text{corners}}_{\substack{\text{the price of averaging over}\\\text{where the corners could be}}}
-    \;=\;F(m)
-  \]
-  {\footnotesize Bayes as in frame 11, now over the \emph{structure} $m$: lowest $F$ = most probable structure.\\
-  \textbf{nat}: the unit of $-\ln p$. A difference of $k$ nats is odds of $e^k$ to 1 (5.8 nats $\approx$ 333 to 1).\par}
-  \src{layout\_acquisition.tex l.1033--1075 (eq.\ la-mdl), l.56--66}
-\end{frame}
-
-\begin{frame}{Step 5, continued: why a corner costs 5.8 nats}
+\begin{frame}{Backup: Step 5, continued: why a corner costs 5.8 nats}
   \begin{columns}[c]
     \begin{column}{0.6\textwidth}
       \centering
@@ -630,68 +1484,9 @@
   \end{columns}
   \vfill
   {\footnotesize This is Day 2's complexity term: the KL from prior (10 m) to belief (3 cm) is $\ln(L/\sigma)$.\par}
-  \src{layout\_acquisition.tex l.56--66, l.128--146}
 \end{frame}
 
-
-\begin{frame}{The room supplies the likelihood: a distance field}
-  \centering
-  \begin{tikzpicture}[mstep/.style={->, very thick, draw=muted, shorten <=3pt, shorten >=3pt}]
-    \node[inner sep=0] (a) at (0,0)   {\includegraphics[width=4.2cm]{figures/d3_sdf_a.pdf}};
-    \node[inner sep=0] (b) at (6.2,0) {\includegraphics[width=4.2cm]{figures/d3_sdf_b.pdf}};
-    \draw[mstep] (a.east) -- node[above, lab] {place a scan} (b.west);
-    \node[lab, anchor=north, align=center, text width=4.8cm] at ([yshift=-3pt]a.south)
-      {\textbf{1. Once per room}: at every point $p$, $d(p)$ = distance to the nearest wall
-       (white lines: 25, 50, 75 cm)};
-    \node[lab, anchor=north, align=center, text width=4.8cm] at ([yshift=-3pt]b.south)
-      {\textbf{2. Every scan}: put its returns where pose $X$ says; each one reads
-       $d_n(X)=d(\text{return } n \text{ placed at } X)$};
-  \end{tikzpicture}\\[0.2em]
-  \raggedright\small
-  \begin{itemize}
-    \item $d_n(X)$ \alert{is} the prediction error: a return should sit on a wall, $d=0$.
-          No expected scan is ever drawn.
-    \item The slope of $d$ (red arrows) says which way to move each return: it gives the gradient for free.
-  \end{itemize}
-  {\footnotesize The code calls it \texttt{sdf}, \emph{signed distance function}; on a polygon it is unsigned, just the distance.\par}
-  \src{room\_concept.tex l.232--290; figures/make\_d3\_sdf.py}
-\end{frame}
-
-\begin{frame}{Localising: Kalman's structure, but optimised}
-  \small
-  With a Gaussian prior and a linear sensor, minimising $F$ (Day 2) gives exactly the Kalman update.
-  Localising has the same two parts:
-  \[
-    F(X) \;=\; \underbrace{\tfrac12\,(X-\bar X)^{\!\top}\bar P^{-1}(X-\bar X)}_{\text{predict: where the wheels say}}
-    \;+\; \underbrace{\tfrac{1}{2\sigma^2}\textstyle\sum_n d_n(X)^2}_{\text{update: every return onto its wall}}
-  \]
-  \vspace{-0.8em}
-  {\footnotesize\makebox[\linewidth][c]{%
-  \begin{tabular}{@{}l@{\ \ }l@{\qquad}l@{\ \ }l@{}}
-    $X$ & the pose: $x$, $y$, heading & $d_n(X)$ & distance from return $n$, placed at $X$, to its wall\\
-    $\bar X,\ \bar P$ & pose predicted by odometry, its covariance & $\sigma$ & noise of one such distance
-  \end{tabular}}\par}
-  \vspace{0.5em}
-  \vspace{0.5em}
-  \begin{columns}[T]
-    \begin{column}{0.47\textwidth}
-      \textbf{Kalman (extended)}: linearise $d_n$ once, at $\bar X$, and take one step.\\[0.3em]
-      \footnotesize That single Gauss--Newton step from $\bar X$ \emph{is} the EKF update: the same
-      gain, the same covariance.
-    \end{column}
-    \begin{column}{0.49\textwidth}
-      \textbf{Here}: keep stepping, re-linearising at each new pose, until $F$ stops falling. It
-      matters when the heading is off: a wall distance turns with it.\\[0.3em]
-      \footnotesize Covariance $P=\Hess^{-1}$, with $\Hess=\bar P^{-1}+J^{\top}J/\sigma^2$ the
-      curvature of $F$ at its minimum and $J$ how each $d_n$ changes with the pose: Day 2's Laplace.
-    \end{column}
-  \end{columns}
-  \vspace{0.6em}
-  \centering\alert{Prior from motion, likelihood from the sensor: optimised, not linearised once.}
-  \src{room\_concept.tex l.243--300, l.1601--1640; Day 2, Gauss--Newton and Laplace}
-\end{frame}
-
-\begin{frame}{Walls are not enough: corners say which is which}
+\begin{frame}{Backup: Walls are not enough: corners say which is which}
   \begin{columns}[c]
     \begin{column}{0.48\textwidth}
       \centering
@@ -729,10 +1524,9 @@
       typical failure.
     \end{column}
   \end{columns}
-  \src{room\_concept.tex l.1791--1840}
 \end{frame}
 
-\begin{frame}{A short history, not one pose: the window as a graph}
+\begin{frame}{Backup: A short history, not one pose: the window as a graph}
   \centering
   \begin{tikzpicture}[x=1.9cm,
       pose/.style={circle, draw=black!75, very thick, minimum size=9mm, inner sep=0, font=\small, fill=white},
@@ -755,10 +1549,9 @@
   \]
   {\footnotesize A scan counts while its pose is the newest (and once more as it leaves); corners count at every pose: the short history.
   The oldest pose leaves on the left; what it knew is squeezed into the boundary prior. Past corners still count: the wheels carry them to $X_4$. No loop is needed, because the room is given.\par}
-  \src{room\_concept.tex l.1601--1720 (eq.\ rc-window); \texttt{RoomConcept.WindowSize} = 5}
 \end{frame}
 
-\begin{frame}{Localising against the room you just built}
+\begin{frame}{Backup: Localising against the room you just built}
   \begin{columns}[c]
     \begin{column}{0.54\textwidth}
       \includegraphics[width=\textwidth]{d3_track.pdf}
@@ -769,172 +1562,14 @@
       Same route, same scans: only the map differs.
       A wall \textbf{1.5 cm} out of place makes the localiser confidently wrong.\\[0.2em]
       \scriptsize NEES: squared error $\div$ claimed variance, summed over $x$, $y$, heading.
-      Honest: 3. Here: 90.
+      Calibrated: 3. Here: 90.
     \end{column}
   \end{columns}
   \lesson{In the operating regime the polygon is a constant, so its error is shared by every scan,
           for ever.}
-  \src{lab 3, exercise 13}
 \end{frame}
 
-\begin{frame}{What an object agent sees: a mask}
-  \centering
-  \begin{tikzpicture}[mimg/.style={inner sep=0, draw=muted!60},
-                      mstep/.style={->, very thick, draw=muted, shorten <=3pt, shorten >=3pt},
-                      mcap/.style={font=\scriptsize, align=center, text width=4cm, inner sep=1pt}]
-    \node[mimg] (a) at (0,0)   {\includegraphics[width=3.8cm]{figures/d3_mask_a.pdf}};
-    \node[mimg] (b) at (5.1,0) {\includegraphics[width=3.8cm]{figures/d3_mask_b.pdf}};
-    \node[inner sep=0] (c) at (9.9,0.25) {\includegraphics[width=2.8cm]{figures/d3_mask_c.pdf}};
-    \draw[mstep] (a.east) -- node[above, lab] {segment} (b.west);
-    \draw[mstep] (b.east) -- node[above, lab, align=center] {depth\\+ pose $\hat X$} ++(1.2,0);
-    \node[lab, text=muted, anchor=north east] at (c.north east) {sketch};
-    \node[mcap, anchor=north] at ([yshift=-3pt]a.south) {\textbf{1. The camera}\\colour and depth, every frame};
-    \node[mcap, anchor=north] at ([yshift=-3pt]b.south) {\textbf{2. Retina's segmenter}\\one mask per object,
-          with a \alert{label} and a \alert{score}};
-    \node[mcap, anchor=north] at ([yshift=-3pt]b.south -| c.south) {\textbf{3. A chair's mask in 3-D}\\
-          \textcolor{cool}{dots: the chair};\\ \textcolor{accent}{crosses: spill onto floor, wall}};
-    % what travels with every mask
-    \node[mtag=2.9cm, draw=cool]   at (-0.3,-2.6) {\textbf{label + score}\\a guess: table 0.75,\\or desk 0.55};
-    \node[mtag=2.9cm, draw=good]   at (2.9,-2.6)  {\textbf{points}\\one $\sigma$ per frame, wider\\far, moving, off-centre};
-    \node[mtag=2.9cm, draw=accent] at (6.1,-2.6)  {\textbf{variance}\\blur and jitter, zero mean:\\it averages out};
-    \node[mtag=3.3cm, draw=accent] at (9.6,-2.6)  {\textbf{bias}\\the camera turned: all points\\shift one way, and it does\\not average out};
-  \end{tikzpicture}
-
-  \small
-  A mask says ``chair'', not \emph{which} chair: each one is handed to an instance, or starts a new
-  one. What instance $i$ was handed is its data $\bar Z_i$, and \alert{the handing is one best guess} (frame 28).
-  \src{retina, \texttt{yoloe-26x-seg-household}, on a simulated frame; phylogenetic\_perception.tex l.347--408}
-\end{frame}
-
-\begin{frame}{The chair: the same free energy}
-  \small
-  \setlength{\abovedisplayskip}{4pt}\setlength{\belowdisplayskip}{4pt}
-  Now the robot's pose is known, from the localiser, and the chair's is not. Bayes as for the room
-  (frame 11): posterior $\propto$ prior $\times$ likelihood, and $F$ is its $-\ln$:
-  \[
-    F(\theta) \;=\; \underbrace{\tfrac12\,(\theta-\bar\theta)^{\!\top}\bar P^{-1}(\theta-\bar\theta)}_{\text{prior: where I believed the chair was}}
-    \;+\; \underbrace{\textstyle\sum_n \rho\big(d_n(\theta)/\sigma\big)}_{\text{likelihood: every mask point onto the chair}}
-  \]
-  {\footnotesize\makebox[\linewidth][c]{%
-  \begin{tabular}{@{}l@{\ \ }l@{\qquad}l@{\ \ }l@{}}
-    $\theta$ & the chair's pose: $x$, $y$, heading &
-    $d_n(\theta)$ & mask point $n$'s distance to the chair\\[2pt]
-    $\bar\theta,\ \bar P$ & last belief, covariance; widened when unseen &
-    $\sigma$ & the frame's noise, shared by its points
-  \end{tabular}}\par}
-  \vspace{0.3em}
-  {\footnotesize $\rho(u)=-\ln p(u)$: a point's cost at $u$ standard deviations. A Gaussian gives
-  $u^2/2$; ``chair or clutter'' stops growing, so a stray point pulls with bounded force.\par}
-  \vspace{0.6em}
-  \textbf{The shape is not fitted}: it is the class template, seat $60\times52$ cm with its top at
-  0.60 m and a backrest 0.66 m above it. Only the pose is estimated.\\[0.3em]
-  Minimised by the same Gauss--Newton steps as the robot's pose; the covariance is again the inverse
-  curvature, $P=\Hess^{-1}$ (Day 2's Laplace).
-  \src{concept\_agents.tex l.469--535; chair\_concept: chair\_dof.h (pose-only), common/concept\_manifest/chair.concept.toml}
-\end{frame}
-
-\begin{frame}{The chair's likelihood: signed distance, mixture, reprojection}
-  \begin{columns}[c]
-    \begin{column}{0.47\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1cm, y=1cm]
-        % camera and image plane
-        \fill[black!60] (0,0) circle (0.12);
-        \node[lab, above, align=center] at (0,0.15) {camera, at the\\robot's pose};
-        \draw[thick, muted] (0.9,-1.0) -- (0.9,1.4);
-        \node[lab, above] at (0.9,1.4) {image};
-        % believed object
-        \coordinate (ch) at (3.45,-0.55);
-        \chairside{ch}{1.0}{0.6}{0.7}{cool, very thick}
-        \node[lab, text=cool] at (4.0,-0.85) {the chair, at pose $\theta$};
-        % deprojection of a mask pixel
-        \draw[accent, thick] (0,0) -- (3.1,0.42);
-        \fill[accent] (0.9,0.122) circle (1.6pt);
-        \fill[accent] (3.1,0.42) circle (2.2pt);
-        \draw[{Stealth[length=1.6mm]}-{Stealth[length=1.6mm]}, thick] (3.13,0.3) -- (3.37,0.3);
-        \node[lab, below, text=accent] at (2.55,0.43) {point $p_n$};
-        \node[lab] at (3.25,0.15) {$d_n$};
-        % reprojection of the silhouette
-        \draw[good, densely dashed] (3.31,0.75) -- (0,0);
-        \draw[good, densely dashed] (3.35,-0.55) -- (0,0);
-        \draw[good, line width=2.2pt] (0.9,0.199) -- (0.9,-0.146);
-        \draw[good, thin] (0.9,-0.1) -- (1.3,-1.3); \node[lab, text=good, anchor=north] at (1.3,-1.3) {predicted outline};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \footnotesize
-      \textbf{Signed distance.} Each mask pixel, with its depth, is placed in the room through the
-      robot's pose: a 3-D point $p_n$. Its error $d_n$ is its distance to the chair's surface:
-      $0$ on it, $+$ outside, $-$ inside.\\[0.3em]
-      \textbf{Mixture.} The chair is a seat, a backrest and four legs. A point is either on the chair
-      or clutter, $\rho=-\ln(\text{chair}+\text{clutter})$, so a stray point costs a bounded amount.\\[0.3em]
-      \textbf{Precision.} One $\sigma$ per frame (blur, depth, range, off-centre), plus one error
-      \emph{shared} by all its points, counted once (frame 29): the robot's pose, wider far away or
-      moving. No gate: a poor view counts, for little.\\[0.3em]
-      \textbf{Reprojection.} The reverse path: the believed silhouette, projected into the image with its
-      predicted depth, is checked against the edges there. \alert{On the robot it feeds existence, not the fit.}
-    \end{column}
-  \end{columns}
-  \src{concept\_agents.tex l.516--523; chair\_concept/src/chair\_fitter.cpp (R and common mode), chair\_contour.h}
-\end{frame}
-
-
-\begin{frame}{Association: the mistake the free energy cannot see}
-  \begin{columns}[c]
-    \begin{column}{0.46\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \draw[cool, thick, fill=cool!10, rotate around={25:(0,0)}] (0,0) ellipse (1.25 and 0.65);
-        \fill[cool] (0,0) circle (2pt); \node[lab, below] at (0,-0.05) {poorly known};
-        \draw[cool, thick, fill=cool!10] (2.9,0.15) ellipse (0.45 and 0.4);
-        \fill[cool] (2.9,0.15) circle (2pt); \node[lab, above] at (2.9,0.55) {precise};
-        \fill[accent] (0.85,0.55) circle (2.5pt);
-        \fill[accent] (3.0,0.05) circle (2.5pt);
-        \fill[accent] (1.9,-0.75) circle (2.5pt);
-        \node[lab, right, text=accent] at (1.95,-0.75) {starts a new candidate};
-      \end{tikzpicture}\\[0.4em]
-      {\small a poorly known object accepts detections from further away}
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \small
-      An object may claim only detections inside its own uncertainty (the ellipse). Then each mask goes
-      to the object whose shape explains it best: lowest $-\ln p$ first, one each.\\[0.5em]
-      That is still one best guess: it has no uncertainty to pay for, so it adds nothing to $F$.
-      \alert{A wrong match is invisible to the quantity that would have registered it.}\\[0.5em]
-      The repair comes later and from elsewhere: merging, and the existence belief.
-    \end{column}
-  \end{columns}
-  \src{concept\_agents.tex l.483--486, l.859--889; chair\_concept/src/specificworker.cpp (gate, then lowest mixture NLL)}
-\end{frame}
-
-\begin{frame}{The common-mode ceiling}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \draw[very thick, muted] (0,0) -- (5,0);
-        \node[lab, below] at (1.1,0) {the true surface};
-        \foreach \x/\e in {0.3/.04,0.65/-.05,1.0/.06,1.35/-.03,1.7/.05,2.05/-.06,2.4/.03,2.75/-.04,3.1/.06,3.45/-.05,3.8/.04,4.15/-.03,4.5/.05} {
-          \fill[cool] (\x,\e) circle (1.5pt);
-          \fill[accent] (\x+0.25,0.75+\e) circle (1.5pt);
-        }
-        \draw[-{Stealth[length=2.5mm]}, very thick, accent] (1.0,0.1) -- (1.25,0.65);
-        \draw[-{Stealth[length=2.5mm]}, very thick, accent] (3.45,0.1) -- (3.7,0.65);
-        \node[lab, text=accent, above] at (2.5,1.05) {one pose error moves them all together};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      The same arrow as yesterday, now on a thousand points.\\[0.5em]
-      Averaging points removes their small independent jitter. It cannot touch the arrow.\\[0.5em]
-      \alert{A denser mask eventually stops helping}: the limit is set by the shared error (the robot's
-      pose, the range, the motion), not by the number of pixels. And the data cannot tell a displaced object from a displaced robot.
-    \end{column}
-  \end{columns}
-  \src{concept\_agents.tex l.1048--1090}
-\end{frame}
-
-\begin{frame}{The ceiling, measured in the toy}
+\begin{frame}{Backup: The ceiling, measured in the toy}
   \begin{columns}[c]
     \begin{column}{0.48\textwidth}
       \includegraphics[width=\textwidth]{d3_ceiling.pdf}
@@ -950,10 +1585,9 @@
     \end{column}
   \end{columns}
   \lesson{Averaging removes independent error. It does not remove shared error.}
-  \src{lab 3, exercise 15}
 \end{frame}
 
-\begin{frame}{Doors: the same idea, with a moving part}
+\begin{frame}{Backup: Doors: the same idea, with a moving part}
   \begin{columns}[c]
     \begin{column}{0.44\textwidth}
       \centering
@@ -986,91 +1620,9 @@
       A door also joins two rooms: crossing it changes which room the robot is in. We stop here.
     \end{column}
   \end{columns}
-  \src{crossing.tex l.307--338; door\_concept: door\_leaf\_channel.h (held leaf, inferred push rate), door\_opening\_edges.h}
 \end{frame}
 
-% =================================================================================================
-\section{Life cycle}
-% =================================================================================================
-
-
-\begin{frame}{The life of an instance}
-  \centering
-  \begin{tikzpicture}
-    \node[bx, draw=muted, densely dashed, minimum width=2.5cm] (p) at (0,0) {\textbf{pending}\\no node, no belief};
-    \node[bx, draw=cool, fill=cool!10, minimum width=2.5cm] (l) at (4.4,0) {\textbf{live}\\on the graph};
-    \node[bx, draw=cool, fill=cool!4, minimum width=2.5cm] (f) at (4.4,-2.1) {\textbf{frozen}\\held, less and less sure};
-    \node[bx, draw=accent, fill=accent!10, minimum width=2.5cm] (d) at (8.8,0) {\textbf{dead}\\owner removes the node};
-    \draw[arr] (p) -- node[above, lab] {evidence} node[below, lab] {matures} (l);
-    \draw[arr] (l) -- node[above, lab] {absence} node[below, lab] {where visible} (d);
-    \draw[arr] (l.-110) -- node[left, lab] {frame unfit} (f.110);
-    \draw[arr] (f.70) -- node[right, lab] {next good frame} (l.-70);
-    \draw[arr, muted, densely dashed] (d.north) -- ++(0,0.65) -| node[above, lab, pos=0.25, text=black] {seen again: a \emph{new} node, a new birth stamp} (p.north);
-  \end{tikzpicture}
-
-  \vspace{0.8em}
-  \small Pending exists so that a wrong hypothesis costs nothing: nobody has read it yet.\\
-  Frozen suppresses an instance's \emph{intake}, not the instance.
-  \src{agents\_life\_cycle.tex l.379--423}
-\end{frame}
-
-\begin{frame}{Birth is a comparison between two worlds}
-  \centering
-  \begin{tikzpicture}
-    \foreach \x/\ttl in {0/{world A: nothing new here}, 6.1/{world B: one more object}} {
-      \begin{scope}[shift={(\x,0)}]
-        \draw[muted, rounded corners=2pt] (0,0) rectangle (4.6,1.7);
-        \node[lab, above, font=\footnotesize\bfseries] at (2.3,1.7) {\ttl};
-        \foreach \p/\q in {1.5/0.55, 1.75/0.95, 2.05/0.6, 2.3/1.05, 2.6/0.7, 2.85/1.0} \fill[accent] (\p,\q) circle (2pt);
-      \end{scope}
-    }
-    \node[lab, align=center] at (2.3,0.25) {these points are unexplained};
-    \draw[cool, very thick, fill=cool!15, fill opacity=0.6] (7.4,0.4) rectangle (9.15,1.25);
-    \node[lab, align=center] at (8.4,0.15) {explained, by a new object};
-    \begin{scope}[shift={(5.3,-1.45)}, x=0.55cm, y=0.55cm]
-      \draw[very thick] (-5.5,0) -- (5.5,0);
-      \fill[muted] (0,0) -- (-0.3,-0.5) -- (0.3,-0.5) -- cycle;
-      \fill[cool!45, draw=white, very thick] (-4.5,0.05) rectangle (-0.9,1.1);
-      \node[lab] at (-2.7,0.58) {what it explains};
-      \fill[accent!40, draw=white, very thick] (0.9,0.05) rectangle (2.9,1.1);
-      \node[lab] at (1.9,0.58) {its cost};
-    \end{scope}
-  \end{tikzpicture}
-
-  \vspace{0.6em}
-  \small The object is born exactly when what it explains outweighs what it costs, both in
-  nats: the room's corners faced the same trade.\\[0.2em]
-  \alert{The cost is not a penalty added on top}: every live object already pays it.
-  \src{agents\_life\_cycle.tex l.594--622}
-\end{frame}
-
-\begin{frame}{A streak cannot read evidence}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \includegraphics[width=\textwidth]{d3_birth.pdf}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \small
-      \begin{tabular}{@{}l r r@{}}
-        \toprule
-        300 runs & streak of 3 & $\Delta F<0$ \\
-        \midrule
-        2 sharp views & 0\% & 98\% \\
-        10 reflections & 94\% & 0\% \\
-        \bottomrule
-      \end{tabular}
-
-      \vspace{0.8em}
-      A streak counts frames. $\Delta F$ reads what each frame says: how sharp it was, and how well
-      the frames agree.
-    \end{column}
-  \end{columns}
-  \lesson{Two sharp views are worth more than ten reflections, and only nats can say so.}
-  \src{lab 3, exercises 1--2}
-\end{frame}
-
-\begin{frame}{What the robot actually computes: a threshold that should not be one}
+\begin{frame}{Backup: What the robot actually computes: a threshold that should not be one}
   \centering
   \begin{tikzpicture}
     \foreach \t/\x in {confidence/0, range/2.05, admissible/4.1, shape/6.15, in the room/8.2, surprise/10.25}
@@ -1087,35 +1639,9 @@
   \small Each factor is sensible, but the units are gone: birth can be traded against nothing else,
   so \alert{a whole subsystem exists to undo births that should not have happened}. The proper
   comparison is within reach; what is missing is plumbing, not theory.
-  \src{agents\_life\_cycle.tex l.629--706, l.1276--1282}
 \end{frame}
 
-\begin{frame}{A miss is evidence only where the object would have been seen}
-  \centering
-  \begin{tikzpicture}[scale=0.8]
-    \foreach \x/\t/\c/\v in {0/occupancy: a return/good/confirms, 5.3/{predicted visible, absent}/accent/removes, 10.6/occluded or out of view/muted/holds} {
-      \begin{scope}[shift={(\x,0)}]
-        \fill[black!55] (0,0.8) circle (0.17);
-        \fill[cool!18, draw=cool!40] (0,0.8) -- (3.6,1.9) -- (3.6,-0.3) -- cycle;
-        \node[lab, align=center] at (1.8,-0.9) {\t};
-        \node[font=\small\bfseries, text=\c!85!black] at (1.8,-1.45) {\v};
-      \end{scope}
-    }
-    \node[obj, fill=cool!40] at (2.8,0.8) {};
-    \foreach \y in {0.62,0.8,0.98} \fill[good] (2.5,\y) circle (1.5pt);
-    \node[obj, draw=accent, densely dashed] at (8.1,0.8) {};
-    \draw[very thick, muted] (13.0,-0.2) -- (13.0,1.8);
-    \node[obj, fill=muted!25] at (13.8,0.8) {};
-  \end{tikzpicture}
-
-  \vspace{0.8em}
-  \small
-  The whole stage lies between the middle panel and the right one. Existence is one running number,
-  evidence for and against simply adds to it, and it never reaches certainty, so it can always recover.
-  \src{agents\_life\_cycle.tex l.887--919}
-\end{frame}
-
-\begin{frame}{A factor whose argument list was wrong}
+\begin{frame}{Backup: A factor whose argument list was wrong}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
       \centering
@@ -1139,10 +1665,9 @@
       \end{measured}
     \end{column}
   \end{columns}
-  \src{agents\_life\_cycle.tex l.921--951; CONCEPT\_AGENT\_LIFECYCLE.md l.7--11}
 \end{frame}
 
-\begin{frame}{Weight absence by how visible it was, after the bucket}
+\begin{frame}{Backup: Weight absence by how visible it was, after the bucket}
   \centering
   \begin{tikzpicture}[tap/.style={draw=accent, very thick, circle, fill=accent!12, inner sep=1.5pt, font=\scriptsize\bfseries},
                       pour/.style={-{Stealth[length=2mm]}, thick, color=cool},
@@ -1175,82 +1700,9 @@
   {\small A view in which a present object would be only 2\% resolvable.}
 
   \lesson{Turned down before the bucket, the tap does nothing: the bucket fills anyway.}
-  \src{agents\_life\_cycle.tex l.953--973; numbers: lab 3, exercise 4}
 \end{frame}
 
-\begin{frame}{Four rules, one tour}
-  \begin{columns}[c]
-    \begin{column}{0.46\textwidth}
-      \includegraphics[width=\textwidth]{d3_existence.pdf}
-    \end{column}
-    \begin{column}{0.51\textwidth}
-      \footnotesize
-      \begin{tabular}{@{}l l@{}}
-        \toprule
-        rule & removes (frame) \\
-        \midrule
-        \textbf{evidence} & vase (68) \\
-        no walls in line of sight & vase (68), \alert{chair} (174) \\
-        weight the count & vase (13) \\
-        miss counter & \alert{everything} by frame 44 \\
-        \bottomrule
-      \end{tabular}
-
-      \vspace{0.6em}
-      \small
-      Never resolvable? No decay constant. The instance is routed to a \textbf{verification
-      pull}: uncertainty that cannot be resolved from here is a reason to move.
-    \end{column}
-  \end{columns}
-  \src{lab 3, exercise 4; agents\_life\_cycle.tex l.975--985}
-\end{frame}
-
-\begin{frame}{A constant $Q$ forgets on the agent's clock}
-  \begin{columns}[c]
-    \begin{column}{0.47\textwidth}
-      \includegraphics[width=\textwidth]{d3_constq.pdf}
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \small
-      Every frame, seen or not, a fixed amount of doubt is added.
-      \begin{itemize}
-        \item A table known to 3 cm loses half its precision in \textbf{3.6 s}.
-        \item It is back at the prior after about \textbf{5.9 minutes}, whether it was tracked for
-              thirty seconds or for three hours.
-      \end{itemize}
-      \begin{measured}{a real table, 1320 blind cycles}
-        Predicted error 0.184 m; logged 0.170 m. The next sparse mask re-cut the table.
-      \end{measured}
-    \end{column}
-  \end{columns}
-  \src{agents\_life\_cycle.tex l.1007--1043}
-\end{frame}
-
-\begin{frame}{The forgetting rate becomes something the object infers}
-  \centering
-  \begin{tikzpicture}[needle/.style={-{Stealth[length=2.5mm]}, very thick, color=accent}]
-    \foreach \x/\ang/\ttl/\txt in {0/150/{views keep agreeing}/{it forgets more slowly,\\precision accumulates}, 6.7/35/{a sustained surprise}/{it forgets faster\\and adapts}} {
-      \begin{scope}[shift={(\x,0)}]
-        \draw[muted, line width=5pt] (180:1.25) arc (180:0:1.25);
-        \draw[needle] (0,0) -- (\ang:1.1);
-        \fill[black!60] (0,0) circle (3pt);
-        \node[lab] at (-1.55,-0.15) {slow};
-        \node[lab] at (1.55,-0.15) {fast};
-        \node[font=\footnotesize\bfseries, above] at (0,1.45) {\ttl};
-        \node[lab, align=center, below] at (0,-0.35) {\txt};
-      \end{scope}
-    }
-  \end{tikzpicture}
-
-  \vspace{0.7em}
-  \small Each object turns its own dial, by how surprised it has been against how surprised it
-  expected to be. One outrageous frame moves it only a bounded amount, and a gentle pull keeps it
-  from sticking: \textbf{stiff, but never locked}.\\[0.4em]
-  \alert{Design only: no agent runs this yet.}
-  \src{agents\_life\_cycle.tex l.1085--1125 (form of the update); lab 3, exercise 5}
-\end{frame}
-
-\begin{frame}{In the toy: stiff, but not locked}
+\begin{frame}{Backup: In the toy: stiff, but not locked}
   \begin{columns}[c]
     \begin{column}{0.56\textwidth}
       \includegraphics[width=\textwidth]{d3_volatility.pdf}
@@ -1274,241 +1726,244 @@
       out with constant $Q$, $7.6\sigma$ with inferred.
     \end{column}
   \end{columns}
-  \src{lab 3, exercises 5--6; agents\_life\_cycle.tex l.1127--1133}
 \end{frame}
 
-% =================================================================================================
-\section{Aspect}
-% =================================================================================================
-
-
-\begin{frame}{Aspect: the class can be imagined, the instance can be recognised}
-  \centering
-  \begin{tikzpicture}[x=1cm, y=1cm, g/.style={thick, color=good, opacity=0.6}]
-    \node[font=\footnotesize\bfseries] at (-3.5,2.7) {``How do you imagine a chair?''};
-    \foreach \w/\h/\b in {0.97/1.0/1.05, 1.06/1.05/1.15, 1.14/1.09/1.25, 1.0/1.06/1.23, 1.11/1.02/1.09} {
-      \chairside{-4.0,0}{\w}{\h}{\b}{g}
-    }
-    \node[lab, align=center] at (-3.5,-0.5) {the class: what any chair might look like\\held inside \textsf{chair\_concept}};
-    \draw[muted, densely dashed] (0,-0.9) -- (0,2.9);
-    \node[font=\footnotesize\bfseries] at (3.5,2.7) {``Is this the one I saw?''};
-    \chairside{1.75,0}{1.05}{1.03}{1.15}{line width=2pt, accent!80}
-    \chairside{4.35,0}{1.05}{1.03}{1.15}{line width=2pt, cool}
-    \node[lab] at (2.3,-0.2) {chair\_22};
-    \node[lab] at (4.9,-0.2) {chair\_23};
-    \node[lab, align=center] at (3.5,-0.72) {the instances: what these two looked like, kept with each};
-  \end{tikzpicture}
-
-  \vspace{0.6em}
-  \small The same split as geometry: the class is a prior inside the agent, an instance is a posterior
-  of its own.\\[0.2em]
-  \alert{Aspect is a dimension of the concept, and it exists as properties of its instances.}
-\end{frame}
-
-\begin{frame}{How do you imagine a chair? Sample the prior and render it}
-  \centering
-  \begin{tikzpicture}[st/.style={draw=good, thick, rounded corners=3pt, fill=good!10, align=center, font=\scriptsize, minimum width=3.0cm, minimum height=1.5cm, inner sep=3pt}, g/.style={thick, color=good}]
-    \node[st] (c) at (0,0) {\textbf{the card}\\[0.15em]seat $0.60\pm0.05$ m wide\\seat $0.595\pm0.03$ m high\\back $0.655\pm0.06$ m\\free or against a wall};
-    \node[st] (s) at (4.0,0) {\textbf{sample}\\[0.15em]sizes, place, heading;\\drop the impossible ones};
-    \node[st] (r) at (8.0,0) {\textbf{render}\\[0.15em]through the ZED model\\and the LiDAR models};
-    \draw[flow] (c) -- (s); \draw[flow] (s) -- (r);
-    \draw[flow] (r.east) -- (10.15,0);
-    \begin{scope}[shift={(10.3,-0.55)}, x=0.75cm, y=0.75cm]
-      \foreach \w/\h/\b in {0.97/1.0/1.05, 1.06/1.05/1.15, 1.14/1.09/1.25} { \chairside{0.1,0}{\w}{\h}{\b}{g} }
-    \end{scope}
-    \node[lab, align=center] at (11.0,-1.15) {drawn on the chat canvas};
-  \end{tikzpicture}
-
-  \vspace{0.8em}
-  \begin{itemize}\small
-    \item It asks the question ``could I see one from there?'' of something that is not in the room:
-          the same samples give a probability of detection.
-    \item A chair on the graph is fitted as a pose of a fixed template. Imagination also draws how
-          real chairs vary.
-    \item \alert{Today the class's look is a shape, written by hand.} No colour, and nothing learned from
-          the chairs it has met.
-  \end{itemize}
-  \src{language\_agent/src/imagine\_view.h; common/concept\_manifest/chair.concept.toml}
-\end{frame}
-
-\begin{frame}{An instance's look is measured one direction at a time \wip}
+\begin{frame}{Backup: Where to look next}
   \begin{columns}[c]
-    \begin{column}{0.36\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \foreach \a in {0,30,...,330} \draw[muted!60] (0,0) -- (\a:1.95);
-        \draw[muted!60] (0,0) circle (1.95);
-        \foreach \a in {90,120,210} {
-          \fill[good!35, draw=good, thick] (0,0) -- (\a-30:1.95) arc (\a-30:\a:1.95) -- cycle;
-          \node[draw=good, fill=white, minimum size=0.42cm, inner sep=0pt, rounded corners=1pt] at (\a-15:1.42) {};
-        }
-        \fill[white, draw=black, thick] (-0.3,-0.27) rectangle (0.3,0.27);
-        \draw[very thick] (-0.3,-0.27) -- (0.3,-0.27);
-        \node[lab, above] at (0,1.98) {front};
-      \end{tikzpicture}\\[0.3em]
-      \footnotesize 12 directions of $30^\circ$; the best view of each is kept
+    \begin{column}{0.58\textwidth}
+      \includegraphics[width=\textwidth]{d1_candidates.pdf}
     \end{column}
-    \begin{column}{0.6\textwidth}
-      \footnotesize
-      \begin{tabular}{@{}p{3.4cm} p{4.6cm}@{}}
-        \toprule
-        what is kept & where it stands \\
-        \midrule
-        colour of each instance & runs, for display only; deliberately in no fit \\
-        a small crop per direction & on a branch; stored by long-term memory across lives \\
-        a learned descriptor per direction (the atlas) & runs in the chair agent in shadow mode; not in long-term memory \\
-        \bottomrule
-      \end{tabular}
-
-      \vspace{0.7em}
+    \begin{column}{0.4\textwidth}
       \small
-      A view from the front says little about the back, so a look is a set of views, each tagged with
-      where it was seen from.\\[0.4em]
-      \alert{Still unreliable:} near-identical crops have been filed in far-apart directions.
+      Monday's wall: the robot (red) has seen its east part. Five candidate viewpoints.
+      \begin{itemize}
+        \item ``far west'' sees few points and gains the most: it adds lever arm where the
+              information is weak;
+        \item ``stay'' gains exactly $\ln 2$. Why?
+      \end{itemize}
     \end{column}
   \end{columns}
-  \src{common/appearance\_belief; common/view\_atlas; branch feat/ltom-thumbnails, 2026-11-09}
 \end{frame}
 
-\begin{frame}{A second sight is a comparison, and ``new'' is on the list}
+\begin{frame}{Backup: Diminishing returns, and a warning}
   \begin{columns}[c]
-    \begin{column}{0.44\textwidth}
-      \centering
-      \begin{tikzpicture}
-        \draw[very thick, muted] (0,0) rectangle (5,3.2);
-        \node[draw=cool, densely dashed, thick, circle, minimum size=0.75cm, font=\tiny] (a) at (1.2,2.2) {22};
-        \node[draw=accent, densely dashed, thick, circle, minimum size=0.75cm, font=\tiny] (b) at (3.9,1.0) {23};
-        \node[lab, above=1pt] at (a.north) {remembered};
-        \fill[black] (1.55,1.75) circle (3pt);
-        \node[lab, right] at (1.65,1.72) {a chair is detected here};
-        \draw[-{Stealth}, muted, thick] (1.2,0.9) -- (1.5,1.6);
-        \node[lab, align=center] at (1.2,0.55) {which world\\explains it best?};
-      \end{tikzpicture}\\[0.4em]
-      \footnotesize
-      \begin{tabular}{@{}l l@{}}
-        is it chair 22? & $\ln p(x\,|\,22) + r_{22}$\\
-        is it chair 23? & $\ln p(x\,|\,23) + r_{23}$\\
-        is it \textbf{new}? & $\ln (1/A)$\\
-      \end{tabular}
+    \begin{column}{0.45\textwidth}
+      \includegraphics[width=\textwidth]{d1_diminishing.pdf}
     \end{column}
     \begin{column}{0.53\textwidth}
       \small
-      Where it is: the chair stayed, or it was moved with probability $\pi$ and could be anywhere:
-      \[ p(x\,|\,k) = (1-\pi)\,\N(x;\mu_k,\Sigma) + \pi/A . \]
-      What it looks like: $r_k$, the nats by which this chair's views explain the view better than
-      the class does.\\[0.5em]
-      Long-term memory only offers. The chair agent decides, the winner must beat ``new'', and a tie
-      goes to ``new''.\\[0.5em]
-      \alert{On position alone a moved chair cannot win: $\pi/A<1/A$.}
+      The $k$-th identical look gives $|(k{+}1)\Lambda_1| / |k\Lambda_1|=((k{+}1)/k)^2$ for two
+      parameters, so
+      \[ \Delta H_k = \ln\frac{k+1}{k}. \]
+      \pause
+      \alert{But this assumes each look's errors are independent.} Repeated looks share the pose
+      and the calibration, and those do not average away.\\[0.4em]
+      This morning's common-mode ceiling put a number on how little a repeat look is worth.
     \end{column}
   \end{columns}
-  \src{common/recall\_match/recall\_match.h; common/view\_atlas/view\_atlas.h}
 \end{frame}
 
-\begin{frame}{Second sight: what the toy says, what the robot does \wip}
+\begin{frame}{Backup: The room: predict through everything you believe}
+  \centering
+  \includegraphics[width=0.84\textwidth]{d4_explorer.pdf}
+
+  \raggedright\small
+  An explorer that casts its predicted beams through what it already knows is solid promises
+  cells nobody can reach, collects nothing for them, and offers them again at the next decision: the
+  robot would shuttle between two standpoints.
+  \alert{Predicted against realised gain is the most useful diagnostic an explorer has.}
+\end{frame}
+
+\begin{frame}{Backup: Who answers for obstacles? The geometry}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=2.45cm, minimum height=1.05cm}]
+    \node[s, fill=cool!10] (a) at (0,0) {grid planner\\{\scriptsize the room}};
+    \node[s, fill=cool!10] (b) at (3.3,0) {route optimiser\\{\scriptsize the route}};
+    \node[s, fill=cool!10] (c) at (6.6,0) {head re-solved\\{\scriptsize what sensors see}};
+    \node[s, fill=good!12] (d) at (9.9,0) {follower\\{\scriptsize no obstacle term}};
+    \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c); \draw[arr4] (c) -- (d);
+    \draw[thick] (-1.2,0.8) -- (7.8,0.8);
+    \node[font=\small] at (3.3,1.12) {obstacles are handled here, at three scales};
+    \node[font=\small, align=center] at (9.9,1.12) {handed a curve};
+  \end{tikzpicture}
+
+  \vspace{1em}
   \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \small
+      The follower has no avoidance mode and no arbitration between avoiding and tracking.
+      An arbitration problem has become a \textbf{coverage requirement}.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      Others choose differently: timed elastic bands emit the commands themselves; predictive
+      contouring keeps obstacles in the controller; regulated pure pursuit carries a collision check,
+      the price of replanning at 1 Hz and tracking at 20.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Backup: Routes as optimisation}
+  \[
+    J[r] = w_c\,\underbrace{\big\langle u^2+4u^4\big\rangle}_{\text{clearance}}
+    + w_\kappa\,\underbrace{\big\langle(\rho\kappa)^2\big\rangle}_{\text{bending}}
+    + \lambda_a\underbrace{\textstyle\sum_k\mathrm{Huber}(\delta_k)}_{\text{authored waypoints}}
+    + \lambda_j\,\underbrace{\big\langle(\mathrm{d}\kappa/\mathrm{d}s)^2\big\rangle}_{\text{turn-rate roughness}}
+  \]
+  \begin{columns}[c]
     \begin{column}{0.5\textwidth}
-      \footnotesize
-      \textbf{Toy, \% identified correctly}\\[0.3em]
-      \begin{tabular}{@{}l r r r@{}}
+      \small
+      \begin{itemize}
+        \item The quartic: margin is surrendered only where it is plentiful.
+        \item $\rho=v_{\max}^2/a^{\max}_{\mathrm{lat}}$: bending is priced by the speed it costs.
+        \item Terms are \emph{not} normalised by their current size, so re-optimising an optimal
+              route leaves it alone.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \centering\small
+      \begin{tabular}{@{}l r r@{}}
         \toprule
-         & position & + look & + look,\\
-         & & & same model \\
+        fixed tour & before & after \\
         \midrule
-        chair stayed & 98 & 100 & 99 \\
-        chair moved & 6 & 100 & \alert{33} \\
-        new chair & 81 & 100 & \alert{0} \\
+        5th-pct.\ clearance (m) & 0.334 & 0.431 \\
+        lap time (s)            & 131.3 & 116.8 \\
+        waypoint fidelity (m)   & 0.115 & 0.173 \\
         \bottomrule
       \end{tabular}
 
-      \vspace{0.6em}
-      With views twice as noisy as the model assumes, the look keeps only \alert{42\%} of the chairs
-      that never moved. Position alone kept 98\%.
-    \end{column}
-    \begin{column}{0.47\textwidth}
-      \begin{measured}{chairs, in simulated tours}\footnotesize
-        Position only, no appearance term. Back in the room, chairs return under their old identity
-        (p $.92$--$.98$), also from a previous start of the system.
-      \end{measured}
-      \footnotesize
-      \begin{itemize}
-        \item The chair is absent for about 35 s after the return, until it is detected again.
-        \item A \alert{moved} chair is not established: replaying the atlas offline, 15 of 53 right.
-        \item Other classes: merged, never run. Renaming and learned permanence: designed only.
-      \end{itemize}
+      \vspace{0.3em}
+      {\scriptsize The third row is the price; an earlier speed limit, before $\lambda_j$.}
     \end{column}
   \end{columns}
-  \src{lab 3, exercises 18--19; runs ltom\_chair2, rose\_chair3, 2026-11-08/09}
 \end{frame}
 
-% =================================================================================================
-\section{Lab}
-% =================================================================================================
-
-
-\begin{frame}{Lab 4: a concept's life, its footing, its look}
-  \texttt{labs/day4.ipynb}, about two hours.
-  \begin{columns}[T]
-    \begin{column}{0.31\textwidth}
-      \small
-      \textbf{Life cycle}
-      \begin{enumerate}
-        \item[A.] \textbf{Birth}: $\Delta F$ against a streak of three.
-        \item[B.] \textbf{Absence}: line of sight through walls; four rules on one tour.
-        \item[C.] \textbf{Forgetting}: constant $Q$ against inferred volatility.
-      \end{enumerate}
-    \end{column}
-    \begin{column}{0.33\textwidth}
-      \small
-      \textbf{Geometry}
-      \begin{enumerate}
-        \item[D.] \textbf{The room}: the vote, the band, four walls.
-        \item[E.] \textbf{The pose}: drive the route; NEES on three maps.
-        \item[F.] \textbf{Symmetry}: $F$ at the true pose and its half-turn.
-        \item[G.] \textbf{Ceiling}: independent against Woodbury.
-      \end{enumerate}
-    \end{column}
-    \begin{column}{0.31\textwidth}
-      \small
-      \textbf{Aspect}
-      \begin{enumerate}
-        \item[I.] \textbf{Second sight}: three remembered chairs and ``new''; position against look;
-                  one model of chair; a view from the other side.
-      \end{enumerate}
-    \end{column}
-  \end{columns}
-  \vspace{0.5em}
-  \small Short of time: A, B, E, G and I.
-\end{frame}
-
-\begin{frame}{Tomorrow}
+\begin{frame}{Backup: The error, in the curve's own coordinates}
   \begin{columns}[c]
-    \begin{column}{0.55\textwidth}
-      Today we asked what a chair is, how long it lasts and how it looks. Tomorrow: what it is
-      \textbf{for}.
-      \begin{itemize}
-        \item function: objects publish what they can do for the robot, priced in nats;
-        \item expected free energy: reaching a goal and reducing uncertainty in one currency, and
-              how the two mix;
-        \item the controller: routes and tracking as control problems with no separate obstacle term;
-        \item and the same objective turned on the body: calibration as inference.
-      \end{itemize}
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm]
+        \draw[very thick] plot[domain=-0.2:5.0, samples=60] (\x, {0.09*\x*\x});
+        \coordinate (F) at (2,0.36);
+        \coordinate (R) at (1.661,1.301);
+        \fill (F) circle (1.6pt);
+        \draw[densely dashed, muted, thick, -{Stealth}] (F) -- ++(19.8:1.5) node[right, lab4, text=black] {$\psi(s)$};
+        \fill[muted!40, draw=black] (R) circle (5pt);
+        \draw[-{Stealth}, very thick, accent] (R) -- ++(44.8:1.25) node[above, lab4, text=black] {heading};
+        \draw[densely dashed, muted] (R) -- ++(19.8:1.1);
+        \draw ([shift=(19.8:0.72)]R) arc (19.8:44.8:0.72);
+        \node[lab4] at (2.55,1.88) {$\phi_e$};
+        \draw[{Stealth}-{Stealth}] (F) -- node[left, lab4] {$e$} (R);
+        \node[lab4] at (5.0,2.5) {route $r(s)$};
+      \end{tikzpicture}
     \end{column}
-    \begin{column}{0.42\textwidth}
-      \begin{block}{Reading for Day 5}\small
-        Thesis chapters:
-        \begin{itemize}
-          \item \emph{Action: affordances and the expected free energy}, up to ``Why the gradient
-                decomposes'';
-          \item \emph{Self-Calibration of the Robot's Body}: ``What the body is'', ``What no data
-                can determine'', ``What each motion makes observable''.
-        \end{itemize}
-      \end{block}
+    \begin{column}{0.46\textwidth}
+      \[
+        \dot e \approx v\,\phi_e,
+        \qquad
+        \dot\phi_e = \omega - v\,\kappa(s)
+      \]
+      \small
+      Heading error turns forward motion into sideways drift. Heading error grows by whatever turn
+      rate exceeds what the curve demands.\\[0.5em]
+      Which suggests the law:
+      \[
+        \omega = \underbrace{v\kappa(s)}_{\text{feedforward}}
+        - v\Big(\frac{2}{L}\,\phi_e+\frac{1}{L^2}\,e\Big)
+      \]
     \end{column}
   \end{columns}
 \end{frame}
 
-\appendix
+\begin{frame}{Backup: A law you can write down}
+  \begin{columns}[c]
+    \begin{column}{0.48\textwidth}
+      \begin{measured}{the earlier follower was a sampler}
+        \small
+        An offline replay found the lateral term contributing \textbf{91.6\%} of the sampler's cost:
+        in effect a lateral regulator paying for $K$ rollouts. The tracker replaced it, and the
+        sampler is gone from the build.
+      \end{measured}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      \textbf{The feedforward is exact.} The unicycle is differentially flat with respect to its
+      position, so a $C^2$ curve and a speed profile fix $\omega=v\kappa$ in closed form.\\[0.6em]
+      A sampler earns its cost with multimodal costs and obstacles inside the objective. Here the
+      obstacles live in the route.
+    \end{column}
+  \end{columns}
+  \vspace{0.6em}
+  \lesson{When the dynamics are locally linear and one term dominates, write the law.}
+\end{frame}
+
+\begin{frame}{Backup: Pole assignment: the gains are not tuned}
+  \begin{columns}[c]
+    \begin{column}{0.4\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.5cm, y=1.5cm]
+        \draw[-{Stealth}, muted] (-2.2,0) -- (0.7,0) node[below, lab4, text=black] {$\mathrm{Re}\,\sigma$};
+        \draw[-{Stealth}, muted] (0,-1.1) -- (0,1.2) node[right, lab4, text=black] {$\mathrm{Im}\,\sigma$};
+        \node[accent, font=\Large] at (-1.2,0) {$\times\!\!\times$};
+        \node[lab4, above] at (-1.2,0.14) {two poles at $-v/L$};
+        \draw[densely dashed, muted, -{Stealth}] (-1.0,-0.45) -- (-1.75,-0.45);
+        \node[lab4, below] at (-1.4,-0.5) {faster robot: further left};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.56\textwidth}
+      Substituting the law into the error equations, at constant speed:
+      \[
+        \ddot e + \frac{2v}{L}\,\dot e + \frac{v^2}{L^2}\,e = 0
+        \;\Longrightarrow\; (\sigma + v/L)^2 = 0
+      \]
+      \small
+      Critically damped by construction, with one free parameter, because a double pole fixes both
+      gains:
+      \[ k_d = \frac{2}{L},\qquad k_p = \frac{v}{L^2}. \]
+      $L = 0.50$ m. What was chosen is where the poles sit.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Backup: The error decays over a distance, not a time}
+  \centering
+  \includegraphics[width=0.76\textwidth]{d4_decay.pdf}
+
+  \raggedright\small
+  With $\mathrm{d}/\mathrm{d}t=v\,\mathrm{d}/\mathrm{d}s$ the speed cancels: $e(s)=(A+Bs)\,e^{-s/L}$.
+  A robot crawling through a door and one crossing a room converge over the same metres, with no gain
+  schedule. These are the toy's three speeds; thin black is the formula.
+  \lesson{$L$ is not a gain. It is a length, read off the space the robot works in.}
+\end{frame}
+
+\begin{frame}{Backup: Why this follower needs no obstacle term}
+  \centering
+  \includegraphics[width=0.8\textwidth]{d4_route.pdf}
+
+  \raggedright\small
+  Same follower, unchanged. Only the curve moved: clearance $-40$ cm straight through, $+23$ cm after
+  deforming.\\[0.4em]
+  \textbf{What it costs.} An obstacle outside the live field, or inside the short fixed prefix, is not
+  avoided at all. \alert{No comparison with the window disabled has been run}: the
+  window is justified by the division of labour, not by a measured benefit.
+\end{frame}
+
+\begin{frame}{Backup: Following and choosing are one objective, at two depths}
+  \[
+    \nabla_{u_t} G_T(\pi)
+      = \underbrace{\nabla_{u_t} G_{t+1}(u_t)}_{\text{what the follower handles, in closed form}}
+      + \underbrace{\sum_{\tau=t+2}^{t+T}\nabla_{u_t} G_\tau(\pi)}_{\text{what the selector adds, in affordances}}
+  \]
+  \begin{center}
+  \begin{tikzpicture}[s/.style={box4, minimum width=4.5cm}]
+    \node[s, fill=cool!10] (a) at (0,0) {keep a re-evaluated \textbf{goal} from dithering:\\switching margin, in nats};
+    \node[s, fill=cool!10] (b) at (6.6,0) {keep a re-solved \textbf{route} from jumping:\\proximal prior, 3 cm};
+    \draw[{Stealth}-{Stealth}, thick] (a) -- node[above, lab4] {same device} (b);
+  \end{tikzpicture}
+  \end{center}
+  \small MPC, MPPI and planning as inference sit on this line, and differ in how many terms they keep
+  and how they estimate them.
+\end{frame}
 
 \begin{frame}{Backup: in the toy, free space tells a wall from a table}
   \begin{columns}[c]
@@ -1533,9 +1988,7 @@
       that edge.
     \end{column}
   \end{columns}
-  \src{lab 3, exercise 11; layout\_acquisition.tex l.507--526}
 \end{frame}
-
 
 \begin{frame}{Backup: Symmetry: where descent cannot help}
   \begin{columns}[c]
@@ -1553,10 +2006,7 @@
       covariance.}
     \end{column}
   \end{columns}
-  \src{room\_concept.tex l.1869--1927}
 \end{frame}
-
-
 
 \begin{frame}{Backup: Birth is a comparison between two worlds}
   \[
@@ -1579,7 +2029,6 @@
   \small
   Two models of \emph{different order}, one currency. The complexity is not a penalty added for
   regularisation: it is the same term every live instance already pays.
-  \src{agents\_life\_cycle.tex l.594--622}
 \end{frame}
 
 \begin{frame}{Backup: The room is the first belief born}
@@ -1611,7 +2060,6 @@
       \end{tikzpicture}
     \end{column}
   \end{columns}
-  \src{layout\_acquisition.tex l.56--66, l.128--146}
 \end{frame}
 
 \begin{frame}{Backup: A band that is derived, not chosen}
@@ -1634,7 +2082,6 @@
     \end{column}
   \end{columns}
   \lesson{A tuned threshold gives the band. The derivation gives the band \emph{and} the currency.}
-  \src{lab 3, exercise 8; the same mixture, per cell: layout\_acquisition.tex l.1049--1055}
 \end{frame}
 
 \begin{frame}{Backup: Promotion: the outline with the shortest description}
@@ -1664,7 +2111,6 @@
       {\scriptsize All in simulation; the pipeline has not run on the physical robot.}
     \end{column}
   \end{columns}
-  \src{layout\_acquisition.tex l.1036--1046, l.1173--1177, l.1455--1462}
 \end{frame}
 
 \begin{frame}{Backup: Observed, precision stops at a floor}
@@ -1682,7 +2128,6 @@
     \item Clamping $\Sigma$ caps the first problem and does nothing about this one.
   \end{itemize}
   \lesson{Nothing an agent learns extends how long it stays resistant.}
-  \src{agents\_life\_cycle.tex l.1045--1082; lab 3, exercise 5}
 \end{frame}
 
 \begin{frame}{Backup: A constant becomes an inferred quantity}
@@ -1707,7 +2152,6 @@
       \alert{Design only: no agent runs this yet.}
     \end{column}
   \end{columns}
-  \src{agents\_life\_cycle.tex l.1085--1125 (form of the update); lab 3, exercise 5}
 \end{frame}
 
 \begin{frame}{Backup: The room supplies the likelihood}
@@ -1740,7 +2184,6 @@
       \end{tikzpicture}
     \end{column}
   \end{columns}
-  \src{room\_concept.tex l.243--307}
 \end{frame}
 
 \begin{frame}{Backup: What the residual floor is made of}
@@ -1766,7 +2209,6 @@
     \end{column}
   \end{columns}
   \lesson{Two-thirds of the floor is an error every return shares. More returns cannot remove it.}
-  \src{room\_concept.tex l.386--426}
 \end{frame}
 
 \begin{frame}{Backup: Association: the factor the free energy cannot see}
@@ -1798,7 +2240,6 @@
       The repair comes later and from elsewhere: merging, and the existence belief.
     \end{column}
   \end{columns}
-  \src{concept\_agents.tex l.483--486, l.859--889}
 \end{frame}
 
 \begin{frame}{Backup: The common-mode ceiling}
@@ -1816,7 +2257,6 @@
     \item The joint information on (object, offset) has rank 6, not 12: the data cannot tell a
           displaced object from a displaced robot.
   \end{itemize}
-  \src{concept\_agents.tex l.1048--1090}
 \end{frame}
 
 \begin{frame}{Backup: Precision stops at a floor, in a picture}
@@ -1845,7 +2285,6 @@
     \end{column}
   \end{columns}
   \lesson{Nothing an agent learns extends how long it stays resistant.}
-  \src{agents\_life\_cycle.tex l.1045--1082; lab 3, exercise 5}
 \end{frame}
 
 \begin{frame}{Backup: The residual floor, in a picture}
@@ -1868,9 +2307,7 @@
     \end{column}
   \end{columns}
   \lesson{Two-thirds of the floor is an error every return shares. More returns cannot remove it.}
-  \src{room\_concept.tex l.386--426}
 \end{frame}
-
 
 \begin{frame}{Backup: Case study: association dies by a common-mode latch \wip}
   \begin{columns}[c]
@@ -1898,7 +2335,6 @@
   \end{columns}
   \vspace{0.5em}
   \centering\small ``A parked run looks perfect and the first tour kills it.''
-  \src{an earlier estimator; post-thesis note, 2026-09-18}
 \end{frame}
 
 \end{document}
