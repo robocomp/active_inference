@@ -57,7 +57,7 @@ int main()
         const float q = detect_prob(D.zed, g, 1.f);
         const float h = hit_llr(q, D.zed, 1.f), m = miss_llr(q, false_alarm_eff(D.zed, q));
         std::printf("  zed 1 m: q=%.3g hit=%.4f miss=%.3g\n", q, h, m);
-        CHECK(h >= 0.f and std::abs(m) < 1e-6f);
+        CHECK(h >= 0.f and std::abs(m) < 1e-3f);   // a miss in a view the door overflows costs ~nothing: the soft envelope leaves q = 2.4e-4 there (1e-6 was the tolerance of the first, sharper envelope)
     }
     { // ricoh_1p4m_defaults_printed (R8: spec's q~0 claim is false; recorded, not forced)
         ViewGeometry g; g.projectable = true; g.vis = 1.f; g.aspect = 1.f; g.fill_h = 0.28145f; g.fill_v = 0.38618f; g.range_m = 1.4f;
@@ -141,6 +141,30 @@ int main()
           CHECK(s.present_outlier == D.support.present_outlier);
           CHECK(msg.find("out of domain") != std::string::npos); }
         std::filesystem::remove(tmp); std::filesystem::remove(p); std::filesystem::remove(err);
+    }
+    { // old_file_loads_with_defaults: a table with no lidar / geometry rows loads, and those rows are today's values with n = 0
+        const auto tmp = std::filesystem::temp_directory_path() / std::format("det_old_{}.csv", ::getpid());
+        { std::ofstream o(tmp); o << "camera,param,value,n,source\nzed,hit_rate,0.85,12,t\nzed,false_alarm,0.03,0,t\n"; }
+        const auto r = load_detectors(tmp);
+        CHECK(r.zed.hit_rate == 0.85f and r.geometry.mu1_sd == 2.0f and r.geometry.n == 0.f);
+        CHECK(r.lidar.through_open == D.lidar.through_open and r.lidar.through_wall == D.lidar.through_wall and r.lidar.n_open == 0.f and r.lidar.n_wall == 0.f);
+        CHECK(D.geometry.mu1_sd == 2.0f);   // the fixed geo_mu1_sd = 2 the channel used before the fit
+        // the new rows round-trip, with their n
+        DetectorTable t = D; t.geometry = {0.37f, 737.f}; t.lidar = {0.8f, 0.002f, 9351.f, 14823.f};
+        save_detectors(tmp, t, "test");
+        const auto q = load_detectors(tmp);
+        CHECK(q.geometry.mu1_sd == 0.37f and q.geometry.n == 737.f);
+        CHECK(q.lidar.through_open == 0.8f and q.lidar.through_wall == 0.002f and q.lidar.n_open == 9351.f and q.lidar.n_wall == 14823.f);
+        // out of domain (a likelihood needs 0 < through_wall < through_open < 1): the compiled lidar pair, n = 0
+        { std::ofstream o(tmp); o << "camera,param,value,n,source\nlidar,through_open,0.1,5,t\nlidar,through_wall,0.4,5,t\n"; }
+        const auto d = load_detectors(tmp);
+        CHECK(d.lidar.through_open == D.lidar.through_open and d.lidar.through_wall == D.lidar.through_wall and d.lidar.n_open == 0.f);
+        // geometry mu1_sd: 0 is allowed (no information), a negative value is out of domain -> the compiled 2, n = 0
+        { std::ofstream o(tmp); o << "camera,param,value,n,source\ngeometry,mu1_sd,0,737,t\n"; }
+        CHECK(load_detectors(tmp).geometry.mu1_sd == 0.0f and load_detectors(tmp).geometry.n == 737.f);
+        { std::ofstream o(tmp); o << "camera,param,value,n,source\ngeometry,mu1_sd,-0.026,737,t\n"; }
+        CHECK(load_detectors(tmp).geometry.mu1_sd == 2.0f and load_detectors(tmp).geometry.n == 0.f);
+        std::filesystem::remove(tmp);
     }
     std::printf(fails ? "FAILED %d\n" : "ALL PASS\n", fails);
     return fails != 0;

@@ -3554,14 +3554,64 @@ int main()
             csv.open(outp, std::ios::app); csv.imbue(std::locale::classic());
             if (fresh) csv << newroom_csv_header() << '\n';
         }
+        // WS_NR_LAYOUTS=<file> (AuRo 2026-11-22): REAL floor plans, "name;x,y x,y ..." one per line (the MatterportLayout
+        // corpus test 8 reads with WS_LAYOUTS). Room i = line i. The start is test 8's: the deepest interior point of a
+        // 0.25 m scan of the room's own bounding box, heading +x — so both explorers start from the same pose.
+        std::vector<std::pair<std::string, Poly>> nr_layouts;
+        if (const char* lp = std::getenv("WS_NR_LAYOUTS"))
+        {
+            std::ifstream in(lp);
+            for (std::string line; std::getline(in, line);)
+            {
+                const auto semi = line.find(';');
+                if (semi == std::string::npos) continue;
+                Poly p;
+                const char* c = line.data() + semi + 1;
+                const char* e = line.data() + line.size();
+                while (c < e)
+                {
+                    while (c < e and *c == ' ') ++c;
+                    float x = 0.f, y = 0.f;
+                    const auto r1 = std::from_chars(c, e, x);
+                    if (r1.ec != std::errc{}) break;
+                    c = r1.ptr; if (c < e and *c == ',') ++c;
+                    const auto r2 = std::from_chars(c, e, y);
+                    if (r2.ec != std::errc{}) break;
+                    c = r2.ptr;
+                    p.emplace_back(x, y);
+                }
+                if (p.size() >= 4) nr_layouts.emplace_back(line.substr(0, semi), std::move(p));
+            }
+            std::printf("WS_NR_LAYOUTS: %zu real layouts from %s\n", nr_layouts.size(), lp);
+        }
         for (int ii = 0; ii < N; ++ii)
         {
             const int i = ilo + ii;
             const bool lu = std::getenv("WS_BOXES_STYLE") and std::string(std::getenv("WS_BOXES_STYLE")) == "lu";
-            const int order = apt ? 32 : lu ? (i % 2 ? 2 : 1) + 1 : olo + (i % nord);   // lu: 2 = L, 3 = U (boxes)
-            const auto gen = apt ? apartamento_room()
+            const bool real = not nr_layouts.empty();
+            if (real and i >= static_cast<int>(nr_layouts.size())) break;
+            const int order = real ? static_cast<int>(nr_layouts[static_cast<size_t>(i)].second.size())
+                            : apt ? 32 : lu ? (i % 2 ? 2 : 1) + 1 : olo + (i % nord);   // lu: 2 = L, 3 = U (boxes)
+            const auto real_room = [&]() -> std::optional<std::pair<Poly, std::vector<Eigen::Vector2f>>>
+            {
+                const Poly& room = nr_layouts[static_cast<size_t>(i)].second;
+                Eigen::Vector2f blo = room.front(), bhi = room.front();
+                for (const auto& v : room) { blo = blo.cwiseMin(v); bhi = bhi.cwiseMax(v); }
+                Eigen::Vector2f start = 0.5f * (blo + bhi); float best_clear = -1.f;
+                for (float x = blo.x() + 0.25f; x < bhi.x(); x += 0.25f)
+                    for (float y = blo.y() + 0.25f; y < bhi.y(); y += 0.25f)
+                    {
+                        const Eigen::Vector2f q(x, y);
+                        if (not rc::corner_visibility::point_in_polygon(q, room)) continue;
+                        if (const float cl = point_to_poly(q, room); cl > best_clear) { best_clear = cl; start = q; }
+                    }
+                return std::pair{room, std::vector<Eigen::Vector2f>{start, start + Eigen::Vector2f(0.3f, 0.f)}};
+            };
+            const auto gen = real ? real_room()
+                           : apt ? apartamento_room()
                            : lu  ? lu_room(static_cast<unsigned>(2000 + i), i % 2 == 1)
                                  : random_room(static_cast<unsigned>(1000 + i), order);
+            if (real) std::printf("room %3d = %s\n", i, nr_layouts[static_cast<size_t>(i)].first.c_str());
             if (not gen) { std::printf("room %d: no drivable circuit\n", i); continue; }
             int srot = geti("WS_BOXES_START_ROT", 0);
             // WS_NR_LEGAL_START=1: the generator only checks that the tour's waypoints lie inside the room, not that the
@@ -3583,7 +3633,7 @@ int main()
                         r.rot_err_deg, 100.f * r.seen_frac, r.promo_frame, r.edits_adopted, r.frames_out, r.frames_blocked, r.frames,
                         r.stop.c_str(), r.wall_s);
             std::fflush(stdout);
-            if (csv.is_open()) { newroom_csv_row(csv, i, order, r, seed, apt ? "apartamento" : lu ? "lu" : "random", srot, sfrac); csv.flush(); }
+            if (csv.is_open()) { newroom_csv_row(csv, i, order, r, seed, real ? "matterport" : apt ? "apartamento" : lu ? "lu" : "random", srot, sfrac); csv.flush(); }
             // WS_NR_DUMP=<dir>: per-room geometry for figures (true polygon, final outline, trajectory), world frame.
             if (const char* dd = std::getenv("WS_NR_DUMP"))
             {

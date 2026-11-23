@@ -22,6 +22,8 @@
 //   then per Bernoulli channel (Zed, Ricoh): n sum_q sum_hit_w sum_f hit_c ; then geo: n sum_x sum_w mu0 mu1 s2;
 //   then the fit-support channel: n sum_x sum_w present_a present_b present_outlier absent_a absent_b absent_outlier.
 //   "VL3" appends the support channel's sum_q (the summed overlap q of its frames, see add_support) after that block.
+//   "VL4" (written only when a view holds one-model geometry) appends per view: framed(0/1) sum_lg, the sum of the frames' own geometry terms.
+//   "VL5" (written only when a view holds a LiDAR opening term) is VL4 plus per view: lidar_n lidar_sum (add_lidar).
 //   "VL1" (the same without the support block) still parses, with an empty support channel; VL1/VL2 read as q = 1.
 #pragma once
 #include <algorithm>
@@ -50,14 +52,38 @@ struct ViewKey { float bearing = 0.f; float range = 0.f; int visit = 0; };   // 
 /// Per-view Bernoulli aggregate over its frames: sums of q, hit weight (association weight of a hit, 0 for a miss) and the
 /// per-frame effective false-alarm rate f_eff (false_alarm_eff). hit_c = ln(hit_rate/false_alarm) of the camera's model.
 struct BernoulliAgg { double n = 0, sum_q = 0, sum_hit_w = 0, sum_f = 0; float hit_c = 0.f; };
-struct GaussAgg { double n = 0, sum_x = 0, sum_w = 0; float mu0 = 0, mu1 = 0, s2 = 1; };
+struct GaussAgg
+{
+    double n = 0, sum_x = 0, sum_w = 0; float mu0 = 0, mu1 = 0, s2 = 1;
+    // One-model geometry (add_geometry_t): each frame is scored with ITS OWN controls and the view keeps the sum of those terms
+    // (w_i * l_i), so no frame overwrites another and no later frame re-prices an earlier one. mu0/mu1/s2 are unused then.
+    bool framed = false; double sum_lg = 0;
+};
+/// ONE-MODEL (final review 2): the term a legacy (pre-flag, VL1-VL3) geometry aggregate stands for under the CURRENT geometry model:
+/// present = mu0 + mu1_sd * s (s = sqrt(s2) of the aggregate), the legacy mean-of-statistic score, clamped one-sided like the legacy branch when
+/// geometry may not refute. The old aggregate scored `mu1 = mu0 + 2 s` of ITS last frame and divided by s2: re-priced by 1/s, which is where a tiny
+/// s2 gave +-3e4 nats. With mu1_sd = 0 (a fitted "this channel carries no information") the term is exactly 0. Returns the SUM the framed form keeps
+/// (term * n: recompute divides it by n).
+[[nodiscard]] inline double rescored_legacy_geometry(const GaussAgg& g, float mu1_sd, bool geometry_may_refute)
+{
+    if (not (g.n > 0 and g.sum_w > 0 and g.s2 > 0.f)) return 0.0;
+    const float mu1 = g.mu0 + mu1_sd * std::sqrt(g.s2);
+    const float xb = float(g.sum_x / g.sum_w), wb = float(g.sum_w / g.n);
+    float lg = wb * ((xb - g.mu0) * (xb - g.mu0) - (xb - mu1) * (xb - mu1)) / (2.f * g.s2);
+    if (not geometry_may_refute) lg = std::max(0.f, lg);
+    return std::isfinite(lg) ? double(lg) * g.n : 0.0;
+}
 /// The fit-support channel's per-view aggregate: the weighted mean of x over the view's frames, scored once (support_llr); the
 /// model it was scored with travels with it (as geo's mu0/mu1/s2 do), so a restored ledger recomputes without the table.
 struct SupportAgg { double n = 0, sum_x = 0, sum_w = 0, sum_q = 0; SupportModel m; };
+/// The LiDAR opening channel's per-view aggregate (one-model): the mean over the view's sweeps of each sweep's opening_view_llr (door_opening_edges.h:
+/// the sweep's mean per-bin log ratio over the aperture span, weighted by the line of sight to it). One sweep is one trial; the view's term is their mean.
+struct LidarAgg { double n = 0, sum = 0; };
 struct View
 {
     ViewKey key; 
     std::array<BernoulliAgg, 2> bern;   // Zed, Ricoh
+    LidarAgg lid;
     GaussAgg geo; SupportAgg sup; float actuation_llr = 0; float llr = 0;
     float llr_percept = 0;   // the perceptual part of llr (recomputed with it; llr - llr_percept = the physical part)
 };
@@ -89,11 +115,35 @@ public:
     void add_bernoulli(std::size_t v, Channel c, float q, const DetectorModel& m, float hit_w)
     {
         if (v >= views_.size()) return;
-        if (c == Channel::Ricoh and not (hit_w > 0.f)) return;   // ★RICOH IS HITS ONLY (Pablo 2026-11-08): a frame without a detection is no trial
+        if (c == Channel::Ricoh and not (hit_w > 0.f) and not ricoh_counts_misses) return;   // ★RICOH IS HITS ONLY (Pablo 2026-11-08): a frame without a detection is no trial
         ++version_;
         auto& a = views_[v].bern[c == Channel::Ricoh ? 1 : 0];
         a.n += 1; a.sum_q += q; a.sum_hit_w += hit_w; a.sum_f += false_alarm_eff(m, q);
         if (q > 0.f) a.hit_c = hit_llr(q, m, 1.f);
+    }
+    /// One geometry frame, one-model form. x = the leaf contour's edge support, mu0/s2 = the mean and variance of the k control
+    /// contours of THIS frame, present = mu0 + mu1_sd * s. Each hypothesis is scored with a Student-t of k - 1 degrees of freedom
+    /// (s is itself estimated from k contours, so a 2-control s is not exact): l = -(nu+1)/2 [ln(1+z1^2/nu) - ln(1+z0^2/nu)],
+    /// z = (x - mu) / s. The view's term is sum(w_i l_i) / n: the weight-averaged mean of its frames' terms. mu1_sd = 0 (a fitted
+    /// "this channel carries no information") gives exactly 0. Two-sided: a refutation is as much evidence as a confirmation.
+    void add_geometry_t(std::size_t v, float x, float w, float mu0, float s2, float mu1_sd, int k, bool may_refute = true)
+    {
+        if (v >= views_.size() or not (s2 > 0.f) or not (w >= 0.f)) return;
+        ++version_;
+        auto& g = views_[v].geo;
+        if (not g.framed)
+        {   // a view that held an old-style aggregate: re-scored under the CURRENT geometry model (rescored_legacy_geometry), never with the mu1 = mu0 + 2 s it was written under
+            g.sum_lg = rescored_legacy_geometry(g, mu1_sd, may_refute);
+            g.framed = true;
+        }
+        double l = 0.0;
+        if (mu1_sd > 0.f and k >= 2)
+        {
+            const double nu = k - 1, z0 = (double(x) - mu0) / std::sqrt(double(s2)), z1 = z0 - mu1_sd;
+            l = -0.5 * (nu + 1.0) * (std::log1p(z1 * z1 / nu) - std::log1p(z0 * z0 / nu));
+            if (not std::isfinite(l)) l = 0.0;
+        }
+        g.n += 1; g.sum_x += double(w) * x; g.sum_w += w; g.sum_lg += double(w) * l;
     }
     /// One geometry frame: statistic x with weight w; hypotheses N(mu0,s2) (absent) vs N(mu1,s2) (present).
     void add_geometry(std::size_t v, float x, float w, float mu0, float mu1, float s2)
@@ -116,6 +166,13 @@ public:
         auto& s = views_[v].sup;
         s.n += 1; s.sum_x += double(w) * x; s.sum_w += w; s.sum_q += std::clamp(std::isfinite(q) ? q : 0.f, 0.f, 1.f); s.m = m;   // clamp: domain of a probability
     }
+    /// One sweep's opening term (opening_view_llr). Not finite = no term (a sweep that saw nothing of the span adds nothing, it is not a zero trial).
+    void add_lidar(std::size_t v, float llr)
+    {
+        if (v >= views_.size() or not std::isfinite(llr)) return;
+        ++version_;
+        views_[v].lid.n += 1; views_[v].lid.sum += llr;
+    }
     void add_actuation(std::size_t v, float llr) { if (v < views_.size()) { views_[v].actuation_llr += llr; ++version_; } }
 
     /// Recompute view v's llr from its aggregate (replacing the old one). Returns the CHANGE in sum().
@@ -129,13 +186,22 @@ public:
         {
             const auto& a = w.bern[i];
             if (a.n <= 0) continue;
+            // one-model: one frame cannot decide a view, so the view's mean frame term counts n/(n + 1): a neutral pseudo-frame (zero evidence)
+            // joins the mean. (Task 6's Beta(1,1) hit fraction (sum hit_w + 1)/(n + 2) turned a MISS into positive evidence:
+            // its pseudo-hits are worth hit_llr whatever q says; one q = 0.08 miss was worth +0.46 nats and a view of misses at q = 0.4 +0.09.)
             const float qb = float(a.sum_q / a.n), fb = float(a.sum_f / a.n), db = float(a.sum_hit_w / a.n);
             const float hit = qb > 0.f ? a.hit_c : 0.f;
-            l += db * hit;
-            if (i == 0) l += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
+            float lc = db > 0.f ? db * hit : 0.f;   // a zero weight never multiplies an llr (0 * -inf = NaN)
+            if ((i == 0 or ricoh_counts_misses) and db < 1.f) lc += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
+            l += beta_hit_fraction ? lc * float(a.n / (a.n + 1.0)) : lc;
         }
+        if (w.lid.n > 0) l += float(w.lid.sum / w.lid.n);   // the LiDAR opening: the mean of the view's sweeps, one trial per view
         const auto& g = w.geo;
-        if (g.sum_w > 0 and g.n > 0 and g.s2 > 0.f)
+        if (g.framed)
+        {
+            if (g.n > 0) l += float(g.sum_lg / g.n);
+        }
+        else if (g.sum_w > 0 and g.n > 0 and g.s2 > 0.f)
         {
             const float xb = float(g.sum_x / g.sum_w), wb = float(g.sum_w / g.n);
             float lg = wb * ((xb - g.mu0) * (xb - g.mu0) - (xb - g.mu1) * (xb - g.mu1)) / (2.f * g.s2);
@@ -160,6 +226,11 @@ public:
         return change;
     }
 
+    /// One-model: the ricoh counts misses (a frame of q > 0 with no detection is a trial) with its own fitted model, like the ZED.
+    /// Set by the owner from cfg.exist_one_model; also passed through parse(). False = today's hits-only ricoh.
+    bool ricoh_counts_misses = false;
+    bool beta_hit_fraction = false;   // one-model: a view's mean frame term counts n/(n + 1), one neutral pseudo-frame (set by observe_place; not persisted)
+
     /// Every channel's sum: what the per-channel dl's of the trace are differences of. The belief does NOT add this (place_belief.h).
     [[nodiscard]] float sum() const { float s = 0.f; for (const auto& v : views_) s += v.llr; return s; }
     /// Sc: zed + ricoh + geometry + support. Evidence that a door-SHAPED thing is here: it does not separate a door from a look-alike.
@@ -172,7 +243,9 @@ public:
 
     [[nodiscard]] std::string serialise() const
     {
-        std::string s = std::format("VL3 {}", views_.size());
+        const bool lidar = std::ranges::any_of(views_, [](const View& v) { return v.lid.n > 0; });
+        const bool framed = lidar or std::ranges::any_of(views_, [](const View& v) { return v.geo.framed; });
+        std::string s = std::format("VL{} {}", lidar ? 5 : framed ? 4 : 3, views_.size());   // VL4 only when a view holds one-model geometry: flag-off output is unchanged
         for (const auto& v : views_)
         {
             s += std::format(" {} {} {} {} {}", v.key.bearing, v.key.range, v.key.visit, v.actuation_llr, v.llr);
@@ -181,13 +254,19 @@ public:
             s += std::format(" {} {} {} {} {} {} {} {} {}", v.sup.n, v.sup.sum_x, v.sup.sum_w, v.sup.m.present_a, v.sup.m.present_b,
                              v.sup.m.present_outlier, v.sup.m.absent_a, v.sup.m.absent_b, v.sup.m.absent_outlier);
             s += std::format(" {}", v.sup.sum_q);
+            if (framed) s += std::format(" {} {}", v.geo.framed ? 1 : 0, v.geo.sum_lg);
+            if (lidar) s += std::format(" {} {}", v.lid.n, v.lid.sum);
         }
         return s;
     }
 
     /// Rejects any non-finite number. The stored llr is NOT trusted: every view is recomputed from its aggregate
     /// (geometry_may_refute must match the one used by the caller's recompute calls).
-    static std::optional<ViewLedger> parse(std::string_view str, bool geometry_may_refute)
+    ///   `one_model_mu1_sd` (nullopt = flag off): the ONE-MODEL reading of the string. A flag-off parse of a ledger a flag-on run wrote (VL4/VL5: frames' own
+///   geometry terms, LiDAR openings, Ricoh aggregates that count misses) returns an EMPTY ledger, which the caller reads as "no ledger, keep the row's L":
+///   those aggregates cannot be separated back into today's. A flag-on parse re-scores every legacy geometry aggregate with the current model (mu1_sd).
+    static std::optional<ViewLedger> parse(std::string_view str, bool geometry_may_refute, bool ricoh_counts_misses = false,
+                                           std::optional<float> one_model_mu1_sd = std::nullopt)
     {
         std::size_t pos = 0;
         const auto tok = [&]() -> std::string_view {
@@ -203,11 +282,13 @@ public:
             return r.ec == std::errc{} and r.ptr == t.data() + t.size();
         };
         const auto version = tok();
-        const bool vl1 = version == "VL1", vl3 = version == "VL3";
+        const bool vl1 = version == "VL1", vl5 = version == "VL5", vl4 = version == "VL4" or vl5, vl3 = version == "VL3" or vl4;
         if (not vl1 and not vl3 and version != "VL2") return std::nullopt;
+        if (vl4 and not one_model_mu1_sd.has_value() and not ricoh_counts_misses) return ViewLedger{};   // written by a flag-on run, read by a flag-off one: empty (see above)
         std::size_t n = 0;
         if (not num(n)) return std::nullopt;
         ViewLedger L;
+        L.ricoh_counts_misses = ricoh_counts_misses;
         for (std::size_t i = 0; i < n; ++i)
         {
             View v; bool ok = num(v.key.bearing) and num(v.key.range) and num(v.key.visit)
@@ -220,16 +301,23 @@ public:
                      and num(v.sup.m.present_outlier) and num(v.sup.m.absent_a) and num(v.sup.m.absent_b) and num(v.sup.m.absent_outlier);
             if (vl3) ok = ok and num(v.sup.sum_q);
             else     v.sup.sum_q = v.sup.n;    // before the overlap existed every frame counted in full: q = 1
+            if (vl4) { int fr = 0; ok = ok and num(fr) and num(v.geo.sum_lg); v.geo.framed = fr != 0; }
+            if (vl5) ok = ok and num(v.lid.n) and num(v.lid.sum) and std::isfinite(v.lid.n) and std::isfinite(v.lid.sum) and v.lid.n >= 0;
             if (not ok) return std::nullopt;
             const auto fin = [](float x) { return std::isfinite(x); };
             ok = ok and fin(v.key.bearing) and fin(v.key.range) and fin(v.actuation_llr) and fin(v.llr)
                  and fin(v.geo.mu0) and fin(v.geo.mu1) and fin(v.geo.s2) and std::isfinite(v.geo.n)
                  and std::isfinite(v.geo.sum_x) and std::isfinite(v.geo.sum_w) and std::isfinite(v.sup.n) and std::isfinite(v.sup.sum_x)
-                 and std::isfinite(v.sup.sum_w) and std::isfinite(v.sup.sum_q) and support_in_domain(v.sup.m);
+                 and std::isfinite(v.sup.sum_w) and std::isfinite(v.sup.sum_q) and std::isfinite(v.geo.sum_lg) and support_in_domain(v.sup.m);
             for (const auto& a : v.bern)
                 ok = ok and fin(a.hit_c) and std::isfinite(a.n) and std::isfinite(a.sum_q) and std::isfinite(a.sum_hit_w) and std::isfinite(a.sum_f);
             if (not ok) return std::nullopt;
             v.llr = 0.f;
+            if (one_model_mu1_sd.has_value() and not v.geo.framed and v.geo.n > 0)
+            {   // a pre-flag aggregate under the flag: re-scored with the current model, and from now on a framed view
+                v.geo.sum_lg = rescored_legacy_geometry(v.geo, *one_model_mu1_sd, geometry_may_refute);
+                v.geo.framed = true;
+            }
             L.views_.push_back(v);
             L.recompute(L.views_.size() - 1, geometry_may_refute);
         }

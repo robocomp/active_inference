@@ -32,6 +32,26 @@ int main()
     // second_door
     CHECK(std::abs(place_prior(input(kRoom, {3, -0.1f}, 0.85f, 1)).base_rate - std::log(0.01f / 0.99f)) < 1e-5f);
     CHECK(std::abs(place_prior(input(kRoom, {3, -0.1f}, 0.85f, 0)).base_rate - first) < 1e-5f);
+    // rates_null_is_today: no WallRates = the integer rule, for 0 and for 1 door before
+    for (int before : {0, 1})
+    {
+        const auto in = input(kRoom, {3, -0.1f}, 0.85f, before);
+        CHECK(in.rates == nullptr);
+        CHECK(place_prior(in).base_rate == (before == 0 ? std::log(0.4f / 0.6f) : std::log(0.01f / 0.99f)));
+    }
+    // rates_given_uses_others: with rates the integer is ignored and the others' beliefs set the rate
+    {
+        const WallRates rates{};
+        const float certain[] = {1.0f}, none[] = {0.0f};
+        auto in = input(kRoom, {3, -0.1f}, 0.85f, 5);   // integer 5 must not matter
+        in.rates = &rates;
+        in.r_others = std::span<const float>(certain);
+        CHECK(std::abs(place_prior(in).base_rate - std::log(0.01f / 0.99f)) < 1e-5f);
+        in.r_others = std::span<const float>(none);
+        CHECK(std::abs(place_prior(in).base_rate - first) < 1e-5f);
+        in.r_others = {};
+        CHECK(std::abs(place_prior(in).base_rate - first) < 1e-5f);
+    }
     // proto_frontier: one-sided, no cutoff. Which sign is outside: y = -0.5 is beyond the wall (the promoted room pays there).
     {
         const auto inside_proto = place_prior(input(kRoom, {3, 0.5f}, 0.85f, 0, true));

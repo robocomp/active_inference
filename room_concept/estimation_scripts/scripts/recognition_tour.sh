@@ -14,7 +14,7 @@ LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK;
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # helpers come from THIS script's own directory (the worktree), data stays under $E
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
 EXPLORE_S=${2:-60}; SCAN_CAP_S=${SCAN_CAP_S:-600}
-export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build} WT_AGENTS=${WT_AGENTS:-"controller door_concept table_concept room_concept ltsm_agent"}
+export WT=${WT:-$B} WT_AGENTS=${WT_AGENTS:-"controller door_concept table_concept room_concept ltsm_agent"}
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent table_concept"
 echo stop > $B/controller/remote_cmd.txt
 # fresh state: no last pose, no name high-water mark, no ltsm memory, no place maps
@@ -46,7 +46,7 @@ now_ms() { date +%s%3N; }
 # GROUND TRUTH at 1 Hz (recog_proto9: a 179° adoption could not be graded without it): wall ms, Webots pose, and every
 # agent log's line count, so any log line (e.g. room_concept's "[room][proposal] ACCEPTED") maps to the true pose then.
 GT=crossing/$1/gt_pose.tsv; printf 't_ms\tx\ty\tyaw\troom_concept\tltsm_agent\tdoor_concept\tcontroller\n' > $GT
-( while [ -f $LOCK ]; do
+( while [ "$(cat $LOCK 2>/dev/null)" = "$$" ]; do
     p=$(python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1"\t"$2"\t"$5}')
     [ -n "$p" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' $(now_ms) "$p" $(nl room_concept) $(nl ltsm_agent) $(nl door_concept) $(nl controller) >> $GT
     sleep 1

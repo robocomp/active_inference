@@ -1,0 +1,46 @@
+% belief-node.tex — schematic companion to Figure 2: one node of the graph as a belief.
+% Uses the palette defined in vygotskian_machine_build.tex. Schematic, not data.
+\begin{tikzpicture}[font=\scriptsize, >=Latex]
+% ---------- the node card
+\node[draw=conceptc, very thick, rounded corners=3pt, fill=conceptf, align=left, inner sep=4pt,
+      text width=36mm, anchor=north west] (card) at (0,0) {%
+  \tikz[baseline=-0.6ex]\fill[yellow!85!orange, draw=conceptc!80!black] (0,0) circle (2.4pt);\
+  \textbf{\textcolor{conceptc!80!black}{chair\_34}}\\[1pt]
+  owner: chair agent\\
+  pose: mean $\mu$, covariance $\Sigma$\\
+  existence: log-odds $\ell$\\
+  parent: \texttt{room\_1}\\
+  edge: transform $T$ and its $\Sigma$};
+% ---------- floor sketch: pose belief seen from the robot
+\begin{scope}[shift={(4.3,-2.15)}]
+  \draw[black!55, thick] (0,0) -- (0,2.05) -- (3.0,2.05);
+  \node[font=\tiny, text=black!55, anchor=south west] at (0,2.05) {room\_1 walls};
+  % view cone
+  \fill[wmc!25] (0.55,0.35) -- (2.75,1.65) -- (2.75,0.05) -- cycle;
+  % robot
+  \fill[bodyc!70] (0.55,0.35) circle (0.13);
+  \draw[bodyc!80!black, thick, ->] (0.55,0.35) -- (0.9,0.55);
+  \node[font=\tiny, text=bodyc!80!black, anchor=north] at (0.55,0.2) {robot};
+  % chair belief: footprint at the mean, 2-sigma ellipse
+  \draw[conceptc, thick, fill=conceptf, rotate around={25:(2.1,1.0)}] (2.1,1.0) ellipse (0.55 and 0.28);
+  \draw[conceptc!80!black, fill=conceptc!45] (1.95,0.88) rectangle (2.25,1.12);
+  \node[font=\tiny, text=conceptc!80!black, anchor=north] at (2.1,0.62) {$\mu$, $2\sigma$};
+\end{scope}
+% ---------- existence log-odds over time
+\begin{scope}[shift={(0,-5.2)}]
+  % segments
+  \fill[wmc!18] (0.2,-0.75) rectangle (2.5,1.45);
+  \fill[black!8] (2.5,-0.75) rectangle (4.6,1.45);
+  \fill[bodyf] (4.6,-0.75) rectangle (7.0,1.45);
+  \draw[->, black!60] (0,0) -- (7.35,0) node[anchor=west, font=\tiny, text=black!60] {time};
+  \draw[->, black!60] (0,-0.75) -- (0,1.55) node[anchor=south, font=\tiny, text=black!60] {$\ell$};
+  \draw[black!35, dashed] (0,0.0) -- (7.0,0.0);
+  \draw[conceptc!85!black, very thick]
+    (0.2,0.0) .. controls (0.9,0.7) and (1.6,1.05) .. (2.5,1.15)
+    -- (4.6,1.15)
+    .. controls (5.4,1.05) and (6.1,0.25) .. (6.9,-0.55);
+  \node[font=\tiny, align=center, anchor=north] at (1.35,-0.78) {seen\\rises};
+  \node[font=\tiny, align=center, anchor=north] at (3.55,-0.78) {occluded\\held};
+  \node[font=\tiny, align=center, anchor=north] at (5.8,-0.78) {absent where\\detectable: falls};
+\end{scope}
+\end{tikzpicture}

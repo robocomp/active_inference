@@ -84,6 +84,23 @@ static void test_existence_prior_read(Fixture& f)
         if (k.n == 3) CHECK(std::abs(k.cand.log_prior - std::log(0.06f)) < 1e-5f);
         else CHECK(k.cand.log_prior == 0.f);   // not stated: position alone, as before
 }
+// Changed object (2026-11-15): the remembered colour and ltom's link ride on the candidate.
+static void test_colour_and_link_read(Fixture& f)
+{
+    f.recall(f.room, uid_of(kMe, 3), 1.5f, -2.0f, 0.02f);
+    f.recall(f.room, uid_of(kMe, 4), 0.5f, -1.0f, 0.02f);
+    auto n = *f.G->get_node("ltom_recall_" + std::to_string(uid_of(kMe, 3)));
+    f.G->add_or_modify_attrib_local<color_name_att>(n, std::string("magenta"));
+    f.G->add_or_modify_attrib_local<color_prob_att>(n, 0.74f);
+    f.G->add_or_modify_attrib_local<same_as_uid_att>(n, uid_of(kMe, 57));
+    f.G->add_or_modify_attrib_local<same_as_prob_att>(n, 1.f);
+    f.G->update_node(n);
+    const auto c = rc::recall_candidates(*f.G, f.room, "chair", kMe, 100, {});
+    CHECK(c.size() == 2);
+    for (const auto& k : c)
+        if (k.n == 3) CHECK(k.colour_name == "magenta" and k.colour_prob == 0.74f and k.same_as_uid == uid_of(kMe, 57) and k.same_as_prob == 1.f);
+        else CHECK(k.colour_name.empty() and k.same_as_uid == 0);
+}
 static void test_live_name_excluded(Fixture& f)
 {
     f.recall(f.room, uid_of(kMe, 3), 1.f, 1.f, 0.02f);
@@ -182,6 +199,7 @@ int main()
     };
     run("test_reads_own_chair_recalls", test_reads_own_chair_recalls);
     run("test_existence_prior_read", test_existence_prior_read);
+    run("test_colour_and_link_read", test_colour_and_link_read);
     run("test_live_name_excluded", test_live_name_excluded);
     run("test_other_agent_uid_excluded", test_other_agent_uid_excluded);
     run("test_candidate_above_counter_excluded", test_candidate_above_counter_excluded);

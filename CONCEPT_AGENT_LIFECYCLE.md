@@ -33,6 +33,12 @@ Five stages: **CREATE · UPDATE · REMOVE · HISTORY · OWNERSHIP**.
 
 **Invariant:** an agent must never create a graph node for an instance the tracker has not birthed.
 
+*(2026-11-15, door_concept only, behind `Existence.OneModel`, default false.)* Door birth is the one sanctioned exception to
+"tracker-only": under `Existence.OneModel = true` a door is born BY COMPARISON inside door_concept (see "door_concept CREATE
+(one-model amendment)" in §1's door note below). The shared tracker (`common/instance_tracker`, not edited) only holds
+candidates and keeps one track per detection; it no longer decides that a door exists. Every other agent keeps this section as
+written. Until the owner accepts the live series the flag stays false and the older door birth below is what runs.
+
 **Every node this fleet inserts carries its birth time.** `common/graph_provenance/creation_stamp.h`
 (`rc::provenance::stamp_creation(*G, node)`), called immediately before `insert_node`, writes one instant in
 two forms: `timestamp_creation` (uint64 ms since the Unix epoch — code subtracts) and `creation_datetime`
@@ -233,8 +239,8 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | table | ✅ resurrects from ltom recall | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ | ✅ | ✅ birth + existence |
 | chair | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` *(Phase 0 re-read, below)* | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* | ✅ | ✅ birth + existence |
 | bottle | ✅ resurrects from ltom recall | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ | ✅ | ⚠️ birth only (no existence channel) |
-| cabinet | ✅ resurrects from ltom recall | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ | ✅ | ✅ birth (both paths) + existence |
-| door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ restores from ltsm `remembered_door` notes; refuted places in a private phantom file *(2026-11-14, Task 6)* | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* | — not audited (Phase 0: countable only) | — |
+| cabinet | ✅ resurrects from ltom recall (classic path; kitchen runs carry no uid) | ✅ | ✅ trunc | ✅ `rc::exist` + left-behind release in BOTH pipelines *(fixed 2026-11-21, below)* | ✅ | ✅ shared helper | ✅ | ✅ | ✅ *(kitchen model re-bound per room 2026-11-21; was classic-only)* | ✅ birth (both paths) + existence |
+| door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)*; *2026-11-15: behind `Existence.OneModel` (default false) the tracker only holds candidates and the birth is decided inside door_concept, every mask shared among four causes (one-model amendment below); live acceptance failed on rate and candidate churn, so the flag stays off (spec 2026-11-14 §13.6)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ restores from ltsm `remembered_door` notes; refuted places in a private phantom file *(2026-11-14, Task 6)* | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* | — not audited (Phase 0: countable only) | — |
 | refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ | ✅ | ✅ birth + existence |
 | hood *(2026-11-13, Phase 0)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ⚠️ `[Owns]` says `hood_concept 21`, `[Agent].id` is 17 (on main HEAD; an uncommitted fix to 17 sits in the main checkout) | ✅ | ✅ birth (wall-mounted: tolerance = depth/2) + existence |
 | countable_concept *(2026-11-14; classes nightstand 29, bed 30, toilet 31)* | ✅ resurrects from ltom recall | ✅ (`rc::ai::update`; under `Model.LidarMeasuresOnGated` the shared `common/ai_belief/persistent_update.h`) | ✅ trunc + confirm_only for camera points; mask-attributed LiDAR-only updates on gated cycles; persistent shared errors (2026-11-16) | ✅ `rc::exist`; existence = occupancy × class *(2026-11-14)*: the class factor (own L_cls, own debounce, same `RemovalPolicy`) removes only on its own measured shape evidence Λ and holds on an unmeasured cycle; occupancy (sensor debounce, out-of-view HOLD) unchanged | ✅ (fleet-prior envelope, uncalibrated) | ✅ shared helper | ✅ | ✅ `[Owns]` = `<class>_concept <id>` per class | ✅ | ✅ birth (tolerance = ½·max(width, depth)) + existence |
@@ -261,6 +267,18 @@ evidence) while that room has no usable outline. An out-of-room existence term (
 chair, table, hood, refrigerator and cabinet; bottle has none (containment at birth only). chair's REMOVE cell was
 stale: re-read 2026-11-13, `chair_existence.cpp` integrates into `rc::exist` and decides with
 `rc::exist::decide_removal`, so it is ✅. Ledger: `docs/superpowers/plans/2026-11-11-countable-agents-phase0-ledger.md`.
+
+*2026-11-21 (cabinet left-behind release, branch `fix/cabinet-exit-release`):* the cabinet row's "room follows robot ✅"
+held only for the CLASSIC pipeline. Phase 0 put `rc::room::drop_left_behind` inside the classic `else`, so the mode
+cabinet runs in (`KitchenModel = true`) never released, and its kitchen cell table, built once over the first room's
+walls, kept publishing with the FOLLOWED room as parent: `insert_or_assign_edge_RT` on the existing nodes moved
+room_1's runs under room_2 and room_3 (live crossing/c3a_1), room_concept could not reap the archived rooms, ltsm gave
+no recall, the tour stopped at 2/4. Now: the shared release runs at the top of `compute()` for both pipelines, and the
+kitchen model is bound to the room it was built over (`cabinet_kitchen_room.h`, same `rc::room::left_behind` rule):
+when that room is left its runs are deleted and the table reset, to be rebuilt over the new room's walls once it has a
+usable outline; a run is published only under the room the model was built over. Kitchen runs have no `aff_*`
+children and no uid, so on return they are re-learnt from the masks rather than recalled. Test:
+`cabinet_concept/tests/kitchen_room_test.cpp`. Diagnosis: `docs/cabinet-exit-release-diagnosis.md`. Live check pending.
 
 *2026-11-04 (ltom recall, step 4a):* the CREATE cell of table, chair, bottle, cabinet and refrigerator now reads "resurrects from ltom recall", and hood (no row of its own in this audit) does the same: a tracker birth may take the remembered instance's number and uid (`rc::choose_recall`, MAP over {recalled candidates, new}; birth itself stays tracker-only). Cabinet does it on both tracker birth paths (detection and residual-arm seed); `run_kitchen_model()` nodes carry no uid and are left out.
 
@@ -339,6 +357,38 @@ both RESTORE a door that some earlier evidence already birthed, as a belief the 
    sighting made `cross door_1` fail in tourP2 because the 60 s exploration did not look at that wall. Rows of the older
    4-column table carry no pose and are skipped with a log line; rows without the ledger / visit / removed columns load with an
    empty ledger and the row's L kept.
+
+**door_concept CREATE (one-model amendment, 2026-11-15; built behind `Existence.OneModel`, default false, until the owner accepts the live series;
+spec `docs/superpowers/specs/2026-11-14-door-agent-one-model-design.md`, §13 "As built").** With the flag on, a door is born by
+comparison inside door_concept, and the shared tracker only holds candidates (it keeps one track per detection; its separation is
+its own noise scale and the merge is off). The rules:
+1. **Every mask is shared among four causes**: an existing door's aperture, an existing door's leaf (over all four hinge x swing
+   branches, at its leaf angle), a new door, and clutter. The share each cause gets is its responsibility for that mask. No cause
+   vetoes another and nothing assigns a mask to one door greedily; the old swept-arc veto, claimed-slice veto and the hard
+   "is this mask an existing door" gates are gone from the flag path.
+2. **Clutter enters only through the fitted false-alarm rate** inside each place's evidence, never as a second competitor for
+   the mask (counting it in both places charged it twice and made a wall phantom flicker).
+3. **The prior of a new door comes from memory**: the per-wall rate is a Beta belief learned from ltsm's remembered rooms (the
+   current room excluded; seeds Beta(2,3) for the first door on a wall and Beta(0.05,4.95) for another), the room's door-count
+   prior is learned from the same rooms, and the new-door density along a wall is uniform over the wall's length. Size uses
+   its own typical prior (0.85 +- 0.12 m wide, 2.05 +- 0.06 m high), separate from the fit's prior.
+4. **Detection probability depends on the leaf state**: what a camera reports for a door is a mixture of its shut rate and its
+   open rate, weighted by how open the leaf is (p_open = E[1 - cos phi]). A miss is scored with that probability, so an open
+   door the camera cannot see is not counted against it. Detector rates are fitted from recorded tapes with Webots labels
+   (`etc/door_detectors_fitted.csv`, read only under the flag).
+5. **The LiDAR opening is an existence channel** of its own, for existing doors and for new-door hypotheses: per range bin the
+   LiDAR either goes through the aperture or meets wall. A shut leaf reads as wall, so a shut door scores about zero; bins
+   inside another live door's span contribute nothing.
+6. **Truncation is lost information, not a cliff**: a truncated view widens the size likelihood. Two parts of the old gate stay,
+   each with a `// kept:` reason in the code: the fit's own truncation gate (a frame must be resolvable, centred and still to
+   MOVE geometry, §2) and the motion part of the admissibility test.
+7. **Duplicates are decided by competition**: two labels at one hole compete for the same masks, and the second-door cost is
+   weighted by how distinct the two places are, the same rule in every place it appears.
+8. **Birth and removal still follow `decide()` and `etc/door_costs.csv`** (L > 0 and L < -ln(C_delete/C_keep)); they were not
+   changed. Restore from ltsm notes (item 2 above) is a responsibility test: a note is restored unless a live (or held) door
+   of the restore's room already explains it, or a door of the same name is live or held.
+Open: the hypothesis look (one look per open question, at the pose that settles it most) and the per-door detectability question
+are in the spec's §13; none of this is validated live yet (Task 13).
 
 **door_concept OWNERSHIP addition (2026-10-21): the look-at-a-remembered-door affordance.** For each identity row of
 the current room whose door is NOT instantiated (identity-only or full), door_concept owns one epistemic affordance

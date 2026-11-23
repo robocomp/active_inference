@@ -51,7 +51,13 @@ LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})
 # framework links them under -Wl,--as-needed with core *ahead* of its consumers,
 # so the linker drops core whenever no TU references it directly. Force-keep all
 # libs so a light-DSR build links too.
-add_link_options(-Wl,--no-as-needed)
+# ⚠ SCOPED to dsr_core only — NOT a global add_link_options(-Wl,--no-as-needed). robocomp.cmake also
+# finds the C++98 Ice libs (Ice, IceStorm) next to the generated Ice++11/IceStorm++11; a global
+# no-as-needed keeps BOTH mappings as DT_NEEDED, and libIceStorm.so (C++98) then binds IceUtil::Shared /
+# IceInternal::* to libIce++11's incompatible definitions → SIGSEGV in IceMX::TopicMetrics::ice_factory
+# during static init, before main (2026-11-15, 100% reproducible). LIBS precedes the DSR libs on the
+# link line, so the core is kept here and --as-needed is restored for everything after it.
+LIST(APPEND LIBS -Wl,--no-as-needed dsr_core -Wl,--as-needed)
 
 # no-char8_t to avoid a problem with ICE Connection lib.
 # CRITICAL — match the prebuilt libdsr's Eigen ABI: use DEFAULT alignment (alignof(Transform)=16).

@@ -66,6 +66,8 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -318,10 +320,19 @@ struct OpeningRun
 
 // through_beyond_m: how far past the line a return must lie to count as THROUGH (0: the tolerance above, for placing the aperture). To say the way is CLEAR it must be past
 // the leaf's reach (the aperture's width): a return short of that may be a leaf on the far side, which a beam stops on just after the line. Between the two a bin is unknown.
-[[nodiscard]] inline std::vector<OpeningRun> measure_openings(const Aperture& ap, const Eigen::Vector3f& origin,
-                                                              const std::vector<Eigen::Vector3f>& pts, float through_beyond_m = 0.0f)
+/// The per-bin through / blocked ray counts along the wall line (the first half of measure_openings, exposed so the likelihood of a
+/// hypothesised opening can be fitted against the bins themselves): bin b spans a_lo + b*kEdgeBinM ... + kEdgeBinM in the wall frame.
+/// nb == 0 when the sensor sits in the wall's slab or the window is degenerate (no ray crosses the line usefully).
+struct ThroughBins
 {
-    std::vector<OpeningRun> out;
+    float a_lo = 0.f;
+    int   nb = 0;
+    std::vector<int> nT, nB;   // through / blocked returns per bin
+};
+[[nodiscard]] inline ThroughBins through_bin_counts(const Aperture& ap, const Eigen::Vector3f& origin,
+                                                    const std::vector<Eigen::Vector3f>& pts, float through_beyond_m = 0.0f)
+{
+    ThroughBins out;
     const Eigen::Vector2f u = ap.wall_u, n = ap.across_u(), O = ap.wall_O, o = origin.head<2>();
     const float s_o = n.dot(o - O);
     const float tol = 3.0f * 0.05f + 0.5f * std::max(0.0f, ap.thickness);
@@ -330,7 +341,9 @@ struct OpeningRun
     const float a_lo = ap.s - kRegWindowM, a_hi = ap.s + ap.w + kRegWindowM;
     const int nb = static_cast<int>(std::ceil((a_hi - a_lo) / kEdgeBinM));
     if (nb < 3) return out;
-    std::vector<int> nT(static_cast<std::size_t>(nb), 0), nB(static_cast<std::size_t>(nb), 0);
+    out.a_lo = a_lo; out.nb = nb;
+    out.nT.assign(static_cast<std::size_t>(nb), 0); out.nB.assign(static_cast<std::size_t>(nb), 0);
+    auto& nT = out.nT; auto& nB = out.nB;
     const float z_lo = ap.floor_z + 0.05f, z_hi = ap.floor_z + ap.h;
     for (const auto& p : pts)
     {
@@ -352,6 +365,19 @@ struct OpeningRun
         if (beyond > std::max(tol, through_beyond_m)) ++nT[static_cast<std::size_t>(b)];
         else if (beyond <= tol)                       ++nB[static_cast<std::size_t>(b)];
     }
+    return out;
+}
+
+[[nodiscard]] inline std::vector<OpeningRun> measure_openings(const Aperture& ap, const Eigen::Vector3f& origin,
+                                                              const std::vector<Eigen::Vector3f>& pts, float through_beyond_m = 0.0f)
+{
+    std::vector<OpeningRun> out;
+    const ThroughBins tb = through_bin_counts(ap, origin, pts, through_beyond_m);
+    if (tb.nb == 0) return out;
+    const float a_lo = tb.a_lo;
+    const int nb = tb.nb;
+    const std::vector<int>& nT = tb.nT;
+    const std::vector<int>& nB = tb.nB;
     const auto centre = [&](int b) { return a_lo + (static_cast<float>(b) + 0.5f) * kEdgeBinM; };
     // Along the wall a ray's crossing is exact in angle; what is unresolved is the gap between the last blocked and the
     // first through bin (uniform, gap²/12) plus each of those two bins' own quantisation.
@@ -393,7 +419,7 @@ struct OpeningRun
 
 // P(the door shows a through-span) = the expected clear fraction of its aperture along the wall, 1 − cos φ, under the leaf
 // posterior (phi, weight) — 1 wide open, 0 shut. An empty curve (no leaf belief) counts as an unknown leaf: ½.
-[[nodiscard]] inline float clear_fraction(const std::vector<std::pair<float, float>>& curve)
+[[nodiscard]] inline float clear_fraction(std::span<const std::pair<float, float>> curve)
 {
     double sw = 0.0, sc = 0.0;
     for (const auto& [phi, w] : curve)
@@ -527,6 +553,72 @@ struct RegisteredSweep
     out.pts = pts;
     out.origin = apply_registration(out.reg, ap, origin, out.pts);
     return out;
+}
+
+
+// ═══ THE LiDAR OPENING AS EXISTENCE EVIDENCE (one-model, spec §3.3 "LiDAR opening is a channel of its own") ═══════════════════════
+// The likelihood of ONE registered sweep under "an opening along this aperture's span" against "solid wall there". Each bin of the
+// span the sweep observed (through_bin_counts: a ray crossed the wall line at the doorway's height) is THROUGH (returns beyond the
+// line, none on it), BLOCKED (a return on the line) or unobserved; the fitted rates (etc/door_detectors_fitted.csv, `lidar` rows,
+// tools/fit_lidar_through.py) are P(through | opening) = through_open and P(through | wall) = through_wall PER OBSERVED BIN, over the
+// span 5 cm inside the jambs (the jamb's own thickness: the fit's definition, so the rates and this reading mean the same bins).
+/// P(a bin reads through | the aperture is a door with this leaf posterior): the span is an opening with probability E[1 - cos phi]
+/// (clear_fraction: a shut leaf IS wall to the LiDAR) and wall otherwise, so  p = cf*through_open + (1 - cf)*through_wall. (The brief's
+/// through_open*cf is the same with the shut part's through_wall taken as 0, which makes a shut door's through bin an infinite surprise.)
+struct OpeningReading
+{
+    float llr = 0.f;      // sum over the observed span bins of the per-bin log likelihood ratio (independent-bin sum)
+    int   n_span = 0;     // bins of the span (observed or not)
+    int   n_through = 0, n_blocked = 0;
+};
+/// A live door's claim on the wall line: its span in the aperture's own along-wall coordinate and its existence probability. A bin inside it is
+/// that door's evidence, not the hypothesis' (per-bin freedom: weight prod(1 - r) over the claims holding the bin).
+struct OpeningClaim { float lo = 0.f, hi = 0.f, r = 0.f; };
+inline constexpr float kJambMarginM = 0.05f;   // the fit's margin (tools/door_truth_scan.cpp): bins whose centre is 5 cm inside the jambs
+
+[[nodiscard]] inline OpeningReading read_opening(const Aperture& ap, const RegisteredSweep& sw, float through_open, float through_wall,
+                                                 std::span<const std::pair<float, float>> phi_curve, std::span<const OpeningClaim> claims = {})
+{
+    OpeningReading out;
+    if (not (through_wall > 0.f and through_wall < through_open and through_open < 1.f)) return out;   // the table's own domain (detector_llr.h): an invalid row says nothing
+    const ThroughBins tb = through_bin_counts(ap, sw.origin, sw.pts);
+    if (tb.nb == 0) return out;
+    const float cf = clear_fraction(phi_curve);
+    const double p_open = double(cf) * through_open + (1.0 - double(cf)) * through_wall, p_wall = through_wall;
+    const double l_through = std::log(p_open / p_wall), l_blocked = std::log1p(-p_open) - std::log1p(-p_wall);
+    for (int b = 0; b < tb.nb; ++b)
+    {
+        const float a = tb.a_lo + (static_cast<float>(b) + 0.5f) * kEdgeBinM;
+        if (a < ap.s + kJambMarginM or a > ap.s + ap.w - kJambMarginM) continue;
+        ++out.n_span;
+        const int T = tb.nT[static_cast<std::size_t>(b)], B = tb.nB[static_cast<std::size_t>(b)];
+        if (T + B == 0) continue;   // unobserved: no evidence
+        double free = 1.0;           // the share of this bin no live door's span already accounts for
+        for (const auto& c : claims) if (a >= c.lo and a <= c.hi) free *= 1.0 - static_cast<double>(c.r);
+        if (T > 0 and B == 0) { out.llr += static_cast<float>(free * l_through); ++out.n_through; }
+        else if (B > 0)       { out.llr += static_cast<float>(free * l_blocked); ++out.n_blocked; }
+    }
+    return out;
+}
+
+/// log p(sweep | opening along ap's span) - log p(sweep | solid wall there), from measure_openings' bins: through bins count
+/// log(p_open/p_wall), blocked bins log((1-p_open)/(1-p_wall)), unknown bins 0 (an INDEPENDENT-bin sum: see opening_view_llr for how
+/// existence uses it). p_open = through_open * clear_fraction(phi_curve) (+ the shut part's through_wall, see OpeningReading).
+[[nodiscard]] inline float opening_llr(const Aperture& ap, const RegisteredSweep& sw, float through_open, float through_wall,
+                                       std::span<const std::pair<float, float>> phi_curve)
+{
+    return read_opening(ap, sw, through_open, through_wall, phi_curve).llr;
+}
+
+/// One sweep as ONE trial: the bins of a sweep read an opening together (a leaf, a jamb, a misregistration moves them all), so
+/// their sum counts one observation, not n_span (the rates' own `n` counts sweeps, tools/fit_lidar_through.py). The trial's
+/// llr is the MEAN per-bin ratio over the SPAN, an unobserved bin counting 0: the line of sight to the span is the weight (0 when the
+/// span is occluded or out of range, whatever the observed part says; no bins = no evidence, a miss with p_D 0 changes nothing).
+[[nodiscard]] inline float opening_view_llr(const Aperture& ap, const RegisteredSweep& sw, float through_open, float through_wall,
+                                            std::span<const std::pair<float, float>> phi_curve, std::span<const OpeningClaim> claims = {})
+{
+    const OpeningReading r = read_opening(ap, sw, through_open, through_wall, phi_curve, claims);
+    return r.n_span > 0 ? r.llr / static_cast<float>(r.n_span) : 0.f;
 }
 
 

@@ -38,6 +38,8 @@
 #include "door_geometry.h"      // rc::door:: Aperture / LeafState / LeafPose — the single geometry source
 #include "door_wall_support.h"  // rc::door::WallSupport — the aperture lies inside its wall (apply_wall_support)
 
+namespace rc::door { struct LeafChannel; }   // door_leaf_channel.h (it includes this header)
+
 namespace rc
 {
 
@@ -758,6 +760,33 @@ public:
     // weightless curve IS clutter_fraction (no other angle is believed).
     float clutter_fraction_leaf_marginal(const std::vector<Eigen::Vector3f>& pts, float R,
                                          std::span<const std::pair<float, float>> phi_curve) const;
+
+    // ★One-model (spec §3.2, §3.6): the leaf marginalised over ALL FOUR hypotheses of the leaf channel — hinge × swing, each with its
+    // OWN phi filter (door_leaf_channel.h LeafChannel::phi), weighted by the hinge and swing beliefs (LeafChannel::hinge/swing llr).
+    // clutter_fraction_leaf_marginal above uses ONE swing side (the believed one): a leaf seen side-on whose swing belief is on the
+    // wrong side is then all clutter, however sure the phi posterior (chat_e2e18: sup x = 1.00 on an open restored door).
+    // `ok` is false when the channel has no phi filter yet (never stepped): the caller falls back to the single-swing marginal.
+    struct LeafMixture
+    {
+        bool   ok = false;
+        double mean_log_u = 0.0;     // mean over the points of log( pi_surf * sum_branch w_b sum_k p_k exp(-d^2/2R) + u_clutter )
+        double clutter_frac = 1.0;   // mean over the points of u_clutter / (u_surf + u_clutter)
+        double p_open = 0.0;         // P(the leaf is not shut) = 1 - sum_branch w_b p_b(phi = 0)
+    };
+    LeafMixture leaf_mixture(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
+                             float phi_max_rad = 2.0944f, double eps_v = 0.03) const;
+    /// The share of the aperture the leaf uncovers, E[1 - cos(phi)] under the four-branch leaf posterior: 0 shut, 1 square to the wall (a
+    /// leaf at 10 degrees uncovers 1.5 %, not "open"). A continuous openness, so no angle is a threshold; NaN when the channel has no phi
+    /// filter yet (the caller then uses its prior).
+    [[nodiscard]] double leaf_p_open(const door::LeafChannel& ch, float phi_max_rad = 2.0944f, double eps_v = 0.03) const;
+    /// Mean per-point log-likelihood of the points under the four-branch leaf marginal (the leaf cause of a mask); NaN when not ok.
+    float leaf_loglik_marginal(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
+                               float phi_max_rad = 2.0944f, double eps_v = 0.03) const;
+    /// The clutter share under the four-branch marginal (the existence channel `sup`'s x); NaN when not ok.
+    float clutter_fraction_leaf_marginal(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
+                                         float phi_max_rad = 2.0944f, double eps_v = 0.03) const;
+    /// Mean per-point log-likelihood of the points under the believed state's mixture (= -association_nll; the aperture cause).
+    float aperture_loglik(const std::vector<Eigen::Vector3f>& pts, float R) const { return -association_nll(pts, R); }
 
     // The wall fixes yaw, so there is no discrete-orientation ambiguity to report: the reported covariance
     // IS the 3×3 posterior Σ over [s,w,h]. Kept as a named accessor so publish/log call sites read cleanly.

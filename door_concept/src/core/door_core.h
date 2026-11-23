@@ -37,10 +37,12 @@
 // this agent (create → adopt → own the birth slice in one cycle; decoupling those steps was the 403-birth churn the
 // birth block's own comment records). The replay answers create_door() with the id the recorded run got.
 #pragma once
+#include <deque>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -55,6 +57,9 @@
 #include "existence_update.h" // Task 8: one frame of evidence into one place belief
 #include "door_decision.h"    // Task 8: the costed decision, the role, the cost estimator
 #include "place_table.h"      // Task 8: the place table (the row is the belief)
+#include "door_mask_causes.h" // one-model: the four causes of a mask and their responsibilities
+#include "../door_hypothesis_look.h" // one-model: the hypothesis look (spec §4): Alt, Member, Question
+#include "../door_leaf_birth.h" // one-model: a side-on leaf points to an opening in its frame wall (spec §3.6)
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
 #include "../door_belief.h"   // rc::DoorBelief (association_nll)
@@ -138,6 +143,9 @@ public:
     // ── act ──
     virtual void retire(std::uint64_t id) = 0;                           // a merged duplicate: affordances + fit + node
     virtual void set_assigned_mask(std::uint64_t id, int slice) = 0;     // -1 = none this cycle
+    /// One-model: how much of the assigned mask this door explains (ρ in [0,1]); weights the fit's support sample. 1 = the whole mask
+    /// (flag off: always). A world that does not carry it ignores it and the fit takes every mask whole, as before.
+    virtual void set_mask_responsibility(std::uint64_t /*id*/, float /*rho*/) {}
     /// The old code between association and births (live: semantic/RGB/depth pumps, actuation UI, detect probe). The
     /// cycle's tracker numbers are final at this point. The core's existence update (which may remove doors) follows it.
     virtual void after_association(const TrackerCycleInfo& info) = 0;
@@ -234,7 +242,9 @@ public:
     //    keeps the compiled defaults) ──
     /// The per-camera detector model: door_detectors.csv's values, FIXED for the session (fix round 3, ruling).
     [[nodiscard]] const DetectorTable& detectors() const { return detectors_; }
-    void set_detectors(const DetectorTable& t) { detectors_ = t; }
+    void set_detectors(const DetectorTable& t) { detectors_ = t; places_.set_geometry_mu1_sd(t.geometry.mu1_sd); }
+    /// One-model: the per-wall Beta rates learned from the remembered rooms (door_memory_rooms.h); the seeds until then.
+    void set_wall_rates(const WallRates& r) { rates_ = r; }
     /// C_keep / C_delete are FIXED within a session: set once from etc/door_costs.csv at start (written offline by tools/door_costs_from_logs.py).
     void set_costs(CostEstimator c) { costs_ = std::move(c); }
     [[nodiscard]] const CostEstimator& costs() const { return costs_; }
@@ -259,8 +269,32 @@ public:
         float best_size = std::numeric_limits<float>::lowest();   // the best size term any frame gave: a clipped blob only understates the width (clean25)
         bool wall_seed = false;                  // seeded along a wall of a room with no known door (no detection needed; spec 2026-11-09)
         std::string seeded_name;                 // the place row it was seeded from (the revisit sample is taken at birth, per visit)
+        bool leaf_born = false;                  // one-model: seeded from a side-on LEAF; theta.aperture is its frame-wall aperture and theta.leaf the leaf's pose (phi known)
+        /// one-model: the base rate the REFUSAL is judged under: the live doors' charge only (wall_base_rate over the doors' p), not the wall's count
+        /// posterior. A place is refused by its own evidence and by the doors that exist, never by the other undecided places that share the wall's
+        /// probability with it (four evidence-free seeds on one wall each hold about a quarter of it: diluted, not refuted). NaN until assigned.
+        float base_open = std::numeric_limits<float>::quiet_NaN();
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
+    /// The candidate key a door was born from (0: none): a question about the candidate carries on, under the same identity, as the question about the door.
+    [[nodiscard]] std::uint64_t door_origin(std::uint64_t door_id) const { const auto it = door_origin_.find(door_id); return it != door_origin_.end() ? it->second : 0; }
+    /// ONE-MODEL (S10, restore): does a LIVE door of the room the notes belong to already carry the responsibility for a remembered place at
+    /// `xy` (position variance `var`)? The CALLER supplies the room's outline, band and proto flag and the ids of the doors living in it
+    /// (a door being crossed into it included: descends from the room node): the core takes its own outline up only at its next step, so at
+    /// restore time it may hold none or the room just left. The aperture takes the place's likelihood against "a new door at that place"
+    /// (place_explained_by: the MAP comparison, the candidates' densities along the wall). A note so explained is adopted, not restored.
+    [[nodiscard]] bool live_door_explains(const std::vector<Vec2f>& polygon, const rc::door::RoomBand& band, bool room_is_proto,
+                                          std::span<const std::uint64_t> room_doors, const Vec2f& xy, float var) const;
+    /// ONE-MODEL (spec §4): the OTHER frame-wall hypotheses of the leaf a leaf-born candidate stands for (apertures_from_leaf on the candidate's own
+    /// leaf segment), each with its log weight RELATIVE to the candidate's own hypothesis (band + size + base rate + the sweep's opening reading, the
+    /// terms the candidate was weighed with). Hypotheses at the candidate's own hole are left out; none for a candidate not born from a leaf.
+    [[nodiscard]] std::vector<rc::door::hlook::Alt> leaf_alternatives(const Candidate& c) const;
+    /// ONE-MODEL (spec §4 / §3.2): which entities compete for a mask. A pair is recorded whenever some mask put non-negligible responsibility (rho >= hlook::kWeightFloor, the floor the hypothesis weights use) on both (a door's
+    /// Aperture + Leaf rho, or the new-door rho of the candidate the mask fed); they stay recorded (the graph of competition is what the clusters are made of, and the mask
+    /// is gone once the robot looks away). Nodes: ('d', door id) or ('c', candidate key).
+    using NodeRef = rc::door::hlook::Competition::NodeRef;
+    /// The pairs live while both members are undecided (hlook::Competition): a verdict change, a removal or a birth drops the member's pairs.
+    [[nodiscard]] const std::set<std::pair<NodeRef, NodeRef>>& competing() const { return competes_.pairs; }
     /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
     [[nodiscard]] bool candidate_is_open(const Candidate& c) const;
     /// Would a frame from `standpoint` be a new view of the candidate, by the ledger's own absorption rule? (spread 0: the standpoint is a plan)
@@ -289,6 +323,9 @@ public:
 
 private:
     // (not "emit": Qt #defines it away in every TU that includes Qt before this header)
+    void note_competition(std::vector<NodeRef> nodes);
+    rc::door::hlook::Competition competes_;
+    void refresh_competition();   // end of step: the members' verdicts, so decided members leave their clusters
     void record(rc::door::DoorDecisionKind k, std::uint64_t id, float x, float y, std::string note, std::string name,
               DoorCycleOutput& out);
     void diag(std::string stream, std::string line, DoorCycleOutput& out);
@@ -296,6 +333,27 @@ private:
     void associate(const DoorCycleInput& in, DoorCycleOutput& out);
     void births(const DoorCycleInput& in, DoorCycleOutput& out);
     void fit_doors(DoorCycleOutput& out);
+    /// ONE-MODEL (spec §3.2): the four causes of every detection this cycle -> mask_causes_ / mask_log_birth_ (door_mask_causes.h).
+    void compute_mask_causes(const DoorCycleInput& in);
+    /// ONE-MODEL: this cycle's detections as one PLACE sees them: each one's weight is its reliability times the responsibility the
+    /// place's cause has for it (door id, or candidate index), so the existence update's association needs no gate of its own.
+    [[nodiscard]] std::vector<FrameDetection> place_detections(std::uint64_t door, int candidate) const;
+    /// ONE-MODEL: log b, the probability that a door is BORN at xy (the typical door's place prior; the live doors on its wall charge the base rate).
+    [[nodiscard]] double log_birth(const Vec2f& xy, float sd) const;
+    [[nodiscard]] const std::vector<int>& groups_cached() const;   // wall_groups of the current outline, rebuilt only when the outline or sigma changes
+    [[nodiscard]] double wall_length_at(const Vec2f& xy) const;   // Λ, the wall's length under `xy` (5 m with no wall)
+    /// ONE-MODEL: where a door born from detection `d` is placed: its winning leaf hypothesis' aperture centre (a side-on leaf), else the detection's xy.
+    [[nodiscard]] Vec2f place_xy(std::size_t d) const
+    { return d < mask_leaf_.size() and mask_leaf_[d].has_value() ? Vec2f(mask_leaf_[d]->aperture.centre_xy()) : dets_[d].xy; }
+    /// ONE-MODEL: the LiDAR opening of a pending candidate's aperture (opening_view_llr on the newest sweep registered to it; nullopt without a sweep).
+    [[nodiscard]] std::vector<rc::door::OpeningClaim> live_claims(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
+    [[nodiscard]] const rc::door::RegisteredSweep& registered(const rc::door::Aperture& ap) const;
+    mutable std::deque<std::pair<rc::door::Aperture, rc::door::RegisteredSweep>> reg_cache_;   // per cycle; a deque, so a reference registered() returned stays valid when another aperture is added
+    [[nodiscard]] double hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
+    [[nodiscard]] std::optional<LidarOpening> candidate_lidar(const rc::DoorFitState& theta, bool leaf_born, const std::vector<int>& groups) const;
+    /// ONE-MODEL (final review 1): the per-wall base rate of every door and candidate of the room, from the wall's exact count posterior
+    /// (wall_count_base_rates), jointly and in this cycle, from every member's evidence as it stands now.
+    void assign_wall_counts();
     /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
     void update_existence(const DoorCycleInput& in, DoorCycleOutput& out);
 
@@ -327,6 +385,16 @@ private:
     std::uint64_t next_candidate_key_ = 0;
     std::unordered_map<std::uint64_t, std::uint64_t> door_seq_;   // order in which doors entered (the per-wall base rate)
     std::uint64_t next_door_seq_ = 0;
+    // ONE-MODEL per-wall rate (spec §3.4): the per-wall base rate reads the OTHER doors' and candidates' existence probabilities from the
+    // PREVIOUS update_existence, so nothing depends on birth order. Rebuilt at the end of each update_existence (stale keys vanish).
+    // Doors are keyed by door id; candidates by Candidate::key (the two key spaces never mix: two maps).
+    std::unordered_map<std::uint64_t, float> last_p_door_, last_p_cand_;
+    mutable int nonfinite_birth_ = 0;   // log_birth calls whose prior total was not finite (logged, not silent)
+    std::unordered_map<std::uint64_t, std::uint64_t> door_origin_;   // door id -> the key of the candidate it was born from
+    WallRates rates_{};   // seeds only; Task 4 sets them (set_wall_rates) from the remembered rooms
+    /// The previous cycle's p of every other live door and candidate on `wall` (not `self_door` / `self_cand`), for wall_base_rate.
+    [[nodiscard]] std::vector<float> other_p_on_wall(int wall, const std::vector<Vec2f>& polygon, const std::vector<int>& groups,
+                                                     std::uint64_t self_door, std::uint64_t self_cand, const Vec2f& self_xy, float self_var, bool doors_only = false) const;
     std::uint64_t visit_room_ = 0;     // the room the current visit is in
     int visit_ = 0;                    // the ledger's visit counter: a new room entry is a new visit
     std::uint64_t last_rgb_gen_ = 0;   // the RGB generation the last existence update scored
@@ -351,6 +419,14 @@ private:
 
     // this cycle
     std::vector<rc::DetectionView> dets_;
+    std::vector<MaskCauses> mask_causes_;     // per dets_ index (one-model; empty when the flag is off)
+    mutable std::vector<Vec2f> groups_key_poly_;
+    mutable float groups_key_sigma_ = -1.0f;
+    mutable std::vector<int> groups_cache_;
+    std::vector<double> mask_log_birth_;      // per dets_ index: log b of a door born at the detection's place (one-model)
+    /// per dets_ index: the leaf-mode hypothesis that wins the new-door cause (the mask is a leaf seen side-on; the door is born at ITS
+    /// aperture in the frame wall, not at the mask). nullopt = the aperture mode wins: the door is born at the mask (spec §3.6).
+    std::vector<std::optional<rc::door::LeafApertureHyp>> mask_leaf_;
     rc::TrackerResult res_;
     TrackerCycleInfo info_;
 };

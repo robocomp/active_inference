@@ -230,6 +230,20 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     // so a consumer reads "not stated", never a made-up 0.5.
     if (std::isfinite(inst.exist_logodds))
         G_->add_or_modify_attrib_local<obj_exist_prob_att>(node, 1.0f / (1.0f + std::exp(-inst.exist_logodds)));
+    // The identity link (changed object, 2026-11-15): "I believe this is <remembered chair>, p". The node's name
+    // never changes (owner's choice B); ltom joins the histories. Absent = no link.
+    if (inst.link_uid != 0)
+    {
+        G_->add_or_modify_attrib_local<same_as_uid_att>(node, inst.link_uid);
+        G_->add_or_modify_attrib_local<same_as_prob_att>(node, inst.link_prob);
+        G_->add_or_modify_attrib_local<left_spot_prob_att>(node, inst.link_left_spot_prob);
+    }
+    else
+    {
+        G_->remove_attrib_local<same_as_uid_att>(node);
+        G_->remove_attrib_local<same_as_prob_att>(node);
+        G_->remove_attrib_local<left_spot_prob_att>(node);
+    }
 
     G_->update_node(node);
 

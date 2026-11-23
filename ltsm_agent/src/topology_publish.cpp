@@ -90,7 +90,68 @@ std::string build_topology_json(DSR::DSRGraph& memory, DSR::DSRGraph& live)
         if (faces == 2) passages.push_back(std::move(p));   // a passage with one face joins nothing
     }
     std::ranges::sort(passages, {}, &rc::ltsm::TopoPassage::id);
-    return rc::ltsm::encode_topology(rooms, passages, room_ids);
+    return rc::ltsm::encode_topology(rooms, passages, room_ids, remembered_door_memory(memory));
+}
+
+namespace
+{
+constexpr const char* kDoorMemoryNode = "ltsm_door_memory";   // memory graph: the door names' counter + change hazard record
+
+std::optional<rc::doormem::DoorMemory> door_memory_on(DSR::DSRGraph& g, const DSR::Node& n)
+{
+    const auto next = g.get_attrib_by_name<door_next_index_att>(n);
+    const auto hz = g.get_attrib_by_name<door_change_hazard_att>(n);
+    if (not next.has_value() and not hz.has_value()) return std::nullopt;
+    rc::doormem::DoorMemory m;
+    m.next_index = next.value_or(0);
+    if (hz.has_value() and hz->get().size() == 2) { m.changes = hz->get()[0]; m.exposure_s = hz->get()[1]; }
+    return m;
+}
+}   // namespace
+
+rc::doormem::DoorMemory remembered_door_memory(DSR::DSRGraph& memory)
+{
+    rc::doormem::DoorMemory m;
+    if (const auto rec = memory.get_node(kDoorMemoryNode); rec.has_value())
+        m = door_memory_on(memory, rec.value()).value_or(rc::doormem::DoorMemory{});
+    std::vector<std::string> names;
+    for (const auto& n : memory.get_nodes_by_type("object"))
+        if (is_door(memory, n)) names.push_back(rc::ltsm::live_name(n.name()));
+    m.next_index = std::max(m.next_index, rc::doormem::next_index_floor(names));
+    return m;
+}
+
+std::optional<rc::doormem::DoorMemory> agent_door_memory(DSR::DSRGraph& live)
+{
+    for (const auto& n : live.get_nodes_by_type("agent"))
+        // cortex names it "<agent name> <agent id>" (dsr_agent_info_api.cpp): match the name, whatever id door_concept runs with
+        if (const auto nm = live.get_attrib_by_name<agent_name_att>(n); nm.has_value() and nm->get().starts_with("door_concept "))
+            return door_memory_on(live, n);
+    return std::nullopt;
+}
+
+bool keep_door_memory(DSR::DSRGraph& memory, DSR::DSRGraph& live)
+{
+    const auto agent = agent_door_memory(live);
+    if (not agent.has_value()) return false;
+    auto rec = memory.get_node(kDoorMemoryNode);
+    const auto held = rec.has_value() ? door_memory_on(memory, rec.value()).value_or(rc::doormem::DoorMemory{}) : rc::doormem::DoorMemory{};
+    const auto m = rc::doormem::merged(held, *agent);
+    if (rec.has_value() and m == held) return false;
+    // ★Its own node, not root's attributes: the memory graph is seeded with a root before the persisted file is read, and the
+    //  file's root is then skipped as an id already present (insert_node_with_id), so what root carried would not come back.
+    DSR::Node n = rec.value_or(DSR::Node{});
+    if (not rec.has_value())
+    {
+        n.type("metaconcept");
+        n.name(kDoorMemoryNode);
+        memory.add_or_modify_attrib_local<object_subtype_att>(n, std::string("door_memory"));   // never "passage": the passage loops skip it
+        memory.add_or_modify_attrib_local<level_att>(n, 0);
+    }
+    memory.add_or_modify_attrib_local<door_next_index_att>(n, m.next_index);
+    memory.add_or_modify_attrib_local<door_change_hazard_att>(n,
+        std::vector<float>{static_cast<float>(m.changes), static_cast<float>(m.exposure_s)});
+    return rec.has_value() ? memory.update_node(n) : memory.insert_node(n).has_value();
 }
 
 bool TopologyPublisher::refresh()
@@ -107,12 +168,14 @@ bool TopologyPublisher::refresh()
         live_->add_or_modify_attrib_local<level_att>(n, 0);   // like passage_live: no parent, no RT edge
         live_->add_or_modify_attrib_local<pos_x_att>(n, -300.f);   // viewer placement only
         live_->add_or_modify_attrib_local<pos_y_att>(n, -300.f);
-        if (not live_->insert_node(n).has_value()) return false;
+        const auto id = live_->insert_node(n);
+        if (not id.has_value()) { qWarning() << "[topology] ltsm_topology insert FAILED"; return false; }
+        qInfo() << "[topology] ltsm_topology inserted as node" << id.value();   // diagnostic (stab_explore3, 11-15)
     }
     else
     {
         live_->add_or_modify_attrib_local<ltsm_topology_att>(node.value(), json);
-        live_->update_node(node.value());
+        if (not live_->update_node(node.value())) qWarning() << "[topology] ltsm_topology update FAILED on node" << node->id();
     }
     last_ = json;
     return true;

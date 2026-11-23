@@ -159,7 +159,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     risk_.clear();
     residual_soft_in_ = residual_hard_in_ = 0;
     live_only_.clear();
-    if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); dist_.clear(); return; }
+    if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); occ_nocells_.clear(); src_squares_.clear(); dist_.clear(); return; }
 
     float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
     for (const auto& p : room_polygon)
@@ -233,6 +233,8 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     // when every latch was a wall. Its risk is added to the ONE planner cell holding its centre: it is
     // an expectation, not an obstacle extent, so there is nothing to round outward — the footprint and
     // safety_margin_m already carry the body's reach.
+    occ_nocells_ = occ_;     // everything but the residual stamp, for the sweep's true-extent test
+    src_squares_.clear();
     if (cells.cell_size_m > 0.f and not cells.centres.empty())
     {
         const float h = 0.5f * cells.cell_size_m;
@@ -256,6 +258,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
                 continue;
             }
             ++residual_hard_in_;
+            src_squares_.push_back({c, h});
             int ix0, iy0, ix1, iy1;
             world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
             world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
@@ -268,6 +271,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
         {
             ++residual_hard_in_;
             const auto& c = cells.centres[k];
+            src_squares_.push_back({c, h});
             int ix0, iy0, ix1, iy1;
             world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
             world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
@@ -419,7 +423,7 @@ void GridPlanner::write_grid(std::ostream& os) const
 
 bool GridPlanner::read_grid(std::istream& is)
 {
-    w_ = h_ = 0; occ_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear(); world_key_ = 0; free_memo_.clear();
+    w_ = h_ = 0; occ_.clear(); occ_nocells_.clear(); src_squares_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear(); world_key_ = 0; free_memo_.clear();
     std::string tok;
     while (is >> tok and tok != "grid") is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     if (tok != "grid") return false;
@@ -436,6 +440,7 @@ bool GridPlanner::read_grid(std::istream& is)
         std::string row;
         if (not (is >> row) or static_cast<int>(row.size()) != w_) { w_ = h_ = 0; occ_.clear(); return false; }
         for (int ix = 0; ix < w_; ++ix) occ_[idx(ix, iy)] = row[ix] == '1' ? 1 : 0;
+        occ_nocells_ = occ_; src_squares_.clear();   // a snapshot keeps lattice extent only
     }
     // Optional soft layer (write_grid). Absent in older snapshots, which therefore replay as before.
     // Parsed with from_chars: these agents run under a comma-decimal locale (CLAUDE.md).
@@ -713,6 +718,109 @@ bool GridPlanner::can_turn_here(const Eigen::Vector2f& pos_room) const
 
 GridPlanner::TurnBlock GridPlanner::why_cannot_turn(const Eigen::Vector2f& pos_room) const
 {
+    std::vector<int> all(kHeadings);
+    for (int h = 0; h < kHeadings; ++h) all[h] = h;
+    return turn_block_over(pos_room, all);
+}
+
+namespace
+{
+// Area of (convex polygon) ∩ (axis-aligned square [x0,x1]x[y0,y1]): Sutherland-Hodgman against the four edges, then the shoelace.
+float overlap_area_with_square(std::vector<Eigen::Vector2f> poly, float x0, float y0, float x1, float y1)
+{
+    const auto clip = [&](auto inside, auto cut)
+    {
+        std::vector<Eigen::Vector2f> out;
+        for (std::size_t i = 0, n = poly.size(); i < n; ++i)
+        {
+            const auto &a = poly[i], &b = poly[(i + 1) % n];
+            const bool ia = inside(a), ib = inside(b);
+            if (ia) out.push_back(a);
+            if (ia != ib) out.push_back(cut(a, b));
+        }
+        poly = std::move(out);
+    };
+    const auto at_x = [](float X) { return [X](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+        { const float t = (X - a.x()) / (b.x() - a.x()); return Eigen::Vector2f(X, a.y() + t * (b.y() - a.y())); }; };
+    const auto at_y = [](float Y) { return [Y](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+        { const float t = (Y - a.y()) / (b.y() - a.y()); return Eigen::Vector2f(a.x() + t * (b.x() - a.x()), Y); }; };
+    clip([&](const Eigen::Vector2f& p) { return p.x() >= x0; }, at_x(x0)); if (poly.empty()) return 0.f;
+    clip([&](const Eigen::Vector2f& p) { return p.x() <= x1; }, at_x(x1)); if (poly.empty()) return 0.f;
+    clip([&](const Eigen::Vector2f& p) { return p.y() >= y0; }, at_y(y0)); if (poly.empty()) return 0.f;
+    clip([&](const Eigen::Vector2f& p) { return p.y() <= y1; }, at_y(y1)); if (poly.empty()) return 0.f;
+    float A = 0.f;
+    for (std::size_t i = 0, n = poly.size(); i < n; ++i)
+        A += 0.5f * (poly[i].x() * poly[(i + 1) % n].y() - poly[(i + 1) % n].x() * poly[i].y());
+    return std::abs(A);
+}
+}  // namespace
+
+float GridPlanner::body_square_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, const Eigen::Vector2f& c, float h) const
+{
+    const auto poly = footprint.at_pose_yaw(pos_room, yaw, /*with_margin=*/false);
+    return overlap_area_with_square(poly, c.x() - h, c.y() - h, c.x() + h, c.y() + h);
+}
+
+float GridPlanner::body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, int ix, int iy) const
+{ return body_square_overlap_m2(pos_room, yaw, cell_to_world(ix, iy), 0.5f * cell_); }
+
+GridPlanner::TurnBlock GridPlanner::why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const
+{
+    // ★ EXACT GEOMETRY (fix round 2, owner ruling): the swept body — the footprint polygon itself, bare hull, no margin —
+    //   must not INTERSECT an occupied cell's square at any yaw of the arc. The 8-bucket rasterisation (+ safety margin) answers
+    //   "does the planner's inflated, quantised body collide", which refused turns the real body makes freely.
+    //   A cell the body ALREADY overlaps at the start yaw is forgiven only while the overlap AREA does not grow (the body is
+    //   evidently there; pressing deeper is a collision).
+    TurnBlock b;
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) { b.blocked = true; b.off_map = true; return b; }
+    const float two_pi = 2.0f * static_cast<float>(M_PI);
+    const float sweep = std::remainder(yaw_to - yaw_from, two_pi);   // the SHORT way, as step_orient / the Heading goal drive
+    float reach = 0.f;                                                 // the footprint's farthest vertex from the pivot
+    for (const auto& v : footprint.at_pose_yaw(Eigen::Vector2f::Zero(), 0.f, false)) reach = std::max(reach, v.norm());
+    // sample spacing from the body: the farthest vertex moves HALF a grid cell per step, so it cannot jump over a cell
+    const float d_theta = reach > 0.f ? 0.5f * cell_ / reach : two_pi / kHeadings;
+    const int n = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / d_theta)));
+    // the obstacles at TRUE extent: lattice cells of everything but the residual stamp, plus the residual cells' own squares
+    std::vector<SourceSquare> squares = src_squares_;
+    const int r = static_cast<int>(std::ceil((reach + cell_) / cell_));
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx)
+        {
+            const int cx = ix + dx, cy = iy + dy;
+            if (not in_bounds(cx, cy)) { b.off_map = true; continue; }
+            if (occ_nocells_.size() == occ_.size() and occ_nocells_[idx(cx, cy)])
+                squares.push_back({cell_to_world(cx, cy), 0.5f * cell_});
+        }
+    std::set<int> buckets;
+    std::set<std::pair<int, int>> seen;
+    float best = std::numeric_limits<float>::max();
+    for (const auto& sq : squares)
+    {
+        if ((sq.c - pos_room).norm() > reach + sq.half * 1.4143f) continue;   // the square cannot reach the hull
+        const float a0 = body_square_overlap_m2(pos_room, yaw_from, sq.c, sq.half);
+        for (int i = 1; i <= n; ++i)
+        {
+            const float y = yaw_from + sweep * (static_cast<float>(i) / static_cast<float>(n));
+            if (body_square_overlap_m2(pos_room, y, sq.c, sq.half) <= a0) continue;
+            buckets.insert(heading_bucket(y));
+            seen.insert({static_cast<int>(std::lround(sq.c.x() * 1000.f)), static_cast<int>(std::lround(sq.c.y() * 1000.f))});
+            if (const float d = (sq.c - pos_room).norm(); d < best)
+            {
+                best = d; b.nearest_cell = sq.c; b.nearest_m = d;
+                b.nearest_bearing_deg = std::atan2(sq.c.y() - pos_room.y(), sq.c.x() - pos_room.x()) * 180.f / static_cast<float>(M_PI);
+            }
+            break;
+        }
+    }
+    b.headings_blocked = static_cast<int>(buckets.size());
+    b.cells_blocked = static_cast<int>(seen.size());
+    b.blocked = not seen.empty();
+    return b;
+}
+
+GridPlanner::TurnBlock GridPlanner::turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings) const
+{
     TurnBlock b;
     int ix, iy;
     if (not world_to_cell(pos_room, ix, iy)) { b.blocked = true; b.off_map = true; return b; }
@@ -723,7 +831,7 @@ GridPlanner::TurnBlock GridPlanner::why_cannot_turn(const Eigen::Vector2f& pos_r
     // A cell can sit under several headings' footprints; count it once so "cells_blocked" reads as the
     // size of the obstruction and not as how thoroughly we looked at it.
     std::set<std::pair<int, int>> seen;
-    for (int h = 0; h < kHeadings; ++h)
+    for (const int h : headings)
     {
         bool this_heading = false;
         for (const auto& o : offsets_[h])
@@ -894,11 +1002,71 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
     {
         if (not params.allow_start_in_collision)
         { last_failure_ = "start is not footprint-feasible"; return std::nullopt; }
+        int ex = -1, ey = -1;
+        // ★ PREFER A WAY OUT FROM WHICH THE GOAL IS REACHABLE (objects_eps1 leg 2, 2026-11-20). The nearest feasible cell
+        //   can lie in a pocket the belief has sealed — the body overlaps residual cells on both sides of it — and then
+        //   every plan from here fails "not connected" although the robot drove in through that very matter. So first look,
+        //   within the body's reach, for a feasible cell that REACHES the goal, stepping only through free cells and
+        //   residual-only cells (the evidence the robot's own presence contradicts) — never through the room mask or an
+        //   obstacle polygon. The reach is the circumscribed radius: the matter the body overlaps lies within it, and a pose
+        //   just past that matter is within one more body radius of it. Nothing found → the nearest feasible cell, as before.
+        {
+            constexpr int DXr[kHeadings] = {1, 1, 0, -1, -1, -1, 0, 1};
+            constexpr int DYr[kHeadings] = {0, 1, 1, 1, 0, -1, -1, -1};
+            // cells from which the lattice reaches the goal: reverse of plan()'s reachability rule (enter (n,d) iff cell_free(n,d))
+            std::vector<std::uint8_t> to_goal(static_cast<std::size_t>(n_cells), 0);
+            std::vector<int> stack{idx(gx, gy)};
+            to_goal[static_cast<std::size_t>(idx(gx, gy))] = 1;
+            while (not stack.empty())
+            {
+                const int c = stack.back(); stack.pop_back();
+                const int cx = c % w_, cy = c / w_;
+                for (int d = 0; d < kHeadings; ++d)
+                {
+                    const int px = cx - DXr[d], py = cy - DYr[d];
+                    if (not in_bounds(px, py) or to_goal[static_cast<std::size_t>(idx(px, py))] or not cell_free(cx, cy, d)) continue;
+                    bool p_free = false;
+                    for (int h = 0; h < kHeadings and not p_free; ++h) p_free = cell_free(px, py, h);
+                    if (not p_free) continue;
+                    to_goal[static_cast<std::size_t>(idx(px, py))] = 1;
+                    stack.push_back(idx(px, py));
+                }
+            }
+            const float reach = 2.f * footprint.circumscribed_radius();
+            const bool split = occ_nocells_.size() == occ_.size();
+            const auto passable = [&](int ix, int iy)
+            { return not occ_[static_cast<std::size_t>(idx(ix, iy))] or (split and not occ_nocells_[static_cast<std::size_t>(idx(ix, iy))]); };
+            std::vector<std::uint8_t> seen(static_cast<std::size_t>(n_cells), 0);
+            std::queue<std::pair<int, int>> q;
+            q.push({sx, sy});
+            seen[static_cast<std::size_t>(idx(sx, sy))] = 1;
+            const Eigen::Vector2f s0 = cell_to_world(sx, sy);
+            int bx = -1, by = -1;
+            float best = std::numeric_limits<float>::infinity();
+            while (not q.empty())
+            {
+                const auto [cx, cy] = q.front();
+                q.pop();
+                constexpr int NX[4] = {1, -1, 0, 0}, NY[4] = {0, 0, 1, -1};
+                for (int d = 0; d < 4; ++d)
+                {
+                    const int nx = cx + NX[d], ny = cy + NY[d];
+                    if (not in_bounds(nx, ny) or seen[static_cast<std::size_t>(idx(nx, ny))]) continue;
+                    seen[static_cast<std::size_t>(idx(nx, ny))] = 1;
+                    const float dist = (cell_to_world(nx, ny) - s0).norm();
+                    if (dist > reach or not passable(nx, ny)) continue;
+                    if (to_goal[static_cast<std::size_t>(idx(nx, ny))] and dist < best) { best = dist; bx = nx; by = ny; }
+                    q.push({nx, ny});
+                }
+            }
+            ex = bx; ey = by;
+        }
+        if (ex < 0)   // no goal-connected way out within reach: the nearest feasible cell, as before
+        {
         std::vector<std::uint8_t> seen(static_cast<std::size_t>(n_cells), 0);
         std::queue<std::pair<int, int>> q;
         q.push({sx, sy});
         seen[idx(sx, sy)] = 1;
-        int ex = -1, ey = -1;
         while (not q.empty() and ex < 0)
         {
             const auto [cx, cy] = q.front();
@@ -914,6 +1082,7 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
                 if (ex >= 0) break;
                 q.push({nx, ny});
             }
+        }
         }
         if (ex < 0)
         { last_failure_ = "start is inside an obstacle and NO footprint-feasible cell is reachable from it"; return std::nullopt; }

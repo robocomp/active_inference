@@ -452,6 +452,8 @@ void SpecificWorker::compute()
         {
             door_sync_next_ = t + std::chrono::seconds(2);
             if (const int n = evictor->sync_found_doors(); n > 0 and store) store->mark_dirty();
+            // door_concept's names' counter and change hazard (door_memory.h): memory keeps the merge, written at the next save
+            if (G_ltsm and G_dsr and ltsm::keep_door_memory(*G_ltsm, *G_dsr) and store) store->mark_dirty();
         }
 
     if (not probe_enabled)

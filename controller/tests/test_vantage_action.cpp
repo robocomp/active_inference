@@ -8,6 +8,7 @@
 #include "../src/controller_anchor_servo.h"
 
 #include <cmath>
+#include <numbers>
 #include <print>
 #include <string_view>
 
@@ -76,6 +77,43 @@ int main()
     CHECK(rc::vantage_action(false, true, true, true, false, true, true, false) != VantageAction::ReAim);
     // facing alone failing also re-aims once the route has arrived
     CHECK(rc::vantage_action(false, true, true, true, true, false, true, true) == VantageAction::ReAim);
+
+    // ── FACE THE DOOR (2026-11-15; chat_e2e20 `cross door_25`: robot 1.45 m in front, heading -176 deg, 50+ s idle) ──────────
+    // At the vantage with the route arrived, the robot faces AWAY: the anchor is stale, so vantage_action says RouteDrives and nothing
+    // drove. face_decision is the passage's own turn: the goal is the DOOR's heading (robot forward + the anchor's heading_err), the
+    // turn runs until the servo's start condition (|heading_err| < 90) holds, and a blocked arc is a REPORT, never a wait.
+    using rc::FaceKind;
+    constexpr float kPi = std::numbers::pi_v<float>;
+    constexpr float kD = kPi / 180.f;
+    const float door_yaw = -kPi / 2.f;                      // the door normal's forward heading
+    const auto route_drives_stale = rc::vantage_action(false, true, false, true, true, false, true, false);   // the e2e20 verdict
+    CHECK(route_drives_stale == VantageAction::RouteDrives);
+    // start at -176 deg off the door: Turn, commanded to the door's heading
+    {
+        const float yaw = door_yaw + 176.f * kD;                       // the body's forward heading
+        const float err = rc::interaction::wrap_pi(door_yaw - yaw);   // the anchor's heading_err (CCW from forward to the normal)
+        const auto d = rc::face_decision(route_drives_stale, true, yaw, err, false, false);
+        CHECK(d.kind == FaceKind::Turn);
+        CHECK(std::abs(rc::interaction::wrap_pi(d.yaw - door_yaw)) < 1e-4f);
+    }
+    // the first cycle turned it to 80 deg off with the anchor still stale: STILL turning (the 90 deg boundary no longer stops it)
+    {
+        const float yaw = door_yaw + 80.f * kD, err = rc::interaction::wrap_pi(door_yaw - yaw);
+        const auto d = rc::face_decision(route_drives_stale, true, yaw, err, true, false);
+        CHECK(d.kind == FaceKind::Turn);
+        CHECK(std::abs(rc::interaction::wrap_pi(d.yaw - door_yaw)) < 1e-4f);
+        // ...but a turn that has not begun is not started for an error the servo already accepts
+        CHECK(rc::face_decision(route_drives_stale, true, yaw, err, false, false).kind == FaceKind::Proceed);
+    }
+    // facing it with a fresh anchor: the servo / re-aim own the decision
+    CHECK(rc::face_decision(VantageAction::Servo, true, 0.f, 0.1f, true, false).kind == FaceKind::Proceed);
+    CHECK(rc::face_decision(VantageAction::ReAim, true, 0.f, 3.f, true, false).kind == FaceKind::Proceed);
+    CHECK(rc::face_decision(VantageAction::HoldNoMouth, true, 0.f, 0.1f, true, false).kind == FaceKind::Proceed);
+    // route not arrived: it drives
+    CHECK(rc::face_decision(VantageAction::RouteDrives, false, 0.f, 3.f, false, false).kind == FaceKind::Proceed);
+    // the arc is blocked: a REPORT toward the door's heading, not a wait (and not a turn), whether or not the turn had begun
+    CHECK(rc::face_decision(VantageAction::RouteDrives, true, 0.f, 3.f, false, true).kind == FaceKind::Report);
+    CHECK(rc::face_decision(VantageAction::RouteDrives, true, 0.f, 1.7f, true, true).kind == FaceKind::Report);
 
     std::println("{}/{} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;

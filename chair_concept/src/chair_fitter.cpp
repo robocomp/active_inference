@@ -3,6 +3,7 @@
  */
 
 #include "chair_fitter.h"
+#include "chair_ghost.h"
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 
@@ -622,7 +623,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
                  // that were MISSING when the belief froze: which condition blocked, and whether the yaw cap
                  // was self-inflicted. oblq_eff is what actually feeds the yaw common-mode; obliquity_cos
                  // above is the (circular) point estimate, kept only for comparison.
-                 << "fixated,centroid_r,ego_lin,ego_ang,oblq_eff,nbv_gain_raw,nbv_gain_pub,flip1,flip2,flip3,p_mode_max,view_spent_max\n";
+                 << "fixated,centroid_r,ego_lin,ego_ang,oblq_eff,nbv_gain_raw,nbv_gain_pub,flip1,flip2,flip3,p_mode_max,view_spent_max,t_ms\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -655,7 +656,11 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
              // expression-template gotcha in common/nbv — never let an iterator or a reference outlive the
              // temporary it came from.
              << p_mode_max << ','
-             << inst.ai2_belief.max_view_spent() << '\n';
+             << inst.ai2_belief.max_view_spent() << ','
+             // wall clock (ms since epoch), appended LAST so positional readers keep working: lines the belief up with the
+             // controller log and the ground truth (AuRo C3(b) change-test timeline, 2026-11-21)
+             << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()
+             << '\n';
     ai2_csv_.flush();
 }
 
@@ -781,6 +786,18 @@ float ChairFitter::zed_detectability(const ChairInstance& inst) const
     in.chair_xy = Eigen::Vector2f(s.cx, s.cy);
     return chair_p_detect(in, rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft},
                           room_polygon_);
+}
+
+float ChairFitter::ghost_p_vis(const Eigen::Vector2f& xy, Eigen::Vector2f* cam_xy)
+{
+    ChairInstance g;
+    g.model = ghost_model(xy.x(), xy.y(), make_model_params());
+    compute_projected_roi(g);
+    if (not g.roi_valid) return 0.0f;
+    if (cam_xy != nullptr) *cam_xy = g.roi_cam_xy;
+    const float pd = zed_detectability(g);
+    const float occ = cfg_.exist_occlusion_check ? los_occlusion(g) : 0.0f;
+    return std::clamp(pd * std::clamp(1.0f - occ, 0.0f, 1.0f), 0.0f, 1.0f);
 }
 
 // FIXATION (attention): true only when this view may touch the chair's POSE — RESOLVABLE, CENTRED and STILL.

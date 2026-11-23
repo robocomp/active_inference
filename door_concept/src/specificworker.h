@@ -34,6 +34,7 @@
 #include <atomic>
 #include <fstream>
 #include <string_view>
+#include "claim_hold.h"
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
 #include <limits>
 #include <memory>
@@ -62,11 +63,14 @@
 #include "door_model.h"
 #include "door_provider_faces.h"   // rc::door::ProviderFaces: one physical door, one leaf (warm34)
 #include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
+#include "door_memory_rooms.h"   // rc::door::memrooms — rates + door-count prior from LTSM remembered rooms (one-model)
 #include "door_look.h"             // rc::door::look — the look-at-a-remembered-door affordance
 #include "door_anchor_open.h"       // rc::door::AnchorLostMode (Task D-B: the passage anchor's per-cycle lost check)
 #include "decision_log.h"          // rc::door::DoorDecisionLog (binary decision log, default off)
 #include "input_snapshot.h"        // rc::door::InputSnapshot (DoorCycleInput recording, default off)
 #include <map>
+#include <chrono>
+#include "../../common/ltsm_topology/door_memory.h"   // rc::doormem — names counter + change hazard kept by ltsm
 #include "../../common/phantom_memory/phantom_memory.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"
@@ -143,6 +147,15 @@ private:
     // graph half is CoreWorld::begin_fit / after_fit.
     void run_tracker_slice();
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
+    // ── A DOOR IS NOT DELETED UNDER A CLAIM (claim_hold.h; trace finding S1, TLA REAP_HOLD) ──
+    [[nodiscard]] std::vector<std::string> executing_target_names() const;   ///< names of the nodes the graph's `executing` edges target
+    [[nodiscard]] bool door_claimed(std::uint64_t door_id) const;            ///< a claim executes on one of this door's affordances
+    /// If a claim executes on `id`: stop treating it as a door of ours (instance forgotten, every affordance but the claimed
+    /// cross removed, HELD), keep the node and its cross affordance, and return true. Else false: the caller deletes as before.
+    /// `delete_door`: delete the node too when the claim ends (a retire); false = only the kept affordance (a release).
+    bool hold_for_claim(std::uint64_t id, bool delete_door, const char* why);
+    void step_claim_holds();   ///< every cycle: the holds whose claim is gone are finished (the deferred deletion)
+    rc::door::ClaimHolds claim_holds_;
 
     // The DoorCore's TrackerWorld over THIS worker's state: the instances (fitter), identities, the room, and
     // the graph writes a birth / merge makes. Nested so it reaches the private members it reads and acts on.
@@ -156,6 +169,7 @@ private:
         std::optional<rc::door::core::IdentityMatch> match_identity(const Eigen::Vector2f& xy) const override;
         void retire(std::uint64_t id) override;
         void set_assigned_mask(std::uint64_t id, int slice) override;
+        void set_mask_responsibility(std::uint64_t id, float rho) override;
         void after_association(const rc::door::core::TrackerCycleInfo& info) override;
         std::uint64_t create_door(const rc::door::core::BirthRequest& r) override;
         std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Eigen::Vector3f& centroid) override;
@@ -217,6 +231,9 @@ private:
     // ★AND, SINCE 2026-10-20, THE POSE TO RESTORE IT (door_identity_table.h): yaw/size, the existence belief and the leaf
     //   memory. SINCE 2026-11-14 THE FILE CARRIES IDENTITY ONLY (room, name, place): a room re-entered FROM MEMORY gets its
     //   doors back from the remembered_door notes ltsm posts (step_restore_from_notes), never from this table.
+    // ★SINCE 2026-11-15 THE TABLE IS NOT WRITTEN TO DISK AT ALL: it lives for the run (crossings, actuation of the other face, the
+    //   looks). A door's name across runs comes back with its note; the name counter and the change hazard go to ltsm through this
+    //   agent's node (door_next_index / door_change_hazard) and come back in ltsm_topology's door_memory (step_door_memory).
     using DoorIdentity = rc::door::IdentityRow;
     std::string current_room_name() const;
     mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
@@ -225,9 +242,22 @@ private:
     // The door-name counter (2026-10-29): every fresh name is `door_<next_door_index_++>`, persisted with the table
     // (`#next_door,N`) so a name is never handed out twice, across runs too. Names are OPAQUE (door_identity_table.h).
     std::uint64_t next_door_index_ = 1;
-    void persist_door_counter(std::uint64_t before) const { if (next_door_index_ != before) save_identities(); }
-    void load_identities();                                            // once, at startup
-    void save_identities() const;                                      // whole table + counter, locale-independent
+    void persist_door_counter(std::uint64_t before) { if (next_door_index_ != before) save_identities(); }
+    void save_identities();                                            // the counter + change hazard to ltsm (publish_door_memory); the table stays in memory
+    // ── Door memory through ltsm (common/ltsm_topology/door_memory.h) ──
+    bool door_memory_adopted_ = false;                                 // ltsm's counter + hazard taken (or Identity.NamesFromLtsm = false)
+    std::string door_memory_wait_reason_;                              // the last logged reason ltsm's door memory is not adopted yet
+    std::chrono::steady_clock::time_point door_memory_wait_logged_at_{};
+    std::optional<rc::doormem::DoorMemory> door_memory_published_;     // what this agent's node carries now
+    std::chrono::steady_clock::time_point door_memory_checked_{};      // last check that the agent node still carries it
+    // No door is named before ltsm's counter is in, nor in a RECALLED room before its notes are read: a door born in that window
+    // takes a remembered door's hole under a fresh name and the note is then refused (names_ltsm1: door_22 born on door_1's hole
+    // between the start-up recall and its notes). The old private file covered that window by matching the room's name.
+    [[nodiscard]] bool door_names_ready() const { return door_memory_adopted_ and not awaiting_room_notes(); }
+    [[nodiscard]] bool awaiting_room_notes() const
+    { return recalled_room_id_ != 0 and recalled_room_id_ == room_node_id_ and notes_read_room_ != room_node_id_; }
+    std::uint64_t notes_read_room_ = 0;   ///< the recalled room whose notes a restore pass has read (or that has none coming)
+    void step_door_memory();                                           // adopt once, then publish on change
     void note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m = 0.0f);   // upsert by PLACE, then save
     // note_identity with the full row (pose, existence, leaf); `weight` = P(the writer is this hole's door), its P(exists)
     void upsert_identity(DoorIdentity row, float width_m, float weight);
@@ -333,6 +363,28 @@ private:
     std::uint64_t door_questions_room_ = 0;
     std::string   door_questions_state_;
     void step_candidate_looks();
+    // ── THE HYPOTHESIS LOOK (one-model, spec §4; door_hypothesis_look.h) ─────────────────────────────────────────────
+    // Under Existence.OneModel the remembered-door look (2) and the candidate look (3) are not created: every open question (an undecided
+    // candidate, a restored-but-unconfirmed door, a leaf's competing frame-wall hypotheses) is a rc::door::hlook::Question and ONE producer
+    // offers the pose that most reduces its uncertainty (`aff_door_look_q_<key>`, gain = the EIG in nats). Producer (1), the live door's
+    // D-optimal place look (epistemic_planner), stays: it refines the place of a door that is already born, a question the hypothesis set
+    // does not hold (which of several doors exist), and its gain is on the same nats scale.
+    struct HypLook
+    {
+        rc::ObjectAffordance             aff;
+        rc::door::core::ViewLedger       tried;                   // one view per site finished or handed back
+        std::optional<rc::AffordanceTarget> site;                 // the pose last offered
+        rc::door::Aperture               ref;                     // the aperture the tried ledger measures its views against
+        rc::door::hlook::LookCache       cache;                   // the question's outcome tables, reused while its geometry is unchanged
+    };
+    std::map<std::string, HypLook> hyp_looks_;                    // by Question::key
+    std::uint64_t hyp_looks_room_ = 0;
+    double hyp_look_ms_sum_ = 0.0, hyp_look_ms_max_ = 0.0; long hyp_look_n_ = 0, hyp_look_hits_ = 0;   // best_look timing, logged every 100 evaluations
+    /// Offer the best look of each open question; withdraw the settled ones. True while some question stands.
+    bool step_hypothesis_looks(std::span<const rc::door::hlook::Member> members, std::span<const std::pair<std::string, std::string>> competing,
+                               const std::function<bool(const rc::door::hlook::Member&)>& undecided,
+                               const rc::nbv::Sensor& sensor, std::span<const rc::nbv::Obstacle> furniture, bool can_plan);
+    void refresh_remembered_rooms();   // one-model: rates + door-count prior from LTSM's remembered rooms (on room entry only)
     void step_wall_hypotheses();                            // a promoted room's walls are its door slots (room-door-belief spec §3.3)
     std::uint64_t wall_seeded_room_ = 0;
     std::uint64_t wall_look_key_ = 0;                       // the one wall place being looked at (one node at a time: rates)
@@ -367,6 +419,7 @@ private:
     void drop_phantom_room(const std::string& room_name);
     void step_phantom_save();
     void step_pending_restore();
+    [[nodiscard]] bool room_has_remembered_passage(const std::string& room) const;   // ltsm_topology lists a passage of it
     void step_restore_from_notes();
     std::unordered_set<std::string> restore_failed_logged_;   ///< rows whose recreation failed (logged once, retried every cycle)
     std::vector<std::string> restore_rows(std::uint64_t new_room, std::span<const rc::door::IdentityRow> rows);
@@ -636,6 +689,9 @@ private:
     rc::EvidenceMonitor* evidence_monitor_ = nullptr;
     rc::EvidenceGlobals  ev_g_{};                       // per-cycle fields reset at the head of compute()
     void refresh_evidence_monitor();                    // throttled push of BOTH dashboard sections
+    std::vector<rc::door::memrooms::RememberedRoom> remembered_rooms_;   // one-model: LTSM's rooms but the current one
+    std::uint64_t remembered_for_room_ = 0;
+    std::chrono::steady_clock::time_point remembered_tp_{};
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz dashboard tick
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
     void restore_dashboard_geometry();

@@ -69,6 +69,23 @@ struct PlaceBelief
     //  WITHDRAWS (the robot never left) is the opposite proof (refute_crossing).
     bool crossing_pending = false;
 
+    /// ★AN IDENTITY-ONLY ROW (one-model; 11-15 e18, door_21): a remembered door whose row carries no L. Its evidence at writing was missing but
+    ///  BOUNDED: a row is written for a door believed to exist, so the posterior then was at least even (L_post >= 0). The least-informative evidence
+    ///  consistent with that is L_evidence = -prior (posterior exactly 0, P = 0.5), the prior being the structural prior of the room it is restored
+    ///  into, which only the first update knows. So the restore holds the row's age factor here (1 = no age) and adopt_prior() enters the evidence.
+    std::optional<double> identity_only_g;
+
+    /// The structural prior, REPLACED (never accumulated). The first adoption on an identity-only restore also enters its evidence, -g * prior
+    /// (aged as any remembered evidence: g = 1 without an age, so P = 0.5; an old row relaxes toward the prior), ON TOP of whatever the ledger holds.
+    void adopt_prior(const PlacePrior& p)
+    {
+        prior = p;
+        if (not identity_only_g.has_value()) return;
+        const double g = *identity_only_g;
+        identity_only_g.reset();
+        remember(float(double(L_evidence()) - g * double(p.total())), float(Sp()));
+    }
+
     /// The body went through this place: pending, unless the proof already stands.
     void note_crossing() { if (not crossed) crossing_pending = true; }
     /// The room switch stood: the pending crossing is proof. No-op without a pending crossing.
@@ -115,8 +132,16 @@ struct PlaceBelief
 
 /// What one existence update did to one place, per channel (spec §3.8). NaN = NOT COMPUTED this cycle (printed `nan` in the
 /// CSV and `—` on stdout, never a stale value). A channel's dl is the change it made to the ledger sum this cycle.
-struct FitSupport { float x = 0.f; int sensor = 0; float coverage = 1.f; float overlap = 1.f; };   // the fit's clutter share, the camera (0 ZED, else ricoh) it came from,
-                                                                              // and the share of the opening the mask samples (rc::door::aperture_coverage)
+struct FitSupport { float x = 0.f; int sensor = 0; float coverage = 1.f; float overlap = 1.f; float trunc = 0.f; float confidence = 1.f; };   // the fit's clutter share, the camera (0 ZED, else ricoh) it came from,
+                                                                              // and the share of the opening the mask samples (rc::door::aperture_coverage); `confidence` = the YOLO score of the mask the fit used (one-model: the support term is worth what the mask is, P(genuine | score), as its hit is); `trunc` = the mask's clipped share (one-model: weights the term by 1 - trunc)
+
+/// One low-LiDAR sweep's reading of a place's aperture span (door_opening_edges.h opening_view_llr: the mean per-bin opening / solid-wall log
+/// ratio over the span, weighted by the line of sight to it; one sweep = one trial) and where the sensor stood (the view it joins). One-model only.
+struct LidarOpening
+{
+    float llr = 0.0f;
+    Eigen::Vector2f origin_xy = Eigen::Vector2f::Zero();
+};
 
 struct ExistenceTrace
 {
@@ -128,6 +153,7 @@ struct ExistenceTrace
     float geo_x = kNan, geo_mu0 = kNan, geo_mu1 = kNan, geo_s = kNan;
     float sup_x = kNan, sup_dl = kNan, sup_c = kNan, sup_q = kNan;   // sup_c: the mask's coverage of the opening (the trial's weight with κ); sup_q: P(the window was on the opening)
             // the fit's clutter share this cycle and what ℓ_sup changed the ledger by (NaN = no fit)
+    float lid_dl = kNan;                       // the LiDAR opening channel (one-model): what the sweep's opening term changed the ledger sum by (NaN = no sweep reading)
     int zed_view = -1, ric_view = -1;          // ledger index of the view this frame joined (-1 = none)
     float delete_line = kNan;
 };

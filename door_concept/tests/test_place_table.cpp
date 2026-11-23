@@ -147,6 +147,18 @@ int main()
       const auto ids = T.to_identity_rows();
       CHECK(not ids[0].pose.has_value()); CHECK(ids[1].pose.has_value() and ids[1].pose->depth == 0.12f);
     }
+    { // flag_boundary (final review 3): a row whose ledger a flag-on run wrote (VL5) read WITHOUT the flag keeps the row's L and has no ledger: the same L as a row with no ledger
+      ViewLedger W; W.ricoh_counts_misses = true;
+      const auto v = W.observe(Vec2f(0.f, 3.f), Vec2f(0.f, 0.f), Vec2f(0.f, 1.f), 1.f, 0.f, 0);
+      W.add_geometry_t(v, 0.7f, 0.8f, 0.2f, 0.04f, 2.f, 4); W.add_lidar(v, 1.5f); W.recompute(v, false);
+      IdentityRow a; a.room = "room_1"; a.name = "door_1"; a.xy = {1.f, 2.f}; a.exist_logodds = 1.2f; a.exist_physical = 0.f;
+      IdentityRow b = a; a.ledger = W.serialise();
+      CHECK(a.ledger->starts_with("VL5 "));
+      const PlaceRow off = PlaceTable::row_of(a, 0.1f, false), none = PlaceTable::row_of(b, 0.1f, false);
+      CHECK(off.ledger.views().empty() and off.L_evidence == none.L_evidence and off.physical == none.physical and off.L_evidence == 1.2f);
+      const PlaceRow on = PlaceTable::row_of(a, 0.1f, false, kLookalikeProbDefault, true, 0.0f);
+      CHECK(on.ledger.views().size() == 1);
+    }
     std::filesystem::remove(tmp);
     std::printf(fails ? "test_place_table: %d FAILED\n" : "test_place_table: ALL PASS\n", fails);
     return fails ? 1 : 0;

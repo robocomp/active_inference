@@ -1,0 +1,632 @@
+\documentclass[10pt, aspectratio=169]{beamer}
+\input{preamble}
+
+\title{A robot that acts to know}
+\subtitle{Day 5 --- Action}
+\date{Friday 4 December}
+
+\tikzset{box4/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize, minimum height=0.8cm},
+         arr4/.style={-{Stealth[length=2.5mm]}, thick},
+         lab4/.style={font=\scriptsize}}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{Today: from a belief to a motion, and back}
+  \centering
+  \begin{tikzpicture}[stage/.style={box4, draw=cool, fill=cool!8, minimum width=2.75cm, minimum height=1cm, font=\small}]
+    \node[stage] (b) at (90:2.15) {a belief\\holds $\Sigma$};
+    \node[stage] (o) at (18:3.7) {publishes an offer,\\priced in nats};
+    \node[stage] (s) at (-54:2.7) {the controller\\selects by $G$};
+    \node[stage] (r) at (-126:2.7) {a route, and\\a law to follow it};
+    \node[stage] (l) at (162:3.7) {the robot looks;\\$\Sigma$ shrinks};
+    \draw[arr4, color=muted] (b) to[bend left=15] (o);
+    \draw[arr4, color=muted] (o) to[bend left=15] (s);
+    \draw[arr4, color=muted] (s) to[bend left=15] (r);
+    \draw[arr4, color=muted] (r) to[bend left=15] (l);
+    \draw[arr4, color=muted] (l) to[bend left=15] (b);
+    \node[align=center, font=\small] at (0,-0.15) {one objective,\\one currency};
+  \end{tikzpicture}
+
+  \small And at the end, the person talks to the robot: language reads and changes the same beliefs.
+\end{frame}
+
+\input{day5_efe}
+
+% =================================================================================================
+\section{Affordances: published, priced offers}
+% =================================================================================================
+
+\begin{frame}{Each term of $G$ belongs to the process that can compute it}
+  \centering
+  \begin{tikzpicture}[p/.style={box4, minimum width=2.6cm}]
+    \node[p] (t) at (0,1.5) {table agent\\{\scriptsize holds $\Sigma_{\theta_1}$}};
+    \node[p] (f) at (0,0) {refrigerator agent\\{\scriptsize holds $\Sigma_{\theta_2}$}};
+    \node[p] (r) at (0,-1.5) {room agent\\{\scriptsize holds $\Sigma_X$}};
+    \node[box4, very thick, fill=muted!12, minimum width=3.6cm, minimum height=1.3cm] (c) at (6.0,0) {controller\\{\scriptsize assembles $G$, resolves, optimises}};
+    \node[box4, minimum width=1.9cm] (m) at (10.2,0) {motion};
+    \foreach \a in {t,f,r} \draw[arr4] (\a) -- (c);
+    \draw[arr4] (c) -- node[above, lab4] {$\argmin G$} (m);
+    \node[lab4, align=center, fill=white, inner sep=1.5pt] at (2.95,1.27) {$\Delta H$ in nats, ranked faces,\\stand-off band, $\Sigma^\ast$};
+    \draw[arr4, densely dashed, accent] (m.south) -- ++(0,-1.75) -| (r.south);
+    \node[lab4, text=accent, align=center, fill=white] at (6.0,-2.32) {what the motion observes shrinks the very $\Sigma$ that priced it};
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  \small An offer is a node in the graph. Add a class of object and you add terms to $G$;
+  the controller does not change.
+  \src{action.tex l.78--84, l.146--188, l.1478--1481}
+\end{frame}
+
+\begin{frame}{The split of knowledge}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[thick, fill=muted!20] (-1.05,-0.6) rectangle (1.05,0.6);
+        \node[font=\small] at (0,0) {table};
+        \foreach \a/\r/\col in {-90/1.6/accent, 90/1.9/muted, 0/2.45/muted} {
+          \draw[densely dashed, color=\col] (\a:0.95) -- (\a:\r);
+          \fill[color=\col] (\a:\r) circle (2.5pt);
+        }
+        \node[lab4, text=accent] at (-90:1.92) {long face: 0.8 nats};
+        \node[lab4] at (90:2.15) {0.2 nats};
+        \draw[very thick, accent!40] (-90:1.25) -- (-90:1.6);
+        \fill[accent!50, draw=black] (-2.45,-1.1) circle (5pt);
+        \node[lab4] at (-2.45,-1.5) {robot};
+        \draw[very thick] (1.65,-0.85) -- (1.65,1.15);
+        \node[lab4, align=center] at (2.35,0.15) {chair: only\\the executor\\knows};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \renewcommand{\arraystretch}{1.5}
+      \small
+      \begin{tabular}{@{}p{2.1cm} p{4.5cm}@{}}
+        \toprule
+        \textbf{producer} & which view, \emph{relative to its object}; what it is worth; when it has learnt enough ($\Sigma^\ast$) \\
+        \textbf{executor} & feasibility; the cost of getting there; how to move and stop \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.8em}
+      A producer cannot publish a world pose. A demand that may be impossible has no vocabulary for
+      saying so; a constraint can be negotiated.
+    \end{column}
+  \end{columns}
+  \src{action.tex l.42--45, l.109--122}
+\end{frame}
+
+\begin{frame}{The price of a view}
+  \centering
+  \[
+    \E[\Delta H](\mathbf v) \;=\; P(\text{detect}\given\mathbf v)\;\sum_j\tfrac12\ln\!\Big(1+\frac{I_j(\mathbf v)}{Y_j}\Big)
+  \]
+  \includegraphics[width=0.74\textwidth]{d4_currency.pdf}
+
+  \raggedright\small
+  $f_{\min}{=}0.10$, $f_{\max}{=}0.60$, $w_f{=}0.06$ are a prior, not a measurement. And because the
+  band is unimodal, a robot unsure of an object's size stands further back: no margin was set.
+  \src{action.tex l.193--207, l.218--226, l.256--265}
+\end{frame}
+
+\begin{frame}{Selecting: one comparison, every cycle}
+  \[
+    a^\star = \argmin_a\big[\lambda\cdot\mathrm{dist}(a) - \Delta H(a) - \text{pragmatic}(a)\big],
+    \qquad \lambda = 0.2\ \text{nats/m}
+  \]
+  \begin{columns}[c]
+    \begin{column}{0.56\textwidth}
+      \centering
+      \begin{tikzpicture}[x=3.0cm, y=0.95cm, lab/.style={font=\scriptsize}]
+        \draw[muted] (0,-0.3) -- (0,2.1);
+        \foreach \y/\n/\g/\c in {1.5/table long face/0.8/0.6, 0.3/room's wall/0.3/0.2} {
+          \fill[good!40] (0,\y) rectangle (-\g,\y+0.5);
+          \fill[accent!45] (0,\y) rectangle (\c,\y+0.5);
+          \node[lab, above] at (-0.4,\y+0.5) {\n};
+          \node[lab] at (-\g/2,\y+0.25) {gain $\g$};
+        }
+        \node[lab, right] at (0.6,1.75) {3 m: cost 0.6};
+        \node[lab, right] at (0.2,0.55) {1 m: cost 0.2};
+        \node[lab, align=center] at (0,-0.75) {$G_{\text{table}} = -0.2$ \quad beats \quad $G_{\text{wall}} = -0.1$};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \small
+      Illustrative gains.\\[0.3em]
+      Already driving to the wall? The table must win by a \textbf{switching margin},
+      $0.5$ nats: the price of work already invested.
+      \begin{itemize}
+        \item It is inside $G$, not a gate on it.
+        \item The offer in hand is re-scored with the rest.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \src{action.tex l.42--49, l.329--347}
+\end{frame}
+
+\begin{frame}{An offer loses value by succeeding}
+  \centering
+  \includegraphics[width=0.66\textwidth]{d4_handoff.pdf}
+
+  \raggedright\small
+  The toy of today's lab: two producers and a door worth 1 nat of preference. Nobody wrote
+  ``the table is done, go to the bottle''. Each look shrinks the covariance that priced the look,
+  until another offer is better by more than the margin.
+  \lesson{Interruption is a consequence of the values, not a rule in the executor.}
+  \src{action.tex l.347--353; lab 4, exercise 7}
+\end{frame}
+
+\begin{frame}{The room: predict through everything you believe}
+  \centering
+  \includegraphics[width=0.84\textwidth]{d4_explorer.pdf}
+
+  \raggedright\small
+  An explorer that casts its predicted beams through what it already knows is solid promises
+  cells nobody can reach, collects nothing for them, and offers them again at the next decision: the
+  robot would shuttle between two standpoints.
+  \alert{Predicted against realised gain is the most useful diagnostic an explorer has.}
+  \src{layout\_acquisition.tex l.725--728; lab 4, exercises 8--10}
+\end{frame}
+
+\begin{frame}{What is not established}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \begin{measured}{derived objective against a heuristic}
+        \small
+        The explorer written in nats, no free weights, against the hand-tuned scorer, over a
+        population of simulated rooms: \textbf{indistinguishable in the mean}. It made a majority of
+        rooms slightly worse and rescued a few outright failures.
+      \end{measured}
+      \small
+      The explorer running now scores unseen floor per metre: a coverage rule.
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      \textbf{Still design, not mechanism:}
+      \begin{itemize}
+        \item the horizon is one affordance deep: the next look, not the best order;
+        \item the pragmatic channel is thin;
+        \item an offer completes on a detection, not on reaching $\Sigma^\ast$.
+      \end{itemize}
+      \alert{The case for the derived form rests on its having no free parameters, not on performance.}
+    \end{column}
+  \end{columns}
+  \src{active\_inference.tex l.876--897; action.tex l.1420--1436}
+\end{frame}
+
+% =================================================================================================
+\section{From a choice to a motion}
+% =================================================================================================
+
+\begin{frame}{Who answers for obstacles? The geometry}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=2.45cm, minimum height=1.05cm}]
+    \node[s, fill=cool!10] (a) at (0,0) {grid planner\\{\scriptsize the room}};
+    \node[s, fill=cool!10] (b) at (3.3,0) {route optimiser\\{\scriptsize the route}};
+    \node[s, fill=cool!10] (c) at (6.6,0) {head re-solved\\{\scriptsize what sensors see}};
+    \node[s, fill=good!12] (d) at (9.9,0) {follower\\{\scriptsize no obstacle term}};
+    \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c); \draw[arr4] (c) -- (d);
+    \draw[thick] (-1.2,0.8) -- (7.8,0.8);
+    \node[font=\small] at (3.3,1.12) {obstacles are handled here, at three scales};
+    \node[font=\small, align=center] at (9.9,1.12) {handed a curve};
+  \end{tikzpicture}
+
+  \vspace{1em}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \small
+      The follower has no avoidance mode and no arbitration between avoiding and tracking.
+      An arbitration problem has become a \textbf{coverage requirement}.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      Others choose differently: timed elastic bands emit the commands themselves; predictive
+      contouring keeps obstacles in the controller; regulated pure pursuit carries a collision check,
+      the price of replanning at 1 Hz and tracking at 20.
+    \end{column}
+  \end{columns}
+  \src{action.tex l.985--1008}
+\end{frame}
+
+\begin{frame}{Routes as optimisation}
+  \[
+    J[r] = w_c\,\underbrace{\big\langle u^2+4u^4\big\rangle}_{\text{clearance}}
+    + w_\kappa\,\underbrace{\big\langle(\rho\kappa)^2\big\rangle}_{\text{bending}}
+    + \lambda_a\underbrace{\textstyle\sum_k\mathrm{Huber}(\delta_k)}_{\text{authored waypoints}}
+    + \lambda_j\,\underbrace{\big\langle(\mathrm{d}\kappa/\mathrm{d}s)^2\big\rangle}_{\text{turn-rate roughness}}
+  \]
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \small
+      \begin{itemize}
+        \item The quartic: margin is surrendered only where it is plentiful.
+        \item $\rho=v_{\max}^2/a^{\max}_{\mathrm{lat}}$: bending is priced by the speed it costs.
+        \item Terms are \emph{not} normalised by their current size, so re-optimising an optimal
+              route leaves it alone.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \centering\small
+      \begin{tabular}{@{}l r r@{}}
+        \toprule
+        fixed tour & before & after \\
+        \midrule
+        5th-pct.\ clearance (m) & 0.334 & 0.431 \\
+        lap time (s)            & 131.3 & 116.8 \\
+        waypoint fidelity (m)   & 0.115 & 0.173 \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.3em}
+      {\scriptsize The third row is the price; an earlier speed limit, before $\lambda_j$.}
+    \end{column}
+  \end{columns}
+  \src{action.tex l.837--876, l.878--904}
+\end{frame}
+
+\begin{frame}{The error, in the curve's own coordinates}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm]
+        \draw[very thick] plot[domain=-0.2:5.0, samples=60] (\x, {0.09*\x*\x});
+        \coordinate (F) at (2,0.36);
+        \coordinate (R) at (1.661,1.301);
+        \fill (F) circle (1.6pt);
+        \draw[densely dashed, muted, thick, -{Stealth}] (F) -- ++(19.8:1.5) node[right, lab4, text=black] {$\psi(s)$};
+        \fill[muted!40, draw=black] (R) circle (5pt);
+        \draw[-{Stealth}, very thick, accent] (R) -- ++(44.8:1.25) node[above, lab4, text=black] {heading};
+        \draw[densely dashed, muted] (R) -- ++(19.8:1.1);
+        \draw ([shift=(19.8:0.72)]R) arc (19.8:44.8:0.72);
+        \node[lab4] at (2.55,1.88) {$\phi_e$};
+        \draw[{Stealth}-{Stealth}] (F) -- node[left, lab4] {$e$} (R);
+        \node[lab4] at (5.0,2.5) {route $r(s)$};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \[
+        \dot e \approx v\,\phi_e,
+        \qquad
+        \dot\phi_e = \omega - v\,\kappa(s)
+      \]
+      \small
+      Heading error turns forward motion into sideways drift. Heading error grows by whatever turn
+      rate exceeds what the curve demands.\\[0.5em]
+      Which suggests the law:
+      \[
+        \omega = \underbrace{v\kappa(s)}_{\text{feedforward}}
+        - v\Big(\frac{2}{L}\,\phi_e+\frac{1}{L^2}\,e\Big)
+      \]
+    \end{column}
+  \end{columns}
+  \src{action.tex l.1019--1027, l.1069--1077}
+\end{frame}
+
+\begin{frame}{A law you can write down}
+  \begin{columns}[c]
+    \begin{column}{0.48\textwidth}
+      \begin{measured}{the earlier follower was a sampler}
+        \small
+        An offline replay found the lateral term contributing \textbf{91.6\%} of the sampler's cost:
+        in effect a lateral regulator paying for $K$ rollouts. The tracker replaced it, and the
+        sampler is gone from the build.
+      \end{measured}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      \textbf{The feedforward is exact.} The unicycle is differentially flat with respect to its
+      position, so a $C^2$ curve and a speed profile fix $\omega=v\kappa$ in closed form.\\[0.6em]
+      A sampler earns its cost with multimodal costs and obstacles inside the objective. Here the
+      obstacles live in the route.
+    \end{column}
+  \end{columns}
+  \vspace{0.6em}
+  \lesson{When the dynamics are locally linear and one term dominates, write the law.}
+  \src{action.tex l.1040--1046, l.1054--1062}
+\end{frame}
+
+\begin{frame}{Pole assignment: the gains are not tuned}
+  \begin{columns}[c]
+    \begin{column}{0.4\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.5cm, y=1.5cm]
+        \draw[-{Stealth}, muted] (-2.2,0) -- (0.7,0) node[below, lab4, text=black] {$\mathrm{Re}\,\sigma$};
+        \draw[-{Stealth}, muted] (0,-1.1) -- (0,1.2) node[right, lab4, text=black] {$\mathrm{Im}\,\sigma$};
+        \node[accent, font=\Large] at (-1.2,0) {$\times\!\!\times$};
+        \node[lab4, above] at (-1.2,0.14) {two poles at $-v/L$};
+        \draw[densely dashed, muted, -{Stealth}] (-1.0,-0.45) -- (-1.75,-0.45);
+        \node[lab4, below] at (-1.4,-0.5) {faster robot: further left};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.56\textwidth}
+      Substituting the law into the error equations, at constant speed:
+      \[
+        \ddot e + \frac{2v}{L}\,\dot e + \frac{v^2}{L^2}\,e = 0
+        \;\Longrightarrow\; (\sigma + v/L)^2 = 0
+      \]
+      \small
+      Critically damped by construction, with one free parameter, because a double pole fixes both
+      gains:
+      \[ k_d = \frac{2}{L},\qquad k_p = \frac{v}{L^2}. \]
+      $L = 0.50$ m. What was chosen is where the poles sit.
+    \end{column}
+  \end{columns}
+  \src{action.tex l.1100--1109, l.1163--1181}
+\end{frame}
+
+\begin{frame}{The error decays over a distance, not a time}
+  \centering
+  \includegraphics[width=0.76\textwidth]{d4_decay.pdf}
+
+  \raggedright\small
+  With $\mathrm{d}/\mathrm{d}t=v\,\mathrm{d}/\mathrm{d}s$ the speed cancels: $e(s)=(A+Bs)\,e^{-s/L}$.
+  A robot crawling through a door and one crossing a room converge over the same metres, with no gain
+  schedule. These are the toy's three speeds; thin black is the formula.
+  \lesson{$L$ is not a gain. It is a length, read off the space the robot works in.}
+  \src{action.tex l.1185--1198, l.1229--1236, l.1257--1260; lab 4, exercise 12}
+\end{frame}
+
+\begin{frame}{Why this follower needs no obstacle term}
+  \centering
+  \includegraphics[width=0.8\textwidth]{d4_route.pdf}
+
+  \raggedright\small
+  Same follower, unchanged. Only the curve moved: clearance $-40$ cm straight through, $+23$ cm after
+  deforming.\\[0.4em]
+  \textbf{What it costs.} An obstacle outside the live field, or inside the short fixed prefix, is not
+  avoided at all. \alert{No comparison with the window disabled has been run}: the
+  window is justified by the division of labour, not by a measured benefit.
+  \src{action.tex l.1002--1008; lab 4, exercise 14}
+\end{frame}
+
+\begin{frame}{Following and choosing are one objective, at two depths}
+  \[
+    \nabla_{u_t} G_T(\pi)
+      = \underbrace{\nabla_{u_t} G_{t+1}(u_t)}_{\text{what the follower handles, in closed form}}
+      + \underbrace{\sum_{\tau=t+2}^{t+T}\nabla_{u_t} G_\tau(\pi)}_{\text{what the selector adds, in affordances}}
+  \]
+  \begin{center}
+  \begin{tikzpicture}[s/.style={box4, minimum width=4.5cm}]
+    \node[s, fill=cool!10] (a) at (0,0) {keep a re-evaluated \textbf{goal} from dithering:\\switching margin, in nats};
+    \node[s, fill=cool!10] (b) at (6.6,0) {keep a re-solved \textbf{route} from jumping:\\proximal prior, 3 cm};
+    \draw[{Stealth}-{Stealth}, thick] (a) -- node[above, lab4] {same device} (b);
+  \end{tikzpicture}
+  \end{center}
+  \small MPC, MPPI and planning as inference sit on this line, and differ in how many terms they keep
+  and how they estimate them.
+  \src{active\_inference.tex l.504--508, l.554--579; action.tex l.978, l.1396--1408}
+\end{frame}
+
+% =================================================================================================
+\section{\texorpdfstring{Talking to the robot\\[0.4em]{\normalsize\mdseries\color{muted} language reads and changes the same beliefs}}{Talking to the robot}}
+% =================================================================================================
+
+\begin{frame}[t]{The language model proposes; the controller acts}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=2.2cm, minimum height=0.9cm}]
+    \node[s, fill=muted!10] (p) at (0,0) {the person\\speaks};
+    \node[s, fill=accent!10] (l) at (2.95,0) {language\\model};
+    \node[s, fill=cool!10] (c) at (5.9,0) {plan checked,\\shown as a card};
+    \node[s, fill=good!12] (k) at (8.85,0) {controller\\runs the plan};
+    \node[s, fill=good!12] (r) at (11.8,0) {the robot\\moves};
+    \draw[arr4] (p) -- (l);
+    \draw[arr4] (l) -- (c);
+    \draw[arr4] (c) -- node[below=0.5cm, lab4] {after ``yes''} (k);
+    \draw[arr4] (k) -- (r);
+    \draw[arr4, muted, dashed] (p.south) to[bend right=18] node[below, lab4, text=black] {``stop'', ``pause'': read by code, no model in the loop} (k.south);
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  \begin{columns}[T]
+    \begin{column}{0.53\textwidth}
+      \footnotesize
+{\ttfamily\scriptsize\raggedright
+      mission "go to room\_3 and tell me the colour\\
+      \hspace*{4.4em}of every chair on the way"\\
+      \hspace*{1em}watch seen(chair) continue each=c\\
+      \hspace*{2em}report "the colour of \$c"\\
+      \hspace*{1em}cross door\_22 expect=room\_3 retry=2\par}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \small
+      The plan is written in a small mission language: steps, conditions such as
+      \texttt{door\_open(door\_1)<0.5}, and watches on what is seen.\\[0.4em]
+      A condition reads a belief: $P(\text{open})$ is the door agent's.
+    \end{column}
+  \end{columns}
+  \lesson{The language model writes plans; it never drives the robot.}
+  \src{language\_agent/etc/skills/missions.md; docs/command\_taxonomy.md \S1.1}
+\end{frame}
+
+\begin{frame}[t]{A question is a query on a belief the robot already holds}
+  \centering\small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{@{}p{3.9cm} p{3.6cm} p{5.3cm}@{}}
+    \toprule
+    the person asks & who holds the belief & the answer \\
+    \midrule
+    ``Where is my chair?'' & long-term object memory & its last seen room and pose, copied, not rephrased \\
+    ``Is door\_1 open?'' & the door agent & $P(\text{open})$ from the leaf angle it observes \\
+    ``Can you see the fridge from the door?'' & every concept agent publishes how it detects & $P(\text{see}\given\mathbf v)$ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{-0.3em}
+  \[
+    P(\text{see}\given\mathbf v) \;=\; P(\text{notice}\given\mathbf v)\;\cdot\;P(\text{recognise}\given\mathbf v)
+  \]
+  \raggedright\small
+  $\mathbf v$: where the robot would stand. \emph{Notice}: enough of the object is in view past walls and
+  doors. \emph{Recognise}: the detector names it at that distance. The same $P(\text{detect}\given\mathbf v)$
+  that priced a view this morning.
+  \lesson{The language model chooses which belief to ask; the number comes from the belief.}
+  \src{language\_agent/src/can\_see.h, where\_is; common/ perception cards}
+\end{frame}
+
+\begin{frame}[t]{Imagining: the same model, run on a changed copy of the world}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=2.7cm, minimum height=0.9cm}]
+    \node[s, fill=cool!10] (w) at (0,0) {the robot's\\beliefs now};
+    \node[s, fill=accent!10] (x) at (3.9,0) {a copy, with one\\thing changed};
+    \node[s, fill=good!12] (m) at (7.8,0) {the model the\\robot acts with};
+    \node[s, fill=muted!10] (a) at (11.7,0) {an answer,\\with its assumptions};
+    \draw[arr4] (w) -- node[above, lab4] {copy} (x);
+    \draw[arr4] (x) -- node[above, lab4] {predict} (m);
+    \draw[arr4] (m) -- (a);
+    \node[lab4, below=0.15cm of x, align=center] {door\_2 := open};
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  \small
+  \renewcommand{\arraystretch}{1.4}
+  \begin{tabular}{@{}p{5.4cm} p{7.0cm}@{}}
+    \toprule
+    ``Would I fit through door\_2?'' & the controller's own fitting model and the robot's footprint \\
+    ``Would I see the fridge if door\_2 were open?'' & $P(\text{see}\given\mathbf v)$ on the changed copy \\
+    ``Would I get through door\_1?'' & the robot's past crossings of that door, counted \\
+    \bottomrule
+  \end{tabular}
+  \lesson{To imagine is to predict observations under a change: what expected free energy needs.}
+  \src{language\_agent/src/imagine\_fit.h, imagine\_see.h, imagine\_succeed.h}
+\end{frame}
+
+\begin{frame}[t]{Every claim must come from a tool that read a belief}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{The person's words become a belief only after a check}
+      \vspace{0.4em}
+
+      \centering
+      \begin{tikzpicture}[s/.style={box4, minimum width=4.6cm}]
+        \node[s, fill=muted!10] (a) at (0,0) {``that chair is mine''};
+        \node[s, fill=cool!10] (b) at (0,-1.3) {card: \emph{chair\_34 belongs to you?}};
+        \node[s, fill=good!12] (c) at (0,-2.6) {stored in memory only on ``yes''};
+        \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{The model's words, when no tool ran}
+      \vspace{0.4em}
+
+      \centering
+      \begin{tikzpicture}[s/.style={box4, minimum width=4.6cm}]
+        \node[s, fill=accent!10] (a) at (0,0) {``I have planned the mission''\\(no tool was called)};
+        \node[s, fill=cool!10] (b) at (0,-1.45) {asked once more: plan it,\\or say nothing was planned};
+        \node[s, fill=muted!10, font=\scriptsize] (c) at (0,-2.9) {kept in the history instead:\\``nothing was planned or sent,\\and the robot did not move''};
+        \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c);
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.5em}
+  \small If the false sentence stayed in the history, the model would copy it the next time.
+  \lesson{The language model is not the robot's belief: it may only report what a tool returned.}
+  \src{language\_agent/src/mission\_plan.h l.607--657; human\_claim.h}
+\end{frame}
+
+\begin{frame}[t]{From speech between people to speech inside \hfill\wip}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=3.4cm, minimum height=0.9cm}]
+    \node[lab4, anchor=east] at (-1.8,0) {a child};
+    \node[s, fill=muted!10] (a) at (0,0) {speech with\\another person};
+    \node[s, fill=muted!10] (b) at (4.3,0) {private speech:\\aloud, to oneself};
+    \node[s, fill=muted!10] (c) at (8.6,0) {inner speech:\\silent, abbreviated};
+    \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c);
+    \node[lab4, anchor=east] at (-1.8,-1.5) {the robot};
+    \node[s, fill=good!12] (d) at (0,-1.5) {chat with\\the person};
+    \node[s, fill=good!12] (e) at (4.3,-1.5) {a robot event wakes\\the model};
+    \node[s, fill=accent!10] (f) at (8.6,-1.5) {questions the robot\\puts to itself};
+    \draw[arr4] (d) -- (e); \draw[arr4, dashed] (e) -- (f);
+    \node[lab4] at (2.15,-2.25) {\color{good!70!black}built};
+    \node[lab4] at (6.45,-2.25) {\color{accent}proposed, not built};
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  \raggedright\small
+  Vygotsky: a function appears first between people, then inside the individual. Children talk aloud
+  to themselves more when the task is harder.\\[0.3em]
+  A wake today: during a mission, a robot event goes to the model, which may look, query, stop or
+  propose, and may not act.
+  \lesson{The robot's inner voice would be the chat, turned inward on its own surprises.}
+  \src{\emph{The Vygotskian Machine}, draft 2026, \S3; Vygotsky 1986; Berk 1992; mission\_plan.h \texttt{allowed\_in\_wake}}
+\end{frame}
+
+\begin{frame}[t]{An inner question is a small active-inference loop \hfill\wip}
+  \centering
+  \begin{tikzpicture}[s/.style={box4, minimum width=3.3cm, minimum height=0.9cm}]
+    \node[s, fill=accent!10] (q) at (0,0) {surprise: an object\\no agent explains};
+    \node[s, fill=cool!10] (h) at (4.3,0) {hypotheses, each\\with what it predicts};
+    \node[s, fill=cool!10] (t) at (8.6,0) {a test: a motion\\that separates them};
+    \node[s, fill=good!12] (m) at (8.6,-1.6) {the robot measures};
+    \node[s, fill=good!12] (p) at (4.3,-1.6) {the posterior moves};
+    \node[s, fill=muted!10] (e) at (0,-1.6) {stop: the gain no longer\\pays the cost};
+    \draw[arr4] (q) -- (h); \draw[arr4] (h) -- node[below=0.1cm, lab4] {VLM proposes} (t);
+    \draw[arr4] (t) -- (m); \draw[arr4] (m) -- (p); \draw[arr4] (p) -- (e);
+    \draw[arr4, muted] (p) -- (h);
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  \raggedright\small
+  \textbf{Illustrative, not a run:} bag, robot vacuum or moved chair? The vision-language model
+  proposes ``approach to 1 m: a vacuum is under 0.15 m tall and moves''. The robot measures 0.12 m and
+  sees it move.\\[0.3em]
+  The model only sets what each hypothesis predicts. \alert{Only the robot's own measurement moves
+  the posterior.}
+  \lesson{Talking to oneself is choosing the next look by expected information gain.}
+  \src{\emph{The Vygotskian Machine} \S3, vygotskian\_internalisation.tex l.9--123}
+\end{frame}
+
+\begin{frame}{What is measured, and what is not}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \begin{measured}{a local model writes the plans}
+        \small
+        On a robot-mounted computer, a 26-billion-parameter open model wrote correct missions
+        for 66 of 72 requests (24 requests, 3 runs each), in under a second.
+      \end{measured}
+      \small
+      In one simulated run a watch reacted while the robot crossed a door, and a ``stop'' watch ended
+      an exploration at a new chair.
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      \textbf{Not established:}
+      \begin{itemize}
+        \item the inner voice: designed, not built, nothing run;
+        \item the prediction that inner questions fall with practice, as private speech does
+              (a cache would show it too);
+        \item phrase lists catch false claims in English and Spanish only.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \src{missions.md header; vygotskian\_internalisation.tex l.235--264}
+\end{frame}
+
+% =================================================================================================
+\section{Lab}
+% =================================================================================================
+
+\begin{frame}{Lab 5: paying for what you learn}
+  \texttt{labs/day5.ipynb}, about 75 minutes.
+  \begin{enumerate}\small
+    \item \textbf{Where to look}: $\Delta H$ on one wall, and travel priced in nats.
+    \item \textbf{Priced offers}: producers publish on the graph, the controller selects; find the
+          hand-offs nobody coded.
+    \item \textbf{The room}: an explorer that knows when to stop, and the trap of predicting through matter.
+    \item \textbf{Following}: a double pole, three ways to break it, a route deformed around an obstacle.
+  \end{enumerate}
+  \vspace{0.3em}
+  \small Short of time: skip exercises 2 and 13.
+\end{frame}
+
+\begin{frame}{The last result of the week}
+  \centering
+  \vspace{1em}
+  \raggedright
+  \alert{The robot acts to make its beliefs better, and language is one more way to read and change
+  those beliefs.} Whatever it says, it can show where it came from: a belief, the model that built it,
+  and the look that paid for it.
+\end{frame}
+
+\end{document}

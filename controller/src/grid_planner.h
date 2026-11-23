@@ -334,6 +334,22 @@ public:
     };
     [[nodiscard]] TurnBlock why_cannot_turn(const Eigen::Vector2f& pos_room) const;
 
+    // The same report for the ARC the body will actually turn through, in EXACT GEOMETRY (not the 8 bucket rasterisation): the
+    // bare footprint polygon, rotating about the robot's position from yaw_from to yaw_to the SHORT way (the direction
+    // step_orient / the Heading goal drive), must not intersect an obstacle AT ITS TRUE EXTENT: a residual cell is its own
+    // (e.g. 0.05 m) square, not the enclosing planner lattice cell(s); room-mask / polygon obstacles are lattice cells.
+    // The body is the planner's own `footprint` object (the shadow hull), never a separate constant. A cell the body already overlaps at
+    // the start yaw is forgiven only while the overlap area does not grow. No margin. Yaws are room-frame FORWARD headings.
+    // Sample spacing: the footprint's farthest vertex moves half a grid cell per step. `headings_blocked` = distinct heading
+    // buckets where a blocking sample fell.
+    float body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, int ix, int iy) const;
+    // overlap of the bare hull at (pos, yaw) with an axis-aligned square (centre, half-size), m2
+    float body_square_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, const Eigen::Vector2f& centre, float half) const;
+    // the same for the cell containing a world point (0 off the map)
+    float body_cell_overlap_m2(const Eigen::Vector2f& pos_room, float yaw, const Eigen::Vector2f& cell_point) const
+    { int ix, iy; return world_to_cell(cell_point, ix, iy) ? body_cell_overlap_m2(pos_room, yaw, ix, iy) : 0.f; }
+    [[nodiscard]] TurnBlock why_cannot_sweep(const Eigen::Vector2f& pos_room, float yaw_from, float yaw_to) const;
+
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
     // Metres from `p` to the nearest occupied cell (outside-the-room counts as occupied, so walls are
     // included). Zero inside an obstacle. Returns a large positive value if there is no world yet, so a
@@ -372,6 +388,8 @@ public:
 
 private:
     static constexpr int kHeadings = 8;
+    // the shared body of why_cannot_turn / why_cannot_sweep: which of `headings` are blocked at pos_room, and by what
+    TurnBlock turn_block_over(const Eigen::Vector2f& pos_room, const std::vector<int>& headings) const;
 
     bool  in_bounds(int ix, int iy) const { return ix >= 0 and ix < w_ and iy >= 0 and iy < h_; }
     int   idx(int ix, int iy) const { return iy * w_ + ix; }
@@ -395,6 +413,13 @@ private:
     float state_risk(int ix, int iy, int h) const;
 
     std::vector<std::uint8_t> occ_;
+    // ★ TRUE EXTENT FOR THE TURN SWEEP (why_cannot_sweep): the lattice stores a 0.05 m residual cell as the enclosing planner cells
+    //   (0.10 m live), which is right for routing and wrong for "does the hull touch it". So the sweep keeps the cells' SOURCE
+    //   squares (hard residual cells: centre + half-size) and, for everything ELSE that occupies the lattice (room mask, obstacle
+    //   polygons), the occupancy raster as it stood BEFORE the residual stamp. Routing keeps using occ_ unchanged.
+    struct SourceSquare { Eigen::Vector2f c; float half = 0.f; };
+    std::vector<SourceSquare> src_squares_;
+    std::vector<std::uint8_t> occ_nocells_;
     std::vector<std::uint8_t> live_only_;   // Task 3c: cells occ_ marks ONLY because of a live-hard residual cell (or empty)
     bool cell_free_persistent(int ix, int iy, int h) const;
     // Soft residual risk per planner cell, nats (0 = none). Empty when nothing soft was supplied, which

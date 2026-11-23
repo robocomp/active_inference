@@ -105,6 +105,20 @@ static void test_reads_chair_pose_and_sizes(Fixture& f)
     CHECK(s->born_ms == 1700000000123);
     CHECK(s->exist_prob == 0.8f);
 }
+// Changed object (2026-11-15): the owner's identity link on a live chair; none published = no link.
+static void test_reads_identity_link(Fixture& f)
+{
+    CHECK(find(f.read(), "chair_3") != nullptr and not find(f.read(), "chair_3")->link.has_value());
+    auto n = *f.G->get_node("chair_3");
+    f.G->add_or_modify_attrib_local<same_as_uid_att>(n, std::uint64_t{777});
+    f.G->add_or_modify_attrib_local<same_as_prob_att>(n, 0.9f);
+    f.G->add_or_modify_attrib_local<left_spot_prob_att>(n, 0.7f);
+    f.G->update_node(n);
+    const auto v = f.read();
+    const auto* s = find(v, "chair_3");
+    CHECK(s != nullptr and s->link.has_value());
+    if (s and s->link) CHECK(s->link->memory_uid == 777 and s->link->same_prob == 0.9f and s->link->left_spot_prob == 0.7f);
+}
 static void test_bottle_on_table_resolves_room(Fixture& f)
 {
     const auto v = f.read();
@@ -210,6 +224,7 @@ int main()
     };
     run("test_door_and_proto_skipped", test_door_and_proto_skipped);   // FIRST: the held line is logged once per object
     run("test_reads_chair_pose_and_sizes", test_reads_chair_pose_and_sizes);
+    run("test_reads_identity_link", test_reads_identity_link);
     run("test_bottle_on_table_resolves_room", test_bottle_on_table_resolves_room);
     run("test_missing_uid_skipped", test_missing_uid_skipped);
     run("test_owners_present_parsed", test_owners_present_parsed);

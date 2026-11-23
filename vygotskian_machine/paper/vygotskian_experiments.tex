@@ -1,0 +1,245 @@
+% =====================================================================================================
+% vygotskian_experiments.tex — The Vygotskian machine, part 5: experimental evidence
+%
+% DRAFT. E1 and the offline part of E2 have been run (tools/, 2026-11-23); every other number is a red \result{}
+% placeholder, and the prose says what each experiment measures and which prediction it tests.
+% Order = the build order of the design note (Part E): each experiment gates the next.
+% =====================================================================================================
+
+\section{Experimental Evidence}
+\label{sec:experiments}
+
+We present the experiments in the order in which the machine is built, and each must succeed before the next
+begins. Each new piece is first run read-only, logging what it would have done, and is allowed to influence the
+robot only when that log scores well. Table~\ref{tab:exp_overview} assigns every prediction of
+Sections~\ref{sec:inner_speech:predictions} and~\ref{sec:lang_hierarchy:predictions} to an experiment, and L1 to two.
+
+\begin{table}[!htb]
+    \centering
+    \small
+    \begin{tabular}{|>{\raggedright\arraybackslash}p{0.04\linewidth}|>{\raggedright\arraybackslash}p{0.56\linewidth}|>{\raggedright\arraybackslash}p{0.17\linewidth}|>{\raggedright\arraybackslash}p{0.13\linewidth}|}
+        \hline
+        & \textbf{Question} & \textbf{Predictions} & \textbf{Mode} \\ \hline
+        E1 & Does elicited culture match measured frequencies? & L0 & offline \\ \hline
+        E2 & Does the function evidence recover what rooms are for? & L1 (corpus) & offline \\ \hline
+        E3 & Does the live function agent resist a missing object or wrong prior? & L1 (live) & live, read-only \\ \hline
+        E4 & Do missions over beliefs search better and catch divergences early? & L2, L3 & live \\ \hline
+        E5 & Does the inner voice resolve anomalies and learn affordances? & P1, P2, P4, P6, L7 & live \\ \hline
+        E6 & Does imagination prepare the robot for what comes next? & L4, L5, P5 & live \\ \hline
+        E7 & Is the scaffold withdrawn, and does culture do the work? & L6, P3, P7--P9 & live, sessions \\ \hline
+    \end{tabular}
+    \caption{The experiments, in build order. Each gates the next.}
+    \label{tab:exp_overview}
+\end{table}
+
+\subsection{Setting and statistical design}
+\label{sec:experiments:setting}
+
+All live experiments run on \cortex{} (Section~\ref{sec:cortex}) with every agent of Figure~\ref{fig:cortex_overview}
+active. E3 to E6 use a simulated apartment of three rooms in a ring (an open-plan room with a kitchen run, a dining
+set and a desk, a bedroom and a bathroom), whose simulator gives the true function of every room and position of every
+object and lets two versions of the machine run on identical tours. Three rooms confirm each function at most once,
+too few for the counts to outweigh the VLM, so the override test of E3 and all of E7 use 12 procedurally furnished
+apartments in which the same functions recur. E1 and E2 also use ScanNet~\cite{dai2017scannet}, 457 real rooms labelled with
+their type and their objects, and E1 checks it against the 45{,}160 rooms of ProcTHOR-10k~\cite{deitke2022procthor}. Shadow repeats E5, E6 and the recurring-task part of E7 in one real apartment,
+with 5 sessions per condition, while the full E7 runs in simulation only.
+
+Every condition uses the deployed model (Section~\ref{sec:cortex}) unless stated otherwise, so every conclusion is
+conditional on it, and E7 repeats its main comparison with a second VLM. Each simulated condition runs 10 seeds
+varying the start pose, the movable objects and the timing of seeded events. We report means with 95\% bootstrap
+intervals and paired tests on identical seeds. The novelty of a goal, fixed before any data are collected, is the
+number of object classes, mission operations and rooms in a reference solution that occur in no goal the robot has
+already performed. In simulation, a scripted person states room functions, approves missions and answers
+questions from the simulator's ground truth. Unless a prediction states its own number, it holds when the 95\%
+interval of the paired difference excludes zero in the predicted direction, and ``match'' means that the interval lies
+within $\pm 10\%$ of the reference value, the machine's or, for P2, P4 and P8, the earlier one. We report the power of
+each ``match'' on 10 paired seeds (\result{--}\%), and a failed match at low power is inconclusive, not a refutation.
+A VLM call is one request to the model, counted by mode, with requests to understand the person counted apart. The
+real-robot sessions are descriptive. These criteria are fixed before any run.
+
+\subsection{E1: Culture elicited from the VLM}
+\label{sec:experiments:e1}
+
+The kitchen metaconcept weighs candidate members by log-odds written by hand for seven classes. We elicit the same
+level-3 quantity from the VLM, and the level-4 $\pi_{cf}$ of Eq.~\eqref{eq:lh_function_evidence}, from which $\pi_{c\bar f}$ follows,
+for seven functions (kitchen, dining room, living room, bedroom, bathroom, office, corridor), one question per class
+and hypothesis at temperature zero, answered on five levels mapped to 0.05, 0.25, 0.5, 0.75 and 0.95, in three
+paraphrases of which we keep the median and the spread. The main test is the Brier score of the elicited $\pi_{cf}$
+against class frequencies per function in the corpus, compared with a constant ``likely'' prior and a uniform prior.
+We also report the correct membership decisions that change when logged kitchen fits are replayed
+(Table~\ref{tab:exp_e1}), and L0 holds if the elicited priors beat both baselines and no correct decision changes.
+
+L0 holds on both corpora and on replay, where every changed decision admits a true kitchen unit. The VLM orders each
+function's classes well (rank correlation 0.71 to 0.80 with ScanNet, 0.31 for its 19 corridors) but overstates
+presence by 0.22, so a corpus frequency blind to function scores better (0.114): the VLM supplies the order, and E2 shows
+that the level has to come from counts. The log holds only kitchen units, so raising the cabinet
+to 1.85 has an untested cost.
+
+\begin{table}[!htb]
+    \centering
+    \small
+    \begin{tabular}{|l|r|r|r|r|r|r|r|}
+        \hline
+        & cabinet & refrigerator & counter & countertop & hood & microwave & chest of drawers \\ \hline
+        Authored & $0.2$ & $2.0$ & $2.5$ & $2.5$ & $3.0$ & $1.5$ & $-0.5$ \\ \hline
+        Elicited & $1.85$ & $2.20$ & $2.20$ & $2.20$ & $4.04$ & $0.00$ & $-1.85$ \\ \hline
+        Spread   & $2.20$ & $2.20$ & $0.35$ & $2.20$ & $2.20$ & $2.20$ & $2.20$ \\ \hline
+    \end{tabular}
+    \caption{Kitchen membership log-odds written by hand and elicited from the VLM (E1).
+    Brier score of the elicited $\pi_{cf}$ on ScanNet: 0.173, against 0.488 (constant) and 0.250
+    (uniform); on ProcTHOR-10k: 0.163, against 0.453 and 0.250. Decisions changed on replay: 464 of 117{,}882
+    member-cycles, all toward a correct admission.}
+    \label{tab:exp_e1}
+\end{table}
+
+\subsection{E2: Function evidence offline}
+\label{sec:experiments:e2}
+
+Each ScanNet room is scored from its annotated objects, taken as certain detections, with every other class taken
+as searched and absent. Five sources of $\pi_{cf}$ are compared:
+\begin{itemize}
+    \item \emph{VLM, as elicited}: the five answer levels of E1 used as probabilities;
+    \item \emph{VLM, calibrated}: the map $g$ of Section~\ref{sec:lang_hierarchy:culture} fitted once on the 45{,}160
+          labelled rooms of ProcTHOR-10k (ScanNet is held out);
+    \item \emph{uniform} (0.5 everywhere), \emph{hand-written} (the authors' table of signature objects, extended
+          after the first run), and \emph{co-occurrence} counted on the other half of ScanNet.
+\end{itemize}
+Two baselines skip the evidence: the VLM asked for the function from one photograph of the room, and from the list
+of its annotated objects \cite{chen2022leveraging}. We report macro F1 of the functions with $\Lambda_f > 0$ and
+top-1 accuracy of the largest $\Lambda_f$, with paired bootstrap intervals over rooms. L1 holds on the corpus if the
+VLM source beats the uniform and hand-written sources. To see how the robot would get $g$, we also refit it from
+$n$ rooms drawn from one half of ScanNet, as if a person had confirmed them, and score the other half (20 draws per
+$n$, both halves in turn).
+
+The results are in Figures~\ref{fig:exp_e2}--\ref{fig:exp_e2_rooms}:
+\begin{itemize}
+    \item \textbf{L1 fails as stated.} As elicited, the VLM trails the hand-written table (macro F1 0.53 against
+          0.75, $[-0.27,-0.18]$). It overstates presence (E1), so an expected object that is missing sinks the right
+          function, and the corridor, which expects nothing, wins 252 of 457 rooms. Eq.~\eqref{eq:lh_beta_prior}
+          without counts does not help (0.55, top-1 0.50).
+    \item \textbf{The order is right; the scale is not.} Calibrated on ProcTHOR, the VLM ties the hand-written
+          table in F1 and beats it in top-1 (0.75 and 0.84; differences $-0.00$ $[-0.03,+0.03]$ and $+0.06$
+          $[+0.02,+0.09]$). The levels 0.05, 0.25, 0.5, 0.75, 0.95 become 0.03, 0.03, 0.38, 0.38, 0.68.
+    \item \textbf{Five confirmed rooms are enough to learn the scale} (Figure~\ref{fig:exp_e2_curve}). With $g$
+          fitted on five rooms the VLM reaches 0.75 and 0.84; Eq.~\eqref{eq:lh_beta_prior} per cell needs about 50
+          rooms, and counts without the VLM about 100. This is the VLM's contribution: the order of the classes,
+          which saves the robot tens of confirmed rooms.
+    \item \textbf{Asking the VLM directly is better on the corpus.} Given the object list, the VLM names the
+          function with macro F1 0.84 and top-1 0.92, ahead of the calibrated evidence ($+0.09$ $[+0.05,+0.14]$ and
+          $+0.09$ $[+0.05,+0.12]$) and of one photograph (0.69 and 0.70), which often shows only a wall or a
+          wardrobe. The corridor is weak for every source (F1 at most 0.41).
+\end{itemize}
+On the corpus, then, culture enters the evidence only as an order, and the evidence does not beat asking the VLM.
+What the corpus cannot show is what the direct question lacks: a list of uncertain detections from a partly searched
+room, absence weighed by where the robot looked, and no VLM call once the rooms are confirmed. The robot's recorded
+tours test this, where each $\Lambda_f$ should leave its prior log-odds only as the room is explored, and where the
+direct question must be asked from the robot's own detections (Figure~\result{--}).
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=\textwidth]{figures/e2_results.pdf}
+    \caption{Function evidence on ScanNet (E2, 457 rooms, held out). (a) Macro F1 and top-1 accuracy per source;
+    the object-list and one-image baselines ask the VLM directly. (b) F1 per function.}
+    \label{fig:exp_e2}
+\end{figure}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=\textwidth]{figures/e2_curve.pdf}
+    \caption{Learning the VLM's scale from person-confirmed rooms (E2). Mean over 20 draws and both halves of
+    ScanNet, with the 95\% range shaded; scored on the held-out half.}
+    \label{fig:exp_e2_curve}
+\end{figure}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=\textwidth]{figures/e2_rooms.pdf}
+    \caption{Six ScanNet rooms (E2). Title: the annotated function; photograph: the frame the image baseline saw;
+    italics: the annotated objects; below: the top function under each source. The last room is labelled a living
+    room but holds a kitchen run, so every source fails.}
+    \label{fig:exp_e2_rooms}
+\end{figure}
+
+\subsection{E3: The function agent, live and read-only}
+\label{sec:experiments:e3}
+
+The level-4 agent runs live and read-only, scored as in E2. In the three-room apartment the refrigerator is removed, which weakens the evidence through its kitchen aggregate, and L1 requires the kitchen
+hypothesis to weaken without disappearing ($\Lambda_{\text{kitchen}}$ \result{--} with it, \result{--} without, prior
+\result{--}); a collapse would mean too strong a prior, and the E1 priors would be revised. In the procedural
+apartments, a refrigerator placed alone in a bedroom belongs to no aggregate and counts under its class, and we
+predict that the bedroom hypothesis survives while the kitchen hypothesis for that room rises only as far as one
+diagnostic object supports. A bedroom whose bed is removed tests the expected-but-absent term on a class that belongs to no aggregate, and the
+bedroom evidence should fall as the room is explored, and only as far as the search was thorough. In a further
+condition the elicited priors of the kitchen and the bathroom are exchanged.
+For the misplaced refrigerator and the exchanged priors we report how many person-confirmed rooms the counts need to override the wrong prior, and whether posteriors
+with and without the VLM's pseudo-counts then agree on held-out rooms (\result{--}).
+
+\subsection{E4: Missions over beliefs}
+\label{sec:experiments:e4}
+
+The robot first finds objects (``find a mug'') with and without the level-3 and level-4 goals of
+Section~\ref{sec:lang_hierarchy:sequencing}, and L2 holds if search is shorter in time and distance with them and
+fewer objects remain unseen in rooms counted as explored (\result{--} versus \result{--}). Divergences are then seeded
+by closing a door the plan relies on, moving an object or leaving a room unexplored, while the demand signal drives
+nothing. For L3 we report the fraction caught before any step fails (\result{--}\%), the median lead time
+(\result{--}~s) and the false alarms, entries into focused mode per hour without a seeded divergence
+(\result{--}). L3 holds if at least 70\% are caught with fewer than one false alarm per hour.
+
+\subsection{E5: The inner voice}
+\label{sec:experiments:e5}
+
+With the voice enabled, known objects are moved and unfamiliar ones introduced. The machine is compared with \cortex{}
+alone and with \cortex{} plus a language-free look policy choosing views by expected information gain under the same
+motion and time budget, which separates asking from looking more. We report the unexplained residual mass per room
+(P1: \result{--}, \result{--} and \result{--}), the proposer's effective weight as confirmed answers accumulate (P2),
+inner questions per hour over repeated visits with the refractory period disabled (P4: \result{--} to \result{--}), and
+questions outside the built-in models answered in agreement with ground truth, against the fixed hypothesis set (P6:
+\result{--} versus \result{--}). For L7 the apartment gains a door left ajar that can be pushed open and a glass panel
+that looks like one but does not move, a false proposal (simulation only). We report trials to a decision, false choices against untried acceptance, and
+later use without the VLM (\result{--} trials, \result{--} versus \result{--}).
+
+\subsection{E6: Imagination}
+\label{sec:experiments:e6}
+
+While demand is low, the machine rehearses the next legs of its mission and completes expected scenes on an imagined
+copy of the world (Section~\ref{sec:lang_hierarchy:imagination}), and each imagined prediction is scored when the
+observation arrives (\result{--}). After a surprise seeded mid-mission we measure the latency to a validated plan and
+the views needed to confirm an expected object, with and without plans prepared at low demand (L4, P5: \result{--}~s
+versus \result{--}~s, \result{--} versus \result{--} views). For L5 the kitchen model is re-created without its tall
+tier, and L5 holds if the tier is proposed in at least 8 of 10 seeds (\result{--} replay episodes).
+
+\subsection{E7: The scaffold withdrawn}
+\label{sec:experiments:e7}
+
+The robot lives in the procedural apartments over repeated sessions with recurring and novel tasks. We report the
+VLM's effective weight, VLM calls for planning made outside wandering and questions put to the person per session, at matched success
+(L6: \result{--} to \result{--} per hour), and the rise of VLM use when doors usually open are shut, unfamiliar
+objects appear and goals are given in fewer words (P8). For P9, requests of equal size are assembled by the robot's
+uncertainty, by input matching (the most similar past request of the same goal type, by overlap of classes, rooms and steps)
+and at random as a sanity check, and P9 holds if the first gives higher answer accuracy and task
+success (\result{--} versus \result{--} and \result{--}), settled items are wrong in fewer than 5\% of cases
+(\result{--}), and a silently broken assumption puts its step back into the request before the step fails
+(\result{--}). Detectors retrained only on confirmed answers should lose false negatives (P3: \result{--} to
+\result{--}).
+
+For P7 the format-only and permuted-names controls of Section~\ref{sec:inner_speech:library} run on the same
+seeds, with images withheld and the person's words passed through the same substitution. P7 holds if both controls
+match the machine, also run without images, on recurring tasks, and the slope of their success gap on novelty,
+regressed over tasks with seeds as repeated measures, has a 95\% interval above zero for both (Figure~\result{--}).
+That permuted names do worse than nonsense tokens until the counts override them is a secondary prediction. A VLM writing beliefs directly should leave more wrong
+beliefs after a wrong proposal, counts and $\beta$ held fixed should leave the VLM's weight unchanged (a sanity check), and
+hand-written or uniform priors should label rooms more slowly on first visits. Finally, the dining set is moved or a door
+locked after a habit is compiled, and the habit's monitored assumptions should catch it before it fails in at least 8 of 10
+seeds (\result{--}).
+
+\paragraph{What would count against the machine.}
+\label{sec:experiments:against}
+
+The VLM supplies no usable culture if its E1 priors are no better calibrated than the constant prior, and culture
+does not belong at level 4 if E2 or E3 fails; if asking the VLM directly, from an image or from the
+list of detected objects, labels rooms as well as the function agent, the hierarchy adds nothing to labelling. On
+the corpus the object list already does better (E2), so this falsifier is decided live, in E3, on the robot's own
+detections. The demand signal fails if E4 misses, asking adds nothing to
+looking if the matched look policy does as well in E5, and imagination is not worth its cost if E6 shows no gain. If
+the controls keep up on novel tasks in E7, the machine works but is not Vygotskian, and if uncertainty-selected
+requests do no better than input-matched ones, uncertainty adds nothing to plan reuse.

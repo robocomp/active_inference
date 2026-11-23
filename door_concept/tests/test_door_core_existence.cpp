@@ -15,6 +15,8 @@
 //       src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
 //       ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc \
 //       -o /tmp/test_door_core_existence && /tmp/test_door_core_existence
+#include <array>
+#include <fstream>
 #include <clocale>
 #include <filesystem>
 #include <cmath>
@@ -24,15 +26,30 @@
 #include <unordered_map>
 #include <vector>
 #include <opencv2/imgproc.hpp>
+#include <unordered_set>
+#include <optional>
+#include <span>
+#include <set>
+#include <map>
+#include <functional>
+#include <memory>
+#define private public   // the order test reads other_p_on_wall and the last-cycle p maps directly
 #include "../src/core/door_core.h"
+#undef private
 #include "../src/core/door_existence.h"
 #include "../src/core/existence_update.h"
 #include "../src/door_opening_edges.h"
+#include "../src/door_leaf_channel.h"
+#include "../src/door_leaf_birth.h"
+#include "../src/core/bernoulli_filter.h"
 #include "../../common/contour_edge/contour_edge_check.h"
 
 using namespace rc::door::core;
 using K = rc::door::DoorDecisionKind;
 
+#ifndef AGENT_DIR
+#define AGENT_DIR "."
+#endif
 static int fails = 0;
 #define CHECK(c) do { if (not (c)) { ++fails; std::print("FAIL {}:{}: {}\n", __FILE__, __LINE__, #c); } } while (0)
 
@@ -117,12 +134,15 @@ static CameraIntrinsics ricoh_cam()
     CameraIntrinsics c; c.present = true; c.width = 3840; c.height = 1920; c.projection_model = 1; return c;
 }
 
-struct DoorDet { float x = 1.0f, y = kWallY, w = 1.0f, conf = 0.9f; };
+struct DoorDet { float x = 1.0f, y = kWallY, w = 1.0f, conf = 0.9f, trunc = 0.0f; };
+// A leaf seen side-on: a door-high mask whose plan view is the segment a -> b (Task 9, spec §3.6).
+struct LeafDet { Vec2f a, b; float conf = 0.9f; };
 
 // One cycle: the robot at `at` looking at `target`, these ZED door detections (an empty list = a frame with no door mask: a
 // small plant in the corner, so the packet is a real frame).
 static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, const Vec2f& target, const std::vector<DoorDet>& dets,
-                            double hz = 10.0, std::optional<Mat6d> cov = std::nullopt)
+                            double hz = 10.0, std::optional<Mat6d> cov = std::nullopt, const std::vector<LeafDet>& leaves = {},
+                            const std::optional<BpearlSweep>& sweep = std::nullopt)
 {
     DoorCycleInput in;
     in.cycle = cycle;
@@ -152,13 +172,45 @@ static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, con
         s.support_end = p.support_points.size();
         s.label = "door"; s.class_id = 1000.f; s.confidence = d.conf;
         s.centroid = {d.x, d.y, 1.05f}; s.bbox_min = {d.x - 0.5f * d.w, d.y - 0.01f, 0.0f}; s.bbox_max = {d.x + 0.5f * d.w, d.y + 0.01f, 2.1f};
-        s.trunc_frac = 0.0f; s.range = (Vec2f(d.x, d.y) - at).norm(); s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
+        s.trunc_frac = d.trunc; s.range = (Vec2f(d.x, d.y) - at).norm(); s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
         // the mask's pixels: the projected box (a pinhole, the cycle's pose)
         float c0 = 1e9f, c1 = -1e9f, r0 = 1e9f, r1 = -1e9f;
         for (const float xx : {d.x - 0.5f * d.w, d.x + 0.5f * d.w})
             for (const float zz : {0.0f, 2.1f})
             {
                 const Eigen::Vector4d P = zed_T_room * Eigen::Vector4d(xx, d.y, zz, 1.0);
+                if (P.y() <= 0.2) continue;
+                const Eigen::Vector2d uv = camera_project(in.camera, P.head<3>());
+                c0 = std::min(c0, float(uv.x())); c1 = std::max(c1, float(uv.x())); r0 = std::min(r0, float(uv.y())); r1 = std::max(r1, float(uv.y()));
+            }
+        s.pixel_begin = p.mask_pixels.size();
+        for (float r = std::max(0.f, r0); r < std::min(float(kH), r1); r += 3.0f)
+            for (float c = std::max(0.f, c0); c < std::min(float(kW), c1); c += 3.0f) p.mask_pixels.emplace_back(c, r);
+        s.pixel_end = p.mask_pixels.size();
+        p.slices.push_back(s);
+    }
+    for (const auto& lf : leaves)
+    {
+        MaskSlice s;
+        s.support_begin = p.support_points.size();
+        for (int i = 0; i <= 20; ++i)
+            for (int j = 0; j <= 21; ++j)
+            {
+                const Vec2f q = lf.a + (lf.b - lf.a) * (static_cast<float>(i) / 20.0f);
+                const float jitter = 0.004f * static_cast<float>(((i * 7 + j * 13) % 5) - 2);
+                p.support_points.emplace_back(q.x() + jitter, q.y(), 0.1f * static_cast<float>(j));
+            }
+        s.support_end = p.support_points.size();
+        const Vec2f mid = 0.5f * (lf.a + lf.b);
+        s.label = "door"; s.class_id = 1000.f; s.confidence = lf.conf;
+        s.centroid = {mid.x(), mid.y(), 1.05f};
+        s.bbox_min = {std::min(lf.a.x(), lf.b.x()), std::min(lf.a.y(), lf.b.y()), 0.0f}; s.bbox_max = {std::max(lf.a.x(), lf.b.x()), std::max(lf.a.y(), lf.b.y()), 2.1f};
+        s.trunc_frac = 0.0f; s.range = (mid - at).norm(); s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
+        float c0 = 1e9f, c1 = -1e9f, r0 = 1e9f, r1 = -1e9f;
+        for (const Vec2f& e : {lf.a, lf.b})
+            for (const float zz : {0.0f, 2.1f})
+            {
+                const Eigen::Vector4d P = zed_T_room * Eigen::Vector4d(e.x(), e.y(), zz, 1.0);
                 if (P.y() <= 0.2) continue;
                 const Eigen::Vector2d uv = camera_project(in.camera, P.head<3>());
                 c0 = std::min(c0, float(uv.x())); c1 = std::max(c1, float(uv.x())); r0 = std::min(r0, float(uv.y())); r1 = std::max(r1, float(uv.y()));
@@ -178,6 +230,7 @@ static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, con
         p.slices.push_back(s);
     }
     in.masks = std::move(p);
+    in.bpearl = sweep;
     return in;
 }
 
@@ -188,11 +241,11 @@ struct Rig
     DoorCore core;
     std::vector<rc::door::DoorDecision> removes, births;
     // These cases jump between standpoints from one cycle to the next: a teleport is not a turn, so turning is priced only where a case asks.
-    static DoorCoreConfig config(bool turns) { DoorCoreConfig c; if (not turns) c.door.ai2_ang_lever_m = 0.0f; return c; }
+    static DoorCoreConfig config(bool turns, bool one_model = false, bool one_currency = false) { DoorCoreConfig c; if (not turns) c.door.ai2_ang_lever_m = 0.0f; c.door.exist_one_model = one_model; c.door.exist_one_currency = one_currency; return c; }
     std::vector<std::string> csv, cost_rows;
     std::uint64_t cycle = 0;
     int frame = 0;
-    explicit Rig(bool turns = false) : cfg(config(turns)), core(cfg)
+    explicit Rig(bool turns = false, bool one_model = false, bool one_currency = false) : cfg(config(turns, one_model, one_currency)), core(cfg)
     {
         w.cfg = cfg.door;
         w.core = &core;
@@ -237,7 +290,8 @@ struct Bench
     DetectorTable det = default_detectors();
     Bench() { pkt.valid = true; }
     ExistenceTrace frame(PlaceBelief& b, const rc::DoorFitState& th, const Vec2f& at, const Vec2f& target, bool zed, bool ricoh,
-                         std::vector<FrameDetection> dets, int visit, std::optional<Mat6d> cov = std::nullopt)
+                         std::vector<FrameDetection> dets, int visit, std::optional<Mat6d> cov = std::nullopt,
+                         std::optional<LidarOpening> lidar = std::nullopt)
     {
         const Mat4d body = body_pose(at, target);
         const std::optional<Mat4d> room_T_zed = body * lift(1.2);
@@ -248,7 +302,7 @@ struct Bench
         if (ricoh) { fr.ricoh_ran = true; fr.ricoh_spec = camera_spec(ric); fr.room_T_ricoh = body * lift(1.0); }
         fr.rt_cov = cov;
         fr.dets = dets;
-        return observe_place(b, th, fr, visit, 0.0f, nullptr);
+        return observe_place(b, th, fr, visit, 0.0f, nullptr, -1, 0.0f, std::nullopt, lidar);
     }
 };
 static rc::DoorFitState shut_door(float width = 0.85f) { return typical_door_at({1.0f, kWallY}, width, rc::DoorConfig{}.door_prior_h_m, kRoom); }
@@ -269,6 +323,64 @@ int main()
                    r.door() ? r.door()->belief.L() : NAN);
         CHECK(r.births.size() == 1);
         CHECK(r.door() != nullptr and r.door()->belief.L() > 0.0f);
+    }
+    // ── one_model_base_rate (Task 3 fix round 1): the per-wall rate reads the OTHER doors' previous-cycle p, never a door's own former candidate
+    {
+        const float first = std::log(0.4f / 0.6f), another = std::log(0.01f / 0.99f);
+        Rig r(false, true);
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.births.size() == 1);
+        for (int k = 0; k < 3; ++k)
+        {
+            r.settle(A0);
+            CHECK(r.door() != nullptr);
+            if (r.door() == nullptr) break;
+            std::print("one_model alone, settle {}: base_rate {:.4f} (first {:.4f})\n", k, r.door()->belief.prior.base_rate, first);
+            CHECK(std::abs(r.door()->belief.prior.base_rate - first) < 1e-4f);
+        }
+        // a door and a pending candidate on one wall, each charged by the wall's JOINT count posterior (final review 1: nothing depends on which was born first, so a
+        // door that holds its place against a second place must carry the evidence for it: six hit views from six bearings; the second place has three).
+        // Each one's rate is strictly between the two seed rates.
+        Rig q(false, true);
+        for (int k = 0; k < 6; ++k) q.look(stand(4.0f, 15.0f * static_cast<float>(k) - 35.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        for (int k = 0; k < 3; ++k) q.look(stand(4.0f, 0.0f, 3.0f), {3.0f, kWallY + 0.01f}, {{3.0f, kWallY, 0.9f}});
+        std::print("one_model door + candidate: {} doors, {} candidates\n", q.w.st.size(), q.core.candidates().size());
+        CHECK(q.w.st.size() == 1 and q.core.candidates().size() == 1);
+        if (q.w.st.size() == 1 and q.core.candidates().size() == 1)
+        {
+            const auto& d = q.w.st.begin()->second;
+            const auto& c = q.core.candidates().front();
+            std::print("  door p={:.3f} base_rate {:.4f} | candidate p={:.3f} base_rate {:.4f}\n", d.belief.p(), d.belief.prior.base_rate, c.belief.p(), c.belief.prior.base_rate);
+            CHECK(d.belief.prior.base_rate < first and d.belief.prior.base_rate > another);
+            CHECK(c.belief.prior.base_rate < first and c.belief.prior.base_rate > another);
+        }
+    }
+    // ── wall_seeds_are_not_refused_by_each_other (final review 1): four wall seeds on one 4 m wall, 30 steps with no mask. The wall's count
+    //    posterior shares the wall's probability among them (diluted, not refuted): every seed stays an OPEN question, and no p oscillates
+    //    (the previous-cycle charge refused all four at L = -1.8..-2.2 and swung period-2 at k >= 3).
+    {
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        r.settle(A0);
+        const std::string room = r.core.room_name();
+        for (const float x : {-1.5f, -0.5f, 0.5f, 1.5f}) CHECK(r.core.hypothesise_place(room, Vec2f(x, kWallY), true));
+        std::vector<std::vector<float>> p(4);
+        for (int k = 0; k < 30; ++k)
+        {
+            r.settle(A0);
+            for (std::size_t i = 0; i < r.core.candidates().size() and i < 4; ++i) p[i].push_back(r.core.candidates()[i].belief.p());
+        }
+        CHECK(r.core.candidates().size() == 4);
+        float swing = 0.0f;
+        for (std::size_t i = 0; i < r.core.candidates().size(); ++i)
+        {
+            const auto& c = r.core.candidates()[i];
+            std::print("seed {}: p={:.3f} L={:+.2f} base_rate {:+.3f} base_open {:+.3f} open {}\n", i, c.belief.p(), c.belief.L(), c.belief.prior.base_rate, c.base_open, r.core.candidate_is_open(c));
+            CHECK(r.core.candidate_is_open(c));
+            for (std::size_t k = 6; k + 1 < p[i].size(); ++k) swing = std::max(swing, std::abs(p[i][k + 1] - p[i][k]));
+        }
+        std::print("four seeds, 30 steps: largest p change after step 6: {:.2e}\n", swing);
+        CHECK(swing < 1e-4f);
     }
     // ── the_blob_pays_its_measured_width (2026-11-09, clean19-21): the measurement is scored against the prior, not the measurement after
     //    that prior has pulled it (0.36 m pulled to 0.95 m paid -0.20 nats; five phantoms measuring 0.23-0.41 m were born on it)
@@ -507,6 +619,57 @@ int main()
             std::print("support_trace: row={}", row);
             }
         }
+    }
+    {   // truncated_view_pays_no_size_cost (one-model, through the core): a 40 % clipped mask of a live door is a TRIAL (its L gains existence
+        // evidence) but never moves the fit, so the size term is bit-equal to before; the fit's own truncation gate holds by construction.
+        Rig r(false, true);
+        for (int k = 0; k < 6; ++k) r.look(A0, kDoor, {{1.0f, kWallY, 0.80f}});
+        CHECK(r.door() != nullptr);
+        if (r.door() != nullptr)
+        {
+            const float size0 = r.door()->belief.prior.size, E0 = r.door()->belief.ledger.sum();
+            const std::size_t v0 = r.door()->belief.ledger.views().size();
+            const float w0 = r.door()->aperture.w;
+            r.look(stand(4.0f, 35.0f), kDoor, {{1.0f, kWallY, 0.80f, 0.9f, 0.4f}});   // a NEW standpoint: a new view, so the frame is a fresh trial
+            std::print("truncated_view: size {} -> {}, ledger {:+.4f} -> {:+.4f}, views {} -> {}\n", size0, r.door()->belief.prior.size, E0,
+                       r.door()->belief.ledger.sum(), v0, r.door()->belief.ledger.views().size());
+            CHECK(r.door()->aperture.w == w0);                                            // the fit never moved (its own gate)
+            CHECK(std::fabs(r.door()->belief.prior.size - size0) < 1e-3f);                // the size term only feels the one-step process noise of predict()
+            CHECK(r.door()->belief.ledger.views().size() == v0 + 1 and r.door()->belief.ledger.sum() > E0);   // a trial: it adds existence evidence
+        }
+        // admissibility: only the truncation cliff is gone under the flag; a moving frame with an off-centre mask is still not a trial
+        rc::DoorConfig on; on.exist_one_model = true; on.ai2_motion_confirm_only = true;
+        rc::DoorConfig off; off.ai2_motion_confirm_only = true;
+        MaskSlice still; still.trunc_frac = 0.4f; still.centroid_radius = 0.1f;
+        MaskSlice moving = still; moving.trunc_frac = 0.0f; moving.centroid_radius = 10.0f; moving.motion_dotd = 1e3f;
+        EgoMotion rest;
+        CHECK(DoorCore::frame_admissible(still, rest, on) and not DoorCore::frame_admissible(still, rest, off));
+        CHECK(not DoorCore::frame_admissible(moving, rest, on) and not DoorCore::frame_admissible(moving, rest, off));
+        // the support row is weighted by 1 - trunc: a clipped view's one row says 60 % of an unclipped one
+        const rc::DoorFitState th = shut_door(0.80f);
+        const auto sup = [&](float trunc)
+        {
+            Bench b; b.cfg.exist_one_model = true; PlaceBelief pb;
+            const Mat4d body = body_pose(A0, kDoor);
+            const std::optional<Mat4d> rtz = body * lift(1.2);
+            const CameraIntrinsics cam = zed_cam();
+            const ExistenceScene scene{b.cfg, rtz, cam, b.pkt, kRoom, rc::door::RoomBand{b.cfg.exist_wall_thickness_m, b.cfg.exist_boundary_sigma_m}, b.doors};
+            ExistenceFrame fr{scene, b.cfg, b.det};
+            observe_place(pb, th, fr, 0, 0.0f, nullptr, -1, 0.0f, FitSupport{0.999999f, 0, 1.0f, 1.0f, trunc});
+            return pb.ledger.sum();
+        };
+        const float s0 = sup(0.0f), s4 = sup(0.4f);
+        CHECK(s0 != 0.0f and std::fabs(s4 / s0 - 0.6f) < 1e-3f);
+    }
+    {   // occluded_door_holds: a door that cannot be seen (the camera looks away: q = 0, p_D = 0) for 300 frames — its L is exactly what it was
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        for (int i = 0; i < 4; ++i) b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+        const float L0 = pb.L(), sum0 = pb.ledger.sum();
+        for (int i = 0; i < 300; ++i) b.frame(pb, th, A0, {A0.x(), A0.y() - 5.0f}, true, true, {}, 0);
+        std::print("occluded_door_holds: L {:+.6f} -> {:+.6f}\n", L0, pb.L());
+        CHECK(std::fabs(pb.L() - L0) < 1e-6f and std::fabs(pb.ledger.sum() - sum0) < 1e-6f);
     }
     {   // a candidate has no fit: observe_place without support adds no term (the brief: never a default)
         Bench b;
@@ -1180,6 +1343,683 @@ int main()
         CHECK(std::abs(mid.extent) < 1e-4f);
         CHECK(front.extent == 0.0f);
         CHECK(std::abs(over.total() - (over.band + over.base_rate + over.size + over.extent)) < 1e-5f);
+    }
+
+    // ═══ ONE MODEL, Task 7: every mask is shared among aperture, leaf, new door and clutter ═══════════════════════════════════════
+    // ── open_leaf_confirms_restored_door (chat_e2e18): a restored OPEN door whose leaf stands 90° side-on, the swing belief on the WRONG
+    //    side (0.9). The fit's support x must come from all four hinge × swing hypotheses: the single-swing marginal called the mask all
+    //    clutter (x = 1.00) and the sup channel removed the door; the four-branch x is ~0 and the same 30 views confirm it.
+    {
+        const auto sup_sum = [&](bool four_branch)
+        {
+            Rig r(false, true);
+            r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+            r.settle(A0);
+            if (r.door() == nullptr) return std::pair{-99.0f, -99.0f};
+            const rc::door::Aperture ap = r.door()->aperture;
+            rc::DoorBeliefParams bp;
+            bp.thickness = 0.05f; bp.floor_z = 0.0f; bp.wall_u = ap.wall_u; bp.wall_O = ap.wall_O;
+            bp.leaf = {1.5708f, rc::door::HingeSide::Near, +1.0f};
+            rc::DoorBelief b({ap.s, ap.w, ap.h}, bp);
+            rc::door::LeafChannel ch;
+            const auto lp = rc::door::gaussian_log_prior(0.0f, 2.0944f, 25, 1.5708f, 0.02f);
+            for (auto& f : ch.phi) f.reset(lp);
+            ch.hinge.prior = 11.0;               // hinge Near, sure
+            ch.swing.prior = std::log(0.9 / 0.1);   // swing +1 believed at 0.9: the leaf really swings the other way
+            std::vector<Eigen::Vector3f> pts;
+            const auto pose = rc::door::leaf_pose(ap, {1.5708f, rc::door::HingeSide::Near, -1.0f});
+            for (int i = 0; i <= 12; ++i)
+                for (int j = 0; j <= 12; ++j)
+                    pts.push_back(rc::door::leaf_point(pose, pose.half_w * (-1.0f + 2.0f * float(i) / 12.0f), 0.0f, pose.centre_z + pose.half_h * (-0.9f + 1.8f * float(j) / 12.0f)));
+            const float R = 0.03f * 0.03f;
+            std::vector<std::pair<float, float>> curve;
+            for (int k = 0; k < 25; ++k) curve.push_back({2.0944f * float(k) / 24.0f, k == 18 ? 1.0f : 1e-6f});
+            const float x = four_branch ? b.clutter_fraction_leaf_marginal(pts, R, ch) : b.clutter_fraction_leaf_marginal(pts, R, curve);
+            float sum = 0.0f;
+            for (int v = 0; v < 30 and r.door(); ++v)
+            {
+                r.door()->pending_fit_support = FitSupport{x, 0, 0.09f};
+                r.look(stand(4.0f, -60.0f + 15.0f * static_cast<float>(v % 9)), kDoor, {{1.0f, kWallY, 0.9f}});
+                if (r.door() and std::isfinite(r.door()->exist_trace.sup_dl)) sum += r.door()->exist_trace.sup_dl;
+            }
+            std::print("open_leaf_confirms_restored_door: {} branches x={:.3f} -> sup dl over 30 frames {:+.2f}, door {}\n", four_branch ? "four" : "one", x, sum, r.door() ? "alive" : "removed");
+            return std::pair{x, sum};
+        };
+        const auto [x_one, s_one] = sup_sum(false);
+        const auto [x_four, s_four] = sup_sum(true);
+        CHECK(x_one > 0.5f and s_one < -1.0f);   // today's single-swing marginal refutes the open door (the 30 frames' sup term sums to -2.4)
+        CHECK(x_four < 0.1f and s_four > s_one + 1.0f);   // the four-branch one does not: its support term is a confirmation at coverage 0.09, ~0 net
+    }
+    // ── being_crossed_never_removed (Review Focus 5): all masks to clutter, the door being crossed: evidence accumulates, never a REMOVE
+    {
+        Rig r(false, true);
+        r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.door() != nullptr);
+        r.settle(stand(6.0f, -75.0f));
+        for (int v = 0; v < 30 and r.door(); ++v)
+            for (int k = 0; k < 5; ++k)
+            {
+                // masks that are clutter (a door-class mask far from every wall), the cross running
+                auto in = input(++r.cycle, ++r.frame, stand(v % 2 ? 4.0f : 2.5f, -60.0f + 15.0f * static_cast<float>(v % 9)), kDoor, {{-3.0f, 0.0f, 0.9f}});
+                in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
+                in.executing.push_back({.from = 8, .to = 555});
+                r.step(std::move(in));
+            }
+        std::print("one_model being_crossed_never_removed: door {} role {} {} REMOVE\n", r.door() ? "alive" : "gone", r.door() ? static_cast<int>(r.door()->role) : -1, r.removes.size());
+        CHECK(r.door() != nullptr and r.removes.empty());
+        CHECK(r.door() and r.door()->role == Role::BeingCrossed);
+    }
+    // ── parked_phantom_never_born: 600 frames at ONE standpoint, door-class masks at the FITTED false-alarm rate (etc/door_detectors_fitted.csv, zed
+    //    hit .938 FA .194: a detection on 19.4 % of the frames) at one place. Neither the mid-room place nor the wall place may ever birth a door:
+    //    a view's hit fraction is a Beta(1,1) posterior mean (one frame cannot decide it) and a mask's MAP cause at a wall is not a certain door.
+    {
+        const DetectorTable fitted = load_detectors(std::string(AGENT_DIR) + "/etc/door_detectors_fitted.csv");
+        const auto parked = [&](float y, int frames)
+        {
+            Rig r(false, true);
+            r.core.set_detectors(fitted);
+            r.core.set_costs(CostEstimator::logged_default());   // the agent's own line (-1.08), not the Rig's equal costs (line 0, where L = 0.00 jitter flickers)
+            const Vec2f at{1.0f, y - 4.0f};
+            for (int f = 0; f < frames; ++f)
+            {
+                const bool hit = (f * 194) / 1000 != ((f + 1) * 194) / 1000;   // a detection on 19.4 % of the frames, regularly spread
+                r.look(at, {1.0f, y}, hit ? std::vector<DoorDet>{{1.0f, y, 0.9f}} : std::vector<DoorDet>{});
+            }
+            std::print("parked_phantom (y={:.2f}, {} frames): {} births, {} removes\n", y, frames, r.births.size(), r.removes.size());
+            return r.births.size();
+        };
+        CHECK(parked(0.0f, 600) == 0);
+        // wall place: ONE early birth, refuted (or not) by the following frames, is the model's honest answer; the failure was the flicker
+        CHECK(parked(kWallY, 600) <= 1);
+    }
+    {   // a real, centred door is still born (fitted table): the frames it needs at 90 % reporting
+        Rig r(false, true);
+        r.core.set_detectors(load_detectors(std::string(AGENT_DIR) + "/etc/door_detectors_fitted.csv"));
+        int f = 0;
+        for (; f < 200 and r.births.empty(); ++f) r.look(stand(2.5f, 0.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        std::print("real_door_fitted_table: born after {} frame(s)\n", f);
+        CHECK(not r.births.empty());
+    }
+    // ── good_views_fewer_frames: the detector reports a near, centred door on most frames and a far, oblique one on few, so the near one is born
+    //    after fewer frames (the rate of reports is the view's q; nothing else differs)
+    {
+        const auto frames_to_birth = [&](const Vec2f& at, float deg_unused, double q)
+        {
+            (void) deg_unused;
+            Rig r(false, true);
+            int f = 0;
+            for (; f < 400 and r.births.empty(); ++f)
+            {
+                const bool hit = std::floor(double(f + 1) * q) > std::floor(double(f) * q);
+                r.look(at, kDoor, hit ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f}} : std::vector<DoorDet>{});
+            }
+            return r.births.empty() ? 400 : f;
+        };
+        const int near_f = frames_to_birth(stand(2.5f, 0.0f), 0.0f, 0.9), far_f = frames_to_birth(stand(7.0f, 70.0f), 70.0f, 0.15);
+        std::print("good_views_fewer_frames: near centred {} frames, far oblique {} frames\n", near_f, far_f);
+        CHECK(near_f < far_f);
+    }
+
+    // ── Task 8 (S3): two labels at one hole compete; there is no separation distance and no merge ───────────────────────────────────────────
+    //    mirror_of_crossed_door_falls: a crossed door (certain) and masks 0.17 m beside it (dm12's entry mirror): a second door is never
+    //    born there, or it falls below the delete line within 60 frames; the crossed door stays throughout.
+    {
+        // The mirror place (1.17 m) is looked at first, alone: a label is born there with evidence. Then the crossed door's place (1.0 m,
+        // 0.17 m away) is fed the same masks with the crossing running: the two labels compete for them, and one hole stays ONE door at the
+        // end (the first label explains the second's masks, or the second falls below its delete line within 60 frames).
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        for (int v = 0; v < 6; ++v) r.look(stand(4.0f, 0.0f, 1.17f), {1.17f, kWallY + 0.01f}, {{1.17f, kWallY, 0.9f}});
+        const std::size_t before = r.w.st.size() + r.core.candidates().size();
+        std::size_t max_near = 0;
+        for (int v = 0; v < 130; ++v)
+        {
+            auto in = input(++r.cycle, ++r.frame, stand(v % 2 ? 4.0f : 2.5f, -45.0f + 15.0f * static_cast<float>(v % 7), 1.1f), kDoor,
+                            {{1.0f, kWallY, 0.9f}, {1.17f, kWallY, 0.9f}});
+            in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
+            in.executing.push_back({.from = 8, .to = 555});
+            r.step(std::move(in));
+            if (v % 5 == 0) r.core.hypothesise_place("room_7", {1.0f, kWallY}, true);   // the second label keeps being proposed at the crossed door's place
+            std::size_t near = 0;
+            for (const auto& [id, st] : r.w.st) if (st.aperture.centre_xy().x() > 0.7f and st.aperture.centre_xy().x() < 1.5f) ++near;
+            if (v >= 60 + 6) max_near = std::max(max_near, near);   // 60 frames to fall
+        }
+        std::print("mirror_of_crossed_door_falls: seeded before {}, births {}, removes {}, doors at the hole after 60 frames: at most {}\n", before, r.births.size(), r.removes.size(), max_near);
+        CHECK(before > 0 and max_near == 1);
+    }
+    {   // the plan's scenario: the CROSSED door first, then a mirror candidate 0.17 m from it fed the same masks
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        r.look(stand(4.0f, 0.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        const std::uint64_t crossed = r.w.st.empty() ? 0 : r.w.st.begin()->first;
+        CHECK(crossed != 0);
+        bool crossed_always = true, mirror_late = false;
+        for (int v = 0; v < 130 and crossed != 0; ++v)
+        {
+            auto in = input(++r.cycle, ++r.frame, stand(v % 2 ? 4.0f : 2.5f, -45.0f + 15.0f * static_cast<float>(v % 7), 1.1f), kDoor,
+                            {{1.0f, kWallY, 0.9f}, {1.17f, kWallY, 0.9f}});
+            in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
+            in.executing.push_back({.from = 8, .to = 555});
+            r.step(std::move(in));
+            if (v % 5 == 0) r.core.hypothesise_place("room_7", {1.17f, kWallY}, true);   // the mirror label, re-proposed
+            crossed_always = crossed_always and r.w.st.contains(crossed);
+            if (v >= 60)
+                for (const auto& [id, st] : r.w.st)
+                    if (id != crossed and std::abs(st.aperture.centre_xy().x() - 1.17f) < 0.3f and st.belief.L() >= 0.0f) mirror_late = true;
+        }
+        std::print("mirror_of_crossed_door_first: crossed door {} throughout, {} births, mirror a live door after 60 frames: {}\n",
+                   crossed_always ? "stays" : "LOST", r.births.size(), mirror_late ? "YES" : "no");
+        CHECK(crossed_always);
+        CHECK(not mirror_late);
+        CHECK(crossed != 0 and r.w.st.contains(crossed) and r.w.st.at(crossed).role == Role::BeingCrossed);   // the crossed door held the BeingCrossed role (no delete line) throughout
+    }
+    //    one_hole_two_labels: a live door and a pending candidate 0.25 m apart are ONE hole under two labels, not two doors: the "another
+    //    door on this wall" cost is charged by how DISTINCT the other place is: a door 0.25 m away costs about half the second-door cost
+    //    (-2.26 against -4.60 at sd 0.1 and 0.2 m), one 1.0 m away nearly all of it (-4.39). (tape_dm: door_4 and place_98, 0.25 m apart, each charged the other as a second door, both fell.)
+    {
+        const WallRates rates{};
+        const float first = wall_base_rate(rates, {}), another = wall_base_rate(rates, std::array<float, 1>{1.0f});
+        const float v = 0.1f * 0.1f + 0.2f * 0.2f;   // a fitted door's and a candidate's position variances
+        const float near_cost = wall_base_rate(rates, std::array<float, 1>{0.95f * place_distinctness(0.25 * 0.25, v)});
+        const float far_cost = wall_base_rate(rates, std::array<float, 1>{0.95f * place_distinctness(1.0 * 1.0, v)});
+        std::print("one_hole_two_labels: first {:.3f} another {:.3f}; a certain-ish door 0.25 m away -> {:.3f}, 1.0 m away -> {:.3f}\n", first, another, near_cost, far_cost);
+        CHECK(near_cost > first - 0.5f * (first - another));   // nearer the first-door rate than the second-door one
+        CHECK(far_cost < first - 0.9f * (first - another) * 0.95f);
+        CHECK(place_distinctness(0.0, v) == 0.0f and place_distinctness(100.0, v) > 0.999f);
+    }
+    //    one_hole_order: a door and a pending place at ONE hole (0.25 m apart) charge each other the same whichever was created first:
+    //    other_p_on_wall read from each side, both creation orders (the live door explains and erases the candidate on the next step,
+    //    so the pair is read right after the cycle in which both exist)
+    {
+        const auto charges = [&](bool door_first)
+        {
+            Rig r(false, true);
+            r.core.set_costs(CostEstimator::logged_default());
+            const Vec2f at = stand(4.0f, 0.0f);
+            if (door_first) r.look(at, kDoor, {{1.0f, kWallY, 0.9f}}); else r.look(at, kDoor);
+            const bool ok = r.core.hypothesise_place("room_7", {1.25f, kWallY}, true);
+            if (not door_first) r.look(at, kDoor, {{1.0f, kWallY, 0.9f}});
+            CHECK(ok and r.w.st.size() == 1);
+            const std::vector<Vec2f> poly(kRoom.begin(), kRoom.end());
+            const std::vector<int> groups(poly.size(), 0);
+            if (r.w.st.empty()) return std::pair{-1.0f, -1.0f};
+            if (r.core.candidates().empty()) r.core.hypothesise_place("room_7", {1.25f, kWallY}, true);
+            const auto& c = r.core.candidates().front();
+            r.core.last_p_door_[r.w.st.begin()->first] = 0.9f;
+            r.core.last_p_cand_[c.key] = 0.6f;
+            const Vec2f dc = r.w.st.begin()->second.aperture.centre_xy();
+            const auto on_door = r.core.other_p_on_wall(2, poly, std::vector<int>{0, 1, 2, 3}, r.w.st.begin()->first, ~std::uint64_t{0}, dc, 0.05f);
+            const auto on_cand = r.core.other_p_on_wall(2, poly, std::vector<int>{0, 1, 2, 3}, ~std::uint64_t{0}, c.key, c.xy, c.var);
+            const float cd = on_door.empty() ? NAN : on_door.front(), cc = on_cand.empty() ? NAN : on_cand.front();
+            std::print("one_hole_order: door_first {}: charge on the door {:.4f}, on the candidate {:.4f}\n", door_first, cd, cc);
+            return std::pair{cd, cc};
+        };
+        const auto [d1, c1] = charges(true);
+        const auto [d2, c2] = charges(false);
+        CHECK(std::isfinite(d1) and std::isfinite(c1) and std::abs(d1 - d2) < 1e-6f and std::abs(c1 - c2) < 1e-6f);
+    }
+    //    S10 live_door_explains: a remembered place at a live door's hole is explained (its note is adopted into that door); one 1.5 m away is not
+    {
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        const Vec2f at = stand(4.0f, 0.0f);
+        for (int v = 0; v < 6; ++v) r.look(at, kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.w.st.size() == 1);
+        if (not r.w.st.empty())
+        {
+            const Vec2f dc = r.w.st.begin()->second.aperture.centre_xy();
+            // the CALLER's room: its outline and the ids of its doors (the core's own outline is not consulted: at restore time it may be empty or the room left)
+            const rc::door::RoomBand band{0.2f, 0.1f};
+            const std::vector<std::uint64_t> mine{r.w.st.begin()->first};
+            const bool near = r.core.live_door_explains(kRoom, band, false, mine, dc + Vec2f(0.3f, 0.0f), 0.04f);
+            const bool far = r.core.live_door_explains(kRoom, band, false, mine, dc + Vec2f(1.5f, 0.0f), 0.04f);
+            // a live door of ANOTHER room at the same coordinates is ignored (it is not in the restore room's door list)
+            const bool other_room = r.core.live_door_explains(kRoom, band, false, std::vector<std::uint64_t>{12345}, dc + Vec2f(0.3f, 0.0f), 0.04f);
+            std::print("live_door_explains: 0.3 m {}, 1.5 m {}, other room's door at 0.3 m {}\n", near, far, other_room);
+            CHECK(not other_room);
+            CHECK(near and not far);
+        }
+    }
+    //    two_real_doors_close_both_live: two true doors 1.0 m apart on one wall, each with its own masks: both are born and both stay.
+    {
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        for (int v = 0; v < 90; ++v)
+            r.look(stand(v % 2 ? 4.0f : 3.0f, -20.0f + 10.0f * static_cast<float>(v % 5), 1.5f), {1.5f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}, {2.0f, kWallY, 0.85f}});
+        std::print("two_real_doors_close_both_live: {} doors, {} births, {} removes, {} candidates\n", r.w.st.size(), r.births.size(), r.removes.size(), r.core.candidates().size());
+        for (const auto& d : r.births) std::print("  BIRTH cycle {} {} ({:.2f},{:.2f})\n", d.cycle, d.name, d.a, d.b);
+        for (const auto& d : r.removes) std::print("  REMOVE cycle {} {} {}\n", d.cycle, d.name, d.note);
+        CHECK(r.w.st.size() == 2);
+        //    the wall's count posterior is computed jointly in the cycle: no start-up fall and re-birth (the previous-cycle charge made both fall and be re-born)
+        CHECK(r.removes.empty());
+        CHECK(r.births.size() == 2);
+        //    removing_one_frees_other: with one gone the other's rate returns to the first-door value within one cycle
+        if (r.w.st.size() == 2)
+        {
+            const float first = std::log(0.4f / 0.6f);
+            const std::uint64_t keep = std::next(r.w.st.begin())->first, drop = r.w.st.begin()->first;
+            const float paid = r.w.st.at(keep).belief.prior.base_rate;
+            r.w.st.erase(drop);
+            const float kept_x = r.w.st.at(keep).aperture.centre_xy().x();   // (the unordered map decides which of the two stays: look at ITS mask)
+            r.look(stand(4.0f, 0.0f, kept_x), {kept_x, kWallY + 0.01f}, {{kept_x, kWallY, 0.85f}});
+            std::print("removing_one_frees_other: base_rate {:.3f} -> {:.3f} (first {:.3f}); {} candidate(s):", paid, r.w.st.at(keep).belief.prior.base_rate, first, r.core.candidates().size());
+            for (const auto& c : r.core.candidates()) std::print(" place_{} ({:.2f},{:.2f}) L={:+.2f} base {:+.2f} wall_seed {}", c.key, c.xy.x(), c.xy.y(), c.belief.L(), c.belief.prior.base_rate, c.wall_seed);
+            std::print("\n");
+            CHECK(paid < first - 1.0f);
+            CHECK(std::abs(r.w.st.at(keep).belief.prior.base_rate - first) < 1e-4f);
+        }
+    }
+
+    //    second_real_door_one_metre_on_is_born_one_currency (final review 9, item 9 R_eff): with Existence.OneCurrency a door has been seen alone (its along-wall belief
+    //    still broad, sd ~ 0.6 m) when a second REAL door appears 1.0 m along the same wall: the new door's cause is the marginal over its own across-wall position, so
+    //    it is not drowned by the young door's cause and is born; both stay and nobody is re-born.
+    {
+        Rig r(false, true, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        for (int v = 0; v < 30; ++v)
+            r.look(stand(v % 2 ? 4.0f : 3.0f, -20.0f + 10.0f * static_cast<float>(v % 5), 1.0f), {1.0f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}});
+        const std::size_t alone = r.births.size();
+        for (int v = 0; v < 90; ++v)
+            r.look(stand(v % 2 ? 4.0f : 3.0f, -20.0f + 10.0f * static_cast<float>(v % 5), 1.5f), {1.5f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}, {2.0f, kWallY, 0.85f}});
+        std::print("second_real_door_one_metre_on_one_currency: {} doors, {} births ({} before the second), {} removes\n", r.w.st.size(), r.births.size(), alone, r.removes.size());
+        for (const auto& d : r.births) std::print("  BIRTH cycle {} {} ({:.2f},{:.2f})\n", d.cycle, d.name, d.a, d.b);
+        for (const auto& d : r.removes) std::print("  REMOVE cycle {} {} {}\n", d.cycle, d.name, d.note);
+        CHECK(alone == 1);
+        CHECK(r.w.st.size() == 2);
+        CHECK(r.births.size() == 2);
+        CHECK(r.removes.empty());
+    }
+    {   // Task 8b A: a door whose leaf is open is not reported by the detector like a shut one (hit_rate_open): the ZED reporting nothing for
+        // 40 frames while the leaf is open (P(open) = 1) leaves L within 0.5 of where the shut-leaf look left it; the old pooled rate dropped it
+        const auto run = [&](float h_open_zed)
+        {
+            Bench b; b.cfg.exist_one_model = true; b.det.zed.hit_rate_open = h_open_zed;
+            const rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            b.cfg.ricoh_birth_p_open = 0.0f;
+            for (int i = 0; i < 4; ++i) b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+            const float L0 = pb.L();
+            b.cfg.ricoh_birth_p_open = 1.0f;   // the leaf opens (the place has no leaf belief: its prior)
+            for (int i = 0; i < 40; ++i) b.frame(pb, th, A0, kDoor, true, false, {}, i + 1);   // (a visit each: the ledger keeps visits apart, so the misses are not averaged into the hit view)
+            return std::pair{L0, pb.L()};
+        };
+        const auto [L0o, L1o] = run(0.05f);
+        const auto [L0s, L1s] = run(-1.0f);   // not fitted: = hit_rate, the old model
+        std::print("open_leaf_misses: with hit_rate_open L {:+.3f} -> {:+.3f}; without {:+.3f} -> {:+.3f}\n", L0o, L1o, L0s, L1s);
+        CHECK(std::fabs(L1o - L0o) < 0.5f);
+        CHECK(L1s < L0s - 0.5f);
+        // an older table (no hit_rate_open row) loads with hit_rate_open = hit_rate: the same numbers as before the row existed
+        const DetectorModel m = default_detectors().zed;
+        CHECK(with_leaf_state(m, 0.7f).hit_rate == m.hit_rate);
+    }
+    {   // Task 8b C(i): a mask the hit channel calls noise (YOLO score 0.35, P(genuine) ~ 0.01) cannot bear a place on support alone
+        const rc::DoorFitState th = shut_door(0.80f);
+        const auto sup = [&](float conf)
+        {
+            Bench b; b.cfg.exist_one_model = true; PlaceBelief pb;
+            const Mat4d body = body_pose(A0, kDoor);
+            const std::optional<Mat4d> rtz = body * lift(1.2);
+            const CameraIntrinsics cam = zed_cam();
+            const ExistenceScene scene{b.cfg, rtz, cam, b.pkt, kRoom, rc::door::RoomBand{b.cfg.exist_wall_thickness_m, b.cfg.exist_boundary_sigma_m}, b.doors};
+            ExistenceFrame fr{scene, b.cfg, b.det};
+            observe_place(pb, th, fr, 0, 0.0f, nullptr, -1, 0.0f, FitSupport{0.05f, 0, 1.0f, 1.0f, 0.0f, conf});
+            return pb.ledger.sum();
+        };
+        const float lo = sup(0.35f), hi = sup(0.80f);
+        std::print("support_by_genuineness: conf 0.35 -> {:+.4f}, conf 0.80 -> {:+.4f}\n", lo, hi);
+        CHECK(hi > 0.3f and lo < 0.1f * hi);
+    }
+    {   // Task 8b: one frame of a view that can hardly report (q = 0.08) and did not is no evidence for the door (the Beta pseudo-hits scale with q)
+        ViewLedger L; L.beta_hit_fraction = true; L.ricoh_counts_misses = true;
+        const DetectorModel m = default_detectors().zed;
+        const std::size_t v = L.observe({0.f, 0.f}, {2.f, 1.f}, {0.f, 1.f}, 1.0f, 0.0f, 0);
+        L.add_bernoulli(v, Channel::Zed, 0.08f, m, 0.002f);
+        L.recompute(v, false);
+        std::print("beta_prior_scales_with_q: one q=0.08 frame -> {:+.4f}\n", L.sum());
+        CHECK(L.sum() < 0.0f and std::fabs(L.sum() + 0.0369f) < 0.003f);   // the n/(n+1) = 1/2 factor on the one frame's miss term
+    }
+
+    {   // Task 8b fix round 1: the leaf's uncovered share (DoorBelief::leaf_p_open) and its wiring into p_D
+        const auto channel_at = [](std::size_t k)   // all four branches certain of the grid step k (25 steps over 0..phi_max)
+        {
+            rc::door::LeafChannel ch;
+            for (auto& ph : ch.phi) { std::vector<double> lp(25, -1e9); lp[k] = 0.0; ph.reset(lp); }
+            return ch;
+        };
+        const rc::DoorBelief bel;
+        const float phi_max = rc::DoorConfig{}.phi_max_rad;
+        const double shut = bel.leaf_p_open(channel_at(0), phi_max), tenth = bel.leaf_p_open(channel_at(2), phi_max),
+                     wide = bel.leaf_p_open(channel_at(24), phi_max);
+        const double want10 = 1.0 - std::cos(double(phi_max) * 2.0 / 24.0);
+        std::print("leaf_p_open: shut {:.4f}, grid step 2 {:.4f} (1-cos {:.4f}), phi_max {:.4f}\n", shut, tenth, want10, wide);
+        CHECK(shut < 1e-6 and std::fabs(tenth - want10) < 1e-3 and std::fabs(wide - 1.0) < 1e-3);
+        CHECK(std::isnan(bel.leaf_p_open(rc::door::LeafChannel{}, phi_max)));   // no phi filter yet: NaN, the caller takes its prior
+        // wiring: with an initialised leaf belief the place's p_D follows it (NOT the no-belief fallback, which is 0 here)
+        const auto run = [&](std::size_t k)
+        {
+            Bench b; b.cfg.exist_one_model = true; b.cfg.ricoh_birth_p_open = 0.0f; b.det.zed.hit_rate_open = 0.05f;
+            rc::DoorFitState th = shut_door();
+            th.leaf_channel = channel_at(k);
+            PlaceBelief pb;
+            for (int i = 0; i < 4; ++i) b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+            const float L0 = pb.L();
+            for (int i = 0; i < 40; ++i) b.frame(pb, th, A0, kDoor, true, false, {}, i + 1);
+            return pb.L() - L0;
+        };
+        const float d_shut = run(0), d_open = run(24);
+        std::print("leaf_belief_lowers_miss_cost: dL over 40 misses: shut-leaf belief {:+.3f}, open-leaf belief {:+.3f}\n", d_shut, d_open);
+        CHECK(d_open > d_shut + 1.0f);
+        // a hit_rate_open of 1e-6 with P(open) = 1: finite ledger after a hit and a miss; a zero or one in the file is out of domain (= hit_rate)
+        Bench b; b.cfg.exist_one_model = true; b.cfg.ricoh_birth_p_open = 1.0f; b.det.zed.hit_rate_open = 1e-6f;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+        b.frame(pb, th, A0, kDoor, true, false, {}, 1);
+        CHECK(std::isfinite(pb.ledger.sum()) and std::isfinite(pb.L()));
+        const auto tmp = std::filesystem::temp_directory_path() / "t8b_detectors.csv";
+        { std::ofstream f(tmp); f << "camera,param,value,n,source\nzed,hit_rate_open,0,5,x\nricoh,hit_rate_open,0.001,5,x\n"; }
+        const DetectorTable t = load_detectors(tmp);
+        CHECK(t.zed.hit_rate_open < 0.0f and t.ricoh.hit_rate_open == 0.001f);   // 0 refused (= hit_rate); 0.001 < false_alarm accepted
+        std::filesystem::remove(tmp);
+    }
+
+
+    // ═══ Task 9: a side-on leaf and the LiDAR opening bear a door in its frame wall (spec §3.3, §3.6; flag on) ═══════════════════════
+    // A low-LiDAR sweep standing at `org` reading the wall line of aperture `ap`: through (the return 1 m beyond the line) where the wall
+    // coordinate a lies in [thr_lo, thr_hi], blocked (the return ON the line) elsewhere in the window; `none` = a sweep that saw nothing.
+    const auto make_sweep = [](const rc::door::Aperture& ap, const Vec2f& org, float thr_lo, float thr_hi, bool none = false)
+    {
+        BpearlSweep sw; sw.room_fresh = true; sw.origin_room = Vec3f(org.x(), org.y(), 0.3f);
+        if (none) return sw;
+        for (float a = ap.s - 0.95f; a <= ap.s + ap.w + 0.95f; a += 0.01f)
+        {
+            const Vec2f X = ap.wall_O + a * ap.wall_u, d = (X - org).normalized();
+            const bool thr = a >= thr_lo and a <= thr_hi;
+            const Vec2f q = thr ? Vec2f(X + 1.0f * d) : X;
+            sw.pts_room.emplace_back(q.x(), q.y(), 1.0f);
+        }
+        return sw;
+    };
+    const auto lid_of = [](const rc::door::Aperture& ap, const BpearlSweep& sw, float cf_curve_phi)
+    {
+        rc::door::RegisteredSweep rs; rs.origin = sw.origin_room; rs.pts = sw.pts_room;
+        const std::pair<float, float> pt{cf_curve_phi, 1.0f};
+        return LidarOpening{rc::door::opening_view_llr(ap, rs, 0.802144f, 0.00110819f, std::span<const std::pair<float, float>>(&pt, 1)),
+                            Vec2f(sw.origin_room.x(), sw.origin_room.y())};
+    };
+    {   // an open door whose ZED reports NOTHING but whose span reads "through" gains L; the ZED alone loses it
+        const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};
+        const auto run = [&](bool with_lidar)
+        {
+            Bench b; b.cfg.exist_one_model = true; b.cfg.ricoh_birth_p_open = 0.0f; b.det.zed.hit_rate_open = 0.05f;
+            rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            b.frame(pb, th, from[0], kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);   // a first view with a hit: the door is real
+            const float L0 = pb.L();
+            for (std::size_t i = 0; i < from.size(); ++i)
+            {
+                std::optional<LidarOpening> lid;
+                if (with_lidar)
+                {
+                    const BpearlSweep sw = make_sweep(th.aperture, from[i] , th.aperture.s + 0.05f, th.aperture.s + th.aperture.w - 0.05f);
+                    lid = lid_of(th.aperture, sw, std::numbers::pi_v<float> / 2);   // the leaf stands open: P(open) = 1
+                }
+                b.frame(pb, th, from[i], kDoor, true, false, {}, static_cast<int>(i) + 1, std::nullopt, lid);   // the ZED reports nothing
+            }
+            return pb.L() - L0;
+        };
+        const float d_zed = run(false), d_lid = run(true);
+        std::print("lidar_opening_supports_open_door: dL over 6 views: ZED misses alone {:+.3f}, with the LiDAR opening {:+.3f}\n", d_zed, d_lid);
+        CHECK(d_lid > d_zed + 3.0f);
+        CHECK(d_lid > 0.0f);   // an open door nobody can see is carried by the opening
+    }
+    {   // a candidate whose span reads solid wall loses L (P(open) = the birth prior 0.2); the ZED reports nothing after a first hit
+        const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};
+        const auto run = [&](bool with_lidar)
+        {
+            Bench b; b.cfg.exist_one_model = true;
+            const rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            b.frame(pb, th, from[0], kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+            const float L0 = pb.L();
+            const float phi = std::acos(1.0f - b.cfg.ricoh_birth_p_open);
+            for (std::size_t i = 0; i < from.size(); ++i)
+            {
+                std::optional<LidarOpening> lid;
+                if (with_lidar) lid = lid_of(th.aperture, make_sweep(th.aperture, from[i], 1e9f, 1e9f), phi);   // every bin blocked
+                b.frame(pb, th, from[i], kDoor, true, false, {}, static_cast<int>(i) + 1, std::nullopt, lid);
+            }
+            return pb.L() - L0;
+        };
+        const float d0 = run(false), d1 = run(true);
+        std::print("lidar_wall_refutes_phantom: dL over 6 views: without the LiDAR {:+.3f}, span reads wall {:+.3f}\n", d0, d1);
+        CHECK(d1 < d0 - 0.5f);
+    }
+    {   // duplicate_lidar_not_credited: a candidate overlapping half of a live open door's span: through on the shared half, wall on its own half
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState live = shut_door();
+        rc::DoorFitState dup = live;
+        dup.aperture.s += 0.4f;   // shifted 0.4 m along the wall
+        const Vec2f org{1.0f, 1.0f};
+        // through exactly over the live door's span, wall elsewhere
+        const BpearlSweep sw = make_sweep(dup.aperture, org, live.aperture.s, live.aperture.s + live.aperture.w);
+        const std::pair<float, float> pt{std::numbers::pi_v<float> / 2, 1.0f};
+        rc::door::RegisteredSweep rs; rs.origin = sw.origin_room; rs.pts = sw.pts_room;
+        const std::span<const std::pair<float, float>> oc(&pt, 1);
+        const float whole = rc::door::opening_view_llr(dup.aperture, rs, 0.802144f, 0.00110819f, oc);
+        const float c0 = live.aperture.s - dup.aperture.s;   // the live span in the candidate's own coordinate (wall_O is shared)
+        const rc::door::OpeningClaim claim{live.aperture.s, live.aperture.s + live.aperture.w, 0.95f};
+        const float shared = rc::door::opening_view_llr(dup.aperture, rs, 0.802144f, 0.00110819f, oc, std::span<const rc::door::OpeningClaim>(&claim, 1));
+        std::print("duplicate_lidar_not_credited: whole-span term {:+.3f} (the shared half credits the duplicate), with the live door's bins released {:+.3f}\n", whole, shared);
+        (void)c0; (void)b;
+        CHECK(whole > 0.0f);
+        CHECK(shared < 0.0f);
+    }
+    {   // live_doors_share_the_opening (final review 5): two BORN labels at one open hole each used to add the whole opening to their own ledger every view
+        // (the strongest channel, ~6 nats a bin; the tracker births one label per hole, so the second is a copy of the first under another id: a mirror that
+        // escaped). Now each holds the bins the other's span holds (Π(1 − r)): the pair's LiDAR credit over the same views is compared with one door's alone.
+        const auto credit = [&](bool pair, std::vector<double>* each)
+        {
+            Rig r(false, true);
+            r.core.set_costs(CostEstimator::logged_default());
+            const rc::door::Aperture ap0 = typical_door_at({1.0f, kWallY}, 0.85f, 2.05f, kRoom).aperture;
+            for (int v = 0; v < 8; ++v) r.look(stand(4.0f, 0.0f, 1.0f), {1.0f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}});
+            if (r.w.st.size() != 1) return std::pair{-99.0, 0};
+            std::vector<std::uint64_t> ids{r.w.st.begin()->first};
+            if (pair)
+            {
+                rc::DoorFitState dup = r.w.st.begin()->second;
+                dup.node_name = "door_dup";
+                r.w.st.emplace(5000, std::move(dup));
+                ids.push_back(5000);
+            }
+            const auto lid_credit = [&](std::uint64_t id) { double c = 0.0; for (const auto& v : r.w.st.at(id).belief.ledger.views()) if (v.lid.n > 0) c += v.lid.sum / v.lid.n; return c; };
+            std::vector<double> c0; for (const auto id : ids) c0.push_back(lid_credit(id));
+            for (int v = 0; v < 40; ++v)
+            {
+                const Vec2f at{1.0f + 0.6f * std::cos(0.7f * float(v)), 1.0f + 0.4f * std::sin(0.5f * float(v))};
+                r.step(input(++r.cycle, ++r.frame, at, {1.0f, 0.0f}, {}, 10.0, std::nullopt, {}, make_sweep(ap0, at, ap0.s + 0.05f, ap0.s + ap0.w - 0.05f)));
+            }
+            double total = 0.0;
+            if (each) each->clear();
+            for (std::size_t k = 0; k < ids.size(); ++k)
+            {
+                const double d = r.w.st.contains(ids[k]) ? lid_credit(ids[k]) - c0[k] : 0.0;
+                total += d; if (each) each->push_back(d);
+            }
+            return std::pair{total, int(r.w.st.size())};
+        };
+        std::vector<double> each;
+        const auto [one, n1] = credit(false, nullptr);
+        const auto [two, n2] = credit(true, &each);
+        std::print("live_doors_share_the_opening: LiDAR credit over 40 sweeps: one door {:+.2f} nats; two labels {:+.2f} nats in total ({:+.2f}, {:+.2f}), {} doors alive\n",
+                   one, two, each.size() > 0 ? each[0] : 0.0, each.size() > 1 ? each[1] : 0.0, n2);
+        CHECK(n1 == 1 and one > 0.0);
+        CHECK(n2 >= 1 and two < 1.5 * one);   // not 2x: the pair shares one opening
+    }
+    {   // shut_door_lidar_neutral: a shut, born door (leaf belief: shut) whose span reads wall is no evidence either way over 30 views
+        const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        b.frame(pb, th, from[0], kDoor, true, false, {}, 0);
+        const float L0 = pb.L();
+        for (int i = 0; i < 30; ++i)
+        {
+            const Vec2f at = from[static_cast<std::size_t>(i) % from.size()] + Vec2f(0.2f * float(i / 6), 0.0f);   // 30 views: every standpoint a new one
+            const LidarOpening lid = lid_of(th.aperture, make_sweep(th.aperture, at, 1e9f, 1e9f), 0.0f);          // phi = 0: P(open) = 0
+            pb.ledger.observe(at, th.aperture.centre_xy(), th.aperture.across_u(), 1.0f, 0.0f, 0);   // (only the LiDAR channel moves it below)
+            b.frame(pb, th, at, kDoor, false, false, {}, i, std::nullopt, lid);   // no camera ran
+        }
+        std::print("shut_door_lidar_neutral: L {:+.4f} -> {:+.4f} over 30 views of wall\n", L0, pb.L());
+        CHECK(std::abs(pb.L() - L0) < 0.05f);
+    }
+    {   // a LiDAR term is one trial per VIEW: ten sweeps from one standpoint are worth one
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        const BpearlSweep sw = make_sweep(th.aperture, {1.0f, 1.0f}, th.aperture.s + 0.05f, th.aperture.s + th.aperture.w - 0.05f);
+        b.frame(pb, th, {1.0f, 1.0f}, kDoor, true, false, {}, 0, std::nullopt, lid_of(th.aperture, sw, std::numbers::pi_v<float> / 2));
+        const float one = pb.ledger.sum();
+        for (int i = 0; i < 9; ++i) b.frame(pb, th, {1.0f, 1.0f}, kDoor, true, false, {}, 0, std::nullopt, lid_of(th.aperture, sw, std::numbers::pi_v<float> / 2));
+        std::print("lidar one trial per view: 1 sweep {:+.3f}, 10 sweeps from the same standpoint {:+.3f}\n", one, pb.ledger.sum());
+        CHECK(std::abs(pb.ledger.sum() - one) < 0.05f * std::max(1.0f, std::abs(one)) + 0.3f);   // the ZED misses of the later frames move it slightly; not 10x
+        // the ledger round-trips the LiDAR term (VL5) and flag-off ledgers keep their old format
+        const auto parsed = ViewLedger::parse(pb.ledger.serialise(), false, true);
+        CHECK(parsed.has_value() and pb.ledger.serialise().starts_with("VL5 "));
+        CHECK(parsed.has_value() and parsed->views().size() == pb.ledger.views().size() and std::abs(parsed->views()[0].lid.sum - pb.ledger.views()[0].lid.sum) < 1e-3
+              and parsed->views()[0].lid.n == pb.ledger.views()[0].lid.n);
+        ViewLedger plain; plain.observe({0.f, 0.f}, {1.f, 0.f}, {1.f, 0.f}, 1.f, 0.f, 0);
+        CHECK(plain.serialise().starts_with("VL3 "));
+    }
+    {   // leaf_born_is_born_as_itself (final review 12): a candidate born from a side-on leaf is seeded at ITS hypothesis' frame-wall aperture and leaf pose even when the BIRTH
+        // frame reads face-on (the aperture mode wins that mask): the same run as above with the birth frame's leaf mask replaced by a face-on blob at the leaf's own
+        // place (0.42 m from the aperture the hypothesis stands at) is still born on the hypothesis' aperture, not at the blob.
+        const LeafDet leaf{{2.0f, kWallY}, {2.0f, 4.14f}};
+        const auto hyps = rc::door::apertures_from_leaf(leaf.a, leaf.b, 2.1f, kRoom, wall_groups(kRoom, 0.1f), SizePrior{0.85f, 0.12f, 2.05f, 0.06f}, rc::door::RoomBand{0.2f, 0.1f});
+        const auto best = std::ranges::max_element(hyps, [&](const auto& a, const auto& b2) { return a.aperture.centre_xy().x() < b2.aperture.centre_xy().x(); });
+        const rc::door::Aperture ap = best->aperture;
+        const Vec2f at{2.0f, 1.0f};
+        // a leaf-born candidate stands (made from an earlier leaf frame: its theta is the hypothesis' frame-wall aperture and leaf pose); the birth frame reads FACE-ON
+        // at the leaf's own place with the opening seen: the candidate is born on that frame.
+        Rig r(false, true);
+        r.look(at, {2.0f, 4.5f}, {});   // takes the room up
+        DoorCore::Candidate c;
+        c.key = ++r.core.next_candidate_key_; c.room = r.core.room_name(); c.xy = ap.centre_xy(); c.var = 0.04f;
+        c.theta = typical_door_at(c.xy, 0.85f, 2.05f, kRoom); c.theta.aperture = ap; c.theta.leaf = best->leaf;
+        c.width_meas = 0.85f; c.width_sd = 0.1f; c.size_resolved = true; c.leaf_born = true;
+        r.core.candidates_.push_back(std::move(c));
+        for (int i = 0; i < 3 and r.births.empty(); ++i)
+            r.step(input(++r.cycle, ++r.frame, at, {2.0f, 4.5f}, {{2.0f, kWallY, 0.9f}}, 10.0, std::nullopt, {}, make_sweep(ap, {at.x(), at.y() + 0.05f * float(i)}, ap.s + 0.05f, ap.s + ap.w - 0.05f)));
+        std::print("leaf_born_is_born_as_itself: born on the face-on frame: {} at x {:.3f} (the candidate's hypothesis aperture x {:.3f}; the blob stands at x 2.000)\n",
+                   r.births.size(), r.births.empty() ? NAN : static_cast<float>(r.births.front().a), ap.centre_xy().x());
+        CHECK(not r.births.empty());
+        if (not r.births.empty()) CHECK(std::abs(r.births.front().a - ap.centre_xy().x()) < 0.2f);
+    }
+    {   // leaf_born_candidate_pays_its_measured_length (final review 6): a 0.4 m side-on leaf mask pays the size term on the MEASURED length 0.4 (against its own sd),
+        // not on the length fused with the typical width (0.5 m: ~4 nats of free support). It needs at least the evidence a 0.4 m face-on candidate needs.
+        Rig leaf(false, true), face(false, true);
+        leaf.step(input(++leaf.cycle, ++leaf.frame, {2.0f, 1.0f}, {2.0f, 4.5f}, {}, 10.0, std::nullopt, {LeafDet{{2.0f, kWallY}, {2.0f, kWallY - 0.4f}}}));
+        face.look({2.0f, 1.0f}, {2.0f, 4.5f}, {{2.0f, kWallY, 0.4f}});
+        const auto leaf_c = std::ranges::find_if(leaf.core.candidates(), [](const auto& c) { return c.leaf_born; });
+        CHECK(leaf_c != leaf.core.candidates().end() and not face.core.candidates().empty());
+        if (leaf_c != leaf.core.candidates().end() and not face.core.candidates().empty())
+        {
+            const float sl = leaf_c->belief.prior.size, sf = face.core.candidates().front().belief.prior.size;
+            std::print("leaf_born_candidate_pays_its_measured_length: leaf-born size term {:+.2f} (measured length {:.2f}, sd {:.3f}), 0.4 m face-on {:+.2f}\n", sl, leaf_c->width_meas, leaf_c->width_sd, sf);
+            CHECK(std::abs(leaf_c->width_meas - 0.4f) < 0.05f);
+            CHECK(sl <= sf + 0.05f);   // at least the evidence a face-on 0.4 m candidate needs (the leaf length is known more precisely, so it pays at least as much)
+            CHECK(sl < -1.5f);
+        }
+    }
+    {   // side_on_leaf_bears_door_in_frame_wall: a leaf mask + the opening seen at its hinge end, no known door: the door is born ON THE FRAME WALL
+        std::vector<float> aperture_err;   // |door aperture centre - the winning hypothesis' centre|, from the birth cycle on
+        const auto run = [&](bool opening, std::vector<rc::door::DoorDecision>* out_births, float* L_at_end)
+        {
+            Rig r(false, true);
+            const LeafDet leaf{{2.0f, kWallY}, {2.0f, 4.14f}};
+            // the hypotheses of this mask (what compute_mask_causes builds): which of them stands where
+            const auto hyps = rc::door::apertures_from_leaf(leaf.a, leaf.b, 2.1f, kRoom, wall_groups(kRoom, 0.1f) , SizePrior{0.85f, 0.12f, 2.05f, 0.06f}, rc::door::RoomBand{0.2f, 0.1f});
+            const auto best = std::ranges::max_element(hyps, [&](const auto& a, const auto& b2) { return a.aperture.centre_xy().x() < b2.aperture.centre_xy().x(); });
+            const rc::door::Aperture ap = best->aperture;   // the hypothesis whose aperture is at x > 2 (the open side)
+            const Vec2f at{2.0f, 1.0f};
+            for (int i = 0; i < 80; ++i)
+            {
+                ++r.cycle; ++r.frame;
+                const BpearlSweep sw = make_sweep(ap, {at.x(), at.y() + 0.05f * float(i % 3)}, ap.s + 0.05f, ap.s + ap.w - 0.05f, not opening);
+                DoorCycleInput in = input(r.cycle, r.frame, at, {2.0f, 4.5f}, {}, 10.0, std::nullopt, {leaf}, opening ? std::optional<BpearlSweep>(sw) : std::optional<BpearlSweep>(make_sweep(ap, {at.x(), at.y()}, 1e9f, 1e9f)));
+                r.step(std::move(in));
+                if (opening and not r.births.empty() and not r.w.st.empty())
+                    aperture_err.push_back((r.w.st.begin()->second.aperture.centre_xy() - ap.centre_xy()).norm());
+            }
+            if (out_births) *out_births = r.births;
+            if (L_at_end) *L_at_end = r.w.st.empty() ? -99.f : r.w.st.begin()->second.belief.L();
+            return r.w.st.size();
+        };
+        std::vector<rc::door::DoorDecision> births; float L = 0;
+        const std::size_t n_open = run(true, &births, &L);
+        std::print("side_on_leaf_bears_door_in_frame_wall: opening seen: {} door(s), {} birth(s) at", n_open, births.size());
+        for (const auto& b : births) std::print(" ({:.2f},{:.2f})", b.a, b.b);
+        std::print(", L {:+.2f}\n", L);
+        CHECK(n_open >= 1 and not births.empty());
+        for (const auto& b : births) CHECK(std::abs(b.b - 5.0f) < 0.25f);        // the frame wall (y = 5), not the leaf's plane (x = 2, y 4.1..5)
+        if (not births.empty()) CHECK(std::abs(births.front().a - 2.425f) < 0.2f); // the side the opening was read on
+        // a leaf-born door is CREATED AND INITIALISED at the hypothesis' aperture (the frame wall), on the birth cycle and 30 cycles later
+        std::print("side_on_leaf aperture error from the birth cycle: first {:.3f} m, +30 cycles {:.3f} m, worst of the run {:.3f} m\n",
+                   aperture_err.empty() ? -1.f : aperture_err.front(), aperture_err.size() > 30 ? aperture_err[30] : -1.f,
+                   aperture_err.empty() ? -1.f : *std::ranges::max_element(aperture_err));
+        CHECK(aperture_err.size() > 30 and aperture_err.front() < 0.05f and aperture_err[30] < 0.05f);
+        std::vector<rc::door::DoorDecision> births_wall; float Lw = 0;
+        const std::size_t n_wall = run(false, &births_wall, &Lw);
+        std::print("side_on_leaf_bears_door_in_frame_wall: span reads solid wall: {} door(s), {} birth(s), L {:+.2f} (opening seen: {:+.2f})\n", n_wall, births_wall.size(), Lw, L);
+        // solid wall: the ZED's own hit still counts (a door-class mask is a door-class mask: Task 8b), but the span reads against it; the opening is
+        // what carries the door: its L is far above the one whose span reads wall
+        CHECK(n_wall == 0 or L > Lw + 0.3f);
+    }
+    {   // corner_two_doors: open door A in wall 1 whose leaf hides door B's aperture in wall 2 (a corner). The leaf's two ends touch the two walls.
+        const Vec2f ea{4.4f, kWallY}, eb{4.99f, 4.37f};
+        const rc::door::RoomBand band{0.2f, 0.1f};
+        const auto groups = wall_groups(kRoom, 0.1f);
+        const auto hyps = rc::door::apertures_from_leaf(ea, eb, 2.1f, kRoom, groups, SizePrior{0.85f, 0.12f, 2.05f, 0.06f}, band);
+        CHECK(hyps.size() == 4);
+        // hypotheses 0,1: hinge at ea (wall 1, y = 5: A); 2,3: hinge at eb (wall 2, x = 5: B)
+        const auto cluster = [&](bool a_open_seen)
+        {
+            Eigen::MatrixXd lw(1, static_cast<int>(hyps.size()));
+            for (std::size_t h = 0; h < hyps.size(); ++h)
+            {
+                const auto& ap = hyps[h].aperture;
+                double v = -std::log1p(std::exp(-hyps[h].log_w)) - std::log(10.0);
+                if (a_open_seen)
+                {   // the scan reads through along A's span on wall 1 (the hypothesis whose aperture lies toward -x of its hinge), solid on B's
+                    const Vec2f org{3.0f, 1.0f};
+                    const bool is_a = h < 2;
+                    const bool thr = is_a and ap.centre_xy().x() < ea.x();
+                    const BpearlSweep sw = make_sweep(ap, org, thr ? ap.s : 1e9f, thr ? ap.s + ap.w : 1e9f);
+                    v += lid_of(ap, sw, std::numbers::pi_v<float> / 2).llr;
+                }
+                lw(0, static_cast<int>(h)) = v;
+            }
+            const std::vector<bool> excl(hyps.size(), false);
+            const bool ex[4] = {false, false, false, false};
+            const auto joints = rc::door::core::bf::k_best(lw, std::span<const bool>(ex, 4), 4);
+            std::vector<double> w;
+            double z = 0.0;
+            for (const auto& j : joints) z += std::exp(j.log_w - joints.front().log_w);
+            for (const auto& j : joints) w.push_back(std::exp(j.log_w - joints.front().log_w) / z);
+            std::vector<int> who;
+            for (const auto& j : joints) who.push_back(j.cause_of_mask[0]);
+            return std::pair{w, who};
+        };
+        const auto [w_open, who_open] = cluster(true);
+        const auto [w_none, who_none] = cluster(false);
+        const double pA_open = [&] { double a = 0; for (std::size_t i = 0; i < w_open.size(); ++i) if (who_open[i] < 2) a += w_open[i]; return a; }();
+        std::print("corner_two_doors: with A's opening in the sweep P(A leaf) {:.3f} (best joint {:.3f}); no opening visible: {} joint hypotheses, weights", pA_open, w_open.front(), w_none.size());
+        for (const double w : w_none) std::print(" {:.3f}", w);
+        std::print("\n");
+        CHECK(pA_open > 0.8);
+        int mid = 0; for (const double w : w_none) mid += (w > 0.2 and w < 0.8);
+        CHECK(mid >= 2);
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));

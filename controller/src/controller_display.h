@@ -101,7 +101,6 @@ public:
     void set_command_text(const QString &text);   // alerts only (LiDAR stall / recovery)
     void set_selected_affordance(const QString &current, const QString &previous);
     // Stage the stuck-recovery indicator state (thread-safe; applied on the GUI thread in present()).
-    void set_stuck_active(bool active);
     // Why compute() is not planning this cycle (ControllerSession::hold_reason()); "" = not holding. Status line only.
     void set_hold_reason(const std::string &why);
     // WHY IS THE ROBOT NOT MOVING (motion_verdict.h): the toolbar's permanent chip. Thread-safe (a copy into the snapshot).
@@ -252,7 +251,6 @@ private:
         QString affordance_current, affordance_previous;
         bool selected_affordance_text_pending = false;
         bool clear_trajectory_pending = false;
-        bool stuck_active = false;   // stuck-recovery indicator (pushed every cycle; widget dedups)
         // Remaining distance to target, shown in the toolbar. nullopt = no active plan.
         // goal_yaw_err_rad is nullopt when the target carries no commanded facing yaw.
         std::optional<float> goal_dist_m;

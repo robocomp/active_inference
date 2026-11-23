@@ -1,0 +1,17 @@
+# E2 baseline: a HAND-WRITTEN level-4 table, the kind an engineer writes without a VLM or a corpus.
+# Drafted 2026-11-21 as the conventional "signature objects" rule; reviewed and extended by the authors 2026-11-22.
+# Classes outside the E1 vocabulary (bottle, faucet, portrait) are not corpus columns and have no effect yet.
+# pi_cf = signature for the classes listed under f, other for every other class; pi_c,notf is derived as for the VLM
+# (mean of pi_cg over the other functions).
+
+signature = 0.8
+other     = 0.1
+
+[functions]
+"kitchen"     = ["refrigerator", "oven", "stove", "microwave", "dishwasher", "hood", "cabinet", "countertop", "sink"]
+"dining room" = ["dining table", "chair", "bottle"]
+"living room" = ["sofa", "armchair", "coffee table", "television"]
+"bedroom"     = ["bed", "nightstand", "wardrobe", "chest of drawers", "chair", "portrait"]
+"bathroom"    = ["toilet", "sink", "bathtub", "shower", "mirror", "faucet"]
+"office"      = ["desk", "office chair", "computer monitor", "bookshelf"]
+"corridor"    = ["coat rack"]

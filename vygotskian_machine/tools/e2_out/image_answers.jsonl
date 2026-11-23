@@ -1,0 +1,1012 @@
+{"model": "gemma4:26b", "scan": "scene0001_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0002_00", "k": 1, "answer": "dining room", "frames": ["002600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0003_00", "k": 1, "answer": "kitchen", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0004_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0006_00", "k": 1, "answer": "bedroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0007_00", "k": 1, "answer": "corridor", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0009_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0010_00", "k": 1, "answer": "office", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0011_00", "k": 1, "answer": "living room", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0012_00", "k": 1, "answer": "living room", "frames": ["002700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0013_00", "k": 1, "answer": "living room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0014_00", "k": 1, "answer": "bathroom", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0017_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0019_00", "k": 1, "answer": "corridor", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0021_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0022_00", "k": 1, "answer": "living room", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0024_00", "k": 1, "answer": "dining room", "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0025_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0026_00", "k": 1, "answer": "bedroom", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0027_00", "k": 1, "answer": "living room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0029_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0031_00", "k": 1, "answer": "living room", "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0032_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0033_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0034_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0035_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0036_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0039_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0040_00", "k": 1, "answer": "office", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0042_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0043_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0045_00", "k": 1, "answer": "living room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0047_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0049_00", "k": 1, "answer": "living room", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0050_00", "k": 1, "answer": "living room", "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0051_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0055_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0058_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0059_00", "k": 1, "answer": "living room", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0060_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0061_00", "k": 1, "answer": "dining room", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0062_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0063_00", "k": 1, "answer": "kitchen", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0065_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0067_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0068_00", "k": 1, "answer": "kitchen", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0070_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0071_00", "k": 1, "answer": "corridor", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0072_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0073_00", "k": 1, "answer": "living room", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0076_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0077_00", "k": 1, "answer": "bedroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0078_00", "k": 1, "answer": "bedroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0080_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0081_00", "k": 1, "answer": "dining room", "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0082_00", "k": 1, "answer": "dining room", "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0083_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0084_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0085_00", "k": 1, "answer": "bedroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0086_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0087_00", "k": 1, "answer": "dining room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0089_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0090_00", "k": 1, "answer": "bathroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0091_00", "k": 1, "answer": "kitchen", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0092_00", "k": 1, "answer": "bedroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0093_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0094_00", "k": 1, "answer": "kitchen", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0096_00", "k": 1, "answer": "corridor", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0097_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0098_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0100_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0105_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0107_00", "k": 1, "answer": "bedroom", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0108_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0110_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0111_00", "k": 1, "answer": "dining room", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0112_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0113_00", "k": 1, "answer": "living room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0114_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0116_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0117_00", "k": 1, "answer": "kitchen", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0118_00", "k": 1, "answer": "corridor", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0119_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0124_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0125_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0126_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0127_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0128_00", "k": 1, "answer": "living room", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0129_00", "k": 1, "answer": "living room", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0131_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0133_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0135_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0137_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0138_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0141_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0142_00", "k": 1, "answer": "office", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0143_00", "k": 1, "answer": "bedroom", "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0144_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0146_00", "k": 1, "answer": "corridor", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0147_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0148_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0149_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0150_00", "k": 1, "answer": "office", "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0151_00", "k": 1, "answer": "living room", "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0152_00", "k": 1, "answer": "corridor", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0153_00", "k": 1, "answer": "bathroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0157_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0158_00", "k": 1, "answer": "kitchen", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0160_00", "k": 1, "answer": "living room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0161_00", "k": 1, "answer": "office", "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0162_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0164_00", "k": 1, "answer": "kitchen", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0165_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0166_00", "k": 1, "answer": "bedroom", "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0168_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0170_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0172_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0174_00", "k": 1, "answer": "office", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0175_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0177_00", "k": 1, "answer": "office", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0178_00", "k": 1, "answer": "bedroom", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0179_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0181_00", "k": 1, "answer": "corridor", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0184_00", "k": 1, "answer": "bedroom", "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0186_00", "k": 1, "answer": "office", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0192_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0193_00", "k": 1, "answer": "bedroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0195_00", "k": 1, "answer": "bathroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0196_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0197_00", "k": 1, "answer": "kitchen", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0198_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0200_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0201_00", "k": 1, "answer": "dining room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0203_00", "k": 1, "answer": "living room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0206_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0209_00", "k": 1, "answer": "bedroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0210_00", "k": 1, "answer": "office", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0211_00", "k": 1, "answer": "office", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0212_00", "k": 1, "answer": "dining room", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0213_00", "k": 1, "answer": "living room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0214_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0217_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0219_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0220_00", "k": 1, "answer": "kitchen", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0221_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0222_00", "k": 1, "answer": "bedroom", "frames": ["002700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0223_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0224_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0226_00", "k": 1, "answer": "living room", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0230_00", "k": 1, "answer": "living room", "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0232_00", "k": 1, "answer": "bathroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0233_00", "k": 1, "answer": "bedroom", "frames": ["003800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0234_00", "k": 1, "answer": "living room", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0235_00", "k": 1, "answer": "living room", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0236_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0237_00", "k": 1, "answer": "bathroom", "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0238_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0239_00", "k": 1, "answer": "living room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0241_00", "k": 1, "answer": "living room", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0242_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0243_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0244_00", "k": 1, "answer": "dining room", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0246_00", "k": 1, "answer": "bathroom", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0247_00", "k": 1, "answer": "office", "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0248_00", "k": 1, "answer": "dining room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0250_00", "k": 1, "answer": "bathroom", "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0251_00", "k": 1, "answer": "dining room", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0253_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0254_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0255_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0256_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0259_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0260_00", "k": 1, "answer": "bathroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0262_00", "k": 1, "answer": "living room", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0263_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0264_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0265_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0267_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0268_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0270_00", "k": 1, "answer": "bedroom", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0271_00", "k": 1, "answer": "bedroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0272_00", "k": 1, "answer": "living room", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0273_00", "k": 1, "answer": "living room", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0274_00", "k": 1, "answer": "office", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0275_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0277_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0279_00", "k": 1, "answer": "bedroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0280_00", "k": 1, "answer": "bedroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0281_00", "k": 1, "answer": "office", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0282_00", "k": 1, "answer": "bedroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0286_00", "k": 1, "answer": "bedroom", "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0287_00", "k": 1, "answer": "bedroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0290_00", "k": 1, "answer": "corridor", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0293_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0294_00", "k": 1, "answer": "office", "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0295_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0296_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0297_00", "k": 1, "answer": "living room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0298_00", "k": 1, "answer": "bedroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0299_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0301_00", "k": 1, "answer": "living room", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0305_00", "k": 1, "answer": "office", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0306_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0308_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0309_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0310_00", "k": 1, "answer": "kitchen", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0313_00", "k": 1, "answer": "living room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0315_00", "k": 1, "answer": "dining room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0316_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0319_00", "k": 1, "answer": "living room", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0321_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0322_00", "k": 1, "answer": "kitchen", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0323_00", "k": 1, "answer": "kitchen", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0324_00", "k": 1, "answer": "dining room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0326_00", "k": 1, "answer": "living room", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0328_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0330_00", "k": 1, "answer": "living room", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0331_00", "k": 1, "answer": "bedroom", "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0332_00", "k": 1, "answer": "bathroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0333_00", "k": 1, "answer": "office", "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0334_00", "k": 1, "answer": "corridor", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0335_00", "k": 1, "answer": "dining room", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0336_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0339_00", "k": 1, "answer": "living room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0340_00", "k": 1, "answer": "living room", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0341_00", "k": 1, "answer": "office", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0344_00", "k": 1, "answer": "living room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0346_00", "k": 1, "answer": "corridor", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0347_00", "k": 1, "answer": "kitchen", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0348_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0350_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0351_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0352_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0353_00", "k": 1, "answer": "living room", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0356_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0359_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0362_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0364_00", "k": 1, "answer": "corridor", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0365_00", "k": 1, "answer": "bathroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0366_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0367_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0368_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0369_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0371_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0374_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0375_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0376_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0378_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0379_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0380_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0382_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0383_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0385_00", "k": 1, "answer": "living room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0386_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0387_00", "k": 1, "answer": "office", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0389_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0390_00", "k": 1, "answer": "kitchen", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0394_00", "k": 1, "answer": "bedroom", "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0395_00", "k": 1, "answer": "office", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0396_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0397_00", "k": 1, "answer": "bedroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0398_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0399_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0400_00", "k": 1, "answer": "corridor", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0406_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0407_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0409_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0410_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0412_00", "k": 1, "answer": "office", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0413_00", "k": 1, "answer": "bathroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0415_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0416_00", "k": 1, "answer": "bedroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0418_00", "k": 1, "answer": "bedroom", "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0423_00", "k": 1, "answer": "living room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0424_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0425_00", "k": 1, "answer": "bedroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0426_00", "k": 1, "answer": "bedroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0429_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0431_00", "k": 1, "answer": "corridor", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0432_00", "k": 1, "answer": "living room", "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0433_00", "k": 1, "answer": "kitchen", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0434_00", "k": 1, "answer": "bathroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0435_00", "k": 1, "answer": "living room", "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0436_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0437_00", "k": 1, "answer": "dining room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0438_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0439_00", "k": 1, "answer": "kitchen", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0440_00", "k": 1, "answer": "corridor", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0441_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0442_00", "k": 1, "answer": "living room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0445_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0446_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0447_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0448_00", "k": 1, "answer": "bathroom", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0449_00", "k": 1, "answer": "bathroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0457_00", "k": 1, "answer": "bedroom", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0458_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0460_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0464_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0465_00", "k": 1, "answer": "kitchen", "frames": ["003200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0467_00", "k": 1, "answer": "kitchen", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0468_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0469_00", "k": 1, "answer": "office", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0471_00", "k": 1, "answer": "bathroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0473_00", "k": 1, "answer": "corridor", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0474_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0476_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0477_00", "k": 1, "answer": "bedroom", "frames": ["002200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0479_00", "k": 1, "answer": "kitchen", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0480_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0484_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0485_00", "k": 1, "answer": "bathroom", "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0486_00", "k": 1, "answer": "kitchen", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0487_00", "k": 1, "answer": "office", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0488_00", "k": 1, "answer": "kitchen", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0492_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0497_00", "k": 1, "answer": "dining room", "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0498_00", "k": 1, "answer": "kitchen", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0499_00", "k": 1, "answer": "living room", "frames": ["002700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0501_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0503_00", "k": 1, "answer": "corridor", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0505_00", "k": 1, "answer": "office", "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0506_00", "k": 1, "answer": "bedroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0507_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0509_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0510_00", "k": 1, "answer": "bathroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0513_00", "k": 1, "answer": "dining room", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0514_00", "k": 1, "answer": "living room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0517_00", "k": 1, "answer": "bedroom", "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0518_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0519_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0520_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0521_00", "k": 1, "answer": "living room", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0522_00", "k": 1, "answer": "bathroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0523_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0525_00", "k": 1, "answer": "office", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0526_00", "k": 1, "answer": "living room", "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0527_00", "k": 1, "answer": "bedroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0529_00", "k": 1, "answer": "living room", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0530_00", "k": 1, "answer": "corridor", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0532_00", "k": 1, "answer": "corridor", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0535_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0537_00", "k": 1, "answer": "dining room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0538_00", "k": 1, "answer": "bathroom", "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0539_00", "k": 1, "answer": "bathroom", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0540_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0541_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0542_00", "k": 1, "answer": "kitchen", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0543_00", "k": 1, "answer": "living room", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0545_00", "k": 1, "answer": "bedroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0546_00", "k": 1, "answer": "bathroom", "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0547_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0548_00", "k": 1, "answer": "bedroom", "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0550_00", "k": 1, "answer": "corridor", "frames": ["002000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0552_00", "k": 1, "answer": "kitchen", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0553_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0554_00", "k": 1, "answer": "office", "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0556_00", "k": 1, "answer": "office", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0557_00", "k": 1, "answer": "bedroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0559_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0560_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0564_00", "k": 1, "answer": "bathroom", "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0567_00", "k": 1, "answer": "bedroom", "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0568_00", "k": 1, "answer": "bedroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0570_00", "k": 1, "answer": "bathroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0571_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0572_00", "k": 1, "answer": "office", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0573_00", "k": 1, "answer": "kitchen", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0574_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0576_00", "k": 1, "answer": "bedroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0577_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0579_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0580_00", "k": 1, "answer": "living room", "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0581_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0582_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0583_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0586_00", "k": 1, "answer": "kitchen", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0587_00", "k": 1, "answer": "living room", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0588_00", "k": 1, "answer": "living room", "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0589_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0590_00", "k": 1, "answer": "bedroom", "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0591_00", "k": 1, "answer": "office", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0593_00", "k": 1, "answer": "office", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0594_00", "k": 1, "answer": "office", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0600_00", "k": 1, "answer": "bedroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0602_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0603_00", "k": 1, "answer": "living room", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0604_00", "k": 1, "answer": "living room", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0607_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0608_00", "k": 1, "answer": "living room", "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0609_00", "k": 1, "answer": "dining room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0610_00", "k": 1, "answer": "bathroom", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0612_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0613_00", "k": 1, "answer": "bedroom", "frames": ["003000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0614_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0615_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0616_00", "k": 1, "answer": "office", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0617_00", "k": 1, "answer": "living room", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0619_00", "k": 1, "answer": "office", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0620_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0622_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0623_00", "k": 1, "answer": "corridor", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0625_00", "k": 1, "answer": "bathroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0626_00", "k": 1, "answer": "living room", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0628_00", "k": 1, "answer": "office", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0630_00", "k": 1, "answer": "office", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0631_00", "k": 1, "answer": "living room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0633_00", "k": 1, "answer": "bedroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0638_00", "k": 1, "answer": "living room", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0639_00", "k": 1, "answer": "bathroom", "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0640_00", "k": 1, "answer": "dining room", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0642_00", "k": 1, "answer": "office", "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0643_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0644_00", "k": 1, "answer": "office", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0645_00", "k": 1, "answer": "bedroom", "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0646_00", "k": 1, "answer": "living room", "frames": ["002400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0647_00", "k": 1, "answer": "dining room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0648_00", "k": 1, "answer": "office", "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0649_00", "k": 1, "answer": "kitchen", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0651_00", "k": 1, "answer": "kitchen", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0652_00", "k": 1, "answer": "bedroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0653_00", "k": 1, "answer": "office", "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0654_00", "k": 1, "answer": "kitchen", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0656_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0658_00", "k": 1, "answer": "bedroom", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0659_00", "k": 1, "answer": "bathroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0660_00", "k": 1, "answer": "office", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0662_00", "k": 1, "answer": "bathroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0663_00", "k": 1, "answer": "office", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0664_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0668_00", "k": 1, "answer": "dining room", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0670_00", "k": 1, "answer": "kitchen", "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0672_00", "k": 1, "answer": "living room", "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0673_00", "k": 1, "answer": "living room", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0674_00", "k": 1, "answer": "bedroom", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0675_00", "k": 1, "answer": "bedroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0676_00", "k": 1, "answer": "bathroom", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0677_00", "k": 1, "answer": "bedroom", "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0679_00", "k": 1, "answer": "living room", "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0681_00", "k": 1, "answer": "kitchen", "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0682_00", "k": 1, "answer": "kitchen", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0683_00", "k": 1, "answer": "bathroom", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0684_00", "k": 1, "answer": "corridor", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0686_00", "k": 1, "answer": "bathroom", "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0687_00", "k": 1, "answer": "kitchen", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0688_00", "k": 1, "answer": "bedroom", "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0693_00", "k": 1, "answer": "bathroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0694_00", "k": 1, "answer": "office", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0695_00", "k": 1, "answer": "bedroom", "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0697_00", "k": 1, "answer": "bedroom", "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0698_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0699_00", "k": 1, "answer": "dining room", "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0700_00", "k": 1, "answer": "living room", "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0701_00", "k": 1, "answer": "living room", "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0702_00", "k": 1, "answer": "bathroom", "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0703_00", "k": 1, "answer": "corridor", "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0706_00", "k": 1, "answer": "bedroom", "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0001_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000300.jpg", "000600.jpg", "001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0002_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "001700.jpg", "003400.jpg", "005100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0003_00", "k": 4, "answer": "kitchen", "frames": ["000000.jpg", "000600.jpg", "001100.jpg", "001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0004_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000300.jpg", "000600.jpg", "000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0006_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000700.jpg", "001400.jpg", "002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0007_00", "k": 4, "answer": "corridor", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0009_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000600.jpg", "000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0010_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000800.jpg", "001700.jpg", "002500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0011_00", "k": 4, "answer": "dining room", "frames": ["000000.jpg", "000800.jpg", "001500.jpg", "002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0012_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "001800.jpg", "003500.jpg", "005300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0013_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000200.jpg", "000500.jpg", "000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0014_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000800.jpg", "001500.jpg", "002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0017_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000400.jpg", "000800.jpg", "001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0019_00", "k": 4, "answer": "corridor", "frames": ["000000.jpg", "000200.jpg", "000300.jpg", "000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0021_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0022_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000600.jpg", "001200.jpg", "001800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0024_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "001100.jpg", "002200.jpg", "003300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0025_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000600.jpg", "001300.jpg", "001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0026_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000900.jpg", "001700.jpg", "002600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0027_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0029_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000600.jpg", "001300.jpg", "001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0031_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000900.jpg", "001800.jpg", "002700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0032_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000200.jpg", "000600.jpg", "000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0033_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000500.jpg", "000900.jpg", "001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0034_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000500.jpg", "000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0035_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000400.jpg", "001000.jpg", "001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0036_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0039_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000700.jpg", "000900.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0040_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "001000.jpg", "001900.jpg", "002900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0042_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0043_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0045_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0047_00", "k": 4, "answer": "kitchen", "frames": ["000000.jpg", "000400.jpg", "000900.jpg", "001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0049_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000600.jpg", "001100.jpg", "001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0050_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "001500.jpg", "003100.jpg", "004600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0051_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000500.jpg", "000900.jpg", "001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0055_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000400.jpg", "000800.jpg", "001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0058_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0059_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000600.jpg", "001200.jpg", "001800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0060_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0061_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000600.jpg", "001300.jpg", "001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0062_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000200.jpg", "000500.jpg", "000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0063_00", "k": 4, "answer": "kitchen", "frames": ["000000.jpg", "000200.jpg", "000300.jpg", "000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0065_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0067_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0068_00", "k": 4, "answer": "kitchen", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0070_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000400.jpg", "000900.jpg", "001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0071_00", "k": 4, "answer": "corridor", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0072_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0073_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000700.jpg", "001400.jpg", "002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0076_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000300.jpg", "000600.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0077_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000200.jpg", "000300.jpg", "000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0078_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000200.jpg", "000300.jpg", "000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0080_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0081_00", "k": 4, "answer": "dining room", "frames": ["000000.jpg", "000100.jpg", "000100.jpg", "000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0082_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000100.jpg", "000300.jpg", "000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0083_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000200.jpg", "000500.jpg", "000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0084_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000600.jpg", "001300.jpg", "001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0085_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000700.jpg", "001400.jpg", "002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0086_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000500.jpg", "000900.jpg", "001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0087_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000400.jpg", "000900.jpg", "001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0089_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0090_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000200.jpg", "000300.jpg", "000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0091_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000500.jpg", "001000.jpg", "001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0092_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000700.jpg", "001500.jpg", "002200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0093_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0094_00", "k": 4, "answer": "kitchen", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0096_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000400.jpg", "000900.jpg", "001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0097_00", "k": 4, "answer": "kitchen", "frames": ["000000.jpg", "000200.jpg", "000500.jpg", "000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0098_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000500.jpg", "000900.jpg", "001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0100_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0105_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000400.jpg", "000800.jpg", "001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0107_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000800.jpg", "001500.jpg", "002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0108_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000200.jpg", "000300.jpg", "000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0110_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000400.jpg", "000700.jpg", "001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0111_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000900.jpg", "001700.jpg", "002500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0112_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000500.jpg", "000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0113_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000200.jpg", "000500.jpg", "000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0114_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000600.jpg", "001300.jpg", "001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0116_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000500.jpg", "000900.jpg", "001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0117_00", "k": 4, "answer": "kitchen", "frames": ["000000.jpg", "000200.jpg", "000300.jpg", "000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0118_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000200.jpg", "000400.jpg", "000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0119_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000600.jpg", "000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0124_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000600.jpg", "001300.jpg", "001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0125_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000200.jpg", "000500.jpg", "000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0126_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000500.jpg", "001100.jpg", "001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0127_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000400.jpg", "000800.jpg", "001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0128_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000700.jpg", "001300.jpg", "001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0129_00", "k": 4, "answer": "living room", "frames": ["000000.jpg", "000700.jpg", "001400.jpg", "002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0131_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0133_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000300.jpg", "000500.jpg", "000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0135_00", "k": 4, "answer": "bathroom", "frames": ["000000.jpg", "000300.jpg", "000700.jpg", "001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0137_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000600.jpg", "001200.jpg", "001800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0138_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000700.jpg", "001300.jpg", "002000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0141_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000300.jpg", "000600.jpg", "000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0142_00", "k": 4, "answer": "office", "frames": ["000000.jpg", "000800.jpg", "001600.jpg", "002400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0143_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000100.jpg", "000100.jpg", "000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0144_00", "k": 4, "answer": "bedroom", "frames": ["000000.jpg", "000500.jpg", "000900.jpg", "001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0001_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0002_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["002600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0003_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0004_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0006_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0007_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0009_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0010_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0011_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0012_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["002700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0013_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0014_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0017_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0019_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0021_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0022_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0024_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0025_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0026_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0027_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0029_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0031_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0032_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0033_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0034_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0035_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0036_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0039_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0040_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0042_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0043_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0045_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0047_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0049_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0050_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0051_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0055_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0058_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0059_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0060_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0061_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0062_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0063_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0065_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0067_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0068_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0070_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0071_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0072_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0073_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0076_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0077_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0078_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0080_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0081_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0082_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0083_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0084_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0085_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0086_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0087_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0089_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0090_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0091_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0092_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0093_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0094_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0096_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0097_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0098_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0100_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0105_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0107_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0108_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0110_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0111_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0112_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0113_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0114_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0116_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0117_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0118_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0119_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0124_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0125_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0126_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0127_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0128_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0129_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0131_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0133_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0135_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0137_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0138_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0141_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0142_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0143_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0144_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0146_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0147_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0148_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0149_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0150_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0151_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0152_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0153_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0157_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0158_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0160_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0161_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0162_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0164_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0165_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0166_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0168_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0170_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0172_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0174_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0175_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0177_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0178_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0179_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0181_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0184_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0186_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0192_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0193_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0195_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0196_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0197_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0198_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0200_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0201_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0203_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0206_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0209_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0210_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0211_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0212_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0213_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0214_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0217_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0219_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0220_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0221_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0222_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["002700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0223_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0224_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0226_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0230_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0232_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0233_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["003800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0234_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0235_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0236_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0237_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0238_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0239_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0241_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0242_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0243_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0244_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0246_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0247_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0248_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0250_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0251_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0253_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0254_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0255_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0256_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0259_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0260_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0262_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0263_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0264_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0265_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0267_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0268_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0270_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0271_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0272_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0273_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0274_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0275_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0277_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0279_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0280_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0281_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0282_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0286_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0287_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0290_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0293_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0294_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0295_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0296_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0297_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0298_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0299_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0301_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0305_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0306_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0308_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0309_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0310_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0313_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0315_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0316_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0319_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0321_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0322_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0323_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0324_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0326_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0328_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0330_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0331_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0332_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0333_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0334_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0335_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0336_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0339_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0340_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0341_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0344_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0346_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0347_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0348_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0350_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0351_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0352_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0353_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0356_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0359_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0362_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0364_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0365_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0366_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0367_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0368_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0369_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0371_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0374_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0375_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0376_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0378_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0379_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0380_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0382_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0383_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0385_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0386_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0387_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0389_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0390_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0394_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0395_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0396_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0397_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0398_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0399_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0400_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0406_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0407_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0409_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0410_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0412_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0413_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0415_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0416_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0418_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0423_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0424_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0425_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0426_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0429_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0431_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0432_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0433_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0434_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0435_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0436_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0437_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0438_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0439_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0440_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0441_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0442_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0445_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0446_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0447_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0448_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0449_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0457_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0458_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0460_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0464_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0465_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["003200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0467_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0468_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0469_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0471_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0473_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0474_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0476_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0477_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["002200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0479_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0480_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0484_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0485_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0486_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0487_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0488_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0492_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0497_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["001600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0498_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0499_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["002700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0501_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0503_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0505_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0506_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0507_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0509_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0510_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0513_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0514_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0517_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0518_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0519_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0520_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0521_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0522_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0523_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0525_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0526_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0527_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0529_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0530_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0532_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0535_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0537_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0538_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0539_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0540_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0541_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0542_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0543_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0545_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0546_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0547_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0548_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0550_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["002000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0552_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0553_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0554_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0556_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0557_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0559_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0560_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0564_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0567_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0568_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0570_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0571_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0572_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0573_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0574_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0576_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0577_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0579_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0580_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0581_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0582_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0583_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0586_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0587_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0588_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0589_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0590_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0591_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0593_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0594_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0600_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0602_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0603_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0604_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0607_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0608_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0609_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0610_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0612_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0613_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["003000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0614_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0615_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0616_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0617_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0619_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0620_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0622_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0623_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0625_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0626_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0628_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0630_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0631_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0633_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0638_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0639_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0640_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0642_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0643_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0644_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0645_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0646_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["002400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0647_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0648_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["002100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0649_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0651_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0652_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0653_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0654_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0656_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0658_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0659_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0660_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0662_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0663_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0664_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0668_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0670_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0672_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0673_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0674_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0675_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0676_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0677_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001200.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0679_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0681_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000700.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0682_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0683_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0684_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0686_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000800.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0687_00", "k": 1, "answer": "kitchen", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0688_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000600.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0693_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0694_00", "k": 1, "answer": "office", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0695_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001000.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0697_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["001400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0698_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0699_00", "k": 1, "answer": "dining room", "num_ctx": 4096, "frames": ["001100.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0700_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["002300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0701_00", "k": 1, "answer": "living room", "num_ctx": 4096, "frames": ["000500.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0702_00", "k": 1, "answer": "bathroom", "num_ctx": 4096, "frames": ["000400.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0703_00", "k": 1, "answer": "corridor", "num_ctx": 4096, "frames": ["000300.jpg"]}
+{"model": "gemma4:26b", "scan": "scene0706_00", "k": 1, "answer": "bedroom", "num_ctx": 4096, "frames": ["000900.jpg"]}

@@ -1,0 +1,39 @@
+{
+  "model": "gemma4:26b",
+  "model_digest": "001e5dafc3c77684c2307ebc6ab8e336e10c9b18eca52acf547d72fc83c3ca8c",
+  "ollama": "http://localhost:11434",
+  "levels": {
+    "almost never": 0.05,
+    "unlikely": 0.25,
+    "as likely as not": 0.5,
+    "likely": 0.75,
+    "almost always": 0.95
+  },
+  "system": "You answer questions about ordinary homes, as most people would. Answer with exactly one of these phrases: \"almost never\", \"unlikely\", \"as likely as not\", \"likely\", \"almost always\". Reply as JSON: {\"answer\": \"<phrase>\"}.",
+  "templates": {
+    "L4_POS": [
+      "In a typical home, how often does a room used as a {f} contain at least one {c}?",
+      "Think of {f}s in ordinary homes. How likely is it that a given {f} has {a_c} in it?",
+      "Someone walks into the {f} of a home. How likely are they to find {a_c} there?"
+    ],
+    "PF": [
+      "In ordinary homes, how likely is it that a given room is used as a {f}?",
+      "Pick a room of a typical home at random. How likely is it to be a {f}?",
+      "A robot is placed in a room chosen at random from an ordinary home. How likely is it that this room is the {f}?"
+    ],
+    "L3": [
+      "In a home, {a_c} stands against a wall. How likely is it to be part of a fitted kitchen, the run of built-in kitchen units?",
+      "You see {a_c} against a wall in a home. How likely is it that it belongs to the built-in kitchen units?",
+      "Of all the {cs} standing against walls in ordinary homes, how often is one part of a fitted kitchen run?"
+    ],
+    "L3_BASE_CLASS": "piece of furniture or appliance"
+  },
+  "spoken": {
+    "hood": "extractor hood"
+  },
+  "pi_c_notf": "uniform mean of pi_cg over the other functions",
+  "vocab_sha": "0e34f18e31d0e8e099c1e6246d70f07e4086f9a495e56078bbf26c48b8e99fbe",
+  "answered": 717,
+  "of": 717,
+  "written": "2026-11-21T21:27:13+00:00"
+}

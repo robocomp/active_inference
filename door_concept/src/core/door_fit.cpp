@@ -387,6 +387,18 @@ void DoorFit::seed_bearing_hypothesis(rc::DoorFitState& inst, const Eigen::Vecto
     refresh_geometry(inst);
 }
 
+float DoorFit::birth_across_var(const Eigen::Vector2f& xy) const
+{
+    const auto band = room_band();
+    const float sd = cfg_.door_recess_prior_std >= 0.0f ? cfg_.door_recess_prior_std   // the same expression make_belief_params writes into recess_prior_std
+                   : std::sqrt(band.wall_thickness_m * band.wall_thickness_m / 12.0f + band.sigma_m * band.sigma_m);
+    float chain = 0.0f;
+    if (cfg_.rt_cov_add_chain and masks_ != nullptr)
+        if (const auto g = chain_point_cov(masks_->packet().room_zed_chain, Eigen::Vector3d(xy.x(), xy.y(), 0.5 * cfg_.door_prior_h_m)); g.has_value())
+            chain = 0.5f * static_cast<float>((*g)(0, 0) + (*g)(1, 1));
+    return sd * sd + chain;
+}
+
 void DoorFit::compute_chain_cov(rc::DoorFitState& inst)
 {
     inst.chain_cov_xx = 0.0f;
@@ -810,6 +822,14 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             if (carried_u.has_value() and carried_u->dot(p.wall_u) < 0.0f)
                 p.leaf.hinge = p.leaf.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
         }
+        if (inst.birth_aperture.has_value())
+        {   // leaf-born: the hypothesis' own frame-wall aperture and leaf pose, not the leaf mask's plane
+            const auto& [bap, bleaf] = *inst.birth_aperture;
+            p.wall_O = bap.wall_O; p.wall_u = bap.wall_u;
+            s0.s = bap.s; s0.w = bap.w; s0.h = bap.h; s0.d = 0.0f;
+            p.leaf = bleaf;
+            inst.birth_aperture.reset();
+        }
         inst.framed_in_proto = room_is_proto_;
         inst.ai2_belief = rc::DoorBelief(s0, p);
         // ★Task D-C round 2 (tour3C): A REMEMBERED PLACE IS NOT A BIRTH SEED. A door restored from memory came back with the
@@ -880,6 +900,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
     // "Be-still-to-update" invariant: a truncated view (gated) OR a MOVING robot may only CONFIRM the door, never
     // move/reshape it. A moving frame's mask is a shared smear whose centroid is unreliable — predict-only here
     // (mean held, Σ carries its one-step Q); the existence belief still confirms it (its mask reset stops vacate).
+    // kept: the lifecycle UPDATE invariant (CONCEPT_AGENT_LIFECYCLE.md): a frame must be resolvable, centred and still to MOVE geometry. A contract,
+    // not a patch; no model term replaces it. One-model (S4) removed only the existence cliff (frame_admissible), not this gate.
     const bool trunc_gated  = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
     const bool motion_gated = confirm_only(inst);
     const bool gated = trunc_gated or motion_gated;
@@ -910,6 +932,9 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             view_cam = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
             credit = credit_view(inst.bearing_view_cam, inst.bearing_view_credit, *view_cam, inst.aperture);
         }
+        // ONE-MODEL: this door explains only mask_rho of the mask (door_mask_causes.h); the rest belongs to another door, a new one or
+        // clutter, so the support sample's weight is its share (a mask two doors share counts once in total, not twice)
+        if (cfg_.exist_one_model) credit *= std::clamp(inst.mask_rho, 0.0f, 1.0f);   // clamp: ρ is a probability (domain, not a threshold)
         inst.dbg_view_credit = credit;
         rc::DoorFrame frame;
         frame.points.reserve(static_cast<std::size_t>(npts));
@@ -1046,12 +1071,20 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         //  from LiDAR alone; its first mask in 25 min lay on the closed leaf plane, x = 1.00 at the 81° point estimate, and that one
         //  frame removed the real door (sup dl −1.95). The fit's own clutter share (last_clutter_frac, logged) keeps its meaning:
         //  how well THIS state explains the mask.
+        // ONE-MODEL: x under ALL FOUR hinge × swing hypotheses of the leaf channel (DoorBelief::leaf_mixture); the single-swing marginal
+        // calls a leaf seen side-on on the swing side the belief gave 0.1 all clutter (chat_e2e18). Not initialised yet: the old marginal.
+        float one_model_x = std::numeric_limits<float>::quiet_NaN();
+        if (cfg_.exist_one_model and not frame.points.empty())
+            one_model_x = inst.ai2_belief.clutter_fraction_leaf_marginal(frame.points, R, inst.leaf_channel, cfg_.phi_max_rad);
+        if (not std::isfinite(one_model_x) and not frame.points.empty())
+            one_model_x = inst.ai2_belief.clutter_fraction_leaf_marginal(frame.points, R, inst.phi_curve);
         if (not frame.points.empty())   // the existence channel `sup`: x is undefined with no support (no default)
-            inst.pending_fit_support = rc::door::core::FitSupport{inst.ai2_belief.clutter_fraction_leaf_marginal(frame.points, R, inst.phi_curve),
+            inst.pending_fit_support = rc::door::core::FitSupport{one_model_x,
                                                                   inst.last_slice_sensor,
                                                                   rc::door::aperture_coverage(inst.ai2_belief.aperture(), frame.points),
                                                                   rc::door::aperture_overlap(inst.ai2_belief.aperture().w,
-                                                                      std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))))};
+                                                                      std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0)))),
+                                                                  inst.last_trunc_frac, inst.last_mask_confidence};
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
     inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());   // HELD, see door_fit_state.h
@@ -1490,6 +1523,17 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     lin.cmd_sigma = sigma_phi;
     lin.phi_min = PHI_MIN; lin.phi_max = PHI_MAX; lin.nstep = NSTEP;
     lin.view_rad = cfg_.phi_step_rad;
+    // ★ONE-MODEL: A SWEEP IS SCORED UNDER THE BELIEF THAT PRECEDES IT (final review 4). The existence term of this sweep's opening is a predictive
+    //  likelihood, so P(open) is the door's four-branch share E[1 - cos phi] BEFORE this sweep's returns formed the posterior (the same quantity the
+    //  camera's p_D reads, DoorBelief::leaf_p_open), the birth prior when no leaf belief exists yet. Scoring it under the posterior it just made
+    //  was positive feedback: the through bins first opened phi, then earned a higher P(through | door).
+    double cf_pre = std::numeric_limits<double>::quiet_NaN();
+    if (cfg_.exist_one_model)
+    {
+        if (inst.ai2_initialized) cf_pre = inst.ai2_belief.leaf_p_open(inst.leaf_channel, cfg_.phi_max_rad);
+        if (not std::isfinite(cf_pre)) cf_pre = cfg_.ricoh_birth_p_open;   // the one open prior the agent has, as observe_place's camera
+        cf_pre = std::clamp(cf_pre, 0.0, 1.0);   // clamp: domain of a share
+    }
     const auto lr = rc::door::leaf_channel_step(inst.leaf_channel, inst.ai2_belief, inst.hinge_llr, inst.swing_llr,
                                                 inst.phi_est, inst.phi_sigma, lin);
     inst.hinge_llr_ref = inst.ai2_belief.params().leaf.hinge;
@@ -1536,6 +1580,23 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         const auto ap = inst.ai2_belief.aperture();
         const auto runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts);
         inst.opening_runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts, ap.w);   // "clear": past the leaf's reach
+        // ★THE LiDAR OPENING AS EXISTENCE EVIDENCE (one-model, spec §3.3): this sweep's reading of the span against solid wall, with this
+        //  door's leaf posterior as P(open), for the next existence update (channel `lid`). An open door the ZED cannot see still shows its
+        //  opening here; a phantom's span reads wall. One term per sweep; the ledger makes it one trial per view.
+        if (cfg_.exist_one_model)
+        {
+            const std::pair<float, float> pre{std::acos(static_cast<float>(1.0 - cf_pre)), 1.0f};   // the one-point curve whose clear fraction is cf_pre
+            // the other live doors' spans in THIS aperture's along-wall coordinate (the aperture moved in this cycle's inference: converted here)
+            std::vector<rc::door::OpeningClaim> claims;
+            for (const auto& c : inst.lidar_claims)
+            {
+                const float a = (c.centre - ap.wall_O).dot(ap.wall_u);
+                claims.push_back({a - c.half_w, a + c.half_w, c.r});
+            }
+            inst.pending_lidar = rc::door::core::LidarOpening{rc::door::opening_view_llr(ap, reg_sweep, lidar_through_open_, lidar_through_wall_,
+                                                                                         std::span<const std::pair<float, float>>(&pre, 1), claims),
+                                                                reg_sweep.origin.head<2>()};
+        }
         const Eigen::Vector2f u = ap.wall_u;
         const float chain_s = u.x() * u.x() * inst.chain_cov_xx + 2.0f * u.x() * u.y() * inst.chain_cov_xy
                             + u.y() * u.y() * inst.chain_cov_yy;

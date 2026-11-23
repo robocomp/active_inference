@@ -1,0 +1,170 @@
+diff --git a/nvblox/include/nvblox/sensors/internal/impl/lidar_impl.h b/nvblox/include/nvblox/sensors/internal/impl/lidar_impl.h
+index 5ef402d..7c79416 100644
+--- a/nvblox/include/nvblox/sensors/internal/impl/lidar_impl.h
++++ b/nvblox/include/nvblox/sensors/internal/impl/lidar_impl.h
+@@ -17,6 +17,7 @@ limitations under the License.
+ #pragma once
+ 
+ #include "math.h"
++#include <algorithm>
+ 
+ #include "nvblox/core/internal/error_check.h"
+ #include "nvblox/geometry/transforms.h"
+@@ -128,8 +129,7 @@ bool Lidar::project(const Vector3f& p_C, Vector2f* u_C, const float,
+   const float azimuth_angle_rad = atan2(p_C.y(), p_C.x());
+ 
+   // To image plane coordinates
+-  float v_float =
+-      (polar_angle_rad - start_polar_angle_rad_) * elevation_pixels_per_rad_;
++  float v_float = polarToRow(polar_angle_rad);
+   float u_float =
+       (azimuth_angle_rad - start_azimuth_angle_rad_) * azimuth_pixels_per_rad_;
+ 
+@@ -186,8 +186,7 @@ Vector3f Lidar::unprojectFromPixelIndices(const Index2D& u_C,
+ Vector3f Lidar::vectorFromImagePlaneCoordinates(const Vector2f& u_C) const {
+   // NOTE(alexmillane): We don't do any bounds checking, i.e. that the point is
+   // actually on the image plane.
+-  const float polar_angle_rad =
+-      u_C.y() * rads_per_pixel_elevation_ + start_polar_angle_rad_;
++  const float polar_angle_rad = rowToPolar(u_C.y());
+   const float azimuth_angle_rad =
+       u_C.x() * rads_per_pixel_azimuth_ + start_azimuth_angle_rad_;
+   return Vector3f(cos(azimuth_angle_rad) * sin(polar_angle_rad),
+@@ -195,6 +194,54 @@ Vector3f Lidar::vectorFromImagePlaneCoordinates(const Vector2f& u_C) const {
+                   cos(polar_angle_rad));
+ }
+ 
++float Lidar::polarToRow(float polar_rad) const {
++  if (num_rings_ < 2) {
++    return (polar_rad - start_polar_angle_rad_) * elevation_pixels_per_rad_;
++  }
++  const float* c = ring_polar_rad_;
++  int lo = 0, hi = num_rings_ - 1;   // last segment start with c[i] <= polar, clamped to [0, n-2]
++  while (hi - lo > 1) {
++    const int mid = (lo + hi) / 2;
++    if (c[mid] <= polar_rad) lo = mid; else hi = mid;
++  }
++  if (polar_rad >= c[num_rings_ - 1]) lo = num_rings_ - 2;
++  return lo + 0.5f + (polar_rad - c[lo]) / (c[lo + 1] - c[lo]);
++}
++
++float Lidar::rowToPolar(float v) const {
++  if (num_rings_ < 2) {
++    return v * rads_per_pixel_elevation_ + start_polar_angle_rad_;
++  }
++  const float w = v - 0.5f;
++  int i = static_cast<int>(floorf(w));
++  i = i < 0 ? 0 : (i > num_rings_ - 2 ? num_rings_ - 2 : i);
++  return ring_polar_rad_[i] + (w - i) * (ring_polar_rad_[i + 1] - ring_polar_rad_[i]);
++}
++
++float Lidar::ring_gap_rad(int row, bool towards_larger_polar) const {
++  if (num_rings_ < 2) return rads_per_pixel_elevation_;
++  row = row < 0 ? 0 : (row > num_rings_ - 1 ? num_rings_ - 1 : row);
++  if (towards_larger_polar) {
++    row = row > num_rings_ - 2 ? num_rings_ - 2 : row;
++  } else {
++    row = row > 0 ? row - 1 : 0;
++  }
++  return ring_polar_rad_[row + 1] - ring_polar_rad_[row];
++}
++
++void Lidar::set_ring_elevations_rad(const float* elevation_rad, int n) {
++  NVBLOX_CHECK(n == num_elevation_divisions_ && n >= 2 && n <= kMaxRings, "");
++  for (int i = 0; i < n; ++i) ring_polar_rad_[i] = M_PI / 2.0f - elevation_rad[i];
++  std::sort(ring_polar_rad_, ring_polar_rad_ + n);
++  num_rings_ = n;
++  max_angle_above_zero_elevation_rad_ = M_PI / 2.0f - ring_polar_rad_[0];
++  min_angle_below_zero_elevation_rad_ = M_PI / 2.0f - ring_polar_rad_[n - 1];
++  vertical_fov_rad_ = ring_polar_rad_[n - 1] - ring_polar_rad_[0];
++  rads_per_pixel_elevation_ = vertical_fov_rad_ / static_cast<float>(n - 1);
++  elevation_pixels_per_rad_ = 1.0f / rads_per_pixel_elevation_;
++  start_polar_angle_rad_ = ring_polar_rad_[0] - rads_per_pixel_elevation_ / 2.0f;
++}
++
+ Vector3f Lidar::vectorFromPixelIndices(const Index2D& u_C) const {
+   return vectorFromImagePlaneCoordinates(
+       pixelIndexToImagePlaneCoordsOfCenter(u_C));
+@@ -227,7 +274,8 @@ size_t Lidar::Hash::operator()(const Lidar& lidar) const {
+ }
+ 
+ bool operator==(const Lidar& lhs, const Lidar& rhs) {
+-  return (lhs.num_azimuth_divisions_ == rhs.num_azimuth_divisions_) &&
++  return (lhs.num_rings_ == rhs.num_rings_) &&
++         (lhs.num_azimuth_divisions_ == rhs.num_azimuth_divisions_) &&
+          (lhs.num_elevation_divisions_ == rhs.num_elevation_divisions_) &&
+          (lhs.min_valid_range_m_ == rhs.min_valid_range_m_) &&
+          (std::fabs(lhs.vertical_fov_rad_ - rhs.vertical_fov_rad_) <
+@@ -297,11 +345,24 @@ bool Lidar::interpolateDepthImage(const DepthImageConstView frame,
+     // Note(alexmillane): This is to prevent large numbers of voxels
+     // being integrated by a single pixel at long ranges.
+     const Vector3f closest_ray = vectorFromPixelIndices(u_px_closest);
+-    const float off_ray_squared_distance =
+-        (p_voxel_center_C - p_voxel_center_C.dot(closest_ray) * closest_ray)
+-            .squaredNorm();
+-    if (off_ray_squared_distance >
+-        nearest_interpolation_max_allowable_squared_dist_to_ray_m) {
++    const Vector3f off_ray =
++        p_voxel_center_C - p_voxel_center_C.dot(closest_ray) * closest_ray;
++    if (nearest_interpolation_ring_fraction_ > 0.0f) {
++      // residual_nvblox patch: split the offset into azimuth / elevation at the ray.
++      const float az = atan2f(closest_ray.y(), closest_ray.x());
++      const float pol = acosf(fminf(1.0f, fmaxf(-1.0f, closest_ray.z())));
++      const Vector3f e_az(-sinf(az), cosf(az), 0.0f);
++      const Vector3f e_pol(cosf(az) * cosf(pol), sinf(az) * cosf(pol), -sinf(pol));
++      const float tol_m = nearest_interpolation_max_allowable_dist_to_ray_vox_ * voxel_size;
++      const float d_pol = off_ray.dot(e_pol);
++      const float tol_el = fmaxf(tol_m, nearest_interpolation_ring_fraction_ *
++                                            ring_gap_rad(u_px_closest.y(), d_pol > 0.0f) *
++                                            p_voxel_center_C.norm());
++      if (fabsf(off_ray.dot(e_az)) > tol_m || fabsf(d_pol) > tol_el) {
++        return false;
++      }
++    } else if (off_ray.squaredNorm() >
++               nearest_interpolation_max_allowable_squared_dist_to_ray_m) {
+       return false;
+     }
+   }
+diff --git a/nvblox/include/nvblox/sensors/lidar.h b/nvblox/include/nvblox/sensors/lidar.h
+index 0adcc97..9089d11 100644
+--- a/nvblox/include/nvblox/sensors/lidar.h
++++ b/nvblox/include/nvblox/sensors/lidar.h
+@@ -146,7 +146,25 @@ class Lidar : public SensorBase {
+     nearest_interpolation_max_allowable_dist_to_ray_vox_ = value;
+   }
+ 
++  /// residual_nvblox patch: the nearest-pixel fallback also accepts a voxel whose off-ray offset ALONG ELEVATION
++  /// is within this fraction of the row spacing at its range (r·Δelev·fraction), i.e. the space between two rings,
++  /// while the azimuth offset keeps the fixed voxel tolerance. 0 = upstream behaviour.
++  __host__ __device__ float nearest_interpolation_ring_fraction() const {
++    return nearest_interpolation_ring_fraction_;
++  }
++  __host__ __device__ void nearest_interpolation_ring_fraction(const float value) {
++    nearest_interpolation_ring_fraction_ = value;
++  }
++
+   /// Equality
++  // residual_nvblox patch: real per-ring elevations (any order, n == rows). Row v is then ring v (top
++  // first) and the elevation axis is piecewise linear between ring centres instead of uniform.
++  static constexpr int kMaxRings = 128;
++  __host__ inline void set_ring_elevations_rad(const float* elevation_rad, int n);
++  __host__ __device__ int num_ring_elevations() const { return num_rings_; }
++  // Angular gap from ring `row` to its neighbour on the side `towards_larger_polar` (uniform model: the pixel).
++  __host__ __device__ inline float ring_gap_rad(int row, bool towards_larger_polar) const;
++
+   __host__ inline friend bool operator==(const Lidar& lhs, const Lidar& rhs);
+ 
+   /// Hash
+@@ -175,6 +193,12 @@ class Lidar : public SensorBase {
+   // Interpolation parameters
+   float linear_interpolation_max_allowable_difference_vox_ = 2.0f;
+   float nearest_interpolation_max_allowable_dist_to_ray_vox_ = 0.5f;
++  float nearest_interpolation_ring_fraction_ = 0.0f;   // residual_nvblox patch
++
++  __host__ __device__ inline float polarToRow(float polar_rad) const;
++  __host__ __device__ inline float rowToPolar(float v) const;
++  int num_rings_ = 0;                  // residual_nvblox patch: 0 = uniform rows
++  float ring_polar_rad_[kMaxRings];    // ascending polar angle = row order
+ };
+ 
+ // Equality

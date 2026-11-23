@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "../../common/ltsm_topology/door_memory.h"
+
 namespace rc::ltsm
 {
 struct TopoRoom { std::string name; bool live = false; };
@@ -49,11 +51,13 @@ inline std::string topo_json_string(const std::string& s)
 }
 
 // {"rooms":[{"name","live"}],"passages":[{"id","a":{"room","face"},"b":{"room","face"},"crossings",
-//  "p_pass":{"alpha","beta"},"p_open":{"alpha","beta"},"live_door"?}],"room_ids":[every room_id in memory]}
+//  "p_pass":{"alpha","beta"},"p_open":{"alpha","beta"},"live_door"?}],"room_ids":[every room_id in memory],
+//  "door_memory"?:{"next_index","changes","exposure_s"}}
 // (room_ids: names are deduplicated live names, which would lose a room whose name repeats; an agent that keeps a private memory keyed by
 //  room_id forgets the rows of any id not listed.)
 inline std::string encode_topology(const std::vector<TopoRoom>& rooms, const std::vector<TopoPassage>& passages,
-                                   const std::vector<std::uint64_t>& room_ids = {})
+                                   const std::vector<std::uint64_t>& room_ids = {},
+                                   const std::optional<rc::doormem::DoorMemory>& door_memory = std::nullopt)
 {
     std::string o = "{\"rooms\":[";
     for (std::size_t i = 0; i < rooms.size(); ++i)
@@ -72,6 +76,10 @@ inline std::string encode_topology(const std::vector<TopoRoom>& rooms, const std
     }
     o += "],\"room_ids\":[";
     for (std::size_t i = 0; i < room_ids.size(); ++i) o += std::format("{}{}", i ? "," : "", room_ids[i]);
-    return o + "]}";
+    o += "]";
+    if (door_memory.has_value())   // door_memory.h: the door names' counter and the change hazard, kept for door_concept
+        o += std::format(",\"door_memory\":{{\"next_index\":{},\"changes\":{},\"exposure_s\":{}}}",
+                         door_memory->next_index, door_memory->changes, door_memory->exposure_s);
+    return o + "}";
 }
 }   // namespace rc::ltsm

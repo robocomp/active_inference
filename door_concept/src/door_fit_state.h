@@ -271,6 +271,16 @@ struct DoorFitState
     // ★THE FIT'S OWN SUPPORT, CONSUMED ONCE by the next existence update (channel `sup`): set only on a cycle whose fit ran on a
     //  non-empty support (a gated/stale/held cycle leaves it alone) and taken out by update_existence — no fit means no term.
     std::optional<rc::door::core::FitSupport> pending_fit_support;
+    // ★THE LiDAR OPENING (one-model, spec §3.3), consumed once like the support: the fit's registered sweep read through this door's aperture span
+    //  (opening_view_llr); set only on a cycle that had a sweep and under Existence.OneModel.
+    std::optional<rc::door::core::LidarOpening> pending_lidar;
+    /// The OTHER live doors' spans on this door's wall, in room coordinates (centre, half width) with their last-cycle existence r: a bin one of them holds is its evidence,
+    /// not this door's (per-bin freedom Π(1 − r_j), as the candidates and hypotheses get it). Set by the core before the fit (final review 5); one-model only.
+    struct LidarClaimW { Eigen::Vector2f centre = Eigen::Vector2f::Zero(); float half_w = 0.f, r = 0.f; };
+    std::vector<LidarClaimW> lidar_claims;
+    // ★A LEAF-BORN DOOR starts AT the aperture and leaf state of the hypothesis that bore it (spec §3.6: the frame wall, the owner's requirement), consumed once by
+    //  the first belief init instead of reading the aperture off the leaf mask's plane.
+    std::optional<std::pair<rc::door::Aperture, rc::door::LeafState>> birth_aperture;
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→door horizontal ray vs backrest normal (1=face-on, →0 grazing)
 
     // Free-energy readout + attention baseline (clutter-inclusive F; TABLE.md §9). dbg_energy HOLDS the last
@@ -295,6 +305,7 @@ struct DoorFitState
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     float chain_cov_xy = 0.0f;   // Task D-C round 2: its xy cross term, so a projection on ANY direction is exact
+    float mask_rho          = 1.0f;   // ONE-MODEL: the share of the assigned mask this door explains (core/door_mask_causes.h); weights the fit's support sample
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     // ── Existence belief ──────────────────────────────────────────────────────────────────────────────
     // ★Task 8: THE existence belief of this door place — prior + carried + crossing + view ledger (core/place_belief.h).

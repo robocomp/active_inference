@@ -249,7 +249,7 @@ static void test_thumbnails_from_another_binning_are_dropped()
     CHECK(got.entries().at(kBig).thumbs.empty());
 }
 
-static HumanBook make_book(const Repertory& r)
+static HumanBook make_book(Repertory& r)
 {
     HumanBook b;
     b.apply(Claim{ClaimKind::name, "Pablo", 0, "my name is Pablo", 1}, r, 1794420000000);
@@ -263,7 +263,7 @@ static bool same_said(const Said& a, const Said& b) { return a.t_ms == b.t_ms an
 static void test_human_round_trip()
 {
     const fs::path f = fresh_dir() / "rep.json";
-    const Repertory r = make_repertory();
+    Repertory r = make_repertory();
     const HumanBook b = make_book(r);
     CHECK(b.human().things.size() == 2 and b.human().names.size() == 2);
     CHECK(save_repertory(f, r, &b));
@@ -292,7 +292,7 @@ static void test_human_round_trip()
 static void test_file_without_humans_loads()
 {
     const fs::path f = fresh_dir() / "rep.json";
-    const Repertory r = make_repertory();
+    Repertory r = make_repertory();
     CHECK(save_repertory(f, r));                       // today's shape: no "humans" section
     CHECK(read_file(f).find("humans") == std::string::npos);
     Repertory r2(3000);
@@ -305,7 +305,7 @@ static void test_file_without_humans_loads()
 static void test_save_keeps_entries_with_humans()
 {
     const fs::path f = fresh_dir() / "rep.json";
-    const Repertory r = make_repertory();
+    Repertory r = make_repertory();
     const HumanBook b = make_book(r);
     CHECK(save_repertory(f, r, &b));
     Repertory r2(3000);

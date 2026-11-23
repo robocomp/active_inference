@@ -4,7 +4,7 @@
 \usepackage{cancel}
 
 \title{A robot that acts to know}
-\subtitle{Day 1 --- The challenge, probability, and free energy}
+\subtitle{Day 1 --- The challenge and probability}
 \date{Monday 30 November}
 
 % --- the door table drawn as areas: width x height = probability ---------------------------------
@@ -50,7 +50,8 @@
     $\rightarrow$ door crossed $\rightarrow$ second room}}}
   \vspace{1em}
 
-  Watch for one thing: \alert{nothing in this video was programmed as a sequence of steps.}
+  \vfill
+  \lesson{Nothing in this video was programmed as a sequence of steps.}
 \end{frame}
 
 \begin{frame}{The cycle we will build this week}
@@ -70,21 +71,24 @@
     \draw[arr] (obj)  to[bend left=15] (door);
     \draw[arr] (door) to[bend left=15] (mem);
     \draw[arr] (mem)  to[bend left=15] (room);
-    \node[day, above=1pt of room] {Day 3};
-    \node[day, right=1pt of loc]  {Days 3--4};
-    \node[day, below=1pt of obj]  {Day 3};
-    \node[day, below=1pt of door] {Day 4};
-    \node[day, left=1pt of mem]   {Day 2};
-    \node[align=center] at (0,0) {every stage is a belief\\[2pt] \alert{one} quantity to lower\\{\scriptsize (this afternoon)}};
+    \node[day, above=1pt of room] {Day 4};
+    \node[day, right=1pt of loc]  {Days 4--5};
+    \node[day, below=1pt of obj]  {Day 4};
+    \node[day, below=1pt of door] {Day 5};
+    \node[day, left=1pt of mem]   {Day 3};
+    \node[align=center] at (0,0) {every stage is a belief\\[2pt] \alert{one} quantity to lower\\{\scriptsize (Day 2)}};
   \end{tikzpicture}
+  \vfill
+  \lesson{Each stage is a belief, and one quantity, defined on Day 2, improves them all.}
 \end{frame}
 
 \begin{frame}{The toy version you will build}
   \centering
-  \includegraphics[width=0.78\textwidth]{toyworld.png}
+  \includegraphics[width=0.66\textwidth]{toyworld.png}
 
-  \small Two rooms, one door, three objects, a LiDAR, and a robot whose wheels lie a little.
-  Pure \texttt{numpy}; it runs on your laptop.
+  \small Two rooms, one door, three objects, a LiDAR, and a robot whose wheel odometry drifts a little.
+  \vfill
+  \lesson{Everything you build this week runs on this toy, in \texttt{numpy}, on your laptop.}
 \end{frame}
 
 \begin{frame}{How this course is built}
@@ -127,7 +131,7 @@
   \end{tikzpicture}
 
   \vspace{0.9em}
-  \lesson{The third step is not optional: most of what the thesis learned, it learned there.}
+  \lesson{The third step is not optional: most of what we learned, we learned there.}
 \end{frame}
 
 % =================================================================================================
@@ -157,7 +161,7 @@
       {\color{cool!80!black}$s$: pose and room ($x,y,\theta,w,d$)}\quad {\color{good!70!black}$o$: scan}\quad {\color{black!75}$a$: command ($v,\omega$)}
 
   \vfill
-  \centering Every unknown is a \textbf{random variable}; a belief is its \textbf{distribution}.
+  \lesson{Every unknown is a random variable; a belief is its distribution.}
 \end{frame}
 
 \begin{frame}{A belief over a discrete variable: one number per value}
@@ -195,6 +199,8 @@
       \small how spread the numbers are is \textbf{how uncertain} the belief is
     \end{column}
   \end{columns}
+  \vfill
+  \lesson{One probability per value, adding to 1; how spread they are is the uncertainty.}
 \end{frame}
 
 \begin{frame}{The joint distribution: everything there is to know}
@@ -227,8 +233,8 @@
     \end{column}
   \end{columns}
 
-  \vspace{0.8em}
-  \centering Everything this week is \alert{three operations} on it: summing, slicing, and multiplying back.
+  \vfill
+  \lesson{Everything this week is three operations on the joint: summing, slicing, and multiplying back.}
 \end{frame}
 
 \begin{frame}{Marginalisation: the belief about one variable, summing over the others}
@@ -270,6 +276,8 @@
     \end{column}
   \end{columns}
 
+  \vfill
+  \lesson{To marginalise, add the joint over the variable you drop: $p(O) = 0.41,\ 0.59$.}
 \end{frame}
 
 % The marginal frame's picture with both marginals; the gap column stretched to width 1.
@@ -309,8 +317,7 @@
   \end{tikzpicture}
 
   \vfill
-  $p(\text{open}\given\text{gap})$ is the \alert{0.27} box rescaled, $0.27/0.41$, so that with
-  $p(\text{closed}\given\text{gap})$ it adds to 1.
+  \lesson{Conditioning keeps the column that matches the reading and rescales it: $0.27/0.41 = 0.66$.}
 \end{frame}
 
 \begin{frame}{Factorisation: express the joint as factors}
@@ -347,6 +354,8 @@
     \node[font=\Large, text=muted] at (5.4,1.2) {$=$};
   \end{tikzpicture}
   \vfill
+  \vfill
+  \lesson{Either order rebuilds the same joint: $0.30\times0.9 = 0.41\times0.66 = 0.27$.}
 \end{frame}
 
 \begin{frame}{A belief over a continuous variable: a density}
@@ -389,6 +398,8 @@
       \small a Gaussian belief is \textbf{two numbers}, $\mu$ and $\sigma$
     \end{column}
   \end{columns}
+  \vfill
+  \lesson{A continuous belief is a density: area is probability, and a Gaussian needs only $\mu$ and $\sigma$.}
 \end{frame}
 
 \begin{frame}{The joint of continuous variables: a surface}
@@ -409,13 +420,15 @@
   \end{columns}
 
   \vfill
-  \centering Area became \textbf{volume}: the \textcolor{prob!85!black}{orange} patch, $s,o \in [2.0,\,2.5]$ m, holds probability \textcolor{prob!85!black}{\textbf{0.23}}.
+  \lesson{Area became volume: the orange patch, $s,o \in [2.0,\,2.5]$\,m, holds probability 0.23.}
 \end{frame}
 
 \begin{frame}{Marginalisation: the belief about one variable, integrating over the others}
   \begin{center}\large $\displaystyle p(o) = \int p(s, o)\,ds$\end{center}
   \centering
-  \includegraphics[height=0.72\textheight]{d1_gaussian_marg.pdf}
+  \includegraphics[height=0.64\textheight]{d1_gaussian_marg.pdf}
+  \vfill
+  \lesson{For a density, marginalising integrates over the variable you drop.}
 \end{frame}
 
 \begin{frame}{The covariance matrix: what each number means}
@@ -442,6 +455,8 @@
     }
   \end{tikzpicture}
   \vfill
+  \vfill
+  \lesson{Diagonal: how spread each variable is. Off-diagonal: how much the two move together.}
 \end{frame}
 
 \begin{frame}{The wall's covariance, built from its model}
@@ -466,6 +481,8 @@
     \end{column}
   \end{columns}
   \vfill
+  \vfill
+  \lesson{The covariance follows from what we write: a prior on $s$ and the sensor's noise.}
 \end{frame}
 
 \begin{frame}{Marginalising a Gaussian: cross out the row and column}
@@ -485,12 +502,16 @@
                           \textcolor{muted}{\cancel{0.25}} & \textcolor{good!70!black}{0.29} \end{bmatrix}
     \quad\Longrightarrow\quad p(o) = \N(2,\ \textcolor{good!70!black}{0.29})$}
   \vfill
+  \vfill
+  \lesson{A Gaussian's marginal keeps its own mean and variance: $p(o) = \N(2,\,0.29)$.}
 \end{frame}
 
 \begin{frame}{Conditioning: how evidence enters a belief}
   \begin{center}\large $\displaystyle p(s\given o) \mathrel{:=} \frac{p(s, o)}{p(o)}$\end{center}
   \centering
-  \includegraphics[height=0.76\textheight]{d1_gaussian_cond.pdf}
+  \includegraphics[height=0.66\textheight]{d1_gaussian_cond.pdf}
+  \vfill
+  \lesson{Conditioning on $o$ takes the slice of the joint at the reading and rescales it to area 1.}
 \end{frame}
 
 \begin{frame}{Conditioning a Gaussian: shift the mean, shrink the variance}
@@ -529,12 +550,16 @@
     \node[lab, text=accent, anchor=west] at (2.85,0.7) {after: $2.52 \pm 0.19$};
   \end{tikzpicture}
 
+  \vfill
+  \lesson{The reading moves the belief 86\% of the way and shrinks its spread from 0.50 to 0.19\,m.}
 \end{frame}
 
 \begin{frame}{Factorisation: express the joint as factors}
   \begin{center}\large $p(s, o) \;=\; p(o\given s)\,p(s) \;=\; p(s\given o)\,p(o)$\end{center}
   \centering
-  \includegraphics[height=0.74\textheight]{d1_gaussian_fact.pdf}
+  \includegraphics[height=0.64\textheight]{d1_gaussian_fact.pdf}
+  \vfill
+  \lesson{The same joint, split either way: $p(o\given s)\,p(s)$ or $p(s\given o)\,p(o)$.}
 \end{frame}
 
 \begin{frame}{The chain rule: $N$ variables, $N$ factors}
@@ -685,7 +710,7 @@
       \node[ttl] at (0,1.5) {Control only};
       \node at (0,0.9) {$p(a\given o)$};
       \node[vo] (o2) at (-0.8,0) {$O$}; \node[va] (a2) at (0.8,0) {$A$}; \draw[ar] (o2) -- (a2);
-      \node[ex] at (0,-1.0) {PID, a hand-written controller, model-free RL};
+      \node[ex] at (0,-1.0) {a hand-written controller, a learned reflex};
     \end{scope}
     % generative model
     \begin{scope}[xshift=7.8cm]
@@ -709,6 +734,8 @@
     \alert{the joint}         & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
     \bottomrule
   \end{tabular}
+  \vfill
+  \lesson{Only the joint says what the robot expects to see, so only the joint can notice a surprise.}
 \end{frame}
 
 \begin{frame}{Time: one copy of each variable per step}
@@ -732,6 +759,37 @@
   {\small one factor per step, multiplied}
   \vfill
   \lesson{A subscript is a time; $a{:}b$ means every step from $a$ to $b$.}
+\end{frame}
+
+\begin{frame}{The robot acts on what it sees, not on the world}
+  \centering
+  \begin{tikzpicture}[v/.style={draw, circle, minimum size=1.0cm},
+      vs/.style={v, draw=cool!80!black, fill=cool!15}, vo/.style={v, draw=good!70!black, fill=good!15},
+      va/.style={v, draw=black!60, fill=black!8},
+      ar/.style={-{Stealth[length=2.4mm]}, very thick},
+      side/.style={font=\footnotesize, muted}]
+    \foreach \x/\ttl in {0/{first step: nothing seen yet}, 6.4/{later steps}} {
+      \begin{scope}[xshift=\x cm]
+        \fill[muted!20] (-0.45,-1.3) rectangle (0.45,1.3);
+        \node[font=\bfseries] at (0,2.1) {\ttl};
+        \node[side] at (-1.7,1.55) {world}; \node[side] at (0,1.55) {senses}; \node[side] at (1.7,1.55) {robot};
+      \end{scope}}
+    % first step
+    \node[vs] (S1) at (-1.7,0) {$S$}; \node[va] (A1) at (1.7,0) {$A$};
+    \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {no path: $A$ cannot depend on $S$};
+    % later
+    \begin{scope}[xshift=6.4cm]
+      \node[vs] (S2) at (-1.7,0) {$S$}; \node[vo] (O2) at (0,0) {$o_{<t}$}; \node[va] (A2) at (1.7,0) {$A$};
+      \draw[ar] (S2) -- (O2); \draw[ar] (O2) -- (A2);
+      \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {the only path goes through what it has seen};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{1.0em}
+  {\large You take an umbrella because of the \textcolor{good!70!black}{forecast}, not because of tomorrow's \textcolor{cool!80!black}{rain}.}\\[0.3em]
+  {\small Same forecast, same decision, whatever the weather turns out to be.}
+  \vfill
+  \lesson{Once we know what the robot has seen, also knowing the world changes nothing about its action.}
 \end{frame}
 
 \begin{frame}{The robot's joint, in causal order}
@@ -789,42 +847,19 @@
   \centering
   \includegraphics[width=0.9\textwidth]{d1_bayes_ops.pdf}
   \vfill
-  \lesson{Step 2, the area $p(o)$, is what a real robot cannot compute; the rest of today avoids it.}
+  \lesson{Step 2, the area $p(o)$, is what a real robot cannot compute; tomorrow we find a way around it.}
 \end{frame}
 
-\begin{frame}{The robot acts on what it sees, not on the world}
-  \centering
-  \begin{tikzpicture}[v/.style={draw, circle, minimum size=1.0cm},
-      vs/.style={v, draw=cool!80!black, fill=cool!15}, vo/.style={v, draw=good!70!black, fill=good!15},
-      va/.style={v, draw=black!60, fill=black!8},
-      ar/.style={-{Stealth[length=2.4mm]}, very thick},
-      side/.style={font=\footnotesize, muted}]
-    \foreach \x/\ttl in {0/{first step: nothing seen yet}, 6.4/{later steps}} {
-      \begin{scope}[xshift=\x cm]
-        \fill[muted!20] (-0.45,-1.3) rectangle (0.45,1.3);
-        \node[font=\bfseries] at (0,2.1) {\ttl};
-        \node[side] at (-1.7,1.55) {world}; \node[side] at (0,1.55) {senses}; \node[side] at (1.7,1.55) {robot};
-      \end{scope}}
-    % first step
-    \node[vs] (S1) at (-1.7,0) {$S$}; \node[va] (A1) at (1.7,0) {$A$};
-    \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {no path: $A$ cannot depend on $S$};
-    % later
-    \begin{scope}[xshift=6.4cm]
-      \node[vs] (S2) at (-1.7,0) {$S$}; \node[vo] (O2) at (0,0) {$o_{<t}$}; \node[va] (A2) at (1.7,0) {$A$};
-      \draw[ar] (S2) -- (O2); \draw[ar] (O2) -- (A2);
-      \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {the only path goes through what it has seen};
-    \end{scope}
-  \end{tikzpicture}
-
-  \vspace{1.0em}
-  {\large You take an umbrella because of the \textcolor{good!70!black}{forecast}, not because of tomorrow's \textcolor{cool!80!black}{rain}.}\\[0.3em]
-  {\small Same forecast, same decision, whatever the weather turns out to be.}
-  \vfill
-  \lesson{Given what it has seen, the robot's action is independent of the world.}
-\end{frame}
 
 % =================================================================================================
-\begin{frame}{Your turn: notebook, part A}
+\begin{frame}[plain]
+  \centering\vfill
+  {\fontsize{60}{60}\selectfont\bfseries\color{accent} BREAK}\\[1.5em]
+  {\large\color{muted} after the break: the notebook}
+  \vfill
+\end{frame}
+
+\begin{frame}{Your turn: the notebook}
   \centering
   \begin{tikzpicture}[tile/.style={draw=muted!60, rounded corners=3pt, minimum width=5.6cm, minimum height=2.5cm, fill=muted!5},
       ttl/.style={font=\bfseries\small, anchor=north west}, chk/.style={font=\footnotesize, anchor=south west, align=left, text=prob},
@@ -868,426 +903,18 @@
       \node[vs] (a) at (-1.1,0) {$S$}; \node[vo] (b) at (0,0) {$o_1$}; \node[va] (c) at (1.1,0) {$a_2$};
       \draw[ar] (a) -- (b); \draw[ar] (b) -- (c);
     \end{scope}
-    \node[chk] at ($(t4.south west)+(0.1,0.05)$) {$0.63 \ne 0.22$;\; given $o_1$: $0.68 = 0.68$};
+    \node[chk] at ($(t4.south west)+(0.1,0.05)$) {$0.62 \ne 0.22$;\; given $o_1$: $0.68 = 0.68$};
   \end{tikzpicture}
   \vfill
-  \lesson{\texttt{labs/day1.ipynb}, part A: the orange numbers are the ones to reach.}
-\end{frame}
-
-\begin{frame}[plain]
-  \centering\vfill
-  {\fontsize{60}{60}\selectfont\bfseries\color{accent} BREAK}\\[1.5em]
-  {\large\color{muted} after the break: inference behind a sensory boundary}
-  \vfill
-\end{frame}
-
-\section{Inference behind a sensory boundary}
-% =================================================================================================
-
-% The idea in 46 s (Spanish captions): click once in pympress to start; it loops.
-\begin{frame}[plain,noframenumbering]
-  \begin{tikzpicture}[remember picture, overlay]
-    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, loop, showcontrols=false]{\includegraphics[width=\paperwidth]{inferencia_activa_poster.png}}{media/InferenciaActiva.mp4}};
-  \end{tikzpicture}
-\end{frame}
-
-\begin{frame}{The agent never sees the state}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \centering
-      \begin{tikzpicture}[node distance=1.6cm, every node/.style={font=\small}]
-        \node[draw, circle, minimum size=1.2cm, fill=muted!15] (s) {$s$};
-        \node[draw, circle, minimum size=1.2cm, right=2.2cm of s, fill=cool!15] (o) {$o$};
-        \draw[-{Stealth}, thick] (s) to[bend left=25] node[above] {$p(o\given s)$} (o);
-        \draw[-{Stealth}, thick, accent, dashed] (o) to[bend left=25] node[below] {$p(s\given o)$?} (s);
-        \node[below=0.4cm of s, align=center, font=\scriptsize] {world (hidden)};
-        \node[below=0.4cm of o, align=center, font=\scriptsize] {sensor buffer};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      The \textbf{generative model}:
-      \[ p(s,o) = p(o\given s)\,p(s) \]
-      \begin{itemize}\small
-        \item $p(o\given s)$ is the agent's theory of its own sensor: which LiDAR returns a robot at
-              this pose, in this room, would produce.
-        \item $p(s)$ is what it brought with it: plausible room shapes, typical table sizes.
-      \end{itemize}
-      Inference runs the arrow backwards:
-      \[ p(s\given o) = \frac{p(o\given s)\,p(s)}{p(o)} \]
-    \end{column}
-  \end{columns}
-  \src{active\_inference.tex l.181--212}
-\end{frame}
-
-\begin{frame}{Where exact inference dies}
-  \[ p(o) = \int p(o\given s)\,p(s)\,\mathrm{d}s \]
-  \begin{itemize}
-    \item The probability of \emph{this scan} under \emph{every} room and furniture configuration
-          the robot considers possible, each weighted by how likely it is.
-    \item No closed form and no feasible quadrature. This is not a quirk of one sensor: it is the
-          generic situation.
-    \item Every practical method from here on is a way of \alert{not computing it}.
-  \end{itemize}
-  \vspace{0.8em}
-  \begin{block}{A word about ``state''}
-    $s$ is a latent variable of the \emph{agent's model}, not the physical truth, which is never
-    accessible. That distinction is what gives the question ``is this belief wrong?'' its meaning.
-  \end{block}
-  \src{active\_inference.tex l.200--220}
-\end{frame}
-
-% =================================================================================================
-\section{Variational free energy}
-% =================================================================================================
-
-\begin{frame}{Do not compute the posterior; approximate it}
-  Choose a tractable family, and a member $q(s)$ of it (the \textbf{belief}). Move it towards
-  the true posterior, measuring closeness by
-  \[ \KL{q(s)}{p(s\given o)} = \int q(s) \ln\frac{q(s)}{p(s\given o)}\,\mathrm{d}s \;\ge 0 . \]
-  \pause
-  \alert{Problem:} it contains $p(s\given o)$, the very thing we cannot have.
-
-  \pause
-  \vspace{0.5em}
-  Substitute Bayes' rule and separate out the part that does not depend on $q$:
-  \[
-    \KL{q}{p(s\given o)} = \underbrace{\int q(s)\ln\frac{q(s)}{p(o,s)}\,\mathrm{d}s}_{F[q,o]} \;+\; \ln p(o)
-  \]
-  $F$ needs only the belief and the joint $p(o\given s)p(s)$ the agent already wrote down.
-  \src{active\_inference.tex l.222--250}
-\end{frame}
-
-\begin{frame}{The identity the framework rests on}
-  \[ \boxed{\; F[q,o] = \KL{q(s)}{p(s\given o)} - \ln p(o) \;} \]
-  \begin{columns}[c]
-    \begin{column}{0.46\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1cm, y=1cm, lab/.style={font=\scriptsize}]
-        \foreach \x/\k/\t in {0/1.5/start, 1.5/0.7/iterating, 3/0.08/converged} {
-          \fill[muted!30, draw=white, very thick] (\x,0) rectangle (\x+1,1.5);
-          \fill[accent!40, draw=white, very thick] (\x,1.5) rectangle (\x+1,1.5+\k);
-          \node[lab, below] at (\x+0.5,0) {\t};
-        }
-        \draw[densely dashed] (-0.2,1.5) -- (4.2,1.5);
-        \node[lab] at (0.5,0.75) {$-\ln p(o)$};
-        \node[lab] at (0.5,2.25) {$\mathrm{KL}$};
-        \node[lab, above] at (0.5,3.0) {$F$};
-        \node[lab, text=muted] at (2,-0.75) {dashed: no belief can move it};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \small
-      \textbf{Same minimiser.} Only the $\mathrm{KL}$ slab can shrink, so lowering the computable $F$
-      lowers the uncomputable divergence.\\[0.5em]
-      \textbf{A bound on surprise.} $\mathrm{KL}\ge 0$, so the bar never falls below the dashed line:
-      $F \ge -\ln p(o)$.\\[0.5em]
-      If you know machine learning: $-F$ is the \textbf{ELBO}.
-    \end{column}
-  \end{columns}
-  \src{active\_inference.tex l.252--268}
-\end{frame}
-
-\begin{frame}{Complexity minus accuracy}
-  \[
-    F[q,o] = \underbrace{\KL{q(s)}{p(s)}}_{\text{complexity}}
-             \;-\; \underbrace{\E_q\!\left[\ln p(o\given s)\right]}_{\text{accuracy}}
-  \]
-  \begin{columns}[c]
-    \begin{column}{0.44\textwidth}
-      \centering
-      \includegraphics[width=\textwidth]{d1_complexity.pdf}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      \small
-      \textbf{Accuracy} alone would adopt any explanation that fits the current scan.\\[0.5em]
-      \textbf{Complexity} charges for the distance travelled from the prior: Occam's razor,
-      written as a divergence.\\[0.5em]
-      The belief settles where the two slopes cancel.\\[0.5em]
-      \footnotesize Both are measured in \textbf{nats}, the unit of $-\ln p$ (natural logarithm):
-      a difference of $k$ nats is odds of $e^k$ to 1. One nat $\approx$ 1.44 bits.
-    \end{column}
-  \end{columns}
-  \lesson{One trade, stated once, in nats, for every quantity the agent believes.}
-  \src{active\_inference.tex l.288--308}
-\end{frame}
-
-\begin{frame}{Worked example: the Kalman update is free-energy minimisation}
-  \small
-  Take the prior $s\sim\N(m,p)$, an observation $y\sim\N(s,r)$, and the belief $q=\N(\mu,\Sigma)$.
-  Every term is a Gaussian expectation:
-  \[
-    F(\mu,\Sigma) = \frac{(\mu-m)^2+\Sigma}{2p} + \frac{(y-\mu)^2+\Sigma}{2r} - \tfrac12\ln\Sigma + \text{const}
-  \]
-  \pause
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      $\partial F/\partial\mu = 0$:
-      \[ \mu = \frac{m/p + y/r}{1/p + 1/r} \]
-      the precision-weighted mean.
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      $\partial F/\partial\Sigma = 0$:
-      \[ \frac1\Sigma = \frac1p + \frac1r \]
-      precisions add.
-    \end{column}
-  \end{columns}
-  \vspace{0.5em}
-  \pause
-  The two halves come from different terms. The \emph{mean} comes from the prediction errors; the
-  \emph{variance} comes from the curvature of $F$ balanced against the entropy
-  $-\tfrac12\ln\Sigma$. Regularised least squares is the same trade with a flat prior.
-\end{frame}
-
-\begin{frame}{One quantity, differentiated twice}
-  \centering
-  \begin{tikzpicture}[box/.style={draw, rounded corners=3pt, very thick, align=center, minimum height=0.8cm, font=\small},
-                      arr/.style={-{Stealth[length=2.5mm]}, very thick}]
-    \node[box, draw=cool, fill=cool!8, minimum width=3.1cm] (ag) at (0,0) {belief $q(s)$, mean $\mu$\\[-0.1em]$F[q,o]$};
-    \node[box, draw=muted, fill=muted!12, minimum width=2.6cm] (w) at (7.2,0) {the world\\[-0.1em](hidden)};
-    \draw[muted, densely dashed] (3.6,-0.75) -- (3.6,0.75) node[above, font=\scriptsize, text=muted] {sensory boundary};
-    \draw[arr, cool] ([yshift=0.2cm]w.west) -- node[above, font=\small, pos=0.25] {$o$} ([yshift=0.2cm]ag.east);
-    \draw[arr, good] ([yshift=-0.2cm]ag.east) -- node[below, font=\small, pos=0.25] {$a$} ([yshift=-0.2cm]w.west);
-  \end{tikzpicture}
-
-  \begin{columns}[T]
-    \begin{column}{0.46\textwidth}
-      \centering
-      \textbf{Perception}: fit the belief to the data
-      \[ \dot\mu = -\frac{\partial F}{\partial\mu} \]
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      \centering
-      \textbf{Action}: fit the data to the belief
-      \[ \dot a = -\frac{\partial F}{\partial a}
-                = -\frac{\partial F}{\partial o}\,\frac{\partial o}{\partial a} \]
-    \end{column}
-  \end{columns}
-  \pause
-  \raggedright\small
-  $\partial o/\partial a$ is the causal model running forwards, and a scan already in the buffer
-  cannot be changed. So a decision scores the observations it \emph{would} bring:
-  \[
-    G(a) = \E_{q(o,s\given a)}\big[F\big] \;\approx\;
-    \underbrace{-\,I(s;o\given a)}_{\text{epistemic: what I would learn}}
-    \;\underbrace{-\,\E_{q(o\given a)}\ln p(o)}_{\text{pragmatic: what I want to see}}
-  \]
-  \src{active\_inference.tex l.335--427; derived in full later in the week}
-\end{frame}
-
-\begin{frame}{A choice, marked as a choice}
-  \begin{itemize}
-    \item Closeness was measured with $\mathrm{KL}$. Nothing forced that: it is the $\alpha\to1$
-          member of the Rényi family, and the bound survives the substitution.
-    \item The order $\alpha$ controls the \emph{character} of the error: does the belief err
-          towards too broad, or towards too confident?
-    \item On this robot, that is not a statistical nicety. A covariance is \alert{spent}: on
-          deciding where to look next, and on how far a measurement may move a belief.
-  \end{itemize}
-  \vspace{0.5em}
-  The thesis keeps $\alpha\to1$ throughout. Making $\alpha$ itself a latent variable is open
-  future work.
-  \src{active\_inference.tex l.270--286; future\_work.tex l.22}
-\end{frame}
-
-% =================================================================================================
-\section{The Laplace approximation}
-% =================================================================================================
-
-\begin{frame}{Gaussian beliefs: the form everything later takes}
-  Take $q(s)=\N(\mu,\Sigma)$ and expand around the mode:
-  \[
-    F \approx -\ln p(o,\mu) + \tfrac12\operatorname{tr}(\Hess\Sigma) - \tfrac12\ln|\Sigma| - \tfrac n2\ln(2\pi e),
-    \qquad \Hess = -\nabla^2_s \ln p(o,s)\big|_{\mu}
-  \]
-  \begin{columns}[c]
-    \begin{column}{0.37\textwidth}
-      \centering
-      \includegraphics[width=\textwidth]{d1_laplace.pdf}
-    \end{column}
-    \begin{column}{0.59\textwidth}
-      \small
-      The \textbf{mean} moves to the bottom of the bowl: nonlinear least squares.\\[0.3em]
-      The \textbf{covariance} is pulled two ways, curvature against entropy;
-      $\partial F/\partial\Sigma=0$ balances them.\\[0.2em]
-      {\scriptsize dashed: the parabola Laplace sees; thin: the exact density.}
-    \end{column}
-  \end{columns}
-  \lesson{$\boxed{\;\Sigma = \Hess^{-1}\;}$\quad The uncertainty comes as a by-product of fitting, at no extra modelling cost.}
-  \src{active\_inference.tex l.310--333}
-\end{frame}
-
-\begin{frame}{Gauss--Newton, in one line}
-  For whitened residuals $r(s)$ with noise covariance $R$, and a Gaussian prior $\N(m,P)$:
-  \[
-    -\ln p(o,s) = \tfrac12 r^\top R^{-1} r + \tfrac12 (s-m)^\top P^{-1}(s-m) + \text{const},
-  \]
-  \[
-    \Hess \approx J^\top R^{-1} J + P^{-1}, \qquad
-    \Delta s = -\Hess^{-1}\big(J^\top R^{-1} r + P^{-1}(s-m)\big).
-  \]
-  \begin{itemize}
-    \item Iterate to convergence. The final $\Hess^{-1}$ \emph{is} the belief's covariance.
-    \item In the lab, \texttt{laplace(residual, x0, sigma, prior=...)} does exactly this. It also
-          returns the Laplace free energy
-          $F \approx -\ln p(o,\mu) + \tfrac12\ln|\Hess| - \tfrac n2\ln 2\pi$,
-          which you will use to compare models.
-  \end{itemize}
-\end{frame}
-
-\begin{frame}{Example: one wall as a belief}
-  \begin{columns}[c]
-    \begin{column}{0.55\textwidth}
-      \includegraphics[width=\textwidth]{d1_wall_belief.pdf}
-    \end{column}
-    \begin{column}{0.43\textwidth}
-      \small
-      A line with normal $n(\alpha)$ at distance $d$:
-      \[ r_i = \cos\alpha\,x_i + \sin\alpha\,y_i - d \]
-      \[ \frac{\partial r_i}{\partial(\alpha,d)} = \big[\,-\sin\alpha\,x_i + \cos\alpha\,y_i,\; -1\,\big] \]
-      \begin{itemize}
-        \item The first column is a \textbf{lever arm}. Points far apart along the wall pin the
-              angle.
-        \item $\alpha$ and $d$ come out correlated ($\rho\approx-0.97$), because $d$ is measured
-              from an origin the points are far away from.
-      \end{itemize}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{Is the covariance honest?}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d1_honesty.pdf}
-    \end{column}
-    \begin{column}{0.53\textwidth}
-      \small
-      $\Sigma=\Hess^{-1}$ is a \emph{claim} about how far the fit would move on a re-scan.
-      Test it with 400 scans from one pose:
-      \begin{itemize}
-        \item uniform $\sigma$: about 10\% too pessimistic, and it does not average away;
-        \item the noise is along the \emph{beam}, the residual along the wall's \emph{normal}:
-              $\sigma_i=\sigma\,|u_i^\top n|$;
-        \item with that likelihood: within a few per cent.
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \lesson{A Laplace covariance is exactly as honest as the likelihood you wrote.}
-  \src{lab 1, exercises 3--4; the real localiser's incidence weight: room\_concept.tex l.232}
-\end{frame}
-
-\begin{frame}{Free energy compares models: the price of a parameter}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d1_occam.pdf}
-    \end{column}
-    \begin{column}{0.53\textwidth}
-      \small
-      Two models of the same wall:
-      \begin{itemize}
-        \item \textbf{Manhattan}: the angle is fixed at $90^\circ$; one parameter, $d$.
-        \item \textbf{free}: $\alpha\sim\N(90^\circ,s^2)$; two parameters.
-      \end{itemize}
-      Both fit equally well. The free model pays
-      $\approx\ln(s/\sigma_\alpha)$ nats of \emph{complexity}: the cost of squeezing the prior
-      down to the posterior.\\[0.4em]
-      Tilt the points by $1.5^\circ$ and the verdict flips by \alert{70 nats}.
-    \end{column}
-  \end{columns}
-  \lesson{Nobody wrote ``if the angle error exceeds $k$ degrees''. That is the first instance of
-          \textbf{no thresholds}.}
-\end{frame}
-
-% =================================================================================================
-\section{What measurement said}
-% =================================================================================================
-
-\begin{frame}{Free energy is not computation}
-  \begin{measured}{a better model does not save arithmetic}
-    Injecting a body-model error from 0 to 10\%:
-    \begin{itemize}
-      \item the solver iterations per correction stay flat to within a twentieth;
-      \item the size of the correction grows by about half as much again.
-    \end{itemize}
-  \end{measured}
-  \begin{itemize}
-    \item The agent pays in \emph{how far its beliefs must move}. The arithmetic doing the moving
-          is nearly constant.
-    \item ``A better model saves the agent work'' has to say \emph{which} work. The two readings
-          come apart, and an endpoint chosen on the wrong reading measures nothing.
-  \end{itemize}
-  \src{active\_inference.tex l.835--848}
-\end{frame}
-
-\begin{frame}{A factor inherits the errors of what it is estimated through}
-  \begin{columns}[T]
-    \begin{column}{0.52\textwidth}
-      \centering
-      \begin{tikzpicture}[box/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize, minimum width=2.1cm, minimum height=0.8cm},
-                          arr/.style={-{Stealth}, thick}]
-        \node[box, draw=accent, fill=accent!12] (map) at (0,0) {wrong map};
-        \node[box, fill=muted!12] (loc) at (3.4,0) {localiser's\\corrections};
-        \node[box, draw=accent, fill=accent!12] (body) at (3.4,-1.75) {wheels\\``learnt'' wrong};
-        \node[box, draw=good, fill=good!10] (ok) at (0,-1.75) {map and body\\agree};
-        \draw[arr] (map) -- node[above, font=\scriptsize] {fitted to} (loc);
-        \draw[arr] (loc) -- node[right, font=\scriptsize] {charged to} (body);
-        \draw[arr] (body) -- node[above, font=\scriptsize] {absorbs it} (ok);
-      \end{tikzpicture}\\[0.5em]
-      \raggedright\small
-      It gets \emph{quieter}, not louder: \alert{internally consistent, externally wrong.}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \begin{measured}{an omitted parameter}
-        Admitting a camera-mount translation the data cannot support moves the reported pitch by
-        \textbf{nine times} its stated interval. An interval speaks only about the parameters the
-        model contains.
-      \end{measured}
-    \end{column}
-  \end{columns}
-  \lesson{Carry an external reference. Never trust only what the agent computes about itself.}
-  \src{active\_inference.tex l.899--950}
-\end{frame}
-
-% =================================================================================================
-\section{Lab}
-% =================================================================================================
-
-\begin{frame}{Lab 1: probability by hand, then a wall as a belief}
-  \texttt{labs/day1.ipynb}, about 50 minutes. Today the robot knows its pose and we cheat on which
-  points are the wall's.
-  \begin{enumerate}\small
-    \item \textbf{Warm-up}: the door table by hand (marginalise, condition, both factorisations);
-          read an anti-causal order off a joint; condition a Gaussian in both forms.
-    \item Write the wall's residual and Jacobian; fit it with \texttt{laplace}.
-    \item \textbf{Honesty test}: 500 scans; predicted vs empirical $\sigma$. Find the 10\% and fix
-          the likelihood.
-    \item \textbf{Model choice}: Manhattan vs free, by $\Delta F$. Then tilt the wall.
-  \end{enumerate}
-  \vspace{0.4em}
-  \small Where to look next waits for Day 4, when $G$ is derived in full.
+  \lesson{\texttt{labs/day1.ipynb}: the orange numbers are the ones to reach.}
 \end{frame}
 
 \begin{frame}{Tomorrow}
-  \begin{columns}[c]
-    \begin{column}{0.55\textwidth}
-      Today there was one robot, one belief and one $F$. A real robot runs a dozen processes:
-      \begin{itemize}
-        \item where does the belief live, and who holds it?
-        \item how is one free energy divided among processes that never talk to each other?
-      \end{itemize}
-      And the commitment that runs through the rest of the week:
-      \alert{a gate is what a model looks like before the modelling has been done.}
-    \end{column}
-    \begin{column}{0.4\textwidth}
-      \begin{block}{Reading for Day 2}\small
-        Thesis chapters:
-        \begin{itemize}
-          \item \emph{The CORTEX Architecture}, \S\S ``The working memory as a distributed graph'',
-                ``Active Inference in CORTEX'';
-          \item \emph{Concept Agents}, up to ``A design rule that follows from the bound''.
-        \end{itemize}
-      \end{block}
-    \end{column}
-  \end{columns}
+  \centering
+  {\Large Today: a belief, a joint, and the three operations on it.}\\[1.2em]
+  {\large Tomorrow: the robot cannot compute Bayes' rule.\\ It computes \alert{free energy} instead, and lowers it by perceiving and by acting.}
+  \vfill
+  \lesson{Tomorrow's lab: a wall from a LiDAR scan, held as a belief.}
 \end{frame}
 
 \end{document}

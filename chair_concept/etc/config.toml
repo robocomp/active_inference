@@ -170,6 +170,7 @@ DetectionAliveMaxFrames = 40 # cycles without a fresh chair mask before detectio
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 MinStandOffM = 2.0          # min stand-off floor for epistemic viewpoints (YOLO misses chairs seen too close)
 EpistemicCooldownCycles = 200 # min cycles a satisfied chair stays withdrawn (anti-chatter)
+EpistemicOfferEnabled = true # false = no epistemic viewpoint offer (AuRo C3(b) comparison arm: the chair is corrected only by what the robot happens to see)
 ChairLogPeriodFrames = 0    # per-chair log throttle; 0 = periodic logs off
 SupportBankMaxPoints = 4000   # max number of chair-owned support points kept in memory
 SupportBankQuantizationM = 0.02 # dedup grid (m) for support-bank hashing
@@ -188,6 +189,9 @@ GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable co
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
 RecallPiMove = 0.5       # ltom recall: weight of "the remembered chair was moved" (a GUESS - chairs get moved; learned permanence replaces it in step 4). 1 = location says nothing
 RecallLogPriorNew = 0.0  # ltom recall: log prior of "a NEW chair" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
+LinkPiMove = 0.10        # identity link (changed object): per-visit P(a remembered chair was moved). A GUESS; the learned "gets moved" belief replaces it
+LinkPiGone = 0.10        # identity link: per-visit P(a remembered chair left the room). A GUESS
+LinkLambdaNew = 0.10     # identity link: per-visit rate of a NEW chair arriving. A GUESS
 BirthFrames = 8          # frames a mask must stay unexplained before spawning a chair
 BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing chair (anti-duplicate)
 MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.

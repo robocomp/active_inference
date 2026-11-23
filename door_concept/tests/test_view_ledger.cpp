@@ -108,11 +108,52 @@ int main()
       const SupportModel m = default_detectors().support;
       ViewLedger L; { auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0); L.add_support(v, 0.95f, 1.f, m); L.recompute(v, false); }
       const auto s = L.serialise();
-      CHECK(s.starts_with("VL2 ")); CHECK(s.find(',') == std::string::npos);
+      CHECK(s.starts_with("VL3 ")); CHECK(s.find(',') == std::string::npos);   // (VL3 since the support channel carries its q; the check read VL2)
       const auto P = ViewLedger::parse(s, false);
       CHECK(P.has_value()); CHECK(P->serialise() == s); CHECK(std::fabs(P->sum() - L.sum()) < 1e-5f);
       const auto old = ViewLedger::parse("VL1 1 0 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1", false);
       CHECK(old.has_value()); CHECK(old->views().size() == 1); CHECK(old->views()[0].sup.n == 0); CHECK(old->sum() == 0.f); }
+    { // ricoh_miss_counts_under_flag: a Ricoh view with q 0.8 and no hit lowers the view llr by miss_llr(q, f); flag off: unchanged (hits only)
+      const DetectorModel R = default_detectors().ricoh;
+      for (bool flag : {false, true})
+      { ViewLedger L; L.ricoh_counts_misses = flag; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+        L.add_bernoulli(v, Channel::Ricoh, 0.8f, R, 0.f); L.recompute(v, false);
+        const float m = miss_llr(0.8f, false_alarm_eff(R, 0.8f));
+        if (flag) { CHECK(m < 0.f); CHECK(std::fabs(L.sum() - m) < 1e-5f); } else CHECK(L.sum() == 0.f); } }
+    { // geometry_may_refute_under_flag: x at mu0 - 2 s is evidence AGAINST (one-model, no clamp); the old path stays 0 with the clamp
+      const float mu0 = 0.5f, s = 0.1f;
+      ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      L.add_geometry_t(v, mu0 - 2 * s, 1.f, mu0, s * s, 2.f, 5); L.recompute(v, false);
+      CHECK(L.sum() < 0.f);
+      ViewLedger O; const auto w = O.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      O.add_geometry(w, mu0 - 2 * s, 1.f, mu0, mu0 + 2 * s, s * s); O.recompute(w, false); CHECK(O.sum() == 0.f); }
+    { // geometry_no_repricing: constant x, s alternating 0.015 / 0.25 — each frame priced by its OWN s, so the view's term moves by at most
+      // (|this frame's term| + |the previous view term|) / n per added frame; the old running-mean-with-overwritten-s form jumps by ~1/s
+      const float x = 0.5f, mu0 = 0.f; ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      float prev = 0.f;
+      for (int i = 0; i < 8; ++i)
+      {
+          const float s = i % 2 ? 0.25f : 0.015f;
+          ViewLedger one; const auto o = one.observe(cam_at(0), DOOR, NRM, 1, 0, 0); one.add_geometry_t(o, x, 1.f, mu0, s * s, 2.f, 3); one.recompute(o, false);
+          const float own = one.sum();   // this frame's term alone (n = 1)
+          L.add_geometry_t(v, x, 1.f, mu0, s * s, 2.f, 3); L.recompute(v, false);
+          CHECK(std::fabs(L.sum() - prev) <= (std::fabs(own) + std::fabs(prev)) / float(i + 1) + 1e-4f);
+          CHECK(std::fabs(own) < 10.f);   // Student-t: log growth, never the 1/s^2 of a Gaussian
+          prev = L.sum();
+      }
+      ViewLedger G; const auto g = G.observe(cam_at(0), DOOR, NRM, 1, 0, 0);   // the old form, same inputs, for contrast
+      float gprev = 0.f, gmax = 0.f;
+      for (int i = 0; i < 8; ++i) { const float s = i % 2 ? 0.25f : 0.015f; G.add_geometry(g, x, 1.f, mu0, mu0 + 2 * s, s * s); G.recompute(g, true); gmax = std::max(gmax, std::fabs(G.sum() - gprev)); gprev = G.sum(); }
+      CHECK(gmax > 50.f); }
+    { // geometry_zero_when_noninformative: mu1_sd = 0 (a fitted "no information") => exactly 0
+      ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      for (int i = 0; i < 5; ++i) { L.add_geometry_t(v, 0.9f - 0.1f * i, 1.f, 0.2f, 0.01f, 0.f, 4); L.recompute(v, false); CHECK(L.sum() == 0.f); } }
+    { // VL4: one-model geometry round-trips; a ledger without it still writes VL3
+      ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      L.add_geometry_t(v, 0.7f, 0.8f, 0.2f, 0.04f, 2.f, 4); L.recompute(v, false);
+      const auto s = L.serialise(); CHECK(s.starts_with("VL4 ")); CHECK(s.find(',') == std::string::npos);
+      const auto P = ViewLedger::parse(s, false, true); CHECK(P.has_value()); CHECK(P->serialise() == s); CHECK(std::fabs(P->sum() - L.sum()) < 1e-4f);
+      ViewLedger N; stare(N, cam_at(0), 3, 0.6f, 0.f); CHECK(N.serialise().starts_with("VL3 ")); }
     { // revisit_replaces_not_adds
       ViewLedger L; stare(L, cam_at(0), 20, 0.6f, 0.f);
       auto P = *ViewLedger::parse(L.serialise(), false); const float s0 = P.sum();
@@ -120,6 +161,46 @@ int main()
       CHECK(P.views().size() == 1); CHECK(P.sum() == s0);
       P.recompute(v, false); CHECK(std::fabs(P.sum() - s0) < 1e-4f);   // replaced, not added
       const auto v2 = P.observe(cam_at(0), DOOR, NRM, 1, 0, 1); CHECK(P.views().size() == 2 and v2 == 1); }
+    { // legacy_geometry_rescored_under_flag (final review 2): a VL3 ledger whose last frame had a tiny s2 holds the old mu1 = mu0 + 2 s term, re-priced by 1/s
+      // (+-3e4 nats). Under the flag it is re-scored with the CURRENT model (mu1_sd = 0 fitted: no information => 0), and the first frame that joins it changes
+      // the view by a bounded amount, not by the legacy term.
+      ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      const float mu0 = 0.2f, s2 = 5e-7f, x = 0.25f;                          // s = 0.0007 m: (x - mu0)^2 / 2 s2 ~ 1e3 nats under the old term
+      L.add_geometry(v, x, 1.f, mu0, mu0 + 2.f * std::sqrt(s2), s2); L.recompute(v, true);
+      const auto ser = L.serialise(); CHECK(ser.starts_with("VL3 "));
+      const auto flag_off = ViewLedger::parse(ser, true);
+      CHECK(flag_off.has_value() and std::fabs(flag_off->sum() - L.sum()) < 1e-3f and std::fabs(L.sum()) > 100.f);   // flag off: the legacy term, untouched
+      const auto on = ViewLedger::parse(ser, true, true, 0.0f);
+      CHECK(on.has_value() and on->sum() == 0.f and on->views()[0].geo.framed);                                       // flag on, mu1_sd 0: exactly 0
+      ViewLedger M1 = *on; const auto v1 = M1.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      M1.add_geometry_t(v1, 0.9f, 1.f, 0.2f, 0.01f, 0.f, 4); M1.recompute(v1, true);
+      CHECK(std::fabs(M1.sum()) < 1.f);                                                                               // bounded after one frame
+      // the same first-touch path with no parse: a legacy view joined by add_geometry_t is re-scored too (the old seed was unclamped)
+      ViewLedger T; const auto vt = T.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      T.add_geometry(vt, x, 1.f, mu0, mu0 + 2.f * std::sqrt(s2), s2);
+      T.add_geometry_t(vt, 0.9f, 1.f, 0.2f, 0.01f, 0.f, 4); T.recompute(vt, true);
+      CHECK(std::fabs(T.sum()) < 1.f);
+      // a non-zero mu1_sd re-scores with present = mu0 + mu1_sd * s: x one s above mu0 is worth +0.5 (mu1_sd 2) , clamped at 0 when it may not refute
+      ViewLedger G; const auto vg = G.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      G.add_geometry(vg, 0.5f, 1.f, 0.f, 0.2f, 0.01f); G.recompute(vg, true);
+      const auto g2 = ViewLedger::parse(G.serialise(), true, true, 2.0f);
+      const float expect = ((0.5f - 0.f) * (0.5f - 0.f) - (0.5f - 0.2f) * (0.5f - 0.2f)) / (2.f * 0.01f);   // mu1 = 0 + 2 * 0.1 = 0.2: the same as the legacy value here
+      CHECK(g2.has_value() and std::fabs(g2->sum() - expect) < 1e-3f);
+      ViewLedger H; const auto vh = H.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      H.add_geometry(vh, 0.0f, 1.f, 0.5f, 0.7f, 0.01f); H.recompute(vh, true);   // x far on the absent side: negative when it may refute
+      CHECK(ViewLedger::parse(H.serialise(), true, true, 2.0f)->sum() < 0.f and ViewLedger::parse(H.serialise(), false, true, 2.0f)->sum() == 0.f); }
+    { // flag_boundary (final review 3): a flag-on ledger (VL4 frames' own terms, VL5 with LiDAR openings) read by a flag-off parse is EMPTY: nothing of it leaks into
+      // today's behaviour. A flag-on parse keeps it.
+      ViewLedger L; L.ricoh_counts_misses = true; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      L.add_geometry_t(v, 0.7f, 0.8f, 0.2f, 0.04f, 2.f, 4); L.add_lidar(v, 1.5f);
+      L.add_bernoulli(v, Channel::Zed, 0.6f, M, 1.f); L.recompute(v, false);
+      const auto s = L.serialise(); CHECK(s.starts_with("VL5 "));
+      const auto off = ViewLedger::parse(s, false);
+      CHECK(off.has_value() and off->views().empty() and off->sum() == 0.f);                       // flag off: an empty ledger (the row keeps its L)
+      const auto on = ViewLedger::parse(s, false, true, 2.0f);
+      CHECK(on.has_value() and on->views().size() == 1 and std::fabs(on->sum() - L.sum()) < 1e-4f);
+      ViewLedger P; P.add_geometry_t(P.observe(cam_at(0), DOOR, NRM, 1, 0, 0), 0.7f, 0.8f, 0.2f, 0.04f, 2.f, 4); P.recompute(0, false);
+      CHECK(P.serialise().starts_with("VL4 ") and ViewLedger::parse(P.serialise(), false)->views().empty()); }
     std::printf(fails ? "FAILED %d\n" : "ALL PASS\n", fails);
     return fails != 0;
 }

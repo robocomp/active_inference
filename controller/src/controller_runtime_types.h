@@ -160,14 +160,6 @@ struct ControllerParams
     float band_window_m = 4.0f;
     // Run the band every N control cycles. 1 = every cycle.
     int   band_period_cycles = 1;
-    // [Route] NearFieldClearance (Task 6, 2026-10-21, user — the B arm of the spline / spline+near-field / policy A/B):
-    // the band's clearance field near the robot becomes the EXPECTED clearance to the local policy's FITTED surfaces
-    // (near_field_clearance.h), joined to the live ESDF by a model weight. false = the old field, byte-identical.
-    bool  route_near_field_clearance = false;
-    // [Route] BandDrivesCross (Task 6 fix round 1, coordinator ruling (b)): with NearFieldClearance on and the policy off, the
-    // spline + band drive a door CROSS (route through the opening to the cross's goal, the jambs in the near field) instead
-    // of the anchor servo; the crossing's completion stays the cross protocol's. false = the servo, byte-identical.
-    bool  route_band_drives_cross = false;
     // Route optimiser: speed (0) <-> safety (1). Trades PRECISION between the clearance preference and
     // the curvature prior (see RouteOptimizerConfig::safety_bias). 0.5 is exactly the written weights, so
     // it is inert until moved. Live from the UI slider; applies to the next route build or repair.
@@ -339,7 +331,6 @@ struct ControllerParams
     // on first sight and could not be disconfirmed by free space. Two independent obstacle representations
     // feeding one ESDF, each with its own inflation and neither able to retire the other, is what produced
     // duplicated and immortal geometry. Flip back on only if residual_concept is down.
-    bool obstacle_creation_enabled = false;
     std::string target_edge_type = "target";
     float pose_xy_std_slow_m = 0.03f;
     float pose_xy_std_stop_m = 0.12f;
@@ -359,25 +350,9 @@ struct ControllerParams
     float pose_xy_std_growth_per_mps = 0.5f;
     float pose_theta_std_growth_per_rps = 1.0f;
     float adv_rotation_coupling_exponent = 0.5f;
-    float temporary_obstacle_front_distance_m = 1.8f;
-    float temporary_obstacle_half_width_m = 0.9f;
-    float temporary_obstacle_cluster_margin_m = 0.35f;
     float temporary_obstacle_padding_m = 0.18f;
-    float temporary_obstacle_occlusion_depth_m = 0.28f;
-    RobustLossType temporary_obstacle_robust_loss = RobustLossType::Huber;
-    float temporary_obstacle_robust_loss_scale_m = 0.08f;
-    int temporary_obstacle_min_points = 12;
     int temporary_obstacle_history_scans = 5;
-    std::uint64_t temporary_obstacle_ttl_ms = 3000;
-    float temporary_obstacle_existence_init_log_odds = 1.6f;
-    float temporary_obstacle_existence_min_log_odds = -4.f;
-    float temporary_obstacle_existence_max_log_odds = 4.f;
     float temporary_obstacle_existence_remove_threshold_log_odds = -1.8f;
-    float temporary_obstacle_existence_observation_bias = 0.30f;
-    float temporary_obstacle_existence_support_gain = 0.06f;
-    float temporary_obstacle_existence_remembered_gain = 0.02f;
-    float temporary_obstacle_existence_weak_miss_penalty = 0.05f;
-    float temporary_obstacle_existence_absence_penalty = 0.75f;
     // LiDAR height band (metres, robot frame ≈ height above floor since robot_from_lidar is identity
     // and the source cloud is already floor-referenced). The min is a floor-plane reject cutoff: the
     // lowest lidar beam grazes the floor into a dense ring at ~0.11–0.18 m (confirmed with an EMPTY
@@ -403,8 +378,6 @@ struct ControllerParams
     bool  policy_affordance_facing = true;      // Task R: a Doorway plan is scored by log P(facing the gap) at its end
     float policy_pose_drift_sigma_m = 0.064f;   // absolute pose error as OU: stationary std — PROGRESS MONITOR
     float policy_pose_drift_time_s = 115.f;     //   and correlation time
-    // Task 8 ([Policy], config.toml carries the provenance): the local policy drives the base; the old chain is OFF.
-    bool  policy_enabled = false;               // default OFF in code: the config turns it on
     float policy_risk_eps = 0.01f;
     // [ChainMonitor] (port step 2, 2026-11-11): the chain's monitors judge and LOG (chain_monitor.csv), never act
     bool  chain_monitor_enabled = true;
@@ -439,8 +412,6 @@ struct ControllerParams
     float policy_unseen_odo_sigma_m = 0.005f;
     float policy_wheel_decel_mps2 = 0.5f;       // PROVISIONAL measured per-wheel decel (Live fix 2); <= 0 = the capability's
     // Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor).
-    float unmodelled_scan_min_z_m = 0.10f;
-    float unmodelled_scan_max_z_m = 1.50f;
     float goal_clearance_relax_dist_m = 0.6f;
     float goal_obstacle_margin_m = 0.08f;
     float goal_clearance_min_ratio = 0.85f;
@@ -561,22 +532,6 @@ struct ControllerParams
     float stuck_meas_rot_eps     = 0.08f;   // rad/s — LEGACY (see above)
     float stuck_slip_ratio       = 0.25f;   // wedge = measured base speed < this × commanded (prediction error)
     float stuck_confirm_ms       = 1500.0f; // sustained command-without-motion before escape fires
-    float escape_adv_speed_mps   = 0.15f;   // reverse speed (issued negative)
-    float escape_rot_speed_rps   = 0.35f;   // slight turn rate during escape
-    float escape_distance_m      = 0.30f;   // back up at most this far …
-    float escape_max_ms          = 1500.0f; // … or this long, whichever comes first
-    float escape_side_probe_m    = 0.50f;   // lateral ESDF probe for turn-direction choice
-    float escape_rear_probe_m    = 0.45f;   // rear ESDF probe distance
-    float escape_rear_min_m      = 0.30f;   // rear clearance below this → rotate-in-place, no reverse
-    // On stuck, drop a LOCAL-ONLY virtual obstacle at the wedge spot: visible to the planner/MPPI
-    // (set_static_obstacles) but NEVER uploaded to DSR. Covers the case where MPPI wedges on
-    // something residual_concept never modelled (e.g. below the LiDAR plane) — the LiDAR-based
-    // temp obstacle would find no points and create nothing, so replanning alone can't help. The
-    // disc ages out on this TTL so it doesn't permanently pollute the map (a dynamic obstacle that
-    // moved on is forgotten); if the robot re-wedges, stuck recovery drops a fresh one.
-    float         stuck_virtual_obstacle_radius_m = 0.30f;   // half-extent of the virtual disc
-    float         stuck_virtual_obstacle_forward_m = 0.40f;  // placed this far ahead of the robot
-    std::uint64_t stuck_virtual_obstacle_ttl_ms   = 5000;    // lifetime before it ages out
 };
 
 struct ControllerGraphState

@@ -642,8 +642,6 @@ void SpecificWorker::initialize()
 	// and truncated by the next run, so without this a comparison destroys its own baseline.
 	session_.mission().archive_on_stop("tracker_diag.csv");
 	session_.mission().archive_on_stop("band_diag.csv");
-	session_.mission().archive_on_stop("route_events.csv");
-	session_.mission().archive_on_stop("route_geometry.csv");
 	// ★2026-08-05 — THE WORLD SNAPSHOT MUST BE ARCHIVED PER RUN TOO. route_world.txt is what
 	// tools/route_bench and tools/tracker_sim replay, and it is REWRITTEN AT EVERY ROUTE BUILD. Two sim
 	// results taken on different days therefore described DIFFERENT ROUTES while appearing comparable —
@@ -1118,8 +1116,6 @@ void SpecificWorker::load_params()
          "absolute pose error as an OU process: stationary std (m) — tools/pose_error_stats.py");
 	cfgr.opt_cast<double>("Policy.PoseDriftTimeS", params.policy_pose_drift_time_s,
          "absolute pose error as an OU process: correlation time (s) — tools/pose_error_stats.py");
-	cfgr.opt("Policy.Enabled", params.policy_enabled,
-         "Task 8: the local look-ahead policy drives every motion; the old chain (escape, backoff, caps, band, tracker, servo) is OFF");
 	cfgr.opt("Policy.HybridChain", params.policy_hybrid_chain,
          "port step 5: with Policy.Enabled, a plain PLACE is driven by the spline chain; the policy takes the stretches the chain's window hands it (episodes) and every door passage / orient / lock-on as before");
 	cfgr.opt_cast<double>("Policy.RiskEps", params.policy_risk_eps, "acceptable P(contact) per Drive decision");
@@ -1164,66 +1160,16 @@ void SpecificWorker::load_params()
          "");
 	cfgr.opt_cast<double>("Controller.AdvRotationCouplingExponent", params.adv_rotation_coupling_exponent,
          "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleFrontDistance", params.temporary_obstacle_front_distance_m,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleHalfWidth", params.temporary_obstacle_half_width_m,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleClusterMargin", params.temporary_obstacle_cluster_margin_m,
-         "");
 	cfgr.opt_cast<double>("Controller.TemporaryObstaclePadding", params.temporary_obstacle_padding_m,
          "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleOcclusionDepth", params.temporary_obstacle_occlusion_depth_m,
-         "");
-	// Empty default = "the config is silent, keep the built-in loss", which is what the exists()
-	// guard meant; the difference is that the key now appears in the startup table either way.
-	if (const auto loss_name = cfgr.s("Controller.TemporaryObstacleRobustLoss", "",
-	        "robust loss for temporary-obstacle residuals (huber | cauchy | ...); empty = keep the built-in");
-	    not loss_name.empty())
-	{
-		if (const auto loss_type = robust_loss_type_from_string(loss_name); loss_type.has_value())
-			params.temporary_obstacle_robust_loss = loss_type.value();
-		else
-			qWarning() << "controller: unknown temporary obstacle robust loss" << loss_name.c_str() << "- using huber";
-	}
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleRobustLossScale", params.temporary_obstacle_robust_loss_scale_m,
-         "");
-	cfgr.opt("Controller.TemporaryObstacleMinPoints", params.temporary_obstacle_min_points,
-         "earlier; the tracker's existence log-odds filter prunes transient false positives");
 	cfgr.opt("Controller.TemporaryObstacleHistoryScans", params.temporary_obstacle_history_scans,
          "");
-	int temporary_obstacle_ttl_ms = static_cast<int>(params.temporary_obstacle_ttl_ms);
-	cfgr.opt("Controller.TemporaryObstacleTTLms", temporary_obstacle_ttl_ms,
-         "");
-	params.temporary_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, temporary_obstacle_ttl_ms));
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceInitLogOdds", params.temporary_obstacle_existence_init_log_odds,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceMinLogOdds", params.temporary_obstacle_existence_min_log_odds,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceMaxLogOdds", params.temporary_obstacle_existence_max_log_odds,
-         "");
 	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceRemoveThresholdLogOdds", params.temporary_obstacle_existence_remove_threshold_log_odds,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceObservationBias", params.temporary_obstacle_existence_observation_bias,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceSupportGain", params.temporary_obstacle_existence_support_gain,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceRememberedGain", params.temporary_obstacle_existence_remembered_gain,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceWeakMissPenalty", params.temporary_obstacle_existence_weak_miss_penalty,
-         "");
-	cfgr.opt_cast<double>("Controller.TemporaryObstacleExistenceAbsencePenalty", params.temporary_obstacle_existence_absence_penalty,
          "");
 	cfgr.opt_cast<double>("Controller.TemporaryObstacleMinHeight", params.temporary_obstacle_min_height_m,
          "LiDAR height band (metres, robot frame ≈ height above floor since robot_from_lidar is identity and the source cloud is already floor-referenced)");
 	cfgr.opt_cast<double>("Controller.TemporaryObstacleMaxHeight", params.temporary_obstacle_max_height_m,
          "");
-	cfgr.opt_cast<double>("Controller.UnmodelledScanMinZ", params.unmodelled_scan_min_z_m,
-         "Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor)");
-	cfgr.opt_cast<double>("Controller.UnmodelledScanMaxZ", params.unmodelled_scan_max_z_m,
-         "");
-	// Controller-side LiDAR obstacle creation (false ⇒ residual_concept is the sole obstacle source).
-	cfgr.opt("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled,
-         "Controller-side LiDAR obstacle CREATION (reactive blockage/stall temp obstacles + refresh)");
 
 	// Rotate in place at the goal to face an affordance's commanded yaw (false ⇒ arrive on position
 	// only, never orient). See ControllerParams::goal_facing_yaw_enabled.
@@ -1285,28 +1231,6 @@ void SpecificWorker::load_params()
          "wedge = measured base speed < this × commanded (prediction error)");
 	cfgr.opt_cast<double>("Controller.StuckConfirmMs", params.stuck_confirm_ms,
          "sustained command-without-motion before escape fires");
-	cfgr.opt_cast<double>("Controller.EscapeAdvSpeedMps", params.escape_adv_speed_mps,
-         "reverse speed (issued negative)");
-	cfgr.opt_cast<double>("Controller.EscapeRotSpeedRps", params.escape_rot_speed_rps,
-         "slight turn rate during escape");
-	cfgr.opt_cast<double>("Controller.EscapeDistanceM", params.escape_distance_m,
-         "back up at most this far …");
-	cfgr.opt_cast<double>("Controller.EscapeMaxMs", params.escape_max_ms,
-         "… or this long, whichever comes first");
-	cfgr.opt_cast<double>("Controller.EscapeSideProbeM", params.escape_side_probe_m,
-         "lateral ESDF probe for turn-direction choice");
-	cfgr.opt_cast<double>("Controller.EscapeRearProbeM", params.escape_rear_probe_m,
-         "rear ESDF probe distance");
-	cfgr.opt_cast<double>("Controller.EscapeRearMinM", params.escape_rear_min_m,
-         "rear clearance below this → rotate-in-place, no reverse");
-	cfgr.opt_cast<double>("Controller.StuckVirtualObstacleRadiusM", params.stuck_virtual_obstacle_radius_m,
-         "half-extent of the virtual disc");
-	cfgr.opt_cast<double>("Controller.StuckVirtualObstacleForwardM", params.stuck_virtual_obstacle_forward_m,
-         "placed this far ahead of the robot");
-	int stuck_virtual_obstacle_ttl_ms = static_cast<int>(params.stuck_virtual_obstacle_ttl_ms);
-	cfgr.opt("Controller.StuckVirtualObstacleTTLms", stuck_virtual_obstacle_ttl_ms,
-         "lifetime before it ages out");
-	params.stuck_virtual_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, stuck_virtual_obstacle_ttl_ms));
 	cfgr.opt("Controller.ProximityLogEnabled", params.proximity_log_enabled,
          "Near-obstacle 'black box': when the robot comes within proximity_log_distance_m of a tracked obstacle (or the trajectory ESDF drops that low), append…");
 	cfgr.opt("Controller.ProximityCsvPath", params.proximity_csv_path,
@@ -1367,12 +1291,6 @@ void SpecificWorker::load_params()
          "Length of the deformable window beyond the lead");
 	cfgr.opt("Controller.BandPeriodCycles", params.band_period_cycles,
          "Run the band every N control cycles. 1 = every cycle");
-	cfgr.opt("Route.NearFieldClearance", params.route_near_field_clearance,
-         "Task 6 (A/B arm B): the band's clearance near the robot = expected clearance to the policy's fitted surfaces, "
-         "joined to the live ESDF by a model weight (near_field_clearance.h). false = the old field, unchanged");
-	cfgr.opt("Route.BandDrivesCross", params.route_band_drives_cross,
-         "Task 6 fix round 1: with NearFieldClearance and the policy off, the spline/band drives a door cross through the "
-         "opening (jambs in the near field) instead of the anchor servo; completion stays the cross protocol's. false = servo");
 	cfgr.opt_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias,
          "Route optimiser: speed (0) <-> safety (1)");
 	cfgr.opt_cast<double>("Controller.RouteSafetyMargin", params.route_safety_margin_m,
@@ -1459,7 +1377,6 @@ void SpecificWorker::load_params()
 			             "'mppi' was removed 2026-09-09.", mode);
 		path_controller_.set_control_mode(plain ? rc::TrajectoryController::ControlMode::PLAIN
 		                                        : rc::TrajectoryController::ControlMode::PD);
-		session_.set_route_tracker(plain, path_controller_.params.plain_rot_headroom);
 		if (plain)
 			std::println("[control] mode = PLAIN tracker (curvature FF + Frenet feedback; NO avoidance — "
 			             "the band and the planner own that)   (L={:.2f} m, T_lag={:.2f} s, g_dc={:.3f}, "
@@ -2276,7 +2193,7 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	else if (not grid.has_world() or room.size() < 3) why = "there is no map of the room yet to check the way is clear";
 	// ★ Task 8: with the local policy driving, a relative move NEVER re-arms the base — the operator's Stop always wins (the
 	//   probe's rule, Task 7 review): a disarmed / paused base refuses the move with the reason.
-	else if (session_.policy_enabled() and (not motion_commander_.output_enabled() or not driving_enabled_ or paused_))
+	else if (not motion_commander_.output_enabled() or not driving_enabled_ or paused_)
 		why = paused_ ? "the base is paused — press Pause again to resume first"
 		              : "the base is disarmed (Stop) — press Run first; a move order never re-arms it";
 	if (why.empty())
@@ -2303,12 +2220,6 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	// ★A RELATIVE MOVE IS A "GO", like a click: it arms the base output (Stop disarmed it). Small moves are sent
 	// by language_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
 	// ★ Task 8: NOT with the local policy driving (refused above when disarmed) — there is nothing to arm here then.
-	if (not session_.policy_enabled())
-	{
-		paused_ = false;
-		motion_commander_.set_output_enabled(true);
-		driving_enabled_ = true;
-	}
 	hibernationTick();
 	const auto v = relative_motion_.view();
 	std::println("[{}] mission '{}' -> RELATIVE MOTION #{} '{}' from ({:.2f},{:.2f}) yaw {:.0f} deg", source, t, v.id,
@@ -2446,7 +2357,6 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 	}
 	// ★ Task 8: with the local policy driving, the step is a GOAL for it (RelativeMotion::policy_goal) — its control law and
 	//   its own lookahead free tests are off; the policy judges contact. Completion stays RelativeMotion's own tolerance.
-	if (session_.policy_enabled())
 	{
 		const auto g = relative_motion_.policy_goal();
 		if (g.has_value())
@@ -2474,21 +2384,6 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		update_custom_widget(*pose);
 		return true;
 	}
-	const auto &grid = session_.grid_planner();
-	const auto free = [&grid](const Eigen::Vector2f &p, float yaw) { return grid.has_world() and grid.pose_free(p, yaw); };
-	const auto cmd = relative_motion_.step(pose->pos, pose->theta, now_ms, free);
-	if (relative_motion_.active())
-		motion_commander_.send_speed_command(cmd.adv, 0.f, cmd.rot);
-	else
-	{
-		motion_commander_.stop_robot();
-		const auto v = relative_motion_.view();
-		std::println("[move] relative motion #{} '{}' {}: {} — at ({:.2f},{:.2f}) yaw {:.0f} deg", v.id, v.text,
-		             rc::RelativeMotion::phase_name(v.phase), v.last_event, pose->pos.x(), pose->pos.y(),
-		             rc::policy::to_policy_pose(*pose).yaw * 180.0 / M_PI);
-	}
-	update_custom_widget(*pose);
-	return true;
 }
 
 // ── BASE PROBE (controller_base_probe.h, Task 7) ───────────────────────────────────────────────────────────────────

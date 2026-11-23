@@ -26,9 +26,11 @@ namespace rc::door::core
 struct DetectorModel
 {
     rc::detect::DetectorEnvelope env;   // shoulders, per axis (fill_h and fill_v)
-    float hit_rate = 1.0f;              // P(report | present, ideally framed, face-on)
+    float hit_rate = 1.0f;              // P(report | present, ideally framed, face-on, leaf SHUT)
     float false_alarm = 0.0f;           // P(report | absent), per view at full visibility
     float n_hit_trials = 0.0f;          // evidence behind hit_rate (0 = a compiled default)
+    float hit_rate_open = -1.0f;        // the same with the leaf OPEN (a doorway with a leaf off the wall is not what the detector learned); < 0 = not fitted: = hit_rate
+    float n_open_trials = 0.0f;         // evidence behind hit_rate_open
 };
 
 // ═══ THE FIT'S OWN SUPPORT (door-existence model, channel `sup`) ═══════════════════════════════════════════════════════════════
@@ -107,7 +109,24 @@ struct ConfidenceModel { float present_mu = 0.66f, absent_mu = 0.46f, sigma = 0.
     return 1.0f / (1.0f + x * x);
 }
 
-struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; ConfidenceModel confidence; };
+/// The geometry channel's mu1 spread (existence_update.h geo_mu1_sd): a door's edge support reads mu1 = mu0 + mu1_sd * s, the controls' mean
+/// plus mu1_sd of their spread. 2 is the value the channel was started with; `n` = the distinct frames of true doors it was fitted on
+/// (0 = that starting value). Fitted offline by tools/fit_geometry_channel.py.
+struct GeometryModel { float mu1_sd = 2.0f, n = 0.0f; };
+
+/// What the low LiDAR's wall-line bins read at a doorway (door_opening_edges.h through_bin_counts): P(a bin reads THROUGH | it lies in an
+/// open aperture) and P(through | it lies on solid wall, or in a shut leaf). The compiled values are the first look at the apartment tapes
+/// before the fit (open 0.75: a swung leaf hides part of the hole; wall 0.01), n = the sweeps of each fit (0 = compiled). Fitted offline by
+/// tools/fit_lidar_through.py; read by the one-model opening likelihood.
+struct LidarThroughModel { float through_open = 0.75f, through_wall = 0.01f, n_open = 0.0f, n_wall = 0.0f; };
+
+[[nodiscard]] inline bool lidar_in_domain(const LidarThroughModel& m)
+{
+    return std::isfinite(m.through_open) and std::isfinite(m.through_wall) and m.through_wall > 0.0f and m.through_wall < m.through_open
+           and m.through_open < 1.0f;
+}
+
+struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; ConfidenceModel confidence; GeometryModel geometry; LidarThroughModel lidar; };
 
 // SENSOR-MODEL CONSTANTS (refit from data). ZED: today's aperture_envelope shoulders (DoorModel.Detect{Min,Max}Fill/Soft),
 // hit 0.9 / clutter 0.02 are placeholders for the ZED (no ZED hit-rate was ever measured per view).
@@ -129,6 +148,16 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
 /// The false-alarm rate AT THIS VIEW: a false alarm passes through the detector's own front end exactly as the door does
 /// (envelope, aspect, visibility, kappa), so f_eff = false_alarm * q / hit_rate = false_alarm * env * aspect * vis * kappa.
 /// 0 when q == 0 (a view the detector cannot report from can neither confirm nor refute).
+/// The camera's model for a door whose leaf is open with probability p_open: P(report | door) = (1 - p_open) h_shut + p_open h_open.
+/// The front end (envelope, aspect, visibility) and the false alarm are the leaf's business no more than the wall's, so only the hit rate moves.
+[[nodiscard]] inline DetectorModel with_leaf_state(DetectorModel m, float p_open)
+{
+    const float h_open = m.hit_rate_open >= 0.0f ? m.hit_rate_open : m.hit_rate;
+    const float po = std::clamp(p_open, 0.0f, 1.0f);   // clamp: a probability
+    m.hit_rate = (1.0f - po) * m.hit_rate + po * h_open;
+    return m;
+}
+
 [[nodiscard]] inline float false_alarm_eff(const DetectorModel& m, float q)
 {
     return m.hit_rate > 0.0f ? m.false_alarm * q / m.hit_rate : 0.0f;
@@ -148,17 +177,23 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
     return q > 0.0f ? std::log((1.0f - q) / (1.0f - f_eff)) : 0.0f;
 }
 
-// CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm.
+// CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm; plus the rows `geometry,mu1_sd` and
+// `lidar,through_open|through_wall` (Task 5; absent from an older file => today's values, n = 0, so old files load unchanged).
 // from_chars must consume the WHOLE field; a malformed row keeps the default for that param and is counted (one warning line).
 // Domain validation (a probability must be a probability, NOT a model threshold): hit_llr divides by false_alarm, f_eff by
 // hit_rate and miss_llr takes log(1 - q), so a loaded camera must satisfy 0 < false_alarm < hit_rate < 1 and a valid envelope;
 // otherwise that camera falls back to its compiled defaults with a warning. kappa is in [0,1] by construction
 // (pose_overlap_factor), so q <= hit_rate < 1 and 1 - q > 0.
+// hit_rate_open: strictly inside (0, 1) (a zero rate is an infinite log-ratio). NOT required to exceed false_alarm: an open door that truly
+// reports less often than a false alarm makes a report there honest evidence AGAINST the door.
+[[nodiscard]] inline bool open_rate_in_domain(float h) { return std::isfinite(h) and h > 0.0f and h < 1.0f; }
+
 [[nodiscard]] inline bool detector_in_domain(const DetectorModel& m)
 {
     return m.false_alarm > 0.0f and m.false_alarm < m.hit_rate and m.hit_rate < 1.0f and m.env.valid()
            and std::isfinite(m.env.min_fill) and std::isfinite(m.env.max_fill) and std::isfinite(m.env.soft)
-           and std::isfinite(m.hit_rate) and std::isfinite(m.false_alarm);
+           and std::isfinite(m.hit_rate) and std::isfinite(m.false_alarm)
+           and (m.hit_rate_open < 0.0f or open_rate_in_domain(m.hit_rate_open));
 }
 
 [[nodiscard]] inline DetectorTable load_detectors(const std::filesystem::path& p)
@@ -207,18 +242,39 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
             else ++malformed;
             continue;
         }
+        if (c[0] == "geometry")
+        {
+            if (c[1] == "mu1_sd" and std::isfinite(v) and v >= 0.0f) { t.geometry.mu1_sd = v; t.geometry.n = n; }   // 0 = no information (mu1 = mu0); a negative spread would flip the evidence sign
+            else if (c[1] == "mu1_sd") { std::fprintf(stderr, "[detector_model] %s: geometry mu1_sd %g out of domain (need finite, >= 0): compiled default\n", p.string().c_str(), static_cast<double>(v)); }
+            else ++malformed;
+            continue;
+        }
+        if (c[0] == "lidar")
+        {
+            if (c[1] == "through_open") { t.lidar.through_open = v; t.lidar.n_open = n; }
+            else if (c[1] == "through_wall") { t.lidar.through_wall = v; t.lidar.n_wall = n; }
+            else ++malformed;
+            continue;
+        }
         DetectorModel* m = c[0] == "zed" ? &t.zed : c[0] == "ricoh" ? &t.ricoh : nullptr;
         if (m == nullptr) { ++malformed; continue; }
         if (c[1] == "min_fill") m->env.min_fill = v;
         else if (c[1] == "max_fill") m->env.max_fill = v;
         else if (c[1] == "soft") m->env.soft = v;
         else if (c[1] == "hit_rate") { m->hit_rate = v; m->n_hit_trials = n; }
+        else if (c[1] == "hit_rate_open") { m->hit_rate_open = v; m->n_open_trials = n; }
         else if (c[1] == "false_alarm") m->false_alarm = v;
         else ++malformed;
     }
     if (malformed > 0)
         std::fprintf(stderr, "[detector_model] %s: %d malformed row(s) ignored (defaults kept for those params)\n",
                      p.string().c_str(), malformed);
+    for (DetectorModel* m : {&t.zed, &t.ricoh})
+        if (m->hit_rate_open >= 0.0f and not open_rate_in_domain(m->hit_rate_open))
+        {
+            std::fprintf(stderr, "[detector_model] %s: hit_rate_open %g out of domain (need 0 < h < 1): = hit_rate\n", p.string().c_str(), static_cast<double>(m->hit_rate_open));
+            m->hit_rate_open = -1.0f;
+        }
     if (not detector_in_domain(t.zed))
     {
         std::fprintf(stderr, "[detector_model] %s: zed out of domain (need 0 < false_alarm < hit_rate < 1): compiled defaults\n", p.string().c_str());
@@ -233,6 +289,11 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
     {
         std::fprintf(stderr, "[detector_model] %s: confidence out of domain (need present_mu > absent_mu, sigma > 0): compiled defaults\n", p.string().c_str());
         t.confidence = defaults.confidence;
+    }
+    if (not lidar_in_domain(t.lidar))
+    {
+        std::fprintf(stderr, "[detector_model] %s: lidar out of domain (need 0 < through_wall < through_open < 1): compiled defaults\n", p.string().c_str());
+        t.lidar = defaults.lidar;
     }
     if (support_seen != 0b111111 or not support_in_domain(t.support))
     {
@@ -249,6 +310,8 @@ inline void save_detectors(const std::filesystem::path& p, const DetectorTable& 
     f.imbue(std::locale::classic());
     f << "camera,param,value,n,source\n";
     const auto write_cam = [&](const char* cam, const DetectorModel& m) {   // (not "emit": Qt #defines it)
+        if (m.hit_rate_open >= 0.0f)
+            f << std::format("{},hit_rate_open,{},{},{}\n", cam, m.hit_rate_open, m.n_open_trials, source);
         f << std::format("{},min_fill,{},0,{}\n{},max_fill,{},0,{}\n{},soft,{},0,{}\n{},hit_rate,{},{},{}\n{},false_alarm,{},0,{}\n",
                          cam, m.env.min_fill, source, cam, m.env.max_fill, source, cam, m.env.soft, source,
                          cam, m.hit_rate, m.n_hit_trials, source, cam, m.false_alarm, source);
@@ -263,5 +326,7 @@ inline void save_detectors(const std::filesystem::path& p, const DetectorTable& 
     const auto& k = t.confidence;
     f << std::format("confidence,present_mu,{},{},{}\nconfidence,absent_mu,{},{},{}\nconfidence,sigma,{},{},{}\n",
                      k.present_mu, k.n_trials, source, k.absent_mu, k.n_trials, source, k.sigma, k.n_trials, source);
+    f << std::format("geometry,mu1_sd,{},{},{}\nlidar,through_open,{},{},{}\nlidar,through_wall,{},{},{}\n", t.geometry.mu1_sd, t.geometry.n, source,
+                     t.lidar.through_open, t.lidar.n_open, source, t.lidar.through_wall, t.lidar.n_wall, source);
 }
 }  // namespace rc::door::core

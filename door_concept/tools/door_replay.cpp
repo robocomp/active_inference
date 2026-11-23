@@ -52,6 +52,7 @@
 #include <clocale>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <format>
 #include <map>
@@ -71,6 +72,7 @@
 #include "../src/door_dof.h"            // the live consumers' DOF table (dashboard, NBV adequacy)
 #include "../src/door_approach_pose.h"  // Task E: the approach offer's price (--look)
 #include "../src/epistemic_planner.h"   // the live NBV (rc::EpistemicPlanner) — run here as a smoke on every door
+#include "../src/door_hypothesis_look.h" // --hlook: the hypothesis look (spec §4) on the tape
 #include "../src/door_leaf_visibility.h" // crossing_logodds (the --mirror stand-in carries existence as live does)
 
 using namespace rc::door::core;
@@ -300,6 +302,7 @@ public:
     }
 
     std::uint64_t room_id() const override { return room_; }
+    [[nodiscard]] const std::string& room_name() const { return room_name_; }
     std::vector<Vec2f> room_polygon() const override { return polygon_; }
     std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const override
     {
@@ -331,6 +334,8 @@ public:
     void retire(std::uint64_t id) override { live_.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
     { if (auto it = live_.find(id); it != live_.end()) it->second.assigned_mask_idx = slice; }
+    void set_mask_responsibility(std::uint64_t id, float rho) override
+    { if (auto it = live_.find(id); it != live_.end()) it->second.mask_rho = rho; }
 
     void after_association(const TrackerCycleInfo&) override {}   // (live: the pumps; existence is the core's now)
 
@@ -470,7 +475,7 @@ int main(int argc, char** argv)
     if (std::setlocale(LC_ALL, "es_ES.UTF-8") == nullptr) std::setlocale(LC_ALL, "");
     if (argc < 3)
     {
-        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--trace NAME]");
+        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--trace NAME] [--set KEY=VALUE]... [--detectors FILE]");
         return 2;
     }
     std::uint64_t until = ~0ull;
@@ -493,6 +498,12 @@ int main(int argc, char** argv)
     std::string costs_path = "etc/door_costs.csv";   // --costs FILE: C_keep / C_delete (fixed; missing => the compiled LOGGED estimate, loudly)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
     bool core_stdout = false;
+    bool seed_walls = true;   // --no-seeds: do not replay the agent's wall seeding (step_wall_hypotheses) under Existence.OneModel
+    std::map<std::string, rc::door::hlook::LookCache> hl_caches;   // --hlook: per question, as the agent keeps them
+    std::vector<double> hl_cold_ms, hl_warm_ms;                    // best_look time on a table miss / on a reuse
+    std::uint64_t hl_from = 1, hl_to = 0;   // --hlook FROM TO: print the hypothesis look's questions and best poses on those cycles (hl_to < hl_from: off)
+    std::vector<std::pair<std::string, std::string>> overrides;   // --set KEY=VALUE: a config key replacing the tape header's (or adding one), e.g. Existence.OneModel=true
+    std::string detectors_path;   // --detectors FILE: the detector table; default = the compiled one, or etc/door_detectors_fitted.csv under Existence.OneModel (as the agent)
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
@@ -500,12 +511,22 @@ int main(int argc, char** argv)
         else if (a == "--verbose") verbose = true;
         else if (a == "--mirror") mirror = true;
         else if (a == "--look") look_log = true;
+        else if (a == "--hlook" and i + 2 < argc) { hl_from = std::strtoull(argv[++i], nullptr, 10); hl_to = std::strtoull(argv[++i], nullptr, 10); }
         else if (a == "--ricoh-strip-oracle") strip_oracle = true;
         else if (a == "--ablate-hull-midpoint") ablate_hull = true;
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
-        else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
+        else if (a == "--clock-jitter-ms" and i + 1 < argc) { const std::string_view v = argv[++i]; std::from_chars(v.data(), v.data() + v.size(), jitter_ms); }   // from_chars: locale-independent (main activates the es_ES locale, where strtod stops at the point)
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
         else if (a == "--costs" and i + 1 < argc) costs_path = argv[++i];
+        else if (a == "--set" and i + 1 < argc)
+        {
+            const std::string_view kv = argv[++i];
+            const auto eq = kv.find('=');
+            if (eq == std::string_view::npos or eq == 0) { std::println("--set wants KEY=VALUE, got '{}'", kv); return 2; }
+            overrides.emplace_back(std::string(kv.substr(0, eq)), std::string(kv.substr(eq + 1)));
+        }
+        else if (a == "--detectors" and i + 1 < argc) detectors_path = argv[++i];
+        else if (a == "--no-seeds") seed_walls = false;
         else if (a == "--stdout") core_stdout = true;   // Task 8: echo the core's stdout lines (existence / candidate readouts)
         else if (a == "--recess-prior-std" and i + 1 < argc)
         {   // a SENSITIVITY probe (Task 5b): the leaf-plane depth's prior σ, overriding the recorded config
@@ -529,7 +550,8 @@ int main(int argc, char** argv)
     std::uint32_t version = 0;
     const auto hdr = f ? read_header(f, RecordingKind::Input, &version) : std::nullopt;
     if (not hdr.has_value()) { std::println("cannot read the input tape {}", argv[1]); return 2; }
-    const EffectiveConfig eff(hdr->config_text);
+    EffectiveConfig eff(hdr->config_text);
+    for (const auto& [k, v] : overrides) { eff.file_values[k] = v; std::println("probe: config {} = {}", k, v); }
     // The agent REFUSES a config that sets a retired key. A tape recorded BEFORE the existence model carries them in its header and
     // must still replay (the core ignores them), so here the same check is a loud warning, not a refusal.
     if (const auto stale = rc::retired_door_keys_present([&](const std::string& k) { return eff.find(k) != nullptr; }); not stale.empty())
@@ -550,6 +572,15 @@ int main(int argc, char** argv)
     ReplayWorld world(cfg.door, by_cycle);
     world.mirror_ = mirror;
     DoorCore core(cfg);
+    if (detectors_path.empty() and cfg.door.exist_one_model and std::filesystem::exists("etc/door_detectors_fitted.csv"))
+        detectors_path = "etc/door_detectors_fitted.csv";   // the agent's own choice under the flag (specificworker.cpp)
+    if (not detectors_path.empty())
+    {
+        core.set_detectors(rc::door::core::load_detectors(detectors_path));
+        const auto& t = core.detectors();
+        std::println("detectors: {} -> zed hit {:.3f} fa {:.3f}, ricoh hit {:.3f} fa {:.3f}, geometry mu1_sd {:.2f}", detectors_path,
+                     t.zed.hit_rate, t.zed.false_alarm, t.ricoh.hit_rate, t.ricoh.false_alarm, t.geometry.mu1_sd);
+    }
     core.set_costs(rc::door::core::CostEstimator::load_or_default(costs_path));
     { const auto c = core.costs().costs(cfg.door.exist_max_room_s);
       std::println("costs: {} -> C_keep {:.2f} s, C_delete(ordinary) {:.2f} s", costs_path, c.keep_s, c.delete_ordinary_s); }
@@ -558,7 +589,8 @@ int main(int argc, char** argv)
     // that cost), and the tool writes no file.
     long diag_rows = 0;
     // --csv DIR: the fit's two logs and the existence log, as the live agent writes them (diff them against its own)
-    std::ofstream ai2_csv, phi_csv, ex_csv, views_csv;
+    std::ofstream ai2_csv, phi_csv, ex_csv, views_csv, stdout_csv;
+    std::uint64_t diag_cycle = 0;   // the cycle being stepped, to stamp the core's stdout lines in --csv's stdout_diag.csv
     if (not csv_dir.empty())
     {
         ai2_csv.open(csv_dir + "/ai2_log.csv");
@@ -566,6 +598,7 @@ int main(int argc, char** argv)
         ex_csv.open(csv_dir + "/door_existence_log.csv");
         views_csv.open(csv_dir + "/door_views_log.csv");
         views_csv << kViewsCsvHeader;
+        stdout_csv.open(csv_dir + "/stdout_diag.log");   // cycle<TAB>line: where a candidate place stood (tools/label_door_views.py)
         ai2_csv << kAi2CsvHeader;
         phi_csv << kPhiCsvHeader;
         ex_csv << kExistenceCsvHeader;
@@ -577,7 +610,11 @@ int main(int argc, char** argv)
         else if (r.stream == "ai2_log_phi.csv" and phi_csv.is_open()) phi_csv << r.line;
         else if (r.stream == "door_existence_log.csv" and ex_csv.is_open()) ex_csv << r.line;
         else if (r.stream == "door_views_log.csv" and views_csv.is_open()) views_csv << r.line;
-        else if (r.stream == "stdout" and core_stdout) std::cout << r.line;
+        else if (r.stream == "stdout")
+        {
+            if (stdout_csv.is_open()) stdout_csv << diag_cycle << '\t' << r.line;
+            if (core_stdout) std::cout << r.line;
+        }
     }});
 
     // the slices the tool does not rebuild — counted, so a tape that exercised them says so
@@ -592,6 +629,8 @@ int main(int argc, char** argv)
     std::vector<DoorDecision> got, got_phi, got_exist, got_remove;
     std::uint64_t n = 0, first = 0, last = 0;
     int stepped = 0, media_only = 0;
+    std::uint64_t seeded_room = 0;   // the room whose walls were seeded last (SpecificWorker::wall_seeded_room_)
+    int n_seeds = 0, n_seed_rooms = 0;
     double step_ms_sum = 0.0, step_ms_max = 0.0, copy_ms_sum = 0.0;
     std::vector<double> step_ms;
     while (true)
@@ -601,6 +640,7 @@ int main(int argc, char** argv)
         if (in->cycle > until) break;
         if (n++ == 0) first = in->cycle;
         last = in->cycle;
+        diag_cycle = in->cycle;
         if (jitter_ms > 0.0)
         {
             static std::uint64_t lcg = 0x9E3779B97F4A7C15ull;
@@ -643,6 +683,25 @@ int main(int argc, char** argv)
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             step_ms_sum += ms; step_ms_max = std::max(step_ms_max, ms); step_ms.push_back(ms);
             ++stepped;
+            // ★THE AGENT-SIDE PRODUCER THE CORE REACTS TO: a promoted room's walls are its door slots (SpecificWorker::step_wall_hypotheses,
+            // one place per door width along every wall, once per room entry, after the cycle's step). Not on the tape, so rebuilt from the
+            // room-promotion input the tape does carry (the room's outline and its proto flag). Only under the one-model flag, as the agent.
+            // NOT replayed: the outline doorways (`room_doorways` node, not on the tape) and the restore of door notes from LTSM (the notes
+            // are graph attributes the tape does not hold; the identity rows it does hold are not the notes' ledgers).
+            if (seed_walls and cfg.door.exist_one_model and world.room_id() != seeded_room and world.room_polygon().size() >= 3
+                and not core.room_is_proto() and not world.room_name().empty() and core.room_name() == world.room_name())
+            {
+                seeded_room = world.room_id();
+                ++n_seed_rooms;
+                const auto& poly = world.room_polygon();
+                for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+                {
+                    const Eigen::Vector2f e = poly[i] - poly[j];
+                    const int k_n = static_cast<int>(e.norm() / cfg.door.door_prior_w_m);
+                    for (int k = 0; k < k_n; ++k)
+                        n_seeds += core.hypothesise_place(world.room_name(), poly[j] + e * ((static_cast<float>(k) + 0.5f) / static_cast<float>(k_n)), true) ? 1 : 0;
+                }
+            }
             for (const auto& d : out.decisions)
             {
                 if (is_tracker_kind(d.kind)) got.push_back(d);
@@ -707,6 +766,79 @@ int main(int argc, char** argv)
                 belief_smoke_sum += acc;
                 ++belief_smoke_runs;
             }
+            if (hl_from <= hl_to and in->cycle >= hl_from and in->cycle <= hl_to and cfg.door.exist_one_model)
+            {   // the hypothesis look as the agent builds it (SpecificWorker::step_candidate_looks): members -> questions -> best pose. No furniture on a tape.
+                namespace hl = rc::door::hlook;
+                std::vector<Eigen::Vector2f> poly;
+                for (const auto& v : world.room_polygon()) poly.emplace_back(v.x(), v.y());
+                std::vector<hl::Member> members;
+                std::set<std::string> open_names;
+                for (const auto& c : core.candidates())
+                {
+                    hl::Member m;
+                    m.name = std::format("place_{}", c.key);
+                    m.aperture = c.theta.aperture; m.leaf = c.theta.leaf; m.leaf_born = c.leaf_born;
+                    const double pm = std::clamp(double(c.belief.p()), 1e-9, 1.0 - 1e-9);
+                    m.L = std::log(pm) - std::log1p(-pm);
+                    if (c.leaf_born) m.alts = core.leaf_alternatives(c);
+                    else m.leaf.phi = std::acos(std::clamp(1.0f - std::clamp(cfg.door.ricoh_birth_p_open, 0.0f, 1.0f), -1.0f, 1.0f));
+                    if (core.candidate_is_open(c)) open_names.insert(m.name);
+                    members.push_back(std::move(m));
+                }
+                for (const auto& [id, st] : world.fit_states())
+                {
+                    if (st == nullptr or st->is_bearing_hypothesis or not st->ai2_initialized) continue;
+                    hl::Member m;
+                    m.name = st->node_name; m.aperture = st->aperture; m.leaf = st->leaf; m.L = st->belief.L();
+                    m.restored_unseen = rc::door::restored_unseen(*st);
+                    members.push_back(std::move(m));
+                }
+                const auto undecided = [&](const hl::Member& m) { return m.name.starts_with("place_") ? open_names.contains(m.name) : m.restored_unseen; };
+                const std::vector<rc::nbv::Obstacle> furniture;
+                const float radius = 0.5f * cfg.door.pragmatic.robot_passage_width_m;
+                hl::Model model;
+                model.camera.hfov_rad = 1.92f; model.camera.vfov_rad = 1.22f; model.camera.height_m = 1.0f; model.camera.env = core.detectors().zed.env;
+                model.zed = core.detectors().zed; model.lidar = core.detectors().lidar; model.polygon = poly; model.furniture = furniture;
+                model.wall_thickness_m = std::max(1e-3f, cfg.door.door_thickness_m); model.robot_radius_m = radius;
+                const auto poses = hl::room_poses(poly, furniture, radius);
+                std::vector<std::pair<std::string, std::string>> competing;
+                {
+                    std::map<std::uint64_t, std::string> door_name;
+                    for (const auto& [id, st] : world.fit_states()) if (st != nullptr) door_name[id] = st->node_name;
+                    const auto name_of = [&](const DoorCore::NodeRef& n) -> std::string
+                    {
+                        if (n.first == 'c') return std::format("place_{}", n.second);
+                        const auto it = door_name.find(n.second);
+                        return it != door_name.end() ? it->second : std::string{};
+                    };
+                    for (const auto& [a, b] : core.competing())
+                        if (const auto na = name_of(a), nb = name_of(b); not na.empty() and not nb.empty()) competing.emplace_back(na, nb);
+                }
+                if (in->robot.room_T_body.has_value())
+                    std::println("HLOOK cycle {} robot ({:.2f},{:.2f})", in->cycle, (*in->robot.room_T_body)(0, 3), (*in->robot.room_T_body)(1, 3));
+                if (in->cycle % 20 == 0) for (const auto& [a, b] : competing) std::println("HLOOK cycle {} competes {} -- {}", in->cycle, a, b);
+                for (const auto& q : hl::questions_from(members, competing, undecided))
+                {
+                    const auto w = hl::weights_of(q);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    hl::LookCache& cache = hl_caches[q.key];
+                    const hl::Best b = hl::best_look(q, poses, model, &cache);
+                    const double bms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    (cache.hit ? hl_warm_ms : hl_cold_ms).push_back(bms);
+                    std::string hs;
+                    const hl::Scene sc = hl::make_scene(q, model);
+                    for (std::size_t h = 0; h < q.hyps.size(); ++h)
+                    {
+                        std::string los;
+                        for (std::size_t sl = 0; sl < sc.holes.size(); ++sl)
+                            los += std::format(" los[{}|{}]={:.2f}", sl, h, b.valid ? hl::lidar_los(b.pose.xy, sc.holes[sl], sc.occ[h][sl]) : 0.f);
+                        std::string ap = q.hyps[h].apertures.empty() ? "none" : std::format("ap@({:.2f},{:.2f}) w{:.2f} phi{:.2f}", q.hyps[h].apertures[0].centre_xy().x(), q.hyps[h].apertures[0].centre_xy().y(), q.hyps[h].apertures[0].w, q.hyps[h].leaves[0].phi);
+                        hs += std::format("\n      h{} w {:.3f} {}{}", h, w[h], ap, los);
+                    }
+                    std::println("HLOOK cycle {} {} settled {} | best ({:.2f},{:.2f}) yaw {:.2f} eig {:.4f} nats ({:.1f} ms, {} poses){}", in->cycle, q.key, hl::settled(q) ? 1 : 0,
+                                 b.pose.xy.x(), b.pose.xy.y(), b.pose.yaw, b.eig_nats, bms, poses.size(), hs);
+                }
+            }
             if (not trace_door.empty())
                 for (const auto& [id, st] : world.fit_states())
                     if (st != nullptr and (trace_door == "*" or st->node_name == trace_door))
@@ -734,6 +866,7 @@ int main(int argc, char** argv)
         world.end_cycle();
     }
     std::println("replayed {} records (cycles {}..{}): stepped {}, media-only {}", n, first, last, stepped, media_only);
+    if (cfg.door.exist_one_model) std::println("wall seeds: {} place(s) seeded in {} room entr{} ({})", n_seeds, n_seed_rooms, n_seed_rooms == 1 ? "y" : "ies", seed_walls ? "as the agent's step_wall_hypotheses" : "OFF: --no-seeds");
     std::println("live-only belief consumers (NBV planner, DOF table, reported Σ) ran {} times, clean (checksum {:.4g})",
                  belief_smoke_runs, belief_smoke_sum);
     for (int k = 0; k < 2; ++k)
@@ -771,6 +904,11 @@ int main(int argc, char** argv)
                      step_ms_sum / static_cast<double>(step_ms.size()), step_ms[step_ms.size() / 2],
                      step_ms[std::min(step_ms.size() - 1, step_ms.size() * 99 / 100)], step_ms_max, diag_rows,
                      copy_ms_sum / static_cast<double>(n));
+    }
+    if (not hl_cold_ms.empty() or not hl_warm_ms.empty())
+    {
+        const auto mean = [](const std::vector<double>& v) { double a = 0; for (double x : v) a += x; return v.empty() ? 0.0 : a / double(v.size()); };
+        std::println("cost: hlook best_look cold (tables rebuilt) {} calls {:.2f} ms mean; warm (tables reused) {} calls {:.2f} ms mean", hl_cold_ms.size(), mean(hl_cold_ms), hl_warm_ms.size(), mean(hl_warm_ms));
     }
     // ── Phi rows: every one, in order ──
     std::vector<DoorDecision> ref_phi;

@@ -60,6 +60,26 @@ void RecallPublisher::write_pose(std::uint64_t room_id, std::uint64_t node_id, c
     written_[r.uid] = r.kf;
 }
 
+// The link can appear, change or go while the recall stays offered: written only on change.
+void RecallPublisher::sync_link(const DSR::Node& node, const Recall& r)
+{
+    auto n = node;
+    const auto uid = G_->get_attrib_by_name<same_as_uid_att>(n).value_or(0);
+    const auto prob = G_->get_attrib_by_name<same_as_prob_att>(n).value_or(0.f);
+    if (uid == r.same_as_uid and prob == r.same_as_prob) return;
+    if (r.same_as_uid == 0)
+    {
+        G_->remove_attrib_local<same_as_uid_att>(n);
+        G_->remove_attrib_local<same_as_prob_att>(n);
+    }
+    else
+    {
+        G_->add_or_modify_attrib_local<same_as_uid_att>(n, r.same_as_uid);
+        G_->add_or_modify_attrib_local<same_as_prob_att>(n, r.same_as_prob);
+    }
+    G_->update_node(n);
+}
+
 void RecallPublisher::insert(std::uint64_t room_id, const Recall& r)
 {
     const std::string name = name_of(r.uid);
@@ -72,6 +92,17 @@ void RecallPublisher::insert(std::uint64_t room_id, const Recall& r)
     G_->add_or_modify_attrib_local<level_att>(n, G_->get_attrib_by_name<level_att>(*room).value_or(1) + 1);
     // The owner's last P(exists): the resurrecting agent takes it as this candidate's prior (recall_match.h).
     if (r.exist_prob.has_value()) G_->add_or_modify_attrib_local<obj_exist_prob_att>(n, *r.exist_prob);
+    // The remembered colour (changed object, 2026-11-15): the concept agent's identity link weighs it.
+    if (not r.color_name.empty())
+    {
+        G_->add_or_modify_attrib_local<color_name_att>(n, r.color_name);
+        G_->add_or_modify_attrib_local<color_prob_att>(n, r.color_prob);
+    }
+    if (r.same_as_uid != 0)   // a memory continuing as a live object: that object keeps the link, no birth takes it
+    {
+        G_->add_or_modify_attrib_local<same_as_uid_att>(n, r.same_as_uid);
+        G_->add_or_modify_attrib_local<same_as_prob_att>(n, r.same_as_prob);
+    }
     const auto id = G_->insert_node(n);
     if (not id) { warn_once(name, "insert_node failed"); return; }
     write_pose(room_id, *id, name, r);
@@ -93,6 +124,7 @@ void RecallPublisher::sync(std::optional<std::uint64_t> room_id, std::span<const
         // Not wanted, or hanging under another room (we re-create it under this one): delete.
         if (it == wanted.end() or not G_->get_edge(*room_id, n.id(), "RT")) { to_delete.emplace_back(n.id(), n.name()); continue; }
         kept.insert(n.name());
+        sync_link(n, *it->second);
         if (not pose_current(*it->second))
             write_pose(*room_id, n.id(), n.name(), *it->second);   // move: same node, new RT pose
     }

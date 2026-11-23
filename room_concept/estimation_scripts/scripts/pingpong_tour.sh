@@ -16,7 +16,7 @@ LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK;
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # helpers come from THIS script's own directory (the worktree), data stays under $E
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
 TRIPS=${2:-6}; LEG_TIMEOUT_S=${LEG_TIMEOUT_S:-600}
-export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build} WT_AGENTS=${WT_AGENTS:-"controller door_concept table_concept room_concept residual_concept ltsm_agent"}
+export WT=${WT:-$B} WT_AGENTS=${WT_AGENTS:-"controller door_concept table_concept room_concept residual_concept ltsm_agent"}
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent table_concept"
 DOOR1_Y=9.3796   # DOOR_1's line in the world (threerooms-piso.wbt, DEF DOOR_1 translation): room_1 is y < it, room_2 is y > it
 echo stop > $B/controller/remote_cmd.txt
@@ -38,7 +38,7 @@ rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv
 # DOOR_1 starts shut (the cross mission opens it); DOOR_0 and DOOR_2 stay shut for the whole run
 for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py close $d; done
 sleep 3
-# graph recorder (passive DSR participant, agent id 28): every structural write with its writer — for trace_check.py
+# graph recorder (passive DSR participant, agent id 40): every structural write with its writer — for trace_check.py
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
 [ -x $REC ] && { setsid $REC crossing/$1/graph_trace.csv > crossing/$1/graph_recorder.log 2>&1 < /dev/null & REC_PID=$!; }
 NORUN=1 bash $S/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
@@ -50,7 +50,7 @@ now_ms() { date +%s%3N; }
 true_y() { python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $2}'; }
 # GROUND TRUTH at 1 Hz: wall ms, Webots pose, and every agent log's line count (maps any log line to the true pose then)
 GT=crossing/$1/gt_pose.tsv; printf 't_ms\tx\ty\tyaw\troom_concept\tltsm_agent\tdoor_concept\tcontroller\n' > $GT
-( while [ -f $LOCK ]; do
+( while [ "$(cat $LOCK 2>/dev/null)" = "$$" ]; do
     p=$(python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1"\t"$2"\t"$5}')
     [ -n "$p" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' $(now_ms) "$p" $(nl room_concept) $(nl ltsm_agent) $(nl door_concept) $(nl controller) >> $GT
     sleep 1

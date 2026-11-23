@@ -20,9 +20,14 @@
 // ends.
 //
 // Build+run (from controller/; one line):
-//   g++ -std=c++23 -O2 -Wall -Wextra -pthread -I/usr/include/eigen3 tests/test_policy_scenarios.cpp
+//   g++ -std=c++23 -O2 -pthread -I/usr/include/eigen3 -I$HOME/robocomp/robocomp_core/classes tests/test_policy_scenarios.cpp
 //     src/local_policy/local_policy.cpp src/local_policy/contact.cpp src/local_policy/cost_to_go.cpp src/local_policy/navigator.cpp
+//     src/grid_planner.cpp src/route_spline.cpp src/chain_monitor/chain_monitor.cpp src/trajectory_controller.cpp
+//     src/route_optimizer.cpp src/trackers/plain_tracker.cpp src/trackers/pd_tracker.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tps && /tmp/tps
+//   (from a git worktree add  -iquote $HOME/robocomp/components/active_inference/controller/src : lidar_buffer_types.h
+//    reaches robocomp_core by a relative path that is one level short there)
+//   REGIME=policy (default) | hybrid : the look-ahead policy alone, or the hybrid (spline chain + policy episodes + recovery).
 //   Env: POLICY_CAMERA=0 turns the Task-R camera model OFF (default ON, as in the controller); POLICY_NOFACING=1 drops the doorway facing term;
 //        ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
@@ -130,7 +135,7 @@ struct Options
     std::vector<Mover> movers = {};
     // THE SPLINE CHAIN (2026-11-10): REGIME=chain drives every scenario with planner -> optimised spline -> band -> PLAIN
     // tracker (run_chain) instead of the look-ahead policy; same world, plant, sensors and oracles
-    bool chain = std::getenv("REGIME") != nullptr and (std::string(std::getenv("REGIME")) == "chain" or std::string(std::getenv("REGIME")) == "hybrid");
+    bool chain = std::getenv("REGIME") != nullptr and std::string(std::getenv("REGIME")) == "hybrid";   // run_chain: the hybrid's driver (REGIME=chain, the chain alone, was removed 2026-11-16)
     // THE HAND-OFF (controller-two-regimes §3.2): the chain drives; a stretch it cannot drive goes to the look-ahead policy as one
     // episode toward a local subgoal on the route
     bool hybrid = std::getenv("REGIME") != nullptr and std::string(std::getenv("REGIME")) == "hybrid";
@@ -338,7 +343,7 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
     CostToGo ref_field = stick.field();
     res.geodesic_m = ref_field.at(start.p);
     if (contact.touches(start)) { res.why = "start pose overlaps the world"; res.contacts = 1; res.end = start; return res; }
-    const bool region_case = opt.hybrid and goal.kind == Goal::Kind::Place;   // a target the body cannot stand on is resolved below
+    const bool region_case = goal.kind == Goal::Kind::Place;   // a target the body cannot stand on is resolved below
     if (not std::isfinite(res.geodesic_m) and not region_case) { res.unreachable = true; res.why = "goal not reachable on the map"; res.end = start; return res; }
 
     // ---- the chain, configured as etc/config.toml configures it
@@ -406,7 +411,7 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
         return true; };
     // THE GOAL REGION, resolved with the CHAIN's own feasibility (the body + margin at some heading, gp.pose_free) and
     // reachability (map geodesic from the start): the nearest such place to the target. A plannable target is unchanged.
-    if (opt.hybrid and goal.kind == Goal::Kind::Place and not install(start.p, goal.p))
+    if (goal.kind == Goal::Kind::Place and not install(start.p, goal.p))
     {
         CostToGo reach;
         const std::vector<V2> src{start.p};
@@ -733,7 +738,7 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
         for (const auto& sw : buffer)
             for (const V2& q : sw) { const V2 r = Rt * (q - bel.p); cloud.emplace_back(r.x(), r.y(), 0.5f); }
         const auto t_step = std::chrono::steady_clock::now();
-        if (opt.hybrid and not waiting)
+        if (not waiting)
         {
             std::vector<Return> ret;
             for (const auto& sw : buffer) for (const V2& q : sw) ret.push_back({q, sigma_r(), 1.f});
@@ -995,7 +1000,7 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
         {
             // judged at the GOAL's own tolerance (Fable round 2: a 0.5 m floor here inflated every reach rate)
             if ((bel.p - goal.p).norm() <= goal.tol_xy) { res.reached = true; res.why = "arrived"; break; }
-            if (opt.hybrid and not episode and not waiting)
+            if (not episode and not waiting)
             {   // the tracker stopped short of the tolerance: the specialist finishes the approach (the whole goal)
                 std::vector<Return> ret;
                 for (const auto& sw : buffer) for (const V2& q : sw) ret.push_back({q, sigma_r(), 1.f});
@@ -1006,12 +1011,11 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
                 episode_final = true;
                 continue;
             }
-            if (not opt.hybrid) { res.stuck = true; res.why = "chain: the tracker reported arrival away from the goal"; break; }
         }
         // HYBRID: the chain's own confirmed blockage IS "the chain cannot drive this stretch" — the third hand-off trigger; the
         // specialist judges the stretch on LiDAR. (An invented permanent obstacle walled off a real 0.9 m door seen 5 cm off
         // under pose drift and sent the robot on a 25 m detour.)
-        if (opt.hybrid and out.path_blocked and not episode and not waiting)
+        if (out.path_blocked and not episode and not waiting)
         {
             std::vector<Return> ret;
             for (const auto& sw : buffer) for (const V2& q : sw) ret.push_back({q, sigma_r(), 1.f});
@@ -1041,7 +1045,6 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
         }
         // ---- the base (identical to run_scenario): latency, ramps, deadband, slip; contact every <= 5 mm
         base.send(t, waiting ? 0.f : out.adv, waiting ? 0.f : -out.rot);
-        if (opt.hybrid)
         {
             // the command's component ALONG the route (a turn-around arc commands speed but predicts no arc length)
             const float along = spline.valid() ? out.adv * std::cos(sim2d::wrap(spline.heading_at(s_prog) - bel.yaw)) : 0.f;
@@ -1056,7 +1059,7 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
             const Pose2 nxt = sim2d::integrate(truth, base.v * sv, base.w * sw, kSub);
             if (contact.touches(nxt)) { touched = true; base.v = base.w = 0.f; continue; }
             if (base.v * sv < 0.f and contact.clearance(truth) >= 0.5f) res.open_reverse_m += (nxt.p - truth.p).norm();
-            if (opt.hybrid) odom = sim2d::integrate(odom, base.v, base.w, kSub);
+            odom = sim2d::integrate(odom, base.v, base.w, kSub);
             truth = nxt;
         }
         if (touched) ++res.contacts;
@@ -1568,6 +1571,8 @@ static void apartment_oracles(const std::string& n, const Summary& S, bool reach
 
 int main()
 {
+    if (const char* r = std::getenv("REGIME"); r != nullptr and std::string(r) == "chain")
+    { std::printf("REGIME=chain (the spline chain alone) was removed with the controller's pure-chain regime; use REGIME=policy or REGIME=hybrid\n"); return 2; }
     const auto& B = body();
     std::printf("body: shadow() |x| 0.284 |y| 0.230, inscribed %.3f circumscribed %.3f\n", B.inscribed_radius(), B.circumscribed_radius());
 

@@ -48,6 +48,10 @@ namespace rc
 
 namespace
 {
+// The intentions THIS agent produces (one node each). Every other node hung from a room by has_intention
+// belongs to another producer and is never deleted here (trace S2).
+constexpr std::array<const char*, 2> kOwnIntentions{"afford_room", "afford_calib"};
+
 // A furniture concept node now lives as a generic type()=="object" node whose class is carried in the
 // object_subtype string attribute; its NAME prefix (table_*, chair_*, …) is unchanged. Match either, so a
 // producer that publishes only the name (or only the subtype) is still recognised as that class.
@@ -986,7 +990,19 @@ void RoomSceneGraph::reap_archived_rooms()
             {
                 const auto c = G_->get_node(e.to());
                 if (not c.has_value() or c->type() == "robot" or c->type() == "root") continue;
-                if (c->type() != "wall" and c->type() != "floor") { foreign = true; break; }
+                if (c->type() != "wall" and c->type() != "floor")
+                {
+                    foreign = true;
+                    // ★DIAGNOSTIC (11-15, ltom_recall p1: room_1 never reaped, so ltsm withheld recall_room_1): who holds the room; once per change
+                    static std::unordered_map<std::uint64_t, std::string> last_holder;
+                    const std::string who = std::format("{} ({}) under {}", c->name(), c->type(), n->name());
+                    if (auto [it, added] = last_holder.try_emplace(room, who); added or it->second != who)
+                    {
+                        it->second = who;
+                        std::println("[room] archived room {} not reaped yet: a foreign node holds it: {}", room, who);
+                    }
+                    break;
+                }
                 ours.emplace_back(c->id(), depth + 1);
                 stack.emplace_back(c->id(), depth + 1);
             }
@@ -1571,8 +1587,10 @@ bool RoomSceneGraph::sweep_foreign_rooms()
         // SIGKILLed run that synced in after the start-up sweep (CLAUDE.md "Stopping an agent"). Left in
         // place it would WIN rc::room::current_room (rule 2 beats rule 3) and every consumer would anchor
         // to a dead room. room_concept owns the room_* subtree, so reaping it is this agent's job.
+        // Only this agent's intentions (by name): another agent's under the leftover room is its owner's to
+        // remove (trace S2).
         for (const auto& e : G_->get_node_edges_by_type(r, "has_intention"))
-            if (G_->get_node(e.to()).has_value())
+            if (const auto c = G_->get_node(e.to()); c.has_value() and std::ranges::contains(kOwnIntentions, c->name()))
                 G_->delete_node(e.to());
         qWarning() << "[room][startup-proto] deleting LEFTOVER room node" << QString::fromStdString(r.name())
                    << r.id() << "— it synced in after the start-up sweep and would out-rank the start-up proto";
@@ -1834,7 +1852,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // node is claimed: a claim held across the crossing (its target in the left room's frame) left afford_room
     // under no room at all, and nothing was offered in the room entered (live try24, re-entered room_1). The claim
     // itself is on a pose of the room left behind, so it is released too — the consumer re-selects in this frame.
-    for (const char* intention : {"afford_room", "afford_calib"})
+    for (const char* intention : kOwnIntentions)
         if (auto n = G_->get_node(intention); n.has_value())
         {
             G_->add_or_modify_attrib_local<parent_att>(n.value(), new_room_id);
@@ -4555,24 +4573,20 @@ void RoomSceneGraph::dsr_create_wall_nodes()
 void RoomSceneGraph::cleanup_room_graph_nodes()
 {
     if (!G_) return;
-    // Delete affordance nodes hanging from room via "has_intention" edges,
-    // then delete the room nodes themselves.
+    // This agent's own intentions first, by name: other agents hang theirs from the room too (door_concept's
+    // aff_door_look_place_*), and only their producer may delete them (LIFECYCLE ownership; trace S2 — every
+    // S2 of 11-17/18 was this loop at teardown, room_concept stopping before door_concept). Deleting the room
+    // drops their has_intention edges; their owner removes the nodes on its own exit.
+    for (const char* name : kOwnIntentions)
+        if (auto n = G_->get_node(name); n.has_value())
+            G_->delete_node(n.value());
     for (const auto& room_node : G_->get_nodes_by_type("room"))
-    {
-        for (const auto& edge : G_->get_node_edges_by_type(room_node, "has_intention"))
-            if (G_->get_node(edge.to()).has_value())
-                G_->delete_node(edge.to());
         G_->delete_node(room_node);
-    }
     // Delete wall and floor nodes owned by this agent.
     for (const auto& n : G_->get_nodes_by_type("wall"))
         G_->delete_node(n);
     for (const auto& n : G_->get_nodes_by_type("floor"))   // "floor" and every "room_<k>_floor" (dsr_create_wall_nodes)
         G_->delete_node(n);
-    // Fallback: delete the affordance nodes by their known names in case they are orphaned.
-    for (const char *name : {"afford_room", "afford_calib"})
-        if (auto n = G_->get_node(name); n.has_value())
-            G_->delete_node(n.value());
     forget_room("cleanup_room_graph_nodes");
     calib_manager_.reset();
     calib_contract_written_ = false;

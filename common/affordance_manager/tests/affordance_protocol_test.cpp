@@ -1,4 +1,5 @@
 #include "../affordance_manager.h"
+#include "../update_if_live.h"
 
 #include <dsr/api/dsr_api.h>
 
@@ -578,6 +579,31 @@ void boxed_in_room_offer_is_selected_when_alone(TestFailure &failure)
                    "a boxed-in afford_room with a real gain must be selected when alone");
 }
 
+// names_ltsm6 (2026-11-15): the producer deleted aff_door_1_open between the controller's get_node and its update_node; cortex
+// threw "is deleted" and the controller aborted. A write on a node deleted meanwhile is `false`, never an exception.
+void write_on_a_deleted_affordance_is_false(TestFailure &failure)
+{
+    auto fixture = create_graph_fixture();
+    auto &graph = fixture.graph;
+    DSR::Node aff = DSR::Node::create<affordance_node_type>("aff_door_x_open");
+    graph->add_or_modify_attrib_local<parent_att>(aff, fixture.room_id);
+    graph->add_or_modify_attrib_local<level_att>(aff, 2);
+    const auto id = graph->insert_node(aff);
+    failure.expect(id.has_value(), "insert the affordance");
+    auto held = graph->get_node(id.value());   // the consumer's copy, read before the delete lands
+    failure.expect(held.has_value(), "read it");
+    graph->add_or_modify_attrib_local<active_att>(*held, true);
+    failure.expect(rc::affordance::update_if_live(*graph, *held), "a live node is written");
+    graph->delete_node(id.value());             // the producer withdraws it
+    bool raw_threw = false;   // the premise: cortex's own update_node THROWS here (what aborted the controller)
+    try { (void)graph->update_node(*held); } catch (const std::runtime_error&) { raw_threw = true; }
+    failure.expect(raw_threw, "premise: update_node on a deleted node throws");
+    bool threw = false, wrote = true;
+    try { wrote = rc::affordance::update_if_live(*graph, *held); } catch (...) { threw = true; }
+    failure.expect(not threw, "a write on a deleted affordance must not throw");
+    failure.expect(not wrote, "…and must report that nothing was written");
+}
+
 int main()
 {
     TestFailure failure;
@@ -585,6 +611,7 @@ int main()
     try
     {
         test_multi_producer_claim_order(failure);
+        write_on_a_deleted_affordance_is_false(failure);
         test_republish_same_node_after_completion(failure);
         test_invalid_state_is_not_claimed(failure);
         test_completion_event_is_consumed_once(failure);

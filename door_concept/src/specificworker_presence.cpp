@@ -97,9 +97,8 @@ void SpecificWorker::cleanup_owned_nodes()
         return;
     owned_nodes_cleaned_ = true;
 
-    // Which door was which, written down before the nodes go. The graph cannot carry it (we delete our own
-    // nodes on the way out by contract), so etc/door_identities.csv is what the next run reads to keep
-    // door_1 on the same physical door instead of renumbering by whatever it sees first.
+    // Which door was which, noted before the nodes go (the run's table; since 2026-11-15 nothing is written to disk: ltsm already
+    // holds each live door's belief and name — it follows them every 2 s — and the counter + hazard ride on this agent's node).
     remember_live_identities();
 
     // The passage anchor first: its link lives on an affordance about to be swept, and the copy hangs from the

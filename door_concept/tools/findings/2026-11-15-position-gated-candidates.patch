@@ -1,0 +1,25 @@
+diff --git a/door_concept/src/core/door_existence.cpp b/door_concept/src/core/door_existence.cpp
+index d157657c..f200a7a9 100644
+--- a/door_concept/src/core/door_existence.cpp
++++ b/door_concept/src/core/door_existence.cpp
+@@ -816,15 +816,14 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
+         int best = -1; float best_m2 = cfg.tracker_gate_mahalanobis;
+         if (one)
+         {
+-            double best_score = mask_log_birth_[d] - std::log(wall_length_at(pxy));   // a candidate must beat a new place (densities along the wall)
++            // ★A pending candidate takes the mask by POSITION (the tracker's gate, as the flag-off path), not by its posterior p.
++            //  Weighting by p (5da7ba0d) let one sliver frame sink a label, and the next mask then opened a new one: live onemodel02
++            //  never bore the bath's second door (9 labels, views 1 each); tape_dm 7 labels at one hole, 1 with this rule (11-15, owner).
+             for (std::size_t c = 0; c < candidates_.size(); ++c)
+             {
+                 if (candidates_[c].room != room_name_) continue;
+-                const double m2 = (candidates_[c].xy - pxy).squaredNorm() / std::max(1e-9f, candidates_[c].var + var);
+-                const auto it = last_p_cand_.find(candidates_[c].key);
+-                const double score = std::log(std::max(1e-9, double(it != last_p_cand_.end() ? it->second : 1.0f))) - 0.5 * m2
+-                                     - 0.5 * std::log(2.0 * std::numbers::pi * std::max(1e-9f, candidates_[c].var + var));
+-                if (score >= best_score) { best_score = score; best = static_cast<int>(c); }
++                const float m2 = (candidates_[c].xy - pxy).squaredNorm() / std::max(1e-9f, candidates_[c].var + var);
++                if (m2 <= best_m2) { best_m2 = m2; best = static_cast<int>(c); }
+             }
+             double door_best = 0.0;
+             for (const auto& [id, st] : world_->fit_states()) door_best = std::max(door_best, mask_causes_[d].rho_door(id));

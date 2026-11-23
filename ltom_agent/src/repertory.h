@@ -3,6 +3,7 @@
 #pragma once
 #include <optional>
 #include <cstdint>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <span>
@@ -12,6 +13,10 @@
 namespace ltom
 {
 struct Pose2 { double x = 0, y = 0, yaw = 0; double vx = 0, vy = 0, vyaw = 0; };   // room frame, m/rad; variances
+
+// The identity link a concept agent publishes on a live object (same_as_uid / same_as_prob / left_spot_prob): the live
+// object is believed to be the remembered `memory_uid`, moved (common/recall_match/identity_link.h).
+struct LinkObs { std::uint64_t memory_uid = 0; float same_prob = 0.f, left_spot_prob = 0.f; };
 
 struct Sighting
 {
@@ -24,6 +29,7 @@ struct Sighting
     std::string color_name;   // the owner's colour name (color_name attr); "" = not measured
     float color_prob = 0;
     std::optional<float> exist_prob;   // the owner's P(exists) (obj_exist_prob); nullopt = not stated
+    std::optional<LinkObs> link;       // the owner's identity link; nullopt = none published
 };
 
 enum class End { alive, death, owner_exit, gap };
@@ -42,6 +48,14 @@ inline const char* end_name(End e)
 
 struct Life { std::int64_t born_ms = 0, first_seen_ms = 0, last_seen_ms = 0, end_ms = -1; End end = End::alive; };
 struct Keyframe { std::int64_t t_ms = 0, room_key = -1; Pose2 pose; };
+// A move the memory holds (owner's choice B, spec 2026-11-15-changed-object): the memory continues as a live object
+// elsewhere. `from` is the memory's last keyframe when linked, `to` the live object's. Confirmed = the owner said yes.
+// question_stamp: the open question about this move (0 = none open); asked: a question about it was answered or closed,
+// so it is never asked again (one question per change).
+struct Move { std::int64_t t_ms = 0; std::uint64_t live_uid = 0; Keyframe from, to; bool confirmed = false; float prob = 0.f;
+              std::uint64_t question_stamp = 0; bool asked = false; };
+// The owner said the live object was NOT this memory: it is gone from that room (kept, so it can match elsewhere).
+struct GoneFromRoom { std::int64_t t_ms = 0, room_key = -1; std::string words; };
 struct Thumbnail { float score = 0.f; std::vector<std::uint8_t> jpeg; };
 
 struct Entry
@@ -58,7 +72,19 @@ struct Entry
     std::vector<Life> lives;
     std::vector<Keyframe> keyframes;
     std::map<int, Thumbnail> thumbs;   // viewing-angle bin -> the best view of the object from there
+    std::optional<std::uint64_t> continued_by;   // on a memory: the live uid it continues as (an open or confirmed move)
+    std::optional<std::uint64_t> continues;      // on the live uid's entry: the memory it continues
+    std::vector<Move> moves;                     // on the memory; the last one is the current link while continued_by is set
+    std::vector<GoneFromRoom> gone;
+    // On a live uid's entry: the owner said they did not move it (their "no"). The owner is the only one who moves
+    // things, so it is NEW: no memory may continue it, whichever the chair agent's MAP names next (moved_chair_4).
+    bool said_new = false;
 };
+
+// A question to the person about a move (derived from the open Move; persisted with it). again = the memory already
+// holds a confirmed move (directly, or through the memory it continues).
+struct Question { std::uint64_t stamp = 0; std::uint64_t memory_uid = 0, live_uid = 0; std::int64_t room_key = -1;
+                  Keyframe old_kf, new_kf; bool again = false; };
 
 struct Changes { std::vector<std::uint64_t> born, reopened, died, owner_exited; };
 
@@ -67,6 +93,18 @@ inline std::uint32_t owner_of(std::uint64_t uid) { return static_cast<std::uint3
 // chi2_3(0.99). A record is a binary act, so some decision rule is unavoidable; this one scales with the
 // estimate's own uncertainty (sum of both covariances) rather than a metric cutoff. Flagged in the plan.
 constexpr double kKeyframeChi2 = 11.34;
+
+// The owner said this memory was not the object seen in `room_key`: gone from it since its last keyframe there.
+// A later keyframe in that room outdates the record (it was seen there again).
+inline bool gone_from(const Entry& e, std::int64_t room_key)
+{
+    if (e.keyframes.empty()) return false;
+    std::int64_t last_t = e.keyframes.front().t_ms;
+    for (const Keyframe& k : e.keyframes) last_t = std::max(last_t, k.t_ms);
+    for (const GoneFromRoom& g : e.gone)
+        if (g.room_key == room_key and g.t_ms >= last_t) return true;
+    return false;
+}
 
 class Repertory
 {
@@ -84,7 +122,23 @@ public:
     bool dirty() const { return dirty_; }
     void clear_dirty() { dirty_ = false; }
 
+    // The identity link (spec 2026-11-15-changed-object). record: both sides + an unconfirmed Move (from = the
+    // memory's last keyframe, to = the live object's). confirm: the owner's yes. cut: the link is undone and its
+    // unconfirmed Move dropped; with the owner's words (their "no") the memory is also marked gone from its room.
+    void record_link(std::uint64_t memory_uid, std::uint64_t live_uid, std::int64_t now_ms, float prob = 0.f);
+    void confirm_link(std::uint64_t memory_uid);
+    void cut_link(std::uint64_t memory_uid, std::int64_t now_ms, std::string words);
+    // Open questions, keyed by stamp. One opens when a held, unconfirmed link's sighting says the old spot is empty
+    // (left_spot_prob > 1/2, the MAP of that binary) and its move was never asked; it closes when answered, when the
+    // link is cut, or when the live object's life ends.
+    std::map<std::uint64_t, Question> questions() const;
+    // Closes the question `stamp` on `memory_uid`'s move; false when it is not open (stale, answered, or no link).
+    bool close_question(std::uint64_t memory_uid, std::uint64_t stamp);
+
 private:
+    void tend_links(std::span<const Sighting> alive, std::int64_t now_ms);
+    // asked = false when the live object only left with its owner (an agent restart): the move is asked when it is back.
+    void close_questions_of_live(std::uint64_t live_uid, bool asked);
     struct Pending { std::int64_t vanish_ms; };
     std::int64_t grace_ms_;
     std::map<std::uint64_t, Entry> entries_;

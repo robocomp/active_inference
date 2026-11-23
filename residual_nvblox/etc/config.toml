@@ -1,0 +1,198 @@
+
+[Proxies]
+# Proxies for required interfaces (unused, kept so the generated genericworker links).
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 10006"
+
+# --- Common Agent Data ---
+[Agent]
+id = 14  # MUST be unique across the shared graph: room=5 robot=6 table=7 controller=8 retina=9 bottle=10 kinova=11 self_calib=12 human=13 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22 ring_metaconcept=23. A collision = CRDT actor-id clash → SIGSEGV.
+name = "residual_concept"
+
+configFile = ""
+domain = 0
+tree = false
+graph = false   # headless perception agent (the shared DSR node-link viewer crashes under participant churn)
+2d = false
+3d = false
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+# ── Agent-presence protocol ───────────────────────────────────────────────────
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]   # robot_concept = lidar3D + robot node; room_concept = room node + floor/wall specialists. NO retina (residual uses LiDAR, not YOLO masks).
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 25000
+rejoin_grace_ms = 8000
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+# Owned graph nodes torn down on shutdown / peer-loss: the agent node and the `residual` grid node.
+[Owns]
+nodes = ["residual_concept 14", "residual*"]
+
+# ── residual_nvblox: nvblox integrates each LiDAR plane in its own frame; every cycle its voxel columns are sampled
+# at the grid's 64 bin centres and read out against the explainers below. Study: residual_nvblox.md (SHADOW_UPDATE).
+
+[Publish]
+# Compute cycles per publish of the `residual` node (1 = 10 Hz at Period.Compute = 100). 5 since 2026-08-28: at 1 the
+# controller's pose went stale in a 50 ms comb every 101 ms (this attribute is the largest in the graph and delays
+# every RT update behind it). The map is the only channel for near-field obstacles: 2 (5 Hz) is the likely
+# compromise, pick it on a measurement.
+EveryN = 5
+FieldEmaUp   = 1.0    # published risk rises at this rate (1 = instant; leave at 1 for safety)
+FieldEmaDown = 0.30   # ...and falls at this one (0.30 ≈ 1 s settle; lower = steadier)
+
+[Readout]
+# What a known model explains, decided per latched cell at read-out (evidence is never deleted):
+FloorZ0M = 0.04               # floor: cells whose band lies below this (nvblox already judged the floor per sweep)
+CeilZM = 1.80                 # ceiling / overhead structure
+RobotRadiusM = 0.32           # robot body around its axis (controller body half-width; 0.45 explained real obstacles
+                              # ~13 cm off the bumper)
+WallMarginM = 0.05            # outside the room polygon or within this of its boundary = wall (a return > 5 cm off
+                              # the wall is likely an obstacle)
+# Objects collapse SOFTLY: P(explained) = Φ(−sdf/σ), σ = the object's own published position covariance
+# (rt_covariance, range-aware through the localisation chain) ⊕ this sensor noise. Watch the [collapse] log.
+ObjectSensorSigmaM = 0.03
+# Claim this far PAST each object box edge to absorb a known under-fit (legs, corners). Keep below the planner's
+# object clearance; 0 = model-exact.
+ObjectFitMarginM = 0.10
+
+[Grid]
+BinSpanM = 2.0                # height covered by the 64 bins sampled per cell ⇒ 3.125 cm bins
+# Nothing within this of the robot is released: the drivers' body filter leaves it unobserved. Match the lidar3d
+# [Footprint] radius.
+LidarClearanceM = 0.55
+# SPECKLE ★a SIZE THRESHOLD, flagged: a residual cell with fewer residual 8-neighbours than this, or a component
+# smaller than MinComponentCells, is not shipped UNLESS a return landed in it within GraceCycles — a real thin
+# obstacle is being struck, a phantom only failed to be refuted. 0 ⇒ off. Read `speckle` in grid_diag.csv.
+SpeckleMinNeighbours = 1
+SpeckleGraceCycles   = 10     # ~1 s at Period.Compute = 100 ms
+SpeckleMinComponentCells = 3
+
+[Lidar]
+UseHelios = true
+UseBpearl = true
+HeliosMinRangeM = 0.40        # RS-Helios datasheet minimum
+BpearlMinRangeM = 0.10        # RS-Bpearl near-field dome
+
+[Nvblox]
+VoxelM = 0.05
+PFree = 0.40              # inverse sensor model: free -0.41 vs occupied +0.85 per sweep. 0.45 (-0.20) did not erase moving obstacles;
+                          # nvblox default 0.30 = symmetric:
+                          # edges flickered, 38% of releases re-latched within 5 s — measured 2026-10-16 13:45)
+POcc = 0.70
+OccHalfWidthM = 0.05      # occupied band around a return; 0.10 (nvblox default) fattens walls
+MaxRangeM = 10.0
+Decay = false             # true = pull every voxel toward P=0.5 each cycle (forgetting); off in the offline tests
+DecayOccP = 0.49          # [0, 0.5): per-cycle step for occupied voxels
+DecayFreeP = 0.51         # (0.5, 1]: per-cycle step for free voxels
+KObs = 20.0               # Beta evidence weight of an observed cell (P/Var field)
+# The drivers crop the floor (z<0.11 m): beams aimed at it arrive EMPTY and nvblox never clears the space they
+# crossed (nothing near the floor was ever released). FloorFill gives each empty beam that meets the floor within
+# MaxRangeM a virtual return FloorFillBelowM under it: the ray clears everything above the floor, its occupied band
+# lands underground. A real return in the same pixel always wins. Offline (15/10 rec.): -40% unexplained occupied.
+FloorFill = true
+FloorFillBelowM = 0.15
+# Real returns near the floor (only matters when the drivers do NOT crop it), by height z and horizontal range r:
+#   z < FloorClearZ0M + FloorClearSlope·r  certainly floor → pushed FloorFillBelowM under it along the ray: clears
+#   z < FloorPushZ0M  + FloorPushSlope·r   floor OR low obstacle (pose/tilt error grows with range)
+#                                          → dropped: no mark, no clearing
+# The single band (13:20) pushed AND cleared everything under 0.08+0.04·r: a 15 cm box seen from 3 m (band 0.20) was
+# erased by its own returns ("low obstacles disappear"). Ambiguous returns now leave what was seen up close alone.
+FloorPush = true
+FloorClearZ0M = 0.04   # 2026-10-19 raised slightly (min 0.03; was 0.05)
+FloorClearSlope = 0.0075   # (min 0.005; was 0.01)
+FloorPushZ0M = 0.065   # 2026-10-19 raised slightly (min 0.05; was 0.08)
+FloorPushSlope = 0.02   # (min 0.01; was 0.04)
+# nvblox's nearest-pixel fallback only updates voxels within this many voxels of a ray (its default 0.5 leaves the
+# space between helios rings, ~2 voxels apart at 3 m, untouched wherever linear interpolation fails).
+NearestRayDistVox = 0.5   # lateral (azimuth) reach off the ray, voxels — nvblox default
+# Along ELEVATION the reach is RingFraction of the ring spacing at the voxel's range (nvblox patched:
+# nvblox_bridge/nvblox_lidar_rings.patch), like the stock grid's beam_spacing_rad: the space between two
+# rings is observed by the nearer ring without widening the ray sideways. History (2026-10-16): a fixed isotropic
+# reach of 1.5 vox flickered at edges (38% of releases re-latched ≤5 s); 0.5–1.0 froze the space between rings
+# (a person who left stayed, columns unchanged for >20 s at 2.5–3 m).
+RingFraction = 0.6
+# Lowest height read into each grid column (m, room). With the drivers' floor crop (z<0.11) nothing real lives below
+# it; with raw clouds it keeps the floor returns' own occupied band (±OccHalfWidthM around z=0) out of the grid.
+ReadMinZM = 0.06   # 2026-10-19 min band (was 0.11)
+# Release a latched cell when its column max log-odds falls below this (P≈0.40). The stock Grid occ_clear (-1.20) is
+# scaled for the grid's own l_miss; with nvblox's ±0.85 per sweep it left cells whose every voxel already reads free
+# (column ≈ -0.85) latched until re-observed — measured 419 latched cells with no material at 2.6–4.8 m.
+OccClearLogOdds = -0.4
+# ...and only after it stays there this many consecutive cycles (10 = 1 s). Two LiDARs feed nvblox ~20 sweeps/s, so a
+# saturated cell could reach the threshold in ~0.3 s; transient free evidence (interpolation at object edges, a
+# passing ray) must not release an obstacle that is still being struck.
+ReleaseCycles = 10
+# Live window (needs the netmon DISPLAY): nvblox P(occupied) · top occupied height · nvblox 2D ESDF · residual
+# (explained vs published), robot = white cross. The ESDF collapses occupied voxels in [EsdfZMinM, EsdfZMaxM].
+Display = true
+DisplayEveryN = 1        # every cycle (10 Hz at Period.Compute = 100); 5 = ~2 Hz
+DisplayScale = 2         # screen pixels per 5 cm cell
+Dump3D = false           # /dev/shm/residual_nvblox_3d.bin every display refresh, for tools/nvblox_rerun_view.py
+DumpClouds = false       # /dev/shm/nvblox_cloud_{pre,post}_<id>.bin every ~2 s, for tools/cloud_deleted.py
+EsdfZMinM = 0.06   # (was 0.11)
+EsdfZMaxM = 1.80
+EsdfMaxDistM = 2.0
+# The bpearl driver DROPS every return inside its [Footprint] disc and [Skirt] (lidar3d_dds
+# etc/config_bpearl_shadow.toml): an obstacle there yields no return, FloorFill sent its beams through it and erased
+# it ("points very close to the robot disappear"). Inside this volume (robot axis, room z) bpearl may raise voxels but
+# never lower them. Mirror the driver's numbers; radius 0 disables. Plus, in the grid, Grid.LidarClearanceM again
+# holds every latched cell within that radius (the stock grid's rule).
+BpearlBlindRadiusM = 0.0    # bpearl driver runs without [Footprint] crop (radius 0); 0.55 with the crop
+BpearlBlindZMinM = 0.11
+BpearlBlindZMaxM = 1.35
+BpearlSkirtRadiusM = 0.0    # bpearl driver runs without [Skirt] crop (radius 0); 0.75 with the crop
+BpearlSkirtZMinM = 0.11
+BpearlSkirtZMaxM = 0.35
+HeliosAzimuthDivisions = 900   # RS-Helios-5515: 0.4 deg steps (measured in the rerun recordings)
+HeliosRows = 32           # uniform model, used only when HeliosRingElevDeg is empty
+HeliosBelowDeg = 55.0
+HeliosAboveDeg = 15.0
+# Real RS-Helios-5515 channel elevations (datasheet, channels 1..32; any order). Rows = rings, piecewise-linear
+# elevation axis (nvblox_lidar_rings.patch). Measured 2026-10-19: 1.33° near the horizon, 3° below -10°; the uniform
+# 2.26° model left rows without a ring → FloorFill fired free rays through obstacles. Empty = uniform HeliosRows.
+HeliosRingElevDeg = ""   # TEMP 2026-10-19: table worse (doc §6.10); was "15;13;11;9;7;5.5;4;2.67;1.33;0;-1.33;-2.67;-4;-5.33;-6.67;-8;-10;-16;-13;-19;-22;-28;-25;-31;-34;-37;-40;-43;-46;-49;-52;-55"
+BpearlAzimuthDivisions = 900
+BpearlRows = 32
+BpearlBelowDeg = 2.0
+BpearlAboveDeg = 90.0
+
+[SelfMask]
+# Pixels of each sensor's range image that see the robot itself: the body, the MIXED returns along its edge (a beam
+# half on the body, half on the floor reports a range in between → a point floating along the ray; bpearl rear arc)
+# and the rays the driver's body filter emptied. The body is fixed in the sensor frame, so they are always the same
+# pixels. Calibrate ONCE with >= ClearRadiusM of free floor all around (robot may stand still), then set
+# Calibrate = false: the masks are saved to FilePrefix<sensor>.bin and loaded at every start. Masked pixels are
+# UNKNOWN (points dropped, never floor-filled). Re-calibrate if a sensor or the body (arm pose!) changes.
+Enabled = true
+Sensors = "bpearl"        # helios: no own returns, and at 1 m it learned the walls of a narrow passage
+Calibrate = false         # 2026-10-19 13:25 calibrated at 1.0 m, corrected bpearl extrinsic, bpearl MeshFilter OFF; true = learn again
+Sweeps = 100              # per sensor, ~10 s; nothing is mapped meanwhile
+ClearRadiusM = 1.0          # inside it, masked pixels lose every NON-floor return (body + mixed edge returns)
+FloorTolM = 0.05          # floor σ ≈ 4.4 cm
+MinFraction = 0.3
+DilateAz = 2              # columns (0.4° each)
+DilateRing = 1
+FilePrefix = "etc/self_mask_"
+
+[Diag]
+CsvLogging = false   # master switch for every diagnostic CSV under etc/ (grid_diag, floor_diag, perf_diag, residual_*);
+                     # the console logs stay. config_effective.csv is always written (shared config registry).
+# Per-cell geometry of the published residual (etc/residual_cells.csv) + why each latched cell is held
+# (etc/residual_occ_debug.csv) every N cycles; 0 = off. ⚠ at 25 these grow by GBs per hour.
+CellDumpEveryN = 25
+BirthCsvPath = "etc/residual_births.csv"       # one row per cell the moment it latches; empty = off
+ReleaseCsvPath = "etc/residual_releases.csv"   # one row per cell the moment it is released; empty = off

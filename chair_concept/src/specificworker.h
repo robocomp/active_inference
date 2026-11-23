@@ -124,6 +124,12 @@ private:
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     void merge_overlapping_instances();   // collapse two instances on the same chair (seat-footprint overlap)
     void update_existence_beliefs();      // gathers inputs for existence_ (chair_existence.cpp) + owns the teardown
+    // Changed object (2026-11-15): a ghost existence belief at each untaken recall's old spot (absence charged by the
+    // live chairs' own route), and the identity link of each chair born new this run (identity_link.h).
+    void update_identity_links(const std::vector<Eigen::Vector2f>& det_xy);
+    struct Ghost { rc::exist::ExistenceBelief belief{0.0f, 4.0f}; float L0 = 0.f; };
+    std::map<std::uint64_t, Ghost> ghosts_;             // recall uid -> its old spot's belief "still there"
+    std::set<std::uint64_t> born_new_ids_;              // node ids born this run without a resurrection
     // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — never feeds back into
     // a belief, birth or removal. chair_concept matters most here: the radiator-reads-as-a-chair failure is a
     // CHAIR phenomenon, so this is the agent whose log actually tests the (place × bearing) clustering claim.

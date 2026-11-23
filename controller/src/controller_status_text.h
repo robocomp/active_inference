@@ -35,7 +35,6 @@ struct Inputs
     rc::AffordanceExecution affordance;
     std::optional<float> goal_dist_m, goal_yaw_err_rad;
     bool goal_aligning = false;
-    bool stuck_active = false;
     bool lidar_stalled = false;
     float lidar_stall_s = 0.f;
     std::string hold_reason;

@@ -91,6 +91,7 @@
 #include "../../common/episodic/em_answers.h"
 #include "intention_node.h"
 #include "human_claim.h"
+#include "question_policy.h"   // changed object: ask or report a moved object
 #include "human_refs.h"
 #include "mission_plan.h"
 #include "mission_watch.h"
@@ -123,6 +124,8 @@ struct SessionConfig
     /// again before the approach (remembered_goto.h view_steps). ★ A fixed time until `wait until=seen(NODE)` exists.
     double look_wait_s = 2.0;
     int object_change_period_ms = 2000;
+    float question_cost_ask = 0.4f;    ///< changed object: the cost of asking the person (relative to cost_wrong)
+    float question_cost_wrong = 1.0f;  ///< changed object: the cost of a wrong "I assume you moved it"
     int look_max_side = 1280;          ///< look(): front frame shrunk to this longest side (px); see image_prep.h
     int look_max_side_360 = 1280;      ///< look(): the same for the 2:1 panorama
     int look_jpeg_quality = 80;
@@ -231,6 +234,12 @@ private:
     // ── the human at the chat (spec 2026-11-11-human-model) ──
     QString do_human_claim(const QJsonObject& args);   ///< resolves, shows a read-back card; never stores
     void check_claim_answer();                         ///< LTOM's answer to the posted claim, or its absence
+    // ── Changed object (spec 2026-11-15-changed-object) ──
+    void track_questions();                            ///< LTOM's open questions: raise one, re-raise once, drop closed ones
+    void answer_question(rc::chat::Reply r, const QString& text);   ///< the person's yes/no/don't-know, as a `moved` claim
+    void say_now(const std::string& text);             ///< the robot speaks on its own (not a model reply)
+    [[nodiscard]] std::string place_of(const rc::chat::OpenQuestion& q, rc::chat::P2 xy) const;
+    [[nodiscard]] QString answer_what_i_learned() const;
     /// "my chair" / "mine" in an object argument → the one owned object's name; an error sentence when there is none
     /// or more than one (the caller refuses with it, and the model asks). nullopt when the words do not say "my".
     std::optional<std::expected<RefCandidate, std::string>> resolve_mine(const std::string& what) const;
@@ -416,6 +425,11 @@ private:
         std::int64_t posted_ms = 0;
     };
     std::optional<PostedClaim> posted_claim_;
+    std::vector<rc::chat::OpenQuestion> questions_;    ///< LTOM's open questions, refreshed every digest tick
+    std::vector<rc::chat::BeliefFacts> beliefs_;       ///< what LTOM learned from the person's answers
+    std::optional<rc::chat::RaiseState> raised_;       ///< the question said in the chat, waiting for an answer
+    std::set<std::uint64_t> done_questions_;           ///< stamps already raised this run (never raised again)
+    bool reraise_due_ = false;                         ///< the person wrote something else: raise it once more after the reply
     std::optional<std::string> last_approach_target_;   ///< the last object approach_object was sent to ("that")
     std::uint64_t card_serial_ = 0;
 };

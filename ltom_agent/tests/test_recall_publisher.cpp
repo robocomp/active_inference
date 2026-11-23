@@ -71,6 +71,27 @@ static void test_existence_on_the_recall(Fixture& f)
     const auto n = f.node(rname(kUid3));
     CHECK(n.has_value() and f.G->get_attrib_by_name<obj_exist_prob_att>(*n) == 0.06f);
 }
+// Changed object (2026-11-15): the remembered colour rides on the recall, and a memory continuing as a live object
+// carries that object's uid; the link can appear and go while the recall stays offered.
+static void test_colour_and_link_on_the_recall(Fixture& f)
+{
+    auto r = recall(kUid3, 1.5, -2.0, 0.5);
+    r.color_name = "magenta"; r.color_prob = 0.74f;
+    f.pub->sync(f.room1, std::vector<ltom::Recall>{r});
+    auto n = f.node(rname(kUid3));
+    CHECK(n.has_value() and f.G->get_attrib_by_name<color_name_att>(*n).value_or("") == "magenta");
+    CHECK(n.has_value() and f.G->get_attrib_by_name<color_prob_att>(*n) == 0.74f);
+    CHECK(n.has_value() and not f.G->get_attrib_by_name<same_as_uid_att>(*n).has_value());
+    r.same_as_uid = 777; r.same_as_prob = 0.9f;
+    f.pub->sync(f.room1, std::vector<ltom::Recall>{r});
+    n = f.node(rname(kUid3));
+    CHECK(n.has_value() and f.G->get_attrib_by_name<same_as_uid_att>(*n) == std::optional<std::uint64_t>(777));
+    CHECK(n.has_value() and f.G->get_attrib_by_name<same_as_prob_att>(*n) == 0.9f);
+    r.same_as_uid = 0; r.same_as_prob = 0.f;
+    f.pub->sync(f.room1, std::vector<ltom::Recall>{r});
+    n = f.node(rname(kUid3));
+    CHECK(n.has_value() and not f.G->get_attrib_by_name<same_as_uid_att>(*n).has_value());
+}
 static void test_inserts_under_room(Fixture& f)
 {
     const std::vector<ltom::Recall> want{recall(kUid3, 1.5, -2.0, 0.5)};
@@ -217,6 +238,7 @@ int main()
         std::println("{} {}", failures == before ? "ok  " : "FAIL", name);
     };
     run("test_existence_on_the_recall", test_existence_on_the_recall);
+    run("test_colour_and_link_on_the_recall", test_colour_and_link_on_the_recall);
     run("test_inserts_under_room", test_inserts_under_room);
     run("test_moves_when_keyframe_changes", test_moves_when_keyframe_changes);
     run("test_removed_when_alive", test_removed_when_alive);

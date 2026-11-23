@@ -232,6 +232,13 @@ int main()
         std::vector<RememberedObject> rem{RememberedObject{.name = "chair_34", .subtype = "chair", .room = "room_1", .uid = 34}};
         mark_owned(rem, anon);
         assert(remembered_line(rem[0], 1).contains("colour not measured, yours")); ++checks;
+        // Changed object (2026-11-15): a live chair believed to be the owned memory, moved, is theirs too; only while
+        // the link is the MAP (p > 1/2).
+        std::vector<ObjectFact> moved{ObjectFact{.name = "chair_57", .subtype = "chair", .uid = 57, .same_as_uid = 34, .same_as_prob = 0.9f},
+                                      ObjectFact{.name = "chair_58", .subtype = "chair", .uid = 58, .same_as_uid = 34, .same_as_prob = 0.4f}};
+        mark_owned(moved, named);
+        assert(moved[0].owner == ", Pablo's"); ++checks;
+        assert(moved[1].owner.empty()); ++checks;
         std::vector<ObjectFact> with_human{obj(1, "chair_1", "chair", true, 2.0, 0), obj(2, "human_1", "person", true, 1.0, 0)};
         assert(not answer_find_objects(with_human, "", "room_1").contains("human_1")); ++checks;
         assert(not answer_find_objects(with_human, "person", "room_1").contains("human_1")); ++checks;

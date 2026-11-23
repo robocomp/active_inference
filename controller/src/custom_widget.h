@@ -397,7 +397,6 @@ public:
     }
 
     // The escape manoeuvre is shown by the WHY verdict in the status column now (cause ESCAPING); kept so callers need not change.
-    void set_stuck_active(bool active) { stuck_active_shown_ = active; }
 
     // What the ARRIVAL test is waiting on, at the right end of the pose row. `yaw_err_rad` is nullopt
     // when the target carries no commanded facing yaw (a plain mouse target), in which case theta reads
@@ -501,7 +500,6 @@ private:
 
     float session_metres_shown_ = std::numeric_limits<float>::quiet_NaN();
     int session_secs_shown_ = -1;
-    bool stuck_active_shown_ = false;
     bool goal_aligning_shown_ = false;
 };
 #endif

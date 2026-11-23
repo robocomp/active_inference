@@ -113,6 +113,8 @@ public:
     { masks_ = masks; sweep_ = sweep; claims_ = claims; }
     /// stdout lines and CSV rows: DiagRow{"stdout" | "ai2_log.csv" | "ai2_log_phi.csv", line}. Unset ⇒ nothing formatted.
     void set_diag(std::function<void(const DiagRow&)> d) { diag_ = std::move(d); }
+    /// One-model: the fitted LiDAR rates (DetectorTable::lidar) the fit scores each door's registered sweep with (opening_view_llr).
+    void set_lidar_model(float through_open, float through_wall) { lidar_through_open_ = through_open; lidar_through_wall_ = through_wall; }
 
     // ── the room-containment prior's polygon (room frame). ONE copy: DoorFitter::set_room_geometry writes it. ──
     void set_ricoh_origin(const std::optional<Eigen::Vector2f>& o) { ricoh_origin_ = o; }   // the 360 camera's room xy
@@ -125,6 +127,10 @@ public:
     void set_room_is_proto(bool p) { room_is_proto_ = p; }
     [[nodiscard]] bool room_is_proto() const { return room_is_proto_; }
     [[nodiscard]] rc::door::RoomBand room_band() const { return {cfg_.exist_wall_thickness_m, cfg_.exist_boundary_sigma_m}; }
+    /// The variance ACROSS its wall a door born at room-frame `xy` would carry: the leaf plane's prior depth variance (make_belief_params' recess_prior_std²,
+    /// the sd a fresh belief's Σ(3,3) starts at) plus the pose chain's across share 0.5(Σ_xx + Σ_yy) at the point (compute_chain_cov's term). The quantity a
+    /// live door carries as place_var with its POSTERIOR recess sd in place of the prior one: the new-door cause is marginal over it (door_mask_causes.h).
+    [[nodiscard]] float birth_across_var(const Eigen::Vector2f& xy) const;
 
     // ── instance lifecycle ──
     /// The DSR-free half of DoorFitter::ensure_instance: `init_state` is what the node said (width_m/depth_m/height_m,
@@ -181,6 +187,7 @@ private:
     std::optional<Eigen::Vector2f> ricoh_origin_;
     std::optional<Eigen::Vector2f> body_xy_;
     std::optional<Eigen::Matrix2f> body_cov_;
+    float lidar_through_open_ = 0.75f, lidar_through_wall_ = 0.01f;   // set_lidar_model (one-model)
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;    // tracker-provided birth XY (note_birth)
     std::size_t n_explained_away_ = 0;                                  // points dropped (diagnostic)
 };

@@ -13,3 +13,9 @@ target_compile_definitions(cabinet_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_
 target_compile_options(cabinet_card_test PRIVATE -O2)
 target_link_libraries(cabinet_card_test PRIVATE Eigen3::Eigen)
 add_test(NAME cabinet_card_test COMMAND cabinet_card_test)
+
+# Kitchen model released on a room change (cabinet_kitchen_room.h); pure rules, no Qt/DSR. Run: ./kitchen_room_test
+add_executable(kitchen_room_test kitchen_room_test.cpp)
+target_include_directories(kitchen_room_test PRIVATE ../src)
+target_compile_options(kitchen_room_test PRIVATE -O2)
+add_test(NAME kitchen_room_test COMMAND kitchen_room_test)

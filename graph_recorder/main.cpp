@@ -10,10 +10,12 @@
 // changes only for a whitelist of protocol attributes (state, room_id, parent, recall_late), with their new value.
 // A snapshot of every node and edge is written once the graph has synced.
 // Signals are connected QUEUED to the main thread (CLAUDE.md: never Qt::DirectConnection).
-// usage: graph_recorder <out.csv> [agent_id=28] [domain=0]      stop with SIGTERM / SIGINT (flushes and leaves).
+// usage: graph_recorder <out.csv> [agent_id=40] [domain=0]      stop with SIGTERM / SIGINT (flushes and leaves).
 #include <dsr/api/dsr_api.h>
 
 #include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTimer>
 
 #include <charconv>
@@ -94,6 +96,16 @@ struct Recorder
         else if (a == "parent") { if (auto x = G->get_attrib_by_name<parent_att>(n.value()); x) { v = std::to_string(x.value()); has = true; } }
         else if (a == "recall_late") { if (auto x = G->get_attrib_by_name<recall_late_att>(n.value()); x) { v = x.value() ? "1" : "0"; has = true; } }
         if (has or not at_birth) row(at_birth ? "attr_birth" : "attr", info.agent_id, id, 0, {}, a, v);
+        // The controller's mission: WHICH mission changed state, so a checker can tell a crossing leg from a
+        // look-round (trace_check S8, 11-18). value = "<title>|cross" when any step crosses a door, else "<title>|-".
+        if (has and a == "state" and n->name() == "controller_mission")
+            if (const auto ir = G->get_attrib_by_name<current_intention_att>(n.value()); ir.has_value())
+            {
+                const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(ir.value().get()));
+                const std::string title = doc.object().value("title").toString().toStdString();
+                const bool crosses = doc.toJson(QJsonDocument::Compact).contains("\"op\":\"cross\"");
+                row("attr", info.agent_id, id, 0, {}, "mission", title + (crosses ? "|cross" : "|-"));
+            }
     }
 
     void on_edge(std::uint64_t from, std::uint64_t to, const std::string& type, DSR::SignalInfo info)
@@ -135,8 +147,8 @@ void on_signal(int) { QCoreApplication::quit(); }
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    if (argc < 2) { std::println(stderr, "usage: graph_recorder <out.csv> [agent_id=28] [domain=0]"); return 2; }
-    std::uint32_t agent_id = 28;
+    if (argc < 2) { std::println(stderr, "usage: graph_recorder <out.csv> [agent_id=40] [domain=0]"); return 2; }
+    std::uint32_t agent_id = 40;   // 28 was taken by ltom_agent (2026-11-15): two participants on one id clash in the CRDT
     int domain = 0;
     const auto parse = [](const char* s, auto& v) { std::from_chars(s, s + std::strlen(s), v); };   // locale-free (CLAUDE.md)
     if (argc > 2) parse(argv[2], agent_id);

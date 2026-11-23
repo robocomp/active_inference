@@ -15,7 +15,7 @@ B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimati
 FIX=$(cd "$2" 2>/dev/null && pwd) || { echo "usage: $0 <run_name> <fixture_dir>"; rm -f $LOCK; exit 2; }
 (cd $FIX && sha256sum -c --quiet SHA256SUMS) || { echo "fixture $FIX: checksums FAIL before the run"; rm -f $LOCK; exit 1; }
 LEG_TIMEOUT_S=${LEG_TIMEOUT_S:-600}
-export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build} WT_AGENTS=${WT_AGENTS:-"controller door_concept room_concept residual_concept ltsm_agent"}
+export WT=${WT:-$B} WT_AGENTS=${WT_AGENTS:-"controller door_concept room_concept residual_concept ltsm_agent"}
 # table_concept left the tour (user 2026-11-01): the object agents run apart, scripts/run_objects.sh
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
 DOOR1_Y=9.3796; DOOR2_X=-1.705
@@ -54,7 +54,7 @@ echo "fixture installed: $FIX (hwm $(cat ../etc/room_name_hwm.txt))"
 # to contradict (warm24: DOOR_1 opened at start, then closed by hand, was believed open for minutes).
 for d in DOOR_0 DOOR_1 DOOR_2; do python3 $S/door.py close $d; done
 sleep 3
-# graph recorder (passive DSR participant, agent id 28): every structural write with its writer — for trace_check.py
+# graph recorder (passive DSR participant, agent id 40): every structural write with its writer — for trace_check.py
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
 [ -x $REC ] && { setsid $REC crossing/$1/graph_trace.csv > crossing/$1/graph_recorder.log 2>&1 < /dev/null & REC_PID=$!; }
 NORUN=1 bash $S/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
@@ -67,7 +67,7 @@ now_ms() { date +%s%3N; }
 true_y() { python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $2}'; }
 # GROUND TRUTH at 1 Hz: wall ms, Webots pose, and every agent log's line count (maps any log line to the true pose then)
 GT=crossing/$1/gt_pose.tsv; printf 't_ms\tx\ty\tyaw\troom_concept\tltsm_agent\tdoor_concept\tcontroller\n' > $GT
-( while [ -f $LOCK ]; do
+( while [ "$(cat $LOCK 2>/dev/null)" = "$$" ]; do
     p=$(python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1"\t"$2"\t"$5}')
     [ -n "$p" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' $(now_ms) "$p" $(nl room_concept) $(nl ltsm_agent) $(nl door_concept) $(nl controller) >> $GT
     sleep 1
@@ -93,7 +93,7 @@ sleep 5
 # ── LOCALISATION GOOD ENOUGH TO ACT ON (user 2026-11-01, warm12: the pose drifted 0.2-0.4 m in room_1, the door was misplaced
 # and everything after failed: "check confidence is good enough to proceed"). loc_ok.py: median scan residual over 5 s.
 # Logged every 2 s for the whole run (crossing/<run>/loc.txt) so a drift DURING a leg is visible afterwards.
-( while [ -f $LOCK ]; do echo "$(now_ms) $(python3 -I $S/loc_ok.py $B/room_concept)" >> crossing/$1/loc.txt; sleep 2; done ) &
+( while [ "$(cat $LOCK 2>/dev/null)" = "$$" ]; do echo "$(now_ms) $(python3 -I $S/loc_ok.py $B/room_concept)" >> crossing/$1/loc.txt; sleep 2; done ) &
 loc_gate() {   # label max_wait_s
   local i; for i in $(seq 1 $2); do python3 -I $S/loc_ok.py $B/room_concept > /dev/null && break; sleep 1; done
   local v; v=$(python3 -I $S/loc_ok.py $B/room_concept); echo "[$1] $v"
@@ -207,6 +207,9 @@ for leg in $(seq 1 $n_legs); do
   echo "leg $leg (cross $a, want $want): controller '$r', true side $side (xy $xy), graph room $(room_now) -> $st; door behind: $c"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $leg $a "$r" $side "$xy" $st $T0 $(now_ms) "$(room_now)" >> $TSV
   [ $st = OK ] || break
+  # AFTER_LEG="<n>:<command>" (2026-11-21, AuRo C3(b) change test): run once right after leg n succeeds — e.g. move an object
+  # with webots_object.py while the robot is in another room. Off by default.
+  if [ -n "$AFTER_LEG" ] && [ "${AFTER_LEG%%:*}" = "$leg" ]; then echo "after leg $leg: ${AFTER_LEG#*:}"; bash -c "${AFTER_LEG#*:}"; fi
 done
 echo "=== $ok/$n_legs legs"
 [ -n "$LOOK_S" ] && look_round end   # the room the tour ended in is looked at too

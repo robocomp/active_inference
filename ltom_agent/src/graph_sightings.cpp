@@ -121,6 +121,10 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
         s.born_ms = static_cast<std::int64_t>(G.get_attrib_by_name<timestamp_creation_att>(n).value_or(0));
         if (const auto pe = G.get_attrib_by_name<obj_exist_prob_att>(n); pe.has_value() and std::isfinite(pe.value()))
             s.exist_prob = pe.value();   // absent = the owner does not state it
+        // The owner's identity link (changed object, 2026-11-15): absent or 0 = none published.
+        if (const auto su = G.get_attrib_by_name<same_as_uid_att>(n); su.has_value() and su.value() != 0)
+            s.link = LinkObs{su.value(), G.get_attrib_by_name<same_as_prob_att>(n).value_or(0.f),
+                             G.get_attrib_by_name<left_spot_prob_att>(n).value_or(0.f)};
 
         out.present.insert(s.uid);                               // on the graph from here on, resolvable or not
         const auto T = ie.get_transformation_matrix(room->name(), n.name());

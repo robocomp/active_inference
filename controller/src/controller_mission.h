@@ -383,7 +383,6 @@ public:
                 float cross_track_m, float heading_err_rad, float ref_curvature,
                 std::uint64_t now_ms);
     void note_replan();
-    void note_escape();
 
     // ── Readout ────────────────────────────────────────────────────────────────────────
     std::string status_text() const;                 // one line for the UI

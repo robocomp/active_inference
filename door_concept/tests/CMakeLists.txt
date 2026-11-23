@@ -51,3 +51,12 @@ target_include_directories(test_phantom_memory PRIVATE ../src ../src/core ../../
 target_compile_options(test_phantom_memory PRIVATE -O1 -w)
 target_link_libraries(test_phantom_memory PRIVATE Eigen3::Eigen)
 add_test(NAME phantom_memory COMMAND test_phantom_memory)
+
+# Per-wall rates and room door-count prior learned from LTSM's remembered rooms: pure counts + read_remembered_rooms on a standalone DSRGraph.
+# Run: ./test_door_memory_rooms
+add_executable(test_door_memory_rooms test_door_memory_rooms.cpp)
+target_include_directories(test_door_memory_rooms PRIVATE ../src ../src/core ../../common)
+target_compile_definitions(test_door_memory_rooms PRIVATE SHADOW_JSON="${CMAKE_CURRENT_LIST_DIR}/../../robot_concept/shadow.json")
+target_compile_options(test_door_memory_rooms PRIVATE -O0 -w)
+target_link_libraries(test_door_memory_rooms PRIVATE Eigen3::Eigen Qt6::Core dsr_api dsr_core fastcdr fastdds)
+add_test(NAME door_memory_rooms COMMAND test_door_memory_rooms)

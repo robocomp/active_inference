@@ -88,6 +88,10 @@ public:
     // Occlusion STRENGTH in [0,1] (0 = clear line of sight, 1 = squarely behind a closer object).
     // Not a verdict: occlusion is a reason to trust absence less, never a licence to ignore it.
     float los_occlusion(const ChairInstance& inst) const;
+    // Changed object (2026-11-15): how well this frame could have resolved a chair standing at room-frame `xy` — a
+    // remembered chair's old spot — by the very route a live instance's absence uses (projection → P(detect) × (1 −
+    // occlusion)). 0 when the camera or projection is unavailable (a HOLD). Also returns the camera's room-frame xy.
+    float ghost_p_vis(const Eigen::Vector2f& xy, Eigen::Vector2f* cam_xy = nullptr);
 
     // ── Room-containment pose prior ───────────────────────────────────────────────────────────────
     // The room polygon (room frame) is a trusted NOMINAL model (authored from the SVG layout, never fitted),

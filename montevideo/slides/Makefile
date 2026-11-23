@@ -6,7 +6,7 @@ all: $(PDFS)
 figures/.day1: figures/make_day1.py
 	python3 figures/make_day1.py && touch $@
 
-day1.pdf: figures/.day1
+day1.pdf day2.pdf: figures/.day1
 
 %.pdf: %.tex preamble.tex
 	pdflatex -interaction=nonstopmode -halt-on-error $< > /dev/null

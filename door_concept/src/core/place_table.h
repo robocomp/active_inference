@@ -23,6 +23,7 @@
 #include <vector>
 #include "view_ledger.h"
 #include "place_belief.h"
+#include "wall_base_rate.h"
 #include "../door_identity_table.h"
 
 namespace rc::door::core
@@ -33,6 +34,7 @@ struct PlaceRow
     Vec2f xy = Vec2f::Zero(); Eigen::Matrix2f cov = Eigen::Matrix2f::Identity(); float yaw = 0.f, width = 0.f, height = 0.f;
     float depth = 0.f;                    // the aperture's wall depth, set by the caller from the fit; 0 = unknown
     float height_sd = 0.f;                // the fit's posterior sd of `height` (m); 0 = unknown (a row loaded from the CSV, which has no column for it)
+    bool identity_only = false;           // one-model: the row carried no L (identity only): PlaceBelief::identity_only_g
     float L_evidence = 0.f;             // PlaceBelief::L_evidence(): everything but the structural prior
     float physical = 0.f;                 // PlaceBelief::Sp(): the physical part of L_evidence (what a memory keeps outside vision's saturation, place_belief.h)
     bool crossed = false;                 // proof, for ever: a crossed place has no delete line (place_belief.h)
@@ -44,11 +46,16 @@ struct PlaceRow
 class PlaceTable
 {
 public:
-    explicit PlaceTable(bool geometry_may_refute, float lookalike = kLookalikeProbDefault) : geometry_may_refute_(geometry_may_refute), lookalike_(lookalike) {}
+    explicit PlaceTable(bool geometry_may_refute, float lookalike = kLookalikeProbDefault, bool one_model = false)
+        : geometry_may_refute_(geometry_may_refute), lookalike_(lookalike), one_model_(one_model) {}
 
     [[nodiscard]] std::span<const PlaceRow> rows() const { return rows_; }
     [[nodiscard]] bool geometry_may_refute() const { return geometry_may_refute_; }
     [[nodiscard]] float lookalike() const { return lookalike_; }
+    [[nodiscard]] bool one_model() const { return one_model_; }
+    /// One-model: the fitted geometry model's mu1_sd (detectors_.geometry.mu1_sd), set with the detector table; a ledger parsed from a row is re-scored with it.
+    void set_geometry_mu1_sd(float v) { geo_mu1_sd_ = v; }
+    [[nodiscard]] std::optional<float> geometry_mu1_sd() const { return one_model_ ? std::optional<float>(geo_mu1_sd_) : std::nullopt; }
 
     PlaceRow* match(std::string_view room, const Vec2f& xy, const Eigen::Matrix2f& cov, float gate)
     {
@@ -126,6 +133,18 @@ public:
             { r.removed_wall_ms.reset(); ++n; }
         return n;
     }
+    /// ONE-MODEL (S10): a crossing lifts the removals the crossed door's RESPONSIBILITY covers — a removed place that is the same place as
+    /// the crossed one (same_place: the MAP reading of their separation under both position variances), not one within a radius. The
+    /// dated semantics stay: only the removal mark goes, and a later removal re-refutes. Returns how many rows were lifted.
+    int lift_refutations_covered(std::string_view room, const Vec2f& holder_xy, const Eigen::Matrix2f& holder_cov)
+    {
+        int n = 0;
+        for (auto& r : rows_)
+            if (r.room == room and r.removed_wall_ms.has_value() and r.xy.allFinite()
+                and same_place((r.xy - holder_xy).squaredNorm(), 0.5 * double(holder_cov.trace() + r.cov.trace())))
+            { r.removed_wall_ms.reset(); ++n; }
+        return n;
+    }
     /// The learned hazard's state (changes, summed exposure in s): persisted with the identity table (`#hazard` line).
     [[nodiscard]] ParsedIdentityTable::Hazard hazard_state() const { return {changes_, sum_elapsed_s_}; }
     void set_hazard(const ParsedIdentityTable::Hazard& h) { changes_ = h.changes; sum_elapsed_s_ = h.sum_elapsed_s; }
@@ -164,27 +183,29 @@ public:
     /// row that does not carry place_sd (caller supplies the tracker's seed sigma).
     void load(const ParsedIdentityTable& t, float fallback_sd)
     {
-        for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_, lookalike_));
+        for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_, lookalike_, one_model_, geometry_mu1_sd()));
         if (t.hazard.has_value()) set_hazard(*t.hazard);   // SET, not added: loading twice is the same table
     }
 
     /// One identity row as a place row (the restore path reads the same thing: the row IS the belief's memory).
     /// ★A row without `exist_physical` (written before the look-alike model, 2026-11-08): its exist_logodds is the OLD unbounded sum, which is on the Sc
     /// scale, not on the saturated one: it is saturated once here (L_evidence = its ledger's physical part + saturated rest). A phantom remembered at +89 comes back near the bound.
-    [[nodiscard]] static PlaceRow row_of(const IdentityRow& i, float fallback_sd, bool geometry_may_refute, float lookalike = kLookalikeProbDefault)
+    [[nodiscard]] static PlaceRow row_of(const IdentityRow& i, float fallback_sd, bool geometry_may_refute, float lookalike = kLookalikeProbDefault, bool one_model = false,
+                                          std::optional<float> mu1_sd = std::nullopt)
     {
         PlaceRow r; r.room = i.room; r.name = i.name; r.xy = i.xy;
         const float sd = i.place_sd.value_or(fallback_sd);
         r.cov = Eigen::Matrix2f::Identity() * sd * sd;
         if (i.pose) { r.yaw = i.pose->yaw; r.width = i.pose->width; r.height = i.pose->height; r.depth = i.pose->depth; }
         r.L_evidence = i.exist_logodds.value_or(0.f);
+        r.identity_only = one_model and not i.exist_logodds.has_value();
         r.visit = i.visit.value_or(0);
         r.last_seen_wall_ms = i.seen_wall_ms.value_or(0);
         r.removed_wall_ms = i.removed_ms;
         r.crossed = i.crossed.value_or(false);
         r.sighted_wall_ms = i.sighted_ms.value_or(i.seen_wall_ms.value_or(0));
         if (i.ledger)
-            if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
+            if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute, one_model, one_model ? std::optional<float>(mu1_sd.value_or(GeometryModel{}.mu1_sd)) : std::nullopt)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
         if (i.exist_physical.has_value())
             r.physical = *i.exist_physical;
         else
@@ -206,6 +227,7 @@ public:
         b.lookalike = lookalike_;
         b.crossed = r.crossed;
         b.remember(float(double(r.L_evidence) * g), float(double(r.physical) * g));
+        if (r.identity_only) b.identity_only_g = r.last_seen_wall_ms > 0 ? g : 1.0;   // no age, no aging
     }
     [[nodiscard]] PlaceBelief restored_belief(const PlaceRow& r, std::int64_t now_wall_ms) const
     {
@@ -239,6 +261,8 @@ private:
     static constexpr double kPriorShape = 1.0, kPriorRateS = 600.0;
     bool geometry_may_refute_;
     float lookalike_;
+    bool one_model_;
+    float geo_mu1_sd_ = 2.0f;   // the legacy mu1 = mu0 + 2 s until set_geometry_mu1_sd
     std::vector<PlaceRow> rows_;
     double changes_ = 0.0, sum_elapsed_s_ = 0.0;
     std::set<std::pair<std::string, int>> sampled_;   // (room/name, visit) pairs that already gave their revisit sample (this process)

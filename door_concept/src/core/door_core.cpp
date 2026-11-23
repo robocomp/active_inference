@@ -106,7 +106,7 @@ const TrackedDoor* find_door(const std::vector<TrackedDoor>& doors, std::uint64_
 }
 }  // namespace
 
-DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute, cfg.door.exist_lookalike_prob)
+DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute, cfg.door.exist_lookalike_prob, cfg.door.exist_one_model)
 {
     // The fit reads the core's views of the input: the mask packet, the low-LiDAR sweep, and the ONE claim set per cycle.
     fit_.set_sources(&masks_, &leaf_sweep_, &claims_);
@@ -156,6 +156,7 @@ void DoorCore::set_cycle_views(const DoorCycleInput& in)
 {
     fit_.set_clock(in.t_steady_ns, in.t_wall_ms);
     fit_.set_camera(CameraModel::room_T_zed(in.robot), in.camera);
+    fit_.set_lidar_model(detectors_.lidar.through_open, detectors_.lidar.through_wall);
 }
 
 void DoorCore::record(K k, std::uint64_t id, float x, float y, std::string note, std::string name, DoorCycleOutput& out)
@@ -184,8 +185,11 @@ void DoorCore::observe_media(const DoorCycleInput& in)
 
 bool DoorCore::frame_admissible(const MaskSlice& sl, const EgoMotion& ego, const rc::DoorConfig& cfg)
 {
-    if (sl.trunc_frac > cfg.ai2_trunc_gate_frac)
+    // One-model: truncation is a loss of information, not a reason to erase the frame as a trial (the existence cliff is gone; the
+    // fit's own gate in door_fit.cpp still keeps a truncated frame from moving geometry, and the support row is weighted 1 - trunc).
+    if (not cfg.exist_one_model and sl.trunc_frac > cfg.ai2_trunc_gate_frac)
         return false;
+    // kept: the motion confirm-only part stays under the flag until ego-motion variance enters existence as a continuous term; listed as a remaining switch
     if (not cfg.ai2_motion_confirm_only)
         return true;
     const bool moving = ego.lin_mps   > cfg.ai2_still_lin_mps
@@ -216,6 +220,7 @@ std::vector<rc::exclusion::Claim> DoorCore::claims_from(const std::vector<Object
 
 DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
 {
+    reg_cache_.clear();   // one LiDAR registration per aperture per cycle (registered())
     DoorCycleOutput out;
     out.cycle = in.cycle;
     out.t_ms = in.t_ms();
@@ -294,6 +299,7 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
         update_existence(in, out);
     births(in, out);
     fit_doors(out);
+    refresh_competition();
     return out;
 }
 
@@ -302,6 +308,25 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
 // slice this very cycle), each door published right after its own fit (after_fit), the Phi rows after the loop.
 void DoorCore::fit_doors(DoorCycleOutput& out)
 {
+    if (cfg_.door.exist_one_model)
+    {   // ★per-bin freedom for a LIVE door's LiDAR opening (final review 5): the OTHER live doors' spans on its wall hold their bins (last cycle's r), as for candidates
+        const auto& polygon = fit_.room_polygon();
+        const auto& groups = groups_cached();
+        const auto states = world_->fit_states();
+        std::vector<int> wall(states.size(), -1);
+        for (std::size_t i = 0; i < states.size(); ++i)
+            if (not states[i].second->is_bearing_hypothesis and last_p_door_.contains(states[i].first))
+                wall[i] = wall_of(states[i].second->aperture.centre_xy(), polygon, groups);
+        for (std::size_t i = 0; i < states.size(); ++i)
+        {
+            auto& mine = states[i].second->lidar_claims;
+            mine.clear();
+            if (wall[i] < 0) continue;
+            for (std::size_t j = 0; j < states.size(); ++j)
+                if (j != i and wall[j] == wall[i])
+                    mine.push_back({states[j].second->aperture.centre_xy(), 0.5f * states[j].second->aperture.w, last_p_door_.at(states[j].first)});
+        }
+    }
     for (const auto id : world_->fit_targets())
     {
         rc::DoorFitState* inst = world_->begin_fit(id);
@@ -311,7 +336,10 @@ void DoorCore::fit_doors(DoorCycleOutput& out)
         const auto observation = fit_.observe(*inst);
 
         // Stale check: skip heavy update if data hasn't moved for too long
-        if (not rc::door::fitted_this_cycle(observation.has_fresh_data, inst->matched_frames))
+        // ONE-MODEL (S10): no frame-count gate. The fit with no fresh data is the belief's own ageing (Sigma grows on the agent clock) and the
+        // LiDAR leaf channel, which no new ledger view announces: gating it on "a new view since the last fit" starved both (tape_dm: 12
+        // removals/13 births against 2/4), so every fitted door is fitted every cycle.
+        if (not cfg_.door.exist_one_model and not rc::door::fitted_this_cycle(observation.has_fresh_data, inst->matched_frames))
             continue;
         // ★ A FACE BACKED BY A CROSSING KEEPS ITS POSE AND ITS LEAF (FACT_HOLD; user 2026-10-31 "hold both"): the body went
         //   through it, where it is and that it is open are what the crossing measured. pingpong13 door_6 (the entry mirror)
@@ -341,6 +369,10 @@ void DoorCore::fit_doors(DoorCycleOutput& out)
 void DoorCore::merge(DoorCycleOutput& out)
 {
     if (cfg_.door.tracker_merge_overlap <= 0.0f)
+        return;
+    // One-model (S3): two labels at one hole COMPETE (responsibilities share the mask, the second-door cost is charged by distinctness);
+    // there is no separate merge authority and no separation distance beside the tracker's own noise.
+    if (cfg_.door.exist_one_model)
         return;
 
     // The sweep is SHARED (common/track); only the two per-object questions stay here.
@@ -387,7 +419,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     //    door removes on the costed decision over its place belief (decide(belief.L(), role, costs), Task 8; Existence.Enabled).
     tp.death_frames     = std::numeric_limits<int>::max();   // never retire by occlusion:
                                                             // removal is the existence channel's
-    tp.birth_min_sep_m  = cfg.tracker_birth_min_sep_m;
+    // kept: the tracker still needs a separation to keep ONE track per detection (its own noise scale: two detections nearer than their
+    // own measurement noise are one detection); no model term does this job, the model's duplicates compete by responsibility instead.
+    tp.birth_min_sep_m  = cfg.exist_one_model ? cfg.tracker_detection_noise_m : cfg.tracker_birth_min_sep_m;
     tp.nll_cost         = cfg.tracker_nll_cost;
     tracker_.set_params(tp);
 
@@ -420,6 +454,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         }
         tracks.push_back(t);
         world_->set_assigned_mask(inst.id, -1);   // cleared; re-set below only if associated this cycle
+        world_->set_mask_responsibility(inst.id, 1.0f);
     }
 
     // Detections ← this frame's "door" mask slices (carry the slice index for the assignment).
@@ -579,6 +614,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     }
 
     // ★Task 8: every detection's place is judged by the door model before the tracker sees it (birth_evidence = verdict).
+    compute_mask_causes(in);   // one-model: every detection's four causes, before anything is gated by them
     prepare_candidates(in, tracks, out);
     res_ = tracker_.update(tracks, dets_);
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
@@ -622,7 +658,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         std::vector<EvPair> pairs;
         const float R = cfg.ai2_sigma_base_m * cfg.ai2_sigma_base_m;
         const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
-        for (const auto& inst : doors)
+        const bool one_model = cfg.exist_one_model;
+        const std::vector<TrackedDoor> no_doors;   // one-model: no greedy pairing, no gate — the responsibilities below assign
+        for (const auto& inst : one_model ? no_doors : doors)
         {
             if (not inst.ai2_initialized or inst.belief == nullptr) continue;
             const Eigen::Vector2f bc = inst.belief->center_xy();   // room-frame panel centre
@@ -661,6 +699,27 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             world_->set_assigned_mask(p.id, p.slice);
             used_inst.insert(p.id); used_slice.insert(p.slice);
         }
+        // ONE-MODEL (spec §3.2): every initialised door takes the mask it is most responsible for — and not only one door per mask: a mask two
+        // doors share goes to both, each weighted by its responsibility (the fit's support sample, DoorFitState::mask_rho). It takes it when
+        // its cause is at least as good an explanation as "a new door" and as "clutter" (a comparison of the mask's causes, not a radius).
+        if (one_model and info_.new_frame)
+            for (const auto& inst : doors)
+            {
+                if (not inst.ai2_initialized or inst.belief == nullptr) continue;
+                int best = -1; double best_rho = 0.0;
+                for (std::size_t d = 0; d < dets_.size() and d < mask_causes_.size(); ++d)
+                {
+                    const auto& mc = mask_causes_[d];
+                    const double r = mc.hit_door(inst.id);
+                    if (r > best_rho and r >= mc.hit_new()) { best_rho = r; best = dets_[d].slice_index; }
+                }
+                if (best >= 0)
+                {
+                    world_->set_assigned_mask(inst.id, best);
+                    world_->set_mask_responsibility(inst.id, static_cast<float>(best_rho));
+                    used_inst.insert(inst.id); used_slice.insert(best);
+                }
+            }
 
         // Pass 2 — INITIALISATION: a freshly-born instance has no belief yet (Pass 1 skips it), so it has no
         // way to earn its first mask. Assign it the nearest UNUSED slice within the metric fallback gate of
@@ -681,7 +740,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 if (used_slice.count(d.slice_index)) continue;
                 const float ex = d.xy.x() - ms.cx, ey = d.xy.y() - ms.cy, r2 = ex * ex + ey * ey;
                 const float v = d.xy_var >= 0.0f ? d.xy_var : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
-                if (r2 >= fb2 and r2 > cfg.tracker_gate_mahalanobis * v) continue;
+                // one-model: no gate; the newborn takes the mask only when its own place explains it better than a new door elsewhere would
+                // (exp(-m²/2) against the mask's new-door responsibility) — a comparison, the gate's job without its radius
+                if (one_model)
+                {
+                    const std::size_t di = static_cast<std::size_t>(&d - dets_.data());
+                    if (di >= mask_causes_.size() or mask_causes_[di].causes.empty()
+                        or std::exp(-0.5 * r2 / std::max(v, 1e-9f)) < mask_causes_[di].hit_new()) continue;   // ruling G: the renormalised hit weight, as at every other site
+                }
+                else if (r2 >= fb2 and r2 > cfg.tracker_gate_mahalanobis * v) continue;
                 if (const float cost = r2 / std::max(v, 1e-9f); cost < best_cost) { best_cost = cost; best = d.slice_index; }
             }
             if (best >= 0) { world_->set_assigned_mask(inst.id, best); used_slice.insert(best); used_inst.insert(inst.id); }
@@ -706,7 +773,15 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // centroid birth and the evidence assignment can disagree). Full birth-validity (P(v=clean) — don't
         // birth from a merged/contaminated mask at all) is §2, still to come.
         // seed at the detection's position (a ricoh slice: wall-fused; a ZED slice: its centroid, unchanged)
-        const Eigen::Vector3f c(dets_[d].xy.x(), dets_[d].xy.y(), pkt.slices[slice].centroid.z());
+        // one-model: a side-on leaf bears its door in the FRAME WALL (spec §3.6): the newborn is placed at the winning hypothesis' aperture, not at the mask
+        // ★A LEAF-BORN CANDIDATE IS BORN AS ITSELF (final review 12): its own theta (the frame-wall aperture and leaf pose of the hypothesis that bore it) seeds the door, not
+        //  this birth frame's mode: the frame may read face-on (the aperture mode wins the mask) and the door would then be seeded at the mask and fit from the leaf plane.
+        const int cand_idx = static_cast<std::size_t>(d) < det_candidate_.size() ? det_candidate_[static_cast<std::size_t>(d)] : -1;
+        const Candidate* leaf_cand = cfg.exist_one_model and cand_idx >= 0 and static_cast<std::size_t>(cand_idx) < candidates_.size()
+                                     and candidates_[static_cast<std::size_t>(cand_idx)].leaf_born ? &candidates_[static_cast<std::size_t>(cand_idx)] : nullptr;
+        const Vec2f birth_xy = leaf_cand != nullptr ? Vec2f(leaf_cand->theta.aperture.centre_xy())
+                             : cfg.exist_one_model ? place_xy(static_cast<std::size_t>(d)) : dets_[d].xy;
+        const Eigen::Vector3f c(birth_xy.x(), birth_xy.y(), pkt.slices[slice].centroid.z());
         // ★Re-read every birth: an earlier birth this cycle is already an instance (a newborn's swept arc can explain
         // the next detection), and the existence update may have retired doors since the association.
         const std::vector<TrackedDoor> doors = world_->doors();
@@ -725,6 +800,9 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // already predicts an object; it never suppresses evidence reaching an instance, and it cannot
         // hide a genuinely new door that is anywhere else. A phi estimate that is wrong stops explaining
         // and the birth goes ahead — which is the right failure, and is visible in the log line.
+        // one-model: the swept-arc / aperture veto (S1) and the claimed-slice veto (S2) are gone — a mask a door's leaf or aperture
+        // explains gives the candidate no hit (its responsibility is the door's), so the candidate is never born from it.
+        if (not cfg_.door.exist_one_model)
         {
             const Eigen::Vector2f cxy(c.x(), c.y());
             std::uint64_t explainer = 0;
@@ -775,6 +853,7 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             }
         }
 
+        if (not cfg_.door.exist_one_model)
         {
             std::uint64_t claimer = 0;
             for (const auto& inst : doors)
@@ -836,6 +915,14 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             // registers it as a track immediately and hands it its birth slice so observe()/run_inference
             // initialise the belief AT the detection centroid this cycle — birth, track, and init are now atomic.
             const auto name = world_->adopt_birth(new_id, slice, c);
+            if (leaf_cand != nullptr)
+            {
+                for (auto& [sid, st] : world_->fit_states())
+                    if (sid == new_id) st->birth_aperture = std::pair{leaf_cand->theta.aperture, leaf_cand->theta.leaf};
+            }
+            else if (cfg.exist_one_model and static_cast<std::size_t>(d) < mask_leaf_.size() and mask_leaf_[static_cast<std::size_t>(d)].has_value())
+                for (auto& [sid, st] : world_->fit_states())
+                    if (sid == new_id) st->birth_aperture = std::pair{mask_leaf_[static_cast<std::size_t>(d)]->aperture, mask_leaf_[static_cast<std::size_t>(d)]->leaf};
             out.creates.back().name = name.value_or(std::string{});
             // ★Task 8: THE BELIEF IS BORN WITH THE DOOR. The candidate's place belief (prior, carried memory, views) becomes the
             //  newborn's; a candidate seeded from a REMOVED row is a deleted door found again — C_delete's sample (spec §8.2).
@@ -846,6 +933,14 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                 Candidate& cand = candidates_[static_cast<std::size_t>(ci)];
                 for (auto& [sid, st] : world_->fit_states())
                     if (sid == new_id) { st->belief = cand.belief; st->place_visit = visit_; }
+                // one-model: the candidate IS the door now; its last p moves to the door's id, or the door would count its own
+                // former candidate as "another door on this wall" for one cycle (wall_base_rate)
+                if (cfg_.door.exist_one_model)
+                {
+                    last_p_cand_.erase(cand.key);
+                    last_p_door_[new_id] = cand.belief.p();
+                    door_origin_[new_id] = cand.key;   // the question the candidate was keeps its identity as the door (hypothesis look, final review 8)
+                }
                 // THE REVISIT SAMPLE of the place this candidate was seeded from, once per place per visit, taken now that the candidate
                 // is BORN (a single unconfirmed detection is no sample): a place remembered as a door that is a door again = unchanged
                 // (found); a place remembered as "no door here" that is a door now = changed.

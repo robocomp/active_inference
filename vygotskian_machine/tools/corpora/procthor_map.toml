@@ -1,0 +1,35 @@
+# ProcTHOR-10k -> E1 vocabulary (tools/elicit_vocab.toml).
+# Data: /media/datadisk/procthor-10k/{train,val,test}.jsonl.gz (allenai/procthor-10k, Apache-2.0; see REVISION there).
+# Only classes the ProcTHOR asset library CAN place are mapped. A class with no asset (bathtub, shower, mirror,
+# oven, stove, hood, cabinet, dishwasher, wardrobe, rug, coat rack, office chair) is left out of the Brier
+# score: its absence in every room says what the generator lacks, not what homes contain.
+# Ambiguous assets are also left out rather than guessed: SideTable (nightstand in bedrooms, end table in
+# living rooms), ShelvingUnit (not specifically a bookshelf).
+
+data_dir = "/media/datadisk/procthor-10k"
+
+[functions]   # ProcTHOR roomType -> paper function
+Kitchen    = "kitchen"
+LivingRoom = "living room"
+Bedroom    = "bedroom"
+Bathroom   = "bathroom"
+
+[classes]     # E1 class -> ProcTHOR object types (present if any one is in the room)
+"bed"              = ["Bed"]
+"chest of drawers" = ["Dresser"]
+"sofa"             = ["Sofa"]
+"armchair"         = ["ArmChair"]
+"coffee table"     = ["CoffeeTable"]
+"television"       = ["Television"]
+"dining table"     = ["DiningTable"]
+"chair"            = ["Chair"]
+"desk"             = ["Desk"]
+"computer monitor" = ["Desktop"]
+"toilet"           = ["Toilet"]
+"sink"             = ["Sink"]
+"refrigerator"     = ["Fridge"]
+"microwave"        = ["Microwave"]
+"countertop"       = ["CounterTop"]
+"washing machine"  = ["WashingMachine"]
+"plant"            = ["HousePlant"]
+"lamp"             = ["FloorLamp", "DeskLamp"]

@@ -1,0 +1,53 @@
+# ScanNet v2 -> E1 vocabulary (tools/elicit_vocab.toml).
+# Data: /media/datadisk/scannet/scans/<scan>/<scan>.txt (sceneType) and <scan>.aggregation.json (object labels),
+# fetched from the ScanNet release under its terms of use (not redistributed here).
+# One scan per room: the first scan of each scene (sceneXXXX_00); rescans of the same room are not independent.
+# Labels are matched by exact (lower-case) name. Generic labels are NOT guessed into specific classes:
+# "table" is not a dining table, "file cabinet" is not a cabinet.
+# ⚠ Under-labelled in ScanNet (annotators rarely segment them): rug (6 instances), dining table (8, most dining
+#   tables are labelled "table"). Their corpus frequencies are lower bounds; report them apart.
+
+data_dir = "/media/datadisk/scannet"
+first_scan_only = true
+
+[functions]   # ScanNet sceneType -> paper function. "Dining Room" has 5 rooms: too few, left out.
+"Kitchen"              = "kitchen"
+"Living room / Lounge" = "living room"
+"Bedroom / Hotel"      = "bedroom"
+"Bathroom"             = "bathroom"
+"Office"               = "office"
+"Hallway"              = "corridor"
+
+[classes]     # E1 class -> ScanNet labels (present if any one is in the room)
+"bed"              = ["bed", "loft bed", "bunk bed"]
+"nightstand"       = ["nightstand"]
+"wardrobe"         = ["wardrobe", "wardrobe closet", "wardrobe cabinet"]
+"chest of drawers" = ["dresser", "chest"]
+"sofa"             = ["couch", "sofa bed"]
+"armchair"         = ["armchair", "sofa chair"]
+"coffee table"     = ["coffee table"]
+"television"       = ["tv"]
+"bookshelf"        = ["bookshelf", "bookshelves"]
+"dining table"     = ["dining table"]
+"chair"            = ["chair"]
+"desk"             = ["desk"]
+"office chair"     = ["office chair"]
+"computer monitor" = ["monitor"]
+"toilet"           = ["toilet"]
+"sink"             = ["sink"]
+"bathtub"          = ["bathtub"]
+"shower"           = ["shower", "shower walls", "shower wall", "shower floor", "shower door", "shower doors", "shower head"]
+"mirror"           = ["mirror"]
+"refrigerator"     = ["refrigerator", "mini fridge"]
+"oven"             = ["oven"]
+"stove"            = ["stove"]
+"microwave"        = ["microwave"]
+"dishwasher"       = ["dishwasher"]
+"hood"             = ["range hood"]
+"cabinet"          = ["cabinet", "cabinets", "kitchen cabinet", "kitchen cabinets", "open kitchen cabinet", "bathroom cabinet"]
+"countertop"       = ["counter", "kitchen counter", "bathroom counter"]
+"washing machine"  = ["washing machine", "washing machines"]
+"plant"            = ["plant", "potted plant"]
+"lamp"             = ["lamp", "desk lamp", "wall lamp", "night lamp"]
+"rug"              = ["rug"]
+"coat rack"        = ["coat rack", "wall mounted coat rack", "coatrack"]

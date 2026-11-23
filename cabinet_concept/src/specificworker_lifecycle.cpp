@@ -8,6 +8,7 @@
  */
 
 #include "specificworker.h"
+#include "cabinet_kitchen_room.h"   // rc::kitchen_room::publish_room
 
 #include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
@@ -315,6 +316,8 @@ void SpecificWorker::run_kitchen_model()
         bp.object_exclusion_precision = cfg_.object_exclusion_precision;   // retract a run's crossing end
         bp.object_exclusion_margin_m  = cfg_.object_exclusion_margin_m;
         kitchen_mgr_.build(walls, tiers, tp, bp, cfg_.ceiling_height_m);
+        if (kitchen_mgr_.built())
+            kitchen_room_ = room_node_id_;   // the walls just used are this room's (refresh_room_geometry, this cycle)
         std::print("cabinet_concept: [kitchen] built {} cells over {} walls (H_room={:.2f})\n",
                    kitchen_mgr_.cells().size(), walls.size(), cfg_.ceiling_height_m);
     }
@@ -618,8 +621,14 @@ void SpecificWorker::apply_arrangement_end_priors()
 // matches them. Box convention (mirrors CabinetSceneGraph): width=L, depth=d, height=z1−z0, RT=(cx,cy,z0),(0,0,yaw).
 void SpecificWorker::publish_kitchen_boxes()
 {
-    if (not G or room_node_id_ == 0 or not rt_api_) return;
-    auto room_opt = G->get_node(room_node_id_);
+    if (not G or not rt_api_) return;
+    // ★A RUN IS PUBLISHED ONLY UNDER THE ROOM THE MODEL WAS BUILT OVER, and only while the agent works there. It used
+    // `room_node_id_`, which follows the robot, while the cells stayed in the first room's frame: on an EXISTING node
+    // insert_or_assign_edge_RT then MOVED room_1's runs under room_2 (live c3a_1). Not built / left behind ⇒ nothing.
+    const auto parent = rc::kitchen_room::publish_room(kitchen_room_, room_node_id_);
+    if (not parent.has_value()) return;
+    const std::uint64_t run_room = *parent;
+    auto room_opt = G->get_node(run_room);
     if (not room_opt.has_value()) return;
     const float rpx = G->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
     const float rpy = G->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
@@ -662,7 +671,7 @@ void SpecificWorker::publish_kitchen_boxes()
             G->add_or_modify_attrib_local<object_size_variance_att>(node,
                 std::vector<float>{b.var_width, b.var_depth, b.var_height});
             G->add_or_modify_attrib_local<level_att>   (node, 3);
-            G->add_or_modify_attrib_local<parent_att>  (node, room_node_id_);
+            G->add_or_modify_attrib_local<parent_att>  (node, run_room);
             G->add_or_modify_attrib_local<pos_x_att>   (node, rpx + 150.f + 40.f * static_cast<float>(slot));
             G->add_or_modify_attrib_local<pos_y_att>   (node, rpy + 50.f);
             rc::provenance::stamp_creation(*G, node);   // birth stamp: epoch ms + local ISO-8601
@@ -670,7 +679,7 @@ void SpecificWorker::publish_kitchen_boxes()
             if (not id_opt.has_value()) { ++slot; continue; }
             kitchen_nodes_[b.id] = id_opt.value();
             rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(), {b.cx, b.cy, b.z0}, {0.f, 0.f, b.yaw});
-            write_kitchen_rt_covariance(room_node_id_, id_opt.value(), b, mask_stamp_ms);
+            write_kitchen_rt_covariance(run_room, id_opt.value(), b, mask_stamp_ms);
             any_birth = true;
             std::print("cabinet_concept: [kitchen] BIRTH '{}' id={} run=({:.2f},{:.2f}) L={:.2f} d={:.2f} z=[{:.2f},{:.2f}]\n",
                        name, id_opt.value(), b.cx, b.cy, b.L, b.d, b.z0, b.z1);
@@ -694,7 +703,7 @@ void SpecificWorker::publish_kitchen_boxes()
                 rt_api_->insert_or_assign_edge_RT(room_opt.value(), it->second, {b.cx, b.cy, b.z0}, {0.f, 0.f, b.yaw});
                 // After the pose write, so a re-created edge cannot clobber the covariance (same ordering
                 // rationale as CabinetSceneGraph::persist_cabinet_belief).
-                write_kitchen_rt_covariance(room_node_id_, it->second, b, mask_stamp_ms);
+                write_kitchen_rt_covariance(run_room, it->second, b, mask_stamp_ms);
             }
         }
         ++slot;

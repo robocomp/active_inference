@@ -20,6 +20,14 @@ namespace
 // Is a detection of this camera from an inadmissible frame inside the place's association gate?
 bool inadmissible_near(std::span<const FrameDetection> dets, int sensor, const Vec2f& xy, float var, const rc::DoorConfig& cfg)
 {
+    if (cfg.exist_one_model)
+    {   // the detections arrive already weighted by this place's responsibility (no gate): the frame is no trial when what this place
+        // explains of the camera's masks comes mostly from frames the fit would refuse (a comparison of two sums, not a radius)
+        double bad = 0.0, good = 0.0;
+        for (const auto& d : dets)
+            if ((d.sensor != 0) == (sensor != 0)) (d.admissible ? good : bad) += d.w;
+        return bad > good;
+    }
     const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
     for (const auto& d : dets)
         if ((d.sensor != 0) == (sensor != 0) and not d.admissible
@@ -40,9 +48,11 @@ struct CamResult { std::size_t v = ViewLedger::npos, log_view = ViewLedger::npos
 
 CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const ExistenceFrame& fr, const CameraSpec& spec,
                          const Mat4d& room_T_cam, std::span<const Vec2f> windows, bool windows_known, Channel ch,
-                         const DetectorModel& m, int sensor, int visit, int self_sensor, float self_w)
+                         const DetectorModel& m_cam, int sensor, int visit, int self_sensor, float self_w, float p_open)
 {
     CamResult r;
+    // one-model: what the detector reports of a door depends on its leaf's state (the leaf-open hit rate); flag off: the camera's model as is
+    const DetectorModel m = fr.cfg.exist_one_model ? with_leaf_state(m_cam, p_open) : m_cam;
     const Vec2f door_xy = th.aperture.centre_xy();
     const float R = half_diag(th);
     const PoseOverlap po = pose_overlap_factor(fr.rt_cov, room_T_cam, door_xy, R);
@@ -71,7 +81,7 @@ CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const Exist
     r.q = detect_prob(m, r.g, kappa);
     if (not (r.q > 0.0f) and not (r.hit > 0.0f))
         return r;   // nothing reportable and nothing reported: no trial, no view (unseen is not evidence)
-    if (ch == Channel::Ricoh and not (r.hit > 0.0f))   // ★RICOH IS HITS ONLY: a frame with no detection touches no view. Logged only, against the view it would have joined, for the offline detector fit
+    if (ch == Channel::Ricoh and not (r.hit > 0.0f) and not fr.cfg.exist_one_model)   // (one-model: the ricoh's miss is a trial like the ZED's, scored by its fitted model) ★RICOH IS HITS ONLY: a frame with no detection touches no view. Logged only, against the view it would have joined, for the offline detector fit
     {
         r.log_view = b.ledger.find_view(xy_of(room_T_cam), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
         return r;
@@ -112,6 +122,14 @@ rc::edges::ContourSet leaf_contour(const ExistenceScene& sc, const rc::DoorFitSt
 float association_weight(std::span<const FrameDetection> dets, int sensor, const Vec2f& xy, float var, float kappa,
                          const rc::DoorConfig& cfg)
 {
+    if (cfg.exist_one_model)
+    {   // one-model: d.w is the detection's reliability times THIS place's responsibility for it (door_mask_causes.h); the gate that
+        // used to stand here (the tracker's Mahalanobis radius) is the cause's likelihood, so the weight is just the best of them
+        float best = 0.0f;
+        for (const auto& d : dets)
+            if ((d.sensor != 0) == (sensor != 0) and d.admissible) best = std::max(best, d.w);
+        return kappa * best;
+    }
     const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
     float best = 0.0f;
     for (const auto& d : dets)
@@ -126,12 +144,23 @@ float association_weight(std::span<const FrameDetection> dets, int sensor, const
 }
 
 ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const ExistenceFrame& fr, int visit,
-                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor, float self_w, std::optional<FitSupport> support)
+                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor, float self_w, std::optional<FitSupport> support,
+                             std::optional<LidarOpening> lidar)
 {
     ExistenceTrace t;
     std::vector<std::size_t> touched;
     const float sum0 = b.ledger.sum();
+    b.ledger.ricoh_counts_misses = fr.cfg.exist_one_model;
+    b.ledger.beta_hit_fraction = fr.cfg.exist_one_model;
     b.lookalike = fr.cfg.exist_lookalike_prob;   // (the sensor-model constant travels with the belief so L() needs no argument)
+    // P(the leaf is open): the door's leaf posterior (the one leaf_mixture reports); a place with no leaf belief yet takes the prior the birth model uses
+    float p_open = 0.0f;
+    if (fr.cfg.exist_one_model)
+    {
+        const double po = th.ai2_initialized ? th.ai2_belief.leaf_p_open(th.leaf_channel, fr.cfg.phi_max_rad) : std::numeric_limits<double>::quiet_NaN();
+        // (no leaf belief: Birth.RicohOpenPrior is the prior P(open) of the place for BOTH cameras; it is the only open-prior the code has)
+        p_open = std::isfinite(po) ? static_cast<float>(po) : fr.cfg.ricoh_birth_p_open;
+    }
     float zed_view_kappa = 0.0f, zed_vis = 0.0f;
     std::size_t zed_v = ViewLedger::npos;
     const auto row = [&](int cam, const CamResult& r)
@@ -144,7 +173,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
     {
         const float before = b.ledger.sum();
         const CamResult r = observe_camera(b, th, fr, *fr.zed_spec, *fr.scene.room_T_zed, {}, false, Channel::Zed, fr.det.zed,
-                                           0, visit, self_sensor, self_w);
+                                           0, visit, self_sensor, self_w, p_open);
         t.zed_q = r.q; t.zed_hit = r.hit; t.kappa = r.kappa;
         zed_view_kappa = r.kappa; zed_vis = r.g.vis; zed_v = r.v;
         if (r.v != ViewLedger::npos)
@@ -162,7 +191,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
         const float before = b.ledger.sum();
         const auto& w = fr.scene.pkt.ricoh_windows;
         const CamResult r = observe_camera(b, th, fr, *fr.ricoh_spec, *fr.room_T_ricoh, w, not w.empty(), Channel::Ricoh,
-                                           fr.det.ricoh, 1, visit, self_sensor, self_w);
+                                           fr.det.ricoh, 1, visit, self_sensor, self_w, p_open);
         t.ric_q = r.q; t.ric_hit = r.hit;
         if (r.v != ViewLedger::npos)
         {
@@ -239,7 +268,10 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 const float before = b.ledger.sum();
                 if (v != ViewLedger::npos and s2 > 0.0f)
                 {
-                    b.ledger.add_geometry(v, x, vis * kappa, mu0, t.geo_mu1, s2);
+                    if (fr.cfg.exist_one_model)   // each frame scored with its own controls (Student-t, k - 1 dof), two-sided
+                        b.ledger.add_geometry_t(v, x, vis * kappa, mu0, s2, fr.geo_mu1_sd, static_cast<int>(sk.size()), fr.geometry_may_refute);
+                    else
+                        b.ledger.add_geometry(v, x, vis * kappa, mu0, t.geo_mu1, s2);
                     b.ledger.recompute(v, fr.geometry_may_refute);
                     touched.push_back(v);
                 }
@@ -262,7 +294,10 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 const float before = b.ledger.sum();
                 const std::size_t v = b.ledger.observe(xy_of(*origin), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
                 // the trial is worth the share of the opening the mask sampled (aperture_coverage): a sliver on the jamb says little
-                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f), fr.det.support, support->overlap);   // clamp: domain of a share
+                const float untrunc = fr.cfg.exist_one_model ? std::clamp(1.0f - support->trunc, 0.0f, 1.0f) : 1.0f;   // clamp: domain of a share
+                // one-model: the mask is worth P(genuine | score), once, as in its hit: a mask the hit channel calls noise cannot bear a place on support alone
+                const float genuine = fr.cfg.exist_one_model ? confidence_reliability(support->confidence, fr.det.confidence) : 1.0f;
+                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f) * untrunc * genuine, fr.det.support, support->overlap);   // clamp: domain of a share
                 b.ledger.recompute(v, fr.geometry_may_refute);
                 touched.push_back(v);
                 t.sup_x = support->x;
@@ -279,6 +314,17 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 }
             }
         }
+    }
+    // ── the LiDAR opening (one-model, spec §3.3): a sweep that read the aperture's span (through or blocked) is one trial of its view. Its term
+    //    arrives already weighted by the line of sight to the span (0 bins observed = exactly 0 = no trial: nothing is added, a miss with p_D 0
+    //    changes nothing). The view is the sweep's standpoint's, found with the same kernel as every channel's. ──
+    if (lidar.has_value() and lidar->llr != 0.0f and std::isfinite(lidar->llr))
+    {
+        const float before = b.ledger.sum();
+        const std::size_t v = b.ledger.observe(lidar->origin_xy, th.aperture.centre_xy(), th.aperture.across_u(), half_diag(th), 0.0f, visit);
+        b.ledger.add_lidar(v, lidar->llr);
+        b.ledger.recompute(v, fr.geometry_may_refute);
+        t.lid_dl = b.ledger.sum() - before;   // (not `touched`: the actuation below keeps joining the camera's view, as before)
     }
     // ── actuation: once per satisfied command, into the view current now ──
     if (actuation_llr != 0.0f)
@@ -301,11 +347,13 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
 
 PlacePrior prior_of(const rc::DoorFitState& th, const std::vector<Vec2f>& polygon, bool proto, const rc::door::RoomBand& band,
                     int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved, const SizePrior& size, float aperture_sd,
-                    float jamb_sd_lo, float jamb_sd_hi, float height_meas)
+                    float jamb_sd_lo, float jamb_sd_hi, float height_meas, const WallRates* rates, std::span<const float> r_others)
 {
     PlacePriorInput in{polygon, proto, band, th.aperture.centre_xy(), th.aperture.wall_u, th.aperture.w,
                        std::isfinite(height_meas) ? height_meas : th.aperture.h,
                        width_sd, height_sd, size_resolved, doors_on_wall_before, size, aperture_sd};
+    in.rates = rates;
+    in.r_others = r_others;
     // The wall that carries θ (the fit's own definition, door_wall_extent) — a proto outline is a frontier: no wall end is known.
     if (not proto and polygon.size() >= 3)
     {

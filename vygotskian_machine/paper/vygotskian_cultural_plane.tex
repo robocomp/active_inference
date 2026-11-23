@@ -1,0 +1,315 @@
+% =====================================================================================================
+% vygotskian_cultural_plane.tex — The Vygotskian machine, part 3: the cultural plane
+%                                  (language over the belief hierarchy: culture, sequencing and imagination)
+%
+% DRAFT (2026-11-19; first drafted as language_hierarchy_section.tex). A proposal section: the architecture it
+% describes is NOT yet implemented beyond the parts stated as existing. Source design note:
+% docs/LANGUAGE_OVER_BELIEF_HIERARCHY.md.
+% Include AFTER vygotskian_machine.tex and vygotskian_internalisation.tex (it refers to their equations and modes).
+% Bibliography: vygotskian_machine.bib (shared). Packages: amsmath, amssymb, enumitem, array.
+% friston2017deeptemporal duplicates main.tex's friston2017deep under a new key on purpose, so that this file builds
+% with vygotskian_machine.bib alone; merge the two keys when the bibliographies are merged.
+% Labels keep their original sec:lang_hierarchy:* prefix so that existing cross-references do not break.
+% =====================================================================================================
+
+\section{The Cultural Plane: Language over the Belief Hierarchy}
+\label{sec:lang_hierarchy}
+
+In this section we turn to the plane on which, according to Vygotsky, every higher function first appears, namely
+the social and cultural plane. For the robot, the vision-language model (VLM) plays the role of \emph{culture}, an
+external store of common-sense knowledge that the robot consults \cite{clark1998extended}. The
+person living with the robot is the second source of culture, and their answers are the most valuable evidence the
+robot receives, entering the counts of \eqref{eq:lh_beta_prior} and the habits of \eqref{eq:lh_habit}. We connect the
+VLM to the belief hierarchy in three roles, which we call culture, sequencing and imagination
+(Table~\ref{tab:lh_roles}), and in each of them the robot's own models test what the VLM supplies. The attention
+modes of Section~\ref{sec:inner_speech:modes} decide when each role runs. The VLM is consulted for culture offline, for sequencing in focused mode, and for imagination in wandering mode.
+
+\begin{table}[ht]
+    \centering
+    \small
+    \begin{tabular}{|>{\raggedright\arraybackslash}p{0.14\linewidth}|>{\raggedright\arraybackslash}p{0.43\linewidth}|>{\raggedright\arraybackslash}p{0.33\linewidth}|}
+        \hline
+        \textbf{Role} & \textbf{What the VLM supplies} & \textbf{What decides} \\ \hline
+        Culture     & room function, class co-occurrence, norms & evidence against a null hypothesis \\ \hline
+        Sequencing  & missions whose steps predict belief changes & the gate, the controller, the belief dynamics \\ \hline
+        Imagination & which questions to put to the robot's models & the models, on an imagined copy of the world \\ \hline
+    \end{tabular}
+    \caption{The three roles of the language model and the generative model that tests each proposal.}
+    \label{tab:lh_roles}
+\end{table}
+
+The seeding stage of Section~\ref{sec:lang_hierarchy:culture} uses one property of the hierarchy
+(Table~\ref{tab:lh_levels}). A level-3 metaconcept sends each of its members an empirical
+prior computed from the arrangement fitted without that member, which is the cavity distribution of expectation
+propagation \cite{minka2001expectation},
+\begin{equation}
+    q_{\setminus i}(\theta) \;\propto\; \frac{q(\theta)}{m_i(\theta)}.
+    \label{eq:lh_cavity}
+\end{equation}
+Here $\theta$ are the parameters of the arrangement (for a kitchen, its axis, worktop height and cabinet depth),
+$q(\theta)$ is their posterior given all members, and $m_i(\theta)$ is the factor contributed by the posterior of
+member $i$, so that a member is never asked to agree with its own evidence.
+
+The hierarchy has three limits, which the three roles address in turn. It cannot say what a room is \emph{for}, it
+cannot pursue a goal it was not built for, and it does not look ahead.
+
+\subsection{Culture: a level-4 function hypothesis}
+\label{sec:lang_hierarchy:culture}
+
+\paragraph{Latent and evidence.}
+For each room $r$ and function $f$ we maintain an independent hypothesis ``$r$ serves $f$'', compared with its
+complement ``$r$ does not serve $f$''. The hypotheses for different functions are not mutually exclusive, because
+open-plan rooms serve several functions. The evidence comes from observation units $c$, defined by instance. A unit is either the
+class of the object instances in $r$ that are not bound into any level-3 aggregate, so that a refrigerator standing
+alone in a bedroom counts under its class, or a level-3 aggregate such as a kitchen run or a dining set, whose members
+then do not count separately. Correlated objects such as a counter, a hood and the kitchen cabinets thus contribute one
+observation, and a kitchen that lacks its refrigerator changes $\Lambda_f$ through the membership and the Bayes
+factor of its aggregate. For each unit, the observation is a binary variable $z_c$ that equals one if $c$ has been
+detected in $r$, so that ten chairs are not ten pieces of evidence. Under $f$ the unit is present with probability
+$\pi_{cf}$ and, if present, detected with probability $d_c$, so $P(z_c = 1 \mid f) = \pi_{cf} d_c$, and under the
+complement $\pi_{c\bar f} = P(c \text{ present} \mid \text{not } f)$ replaces $\pi_{cf}$. Since a detection may be
+false, we take the expected log-likelihood ratio under the probability $p_c$ that the unit has truly been detected,
+\begin{equation}
+    \Lambda_f(r) \;=\; \log\frac{P(f)}{P(\bar f)} \;+\; \sum_c \Big[\, p_c \log\frac{\pi_{cf}}{\pi_{c\bar f}}
+    \;+\; (1 - p_c)\log\frac{1 - \pi_{cf}\, d_c}{1 - \pi_{c\bar f}\, d_c} \Big],
+    \qquad p_c = 1 - \prod_{i \in c} (1 - p_i).
+    \label{eq:lh_function_evidence}
+\end{equation}
+For a class unit, $p_i$ is the existence probability of unbound instance $i$ in $r$, the product runs over the
+unbound instances observed at least once, and $p_c = 0$ when there is none. For an aggregate unit, $\pi_{cf}$ is the
+probability that an aggregate of that schema is present given $f$, $d_c$ is approximated by the detectability of its most
+detectable member, which overstates it because an aggregate needs several members to be seen, and $p_c$ is its existence probability, given by its log Bayes factor. The prior log-odds of $f$ is elicited from the VLM like
+$\pi_{cf}$, and $\pi_{c\bar f}$ is the mean of $\pi_{cg}$ over the other functions $g$, weighted by how often each occurs. Once rooms have been confirmed,
+$\pi_{c\bar f}$, like $\pi_{cf}$, is replaced by counts over rooms that a person confirmed do not serve $f$. Put simply, a unit that was found speaks for the functions that expect it, and a unit looked for and not
+found speaks against them in proportion to how thoroughly it was looked for. The sum is exact when every $p_c$ is 0 or 1 and otherwise approximates the log marginal likelihood. Because $p_i$ does not depend on the search for other
+instances, $d_c$ enters the evidence once, and the dependence that remains between units makes $\Lambda_f$ somewhat
+overconfident. At present $d_c$ is the room's exploration completeness, which is the room
+agent's estimate of the fraction of the room that has been observed, multiplied by a per-class detection rate. This
+product cannot register a search directed at one class, so $d_c$ must be computed from the viewpoints actually
+occupied before the second stage below is enabled.
+
+\paragraph{Priors from culture, replaced by experience.}
+The conditional probabilities $\pi_{cf}$ cannot be supplied by any geometric model. We elicit them from the VLM over
+a closed vocabulary, consisting of the class and aggregate schema names already used in the graph and a fixed set of functions, and give
+each of them a Beta prior whose strength must be earned through measured reliability,
+\begin{equation}
+    \pi_{cf} \sim \mathrm{Beta}\big(\alpha + \kappa\beta_f\,\pi^{\text{VLM}}_{cf},\;
+    \alpha + \kappa\beta_f\,(1-\pi^{\text{VLM}}_{cf})\big),
+    \qquad
+    \hat\pi_{cf} = \frac{\alpha + \kappa\beta_f\,\pi^{\text{VLM}}_{cf} + n_{cf}}{2\alpha + \kappa\beta_f + n_f}.
+    \label{eq:lh_beta_prior}
+\end{equation}
+Here $\alpha > 0$ is a small base count, $\kappa$ a pseudo-count worth a few observed rooms, $n_f$ the number of
+distinct rooms confirmed as serving $f$ (a room counts once, however often it is visited), and $n_{cf}$ the number of
+those that contained $c$. As in \eqref{eq:inner_prior}, $\beta_f \in [0,1]$ is the robot's estimate of the VLM's
+reliability for $f$, the posterior mean, under a $\mathrm{Beta}(1,1)$ prior, of the probability that the VLM-seeded hypothesis
+agrees with a person who has stated the room's function. It is updated only on such rooms, so the VLM's reliability is
+never scored against labels its own priors produced. The effective weight of the VLM, $\kappa\beta_f/(\kappa\beta_f +
+n_f)$, decreases as experience accumulates.
+The VLM answers on a graded scale whose levels it does not map to frequencies correctly
+(Section~\ref{sec:experiments:e2}). We therefore take $\pi^{\text{VLM}}_{cf} = g(\ell_{cf})$, where $\ell_{cf}$ is the
+level the VLM chose and $g$ is one monotone map from levels to probabilities, shared by every class and function and
+fitted by isotonic regression to the same confirmed rooms. The VLM supplies the order of the classes, and the
+confirmed rooms supply the scale.
+
+The counts must not confirm the prior that produced them, as they would if a room counted because a posterior
+computed with $\hat\pi_{cf}$ had become confident. We therefore admit a room into $n_f$ only if a person has stated its
+function, or if the evidence \eqref{eq:lh_function_evidence} for $f$ remains positive when recomputed with a prior
+built only from the other rooms the robot has confirmed, without the VLM's pseudo-counts. The second route is closed
+until three rooms have been confirmed by a person, a number we choose as a design parameter. The same elicitation will replace priors that are currently written
+by hand, such as the kitchen membership log-odds tested in Section~\ref{sec:experiments:e1}.
+
+\paragraph{How a function hypothesis influences lower levels without confirming itself.}
+In the first stage a function hypothesis sends nothing to its members. In the second it sends only exploration
+targets, expected but unseen classes with a coarse placement, which the planners use to value viewpoints and never as
+evidence. This biases where the robot looks but not the evidence, provided that $d_c$ is computed from the viewpoints
+actually occupied. Only at a later stage, and only if its record justifies it, would a function seed the creation of level-3 objects,
+and in that case the cavity rule \eqref{eq:lh_cavity} would apply to the members it seeded, so that an object born
+because ``kitchen'' predicted it is not counted as evidence for ``kitchen''. The cavity rule covers only this route.
+It does not prevent self-confirmation through the counts of \eqref{eq:lh_beta_prior}, which is prevented instead by
+the admission rule stated with that equation, and it does not protect against a VLM that is wrong in the same way
+about every room, which only rooms confirmed by a person can reveal.
+
+\paragraph{Norms and model-level surprise.}
+Each function also carries norms supplied by the VLM, such as never blocking a doorway, which are preferences
+rather than evidence. Levels 2--3 can also report that their \emph{model} is wrong. The kitchen model describes one
+tier of base units under a worktop, so a refrigerator, which belongs to a tall tier of full-height units, scored
+$0.00$ as a member. Structural replay in wandering mode (Section~\ref{sec:lang_hierarchy:imagination}) then proposes a revision, and a person accepts it.
+
+\paragraph{Cultural affordances.}
+What the robot can do with an object is also partly cultural knowledge, such as that a door left ajar can be pushed
+open or that the space under a high table can be crossed. Ramstead and colleagues call such possibilities for action
+cultural affordances and treat them within Active Inference \cite{gibson1979ecological, ramstead2016cultural},
+and robotics has long learned affordances from the robot's own trials \cite{sahin2007affordances, jamone2018affordances}. In
+\cortex{}, concept agents already offer affordances in the graph, and the controller ranks them by expected free
+energy (Section~\ref{sec:cortex}). We let the VLM propose new affordances for a known class, restricted to actions
+the mobile base can perform. A proposal is a mission step with its preconditions and predicted change of belief, for
+example that pushing a door ajar with the body raises its opening angle until the passage is traversable, and its
+test is an inner question with two hypotheses, scored by \eqref{eq:inner_value}. Only the observed outcome counts as a
+trial. The success probability $\rho_a$ has the prior of \eqref{eq:lh_beta_prior}, with $\rho^{\text{VLM}}_a$ in
+place of $\pi^{\text{VLM}}_{cf}$ and $\beta$ the VLM's reliability on past affordance proposals, and a person's statement such as ``you can push that door'' adds a further
+pseudo-count of its own weight rather than a trial. The concept agent offers the affordance with its current
+$\rho_a$, so that the controller's expected free energy weighs it without any threshold, and an affordance that fails
+loses weight in the same way. For reporting only, we call a proposal confirmed or rejected once the 95\% interval of
+$\rho_a$ excludes one half. Only actions that the gate already permits and that the base can undo, such as pushing or
+driving forward and backing out, are tried.
+
+\subsection{Sequencing over the hierarchy}
+\label{sec:lang_hierarchy:sequencing}
+
+\paragraph{Goals at their own level.}
+The hierarchy lets a goal be planned at its own level and refined downward, as in the deep temporal models of Active
+Inference \cite{friston2017deeptemporal}. ``Find a mug'' becomes the room with the most kitchen evidence, then its
+worktop plane, a sequence the exploration drive cannot produce.
+
+\paragraph{Every step predicts its belief outcome.}
+We require each mission step to declare the change in belief it should produce, not only completion. Let
+$\phi_k$ be the predicate over beliefs that step $k$ predicts, which must hold by the end of the step, and let
+$\psi_j$ be the assumptions on which the running plan relies (``door 3 is open'', ``room 2 is still the
+kitchen''). Both enter the demand signal \eqref{eq:inner_demand} in a centred, positive-part form,
+\begin{equation}
+    s^{\text{plan}}_t = \max\!\big(0,\, -\log P_t(\phi_k) + \log \hat P_{t_0}(\phi_k)\big) \;\text{at the step's deadline},
+    \qquad
+    s^{\text{assume}}_{j,t} = \max\!\big(0,\, -\log P_t(\psi_j) + \log P_{t_0}(\psi_j)\big),
+    \label{eq:lh_plan_surprise}
+\end{equation}
+where $P_t$ is the current belief, $t_0$ is the time the plan was made, $\hat P_{t_0}(\phi_k)$ is the probability,
+predicted at $t_0$ with the imagination tools, that $\phi_k$ will hold at the step's deadline, and $P_{t_0}(\psi_j)$ is
+the belief in the assumption at $t_0$. Each term is therefore the surprisal of its predicate in excess of what the
+plan expected. Unlike the observation surprisals of
+Section~\ref{sec:inner_speech:modes}, these are probabilities of predicates under the belief, and both are averaged
+with them. The first term catches a step that reported success but diverged, and
+the second raises attention when an assumption weakens before any step fails. A plan thus becomes the same kind of
+object as an inner question (Section~\ref{sec:inner_speech:questions}), since both are proposals whose predictions the
+belief dynamics confirm or refute.
+
+\paragraph{Habits.}
+Sequences that recur and succeed are compiled into habits. In Active Inference, the prior over policies combines a
+habit term $E$ with the expected free energy $G$, weighted by a precision $\gamma$
+\cite{friston2017process, parr2022active},
+\begin{equation}
+    \begin{aligned}
+    p(\pi \mid g, z) &= \sigma\big(\ln E(\pi \mid g, z) - \gamma\, G(\pi \mid g, z)\big),
+    \qquad
+    E(\pi \mid g, z) = \frac{\epsilon + n_{g,z}(\pi)}{\sum_{\pi'} \big(\epsilon + n_{g,z}(\pi')\big)},\\
+    G(\pi \mid g, z) &= -\sum_k \mathbb{E}\big[I(s_k; o_k \mid \pi)\big]
+    \;-\; \mathbb{E}\big[\ln P(g \text{ and the norms of } z \text{ hold} \mid \pi)\big].
+    \end{aligned}
+    \label{eq:lh_habit}
+\end{equation}
+Here $g$ is the goal type, $z$ the context (the function and arrangement hypotheses of the current room), $\sigma$
+the softmax over candidate missions, $n_{g,z}(\pi)$ the number of successes of $\pi$ for that goal in that context,
+and $\epsilon > 0$ a base count that keeps a new mission eligible. In $G$, $s_k$ are the hidden states that step $k$
+observes and $o_k$ its observations, and $G$ is evaluated with the imagination tools of
+Section~\ref{sec:lang_hierarchy:imagination}. A mission is therefore preferred when it has worked before in similar
+situations and is expected to reach the goal, respect the norms and learn what the robot needs to know. The VLM
+defines the candidate missions and supplies the norms that enter the preference term of $G$.
+
+A successful mission is stored with its objects replaced by roles. The role stored for each object is the most
+specific role that the arrangement agents had assigned to it when the mission ran, so ``go to chair 34'' becomes ``go
+to a chair of the dining set'', and in a new room the arrangement agents bind the roles again. Each habit also
+carries the assumptions $\psi_j$ under which it succeeded. Storing and reusing validated missions is caching, as in classical plan reuse with monitored preconditions
+\cite{fikes1972learning}. Steps whose roles are bound and whose assumptions still hold run without the VLM, and only
+the steps whose assumptions have weakened or whose roles could not be bound are sent to it, so every request is
+assembled from current beliefs and habits and shrinks with experience. What P9 tests is whether this selection by
+the robot's uncertainty serves better than selection by input match or at random, at equal request size.
+
+\subsection{Imagination while the automatic level runs well}
+\label{sec:lang_hierarchy:imagination}
+
+Imagining means running the robot's own generative models on an imagined copy of the world, using tools the
+deployed language agent already has, such as the fit, visibility and route-odds models. In wandering mode the robot
+puts these questions to itself. The VLM chooses the seed, the intervention and the question, and the models compute
+the answer, because an answer written by the VLM alone would not be grounded. Table~\ref{tab:lh_imagination} lists
+five kinds of imagining.
+
+\begin{table}[ht]
+    \centering
+    \small
+    \begin{tabular}{|>{\raggedright\arraybackslash}p{0.18\linewidth}|>{\raggedright\arraybackslash}p{0.33\linewidth}|>{\raggedright\arraybackslash}p{0.38\linewidth}|}
+        \hline
+        \textbf{Kind} & \textbf{Question to the models} & \textbf{Product} \\ \hline
+        Rehearsal & success odds and visibility for the next legs of the mission & contingency plans keyed by the assumptions that would trigger them \\ \hline
+        Scene completion & detection probability of expected but unseen classes & candidate viewpoints \\ \hline
+        Counterfactual replay & a failed or slow episode with another door or opening & lessons as testable hypotheses; assumptions for habits \\ \hline
+        Anomaly pre-analysis & candidate classes rendered at an unexplained residual & ranked hypotheses for the next focused episode \\ \hline
+        Structural replay & logged metaconcept inputs refitted under another schema & structural proposals, such as the missing tall tier \\ \hline
+    \end{tabular}
+    \caption{Imagination in wandering mode. The VLM chooses the seed and the question; the robot's models answer.}
+    \label{tab:lh_imagination}
+\end{table}
+
+Seeds are ranked by how soon their situation will occur and how much their product could change the decision
+there, as in prioritised replay \cite{mattar2018prioritized}. Every imagined episode carries an
+imagined provenance and never reaches the live graph or factual memory, and every product that makes a prediction is
+scored when the observation arrives, so that each kind of imagination earns trust as the VLM's priors do.
+Imagination is cancelled as soon as demand crosses $\theta_{\text{hi}}$. The three roles feed one another.
+Imagination prepares the contingency plans that sequencing needs in focused mode, focused mode produces the episodes
+that imagination replays, and the confirmed rooms and successful missions of both supply the counts of the culture
+role and the habits that replace the VLM for routine matters.
+
+\subsection{Relation to prior work}
+\label{sec:lang_hierarchy:related}
+
+Language models have been used to sequence robot skills in several ways. SayCan weights each proposed skill by a
+learned affordance score \cite{ahn2022saycan}, Inner Monologue feeds scene descriptions and success detection back
+into the prompt \cite{huang2022inner}, and SayPlan checks plans over a three-dimensional scene graph in a simulator
+before execution \cite{rana2023sayplan}. Others bias object search \cite{zhou2023esc} or write robot programs
+\cite{liang2023code, singh2023progprompt}. LLM-Modulo frameworks argue that a language model should
+generate candidates for external verifiers \cite{kambhampati2024llmmodulo}, KnowNo calibrates when a language-model
+planner should ask a person for help \cite{ren2023knowno}, Voyager stores successful programs in a skill library
+\cite{wang2023voyager}, and Reflexion turns failures into verbal lessons \cite{shinn2023reflexion}. ASPIRE carries
+this to robot manipulation: a coding agent repairs failed control programs from execution traces, keeps the repairs
+it validates as text skills, and retrieves them as context for later tasks, transferring them from simulation to a
+real robot \cite{lu2026aspire}. The machine shares the pattern of generation followed by verification. It differs in
+that the verifier is the robot's probabilistic belief state, each step declares a change in belief that is
+monitored while the step runs, and stored missions are retrieved under expected free energy. It also differs in
+where learned procedures end up: ASPIRE's skills are read by the language model on every task, whereas the
+machine compiles a procedure that recurs and succeeds into a habit that runs without it (Eq.~\eqref{eq:lh_habit}). Because probabilities stated by a model have known limits
+\cite{tian2023just, xiong2024can}, the robot measures the reliability $\beta$ instead of trusting them.
+
+Three-dimensional scene graphs layer a building into rooms, objects and the cameras that observed them
+\cite{armeni2019scene}. Rosinol et al.\ added a layer of places \cite{rosinol2020dynamic}, Hydra builds
+and optimises such graphs in real time \cite{hughes2022hydra}, ConceptGraphs labels them with an open vocabulary \cite{gu2024conceptgraphs},
+language models have labelled rooms from the objects they contain \cite{chen2022leveraging}, and language-enabled
+spatial ontologies have guided the construction of such graphs \cite{strader2024indoor}. Inferring room categories
+from objects is also established in semantic mapping \cite{pronobis2012large}. These systems are the closest relatives
+of the hierarchy of Section~\ref{sec:cortex}. In them the room label is an output of the pipeline, whereas here it is a
+hypothesis whose VLM prior is replaced by confirmed counts and weighed against evidence of absence.
+
+Vygotskian robotics \cite{mirolli2011towards} and autotelic agents, which set their own goals \cite{colas2022language}, use language as a tool for
+thought, and Pipitone and Chella's robot speaks its reasoning aloud, which made its decisions more transparent to its
+partner \cite{pipitone2021robots}, and developmental robotics stages competence through interaction \cite{cangelosi2015developmental}. Here inner speech is instead an epistemic action recruited on surprise, whose
+conclusions perception must confirm. Active Inference
+has been applied to robot perception and control \cite{lanillos2021active}, and Pezzulo et al.\ argue that passively
+trained models such as large language models lack the grounding that action provides \cite{pezzulo2024generating},
+which is the grounding the machine supplies by letting only its own models decide. Amortised inference learns a
+mapping that replaces repeated inference \cite{gershman2014amortized}, and hybrid schemes initialise iterative
+planning with an amortised policy \cite{tschantz2020control}. The machine's internalisation is a simpler,
+count-based form of the same idea, and its trigger for returning to deliberation, reported surprise, is its own.
+
+\subsection{Testable predictions}
+\label{sec:lang_hierarchy:predictions}
+
+Section~\ref{sec:experiments} assigns each prediction to an experiment.
+\begin{enumerate}[label=\textbf{L\arabic*}, start=0]
+    \item Elicited priors beat a constant and a uniform prior on a corpus, and replacing the hand-written ones changes no correct membership decision.
+    \item The function hypothesis with VLM priors beats the uniform and hand-written priors on a corpus, survives a missing refrigerator, and a wrong prior is
+    overridden by the counts.
+    \item Goals at levels 3--4 make search shorter than the exploration drive.
+    \item Expected outcomes catch at least 70\% of seeded divergences before a step fails, with under one false alarm an hour.
+    \item Rehearsal and scene completion shorten replanning latency and views to confirm an object.
+    \item Structural replay proposes the missing tall tier when the single-tier kitchen model is re-created.
+    \item As confirmed rooms and missions accumulate, the effective weight of the VLM falls (a sanity check of Eq.~\eqref{eq:lh_beta_prior}), and VLM calls per hour
+    outside wandering fall at matched task success.
+    \item A proposed affordance of a known class is decided by trial, a false proposal is chosen at most a third as
+    often as when proposals are accepted without trial, and a confirmed one is then used without the VLM.
+\end{enumerate}
+
+\subsection{Limitations}
+\label{sec:lang_hierarchy:limitations}
+
+The function evidence \eqref{eq:lh_function_evidence} approximates the marginal likelihood and is somewhat
+overconfident for units that remain correlated. The VLM's notion of a typical home carries a cultural bias that only
+the robot's counts can correct. Expected outcomes are hard to state for open-ended exploration, structural
+revisions remain the task of a person, and affordances whose actions cannot be undone are not learned by trial.

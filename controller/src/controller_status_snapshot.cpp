@@ -18,7 +18,8 @@ rc::ControllerStatusSnapshot ControllerSession::status_snapshot(const std::optio
     s.now_ms = now_ms;
 
     // who drives
-    s.policy_enabled = policy_enabled();
+    s.mode = drive_mode_;
+    s.mode_why = drive_mode_why_;
     s.hybrid_on = chain_hybrid_on();
     s.hybrid_place = chain_hybrid_place_;
     s.chain_monitor_on = params_ != nullptr and params_->chain_monitor_enabled;
@@ -43,8 +44,6 @@ rc::ControllerStatusSnapshot ControllerSession::status_snapshot(const std::optio
     }
     s.marks = static_cast<int>(chain_marks_.marks.size());
     s.fail_marks = static_cast<int>(chain_marks_.fail.size());
-    s.escape_active = escape_active_;
-    s.backoff_active = returns_backoff_active_;
     s.lockon_active = lockon_.active();
     s.approach_order_active = approach_order_.active();
     s.policy_mode = policy_last_mode_;
@@ -73,10 +72,8 @@ rc::ControllerStatusSnapshot ControllerSession::status_snapshot(const std::optio
     if (const auto curve = driven_curve(); curve.valid())
     {
         s.route_valid = true;
-        s.route_on_mission = curve.on_mission();
         s.route_len = curve.spline->length();
         if (chain_have_s_) { s.route_s_known = true; s.route_s = chain_s_prog_; }
-        else if (curve.on_mission()) { s.route_s_known = true; s.route_s = route_.progress(); }
         if (s.route_s_known and robot_pose.has_value())
         {
             const float sp = std::clamp(s.route_s, 0.f, s.route_len);

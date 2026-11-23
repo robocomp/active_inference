@@ -65,6 +65,13 @@ inline std::vector<RecallCand> recall_candidates(DSR::DSRGraph& G, std::uint64_t
         // stated, which stays log 1 (position alone), never read as "believed absent".
         if (const auto pe = G.get_attrib_by_name<obj_exist_prob_att>(node); pe.has_value() and std::isfinite(pe.value()))
             rc.cand.log_prior = std::log(std::clamp(pe.value(), 0.f, 1.f));
+        if (const auto cn = G.get_attrib_by_name<color_name_att>(node); cn.has_value())
+        {
+            rc.colour_name = cn.value();
+            rc.colour_prob = G.get_attrib_by_name<color_prob_att>(node).value_or(0.f);
+        }
+        rc.same_as_uid = G.get_attrib_by_name<same_as_uid_att>(node).value_or(0);
+        rc.same_as_prob = G.get_attrib_by_name<same_as_prob_att>(node).value_or(0.f);
         out.push_back(rc);
     }
     return out;
