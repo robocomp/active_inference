@@ -6,7 +6,11 @@ For every corpus room (ScanNet first scans), k colour frames evenly spaced throu
 functions (forced by a JSON-schema enum, temperature 0). The answer is a single claim, scored with the same
 precision / recall / macro F1 / top-1 as tools/function_evidence_e2.py. Answers are cached by (model, scan, k).
 
-    python3 tools/image_baseline_e2.py [--k 1] [--k 4]      OLLAMA=http://localhost:11434
+    python3 tools/image_baseline_e2.py [--k 1]      OLLAMA=http://localhost:11434
+
+The paper reports k=1 only (authors' decision, 2026-11-23). k=4 does not fit on the 16 GB development GPU: with
+gemma4:26b resident (~13 GB) the image encoder's ~600 MB buffer for four images fails to allocate even on an otherwise
+empty card. 98 rooms answered earlier at k=4 stay in the cache but are not reported.
 """
 from __future__ import annotations
 
@@ -67,14 +71,14 @@ def main() -> None:
     ap.add_argument("--frames", type=Path, default=Path("/media/datadisk/scannet/tasks/scannet_frames_25k"))
     ap.add_argument("--vocab", type=Path, default=HERE / "elicit_vocab.toml")
     ap.add_argument("--model", default="gemma4:26b")
-    ap.add_argument("--k", type=int, action="append", help="frames per room (repeatable); default 1 and 4")
+    ap.add_argument("--k", type=int, action="append", help="frames per room (repeatable); default 1")
     ap.add_argument("--num-ctx", type=int, default=None,
                     help="smaller context = smaller KV cache, so the image encoder fits beside other GPU users; "
                          "part of the cache key")
     ap.add_argument("--cache", type=Path, default=HERE / "e2_out/image_answers.jsonl")
     args = ap.parse_args()
     url = os.environ.get("OLLAMA", "http://localhost:11434").rstrip("/")
-    ks = args.k or [1, 4]
+    ks = args.k or [1]
 
     all_funcs = tomllib.loads(args.vocab.read_text())["functions"]
     rooms = list(csv.DictReader(args.rooms.open()))
