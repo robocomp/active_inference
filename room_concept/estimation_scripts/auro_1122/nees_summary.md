@@ -89,6 +89,9 @@ Runs used:
   - The chair return-visit row above was stale from an earlier pass. It is corrected here, and the rows are unchanged by this fix.
 - Consecutive rows are strongly autocorrelated. The independent units are the instances and visits.
 - c3a_3's countable logs were byte-identical copies of c3a_2's. Cause: in c3a_3 the bed, nightstand and toilet agents ran from the cabinet-exit worktree (agents.txt), but the logs were copied from main's etc/. The real logs were recovered from `active_inference.worktrees/cabinet-exit/<class>_concept/etc/ai2_log.csv` (timestamps inside c3a_3's window). The stale copies are kept as `*.stale_copy_of_c3a_2`. `concept_agents.sh harvest <out_dir>` now copies from the checkout each agent ran from and refuses logs older than the run. The C3a grade comes from ltom and is unaffected.
+- **c3a_cab1's countable logs** (nightstand, bed, toilet) were ALSO byte-identical copies of c3a_2's (found 11-23).
+  - The originals are overwritten and lost. The copies are renamed `*.stale_copy_of_c3a_2`.
+  - The NEES numbers above are unchanged by this: the script drops rows outside each run's own ground-truth window, so the copies never entered. Rerun 11-23, identical output.
 - Object yaw and size are not scored.
 - Only diagonal σ are logged, so NEES ignores cross terms.
 - Builds: c3a on 6f8a850b (`agents.txt`).
