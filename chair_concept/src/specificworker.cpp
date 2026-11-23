@@ -1383,7 +1383,12 @@ void SpecificWorker::step_epistemic(rc::ChairInstance& inst, DSR::Node& node)
             epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
                                        rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
-                                       fitter_->room_polygon());
+                                       fitter_->room_polygon(),
+                                       // The existence belief + the shared physical sensor rates (rc::exist::SensorModel defaults: chair's
+                                       // existence channel is in its own log-ratio units and configures no hit/false rate). The view's value
+                                       // includes what it adds about existence (owner ruling 2026-11-23, same term as every concept agent).
+                                       rc::nbv::ExistenceView{inst.existence.p_exists(), rc::exist::SensorModel{}.detection_prob,
+                                                              rc::exist::SensorModel{}.clutter_prob});
         // Degenerate (non-finite) fit — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;

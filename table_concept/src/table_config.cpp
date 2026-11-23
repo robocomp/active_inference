@@ -325,8 +325,6 @@ TableConfig load_table_config(const ConfigLoader& cfg)
             "decayed unresolvable-absence surprise above which the table asks to be verified");
     out.verify_surprise_smooth        = getf("TableModel.VerifySurpriseSmooth", 0.10f,
             "EMA weight of the go-verify surprise accumulator");
-    out.existence_verify_gain         = getf("TableModel.ExistenceVerifyGain", 5.0f,
-            "epistemic gain (nats) granted to a table that wants verification");
     out.existence_leg_occupancy       = getb("TableModel.ExistenceLegOccupancy", true,
             "also carve the 4 leg volumes for OCCUPANCY only - thin legs, and the hollow space between them must never vote absence", rc::cfg::experiment);
     out.existence_local_clutter       = getb("TableModel.ExistenceLocalClutter", true,

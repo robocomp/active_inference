@@ -396,10 +396,9 @@ ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/ran
 # REMOVAL in proportion to P(detect | present, geometry) = range_conf × in_fov_frac × central_frac. The REMAINING
 # absence (from a far / peripheral / edge-on view that CAN'T resolve the hood) is epistemic surprise, not removal:
 # it feeds a decayed go-VERIFY accumulator. Above ExistenceVerifySurprise the hood is flagged wants_verification
-# and gets an epistemic pull (ExistenceVerifyGain nats) so the controller drives to a resolving ZED view — absence
-# never deletes a hood the robot never properly looked at; it sends the robot to look (confirm-or-remove).
+# (logged only since 2026-11-23: it no longer prices the offer — the 5-nat ExistenceVerifyGain floor was replaced by
+# the information each view adds about the hood's existence, computed in the planner).
 ExistenceVerifySurprise = 20.0    # decayed un-resolvable-absence surprise above which a hood wants verification
-ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification hood gets (drives a resolving view)
 
 # LiDAR carve geometry — NO CONFIG KEY: it is the model's own geometry, nothing to choose. The carve covers the
 # WHOLE SOLID BOX z∈[0,H] from each available ray-set (helios + the low bpearl, each with its own origin), because

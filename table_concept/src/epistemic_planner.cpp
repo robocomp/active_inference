@@ -68,7 +68,8 @@ EpistemicPlanner::EpistemicPlanner(float d_obs)
 EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat_rate, float sigma_base,
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<EpistemicPlanner::Obstacle>& obstacles,
-                                            const std::vector<Eigen::Vector2f>& room_polygon) const
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            const rc::nbv::ExistenceView& existence) const
 {
     // The camera geometry arrives from the caller (read fresh from the graph each cycle); the detector
     // envelope is ours. Merging here keeps the two concerns with their right owners.
@@ -95,6 +96,9 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     // the overflow shoulder automatically. That is the model-level replacement for the 0.45 m margin constant
     // this function used to carry.
     rc::nbv::Target target;
+    // EXISTENCE: every face is also worth I(E;Y) — what its detector outcome says about whether the object is there
+    // at all. Replaced the 5-nat verification floor (owner ruling 2026-11-23); see rc::nbv::Target::p_exists.
+    target.set_existence(existence);
     target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
     target.w  = s.w;  target.h  = s.h;
     target.z0 = 0.0f; target.z1 = s.H;                                   // a table occludes from the floor up

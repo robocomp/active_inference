@@ -62,7 +62,10 @@ public:
                               /// through plan_faces, so it does not inherit that function's is_reachable check — without the
                               /// polygon a far-side viewpoint outside the room is scored as perfectly good, and the controller
                               /// then REPAIRS the unroutable standpoint onto the bottle itself.
-                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
+                              const std::vector<Eigen::Vector2f>& room_polygon = {},
+                              /// The instance's EXISTENCE belief + this agent's sensor model: the view is also worth the
+                              /// information its detector outcome adds about existence (rc::nbv::Target::p_exists).
+                              const rc::nbv::ExistenceView& existence = {}) const;
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, which is what retires the
     // d_obs_ constructor constant as the thing that set the viewing distance.

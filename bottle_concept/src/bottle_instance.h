@@ -144,7 +144,7 @@ struct BottleInstance
     // opposite sides of the cooldown suppression. The same column therefore answered two different questions
     // depending on which log you opened, and during a cooldown hold the two differ by the whole gain.
     float dbg_nbv_gain_raw = 0.0f;   // ΔH the planner computed — "how uncertain is the belief?"
-    float dbg_nbv_gain_pub = 0.0f;   // after the cooldown suppression and the verification floor: the number
+    float dbg_nbv_gain_pub = 0.0f;   // after the cooldown suppression: the number
                                      // the controller actually ranks on — "why did/didn't the robot come?"
     // Off-surface (unexplained) support points of the last FRESH frame. HELD between masks on purpose so
     // the dashboard trace keeps its last real value instead of crashing to 0 on every idle cycle.

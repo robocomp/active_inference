@@ -567,8 +567,9 @@ void SpecificWorker::apply_class_factor()
     // inside run_inference, so comparing it with class_seen_frames admits exactly the cycles that took a geometric
     // update. Re-scoring a frozen belief every cycle is the SAME evidence counted N times (it deleted well-fitted
     // beds with no sensor evidence at all, [[chair-flip-acc-repetition-defect]]). A diverged mis-detection that
-    // coasts out of view sits until it is looked at; the silhouette channel HOLDs out of the FoV and raises
-    // wants_verification, the designed answer: send the robot to LOOK, never delete what it has not seen.
+    // coasts out of view sits until it is looked at; the silhouette channel HOLDs out of the FoV and the planner's
+    // existence-information term (which replaced the wants_verification floor, 2026-11-23) is the designed answer:
+    // send the robot to LOOK, never delete what it has not seen.
     std::vector<std::uint64_t> ids;
     std::vector<float>         lambda, p_product;
     std::vector<char>          measured;

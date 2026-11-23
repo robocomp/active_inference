@@ -46,7 +46,8 @@ EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
                                             float sigma_base,
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<rc::nbv::Obstacle>& obstacles,
-                                            const std::vector<Eigen::Vector2f>& room_polygon) const
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            const rc::nbv::ExistenceView& existence) const
 {
     // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
     // detector envelope is ours. Merging here keeps the two concerns in their right owners.
@@ -75,6 +76,9 @@ EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
     // the hidden-side ray and returns where it peaks. The bottle is a CYLINDER: a square 2r × 2r footprint
     // presents the same silhouette from every bearing, which is exactly what a cylinder does.
     rc::nbv::Target tgt;
+    // EXISTENCE: score() adds I(E;Y) at the candidate pose (P(detect) folded into the hit rate). Replaced the
+    // 5-nat verification floor (owner ruling 2026-11-23); see rc::nbv::Target::p_exists.
+    tgt.set_existence(existence);
     tgt.cx = s.cx; tgt.cy = s.cy; tgt.yaw = 0.0f;
     tgt.w  = 2.0f * s.radius; tgt.h = 2.0f * s.radius;
     tgt.z0 = s.cz - 0.5f * s.height; tgt.z1 = s.cz + 0.5f * s.height;

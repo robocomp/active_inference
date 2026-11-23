@@ -345,11 +345,9 @@ struct CountableConfig
     float existence_absence_range_ref_m = 2.5f;   // range (m) below which absence is trusted at full weight
     float existence_absence_range_power = 2.0f;   // decay exponent (2 ≈ angular-area ∝ 1/range²); 0 disables
     float existence_verify_surprise     = 20.0f;  // decayed go-verify surprise (un-resolvable absence) above which
-                                                  // a bed is flagged wants_verification (epistemic pull, not removal)
+                                                  // a bed is flagged wants_verification (logged only; no longer prices the offer)
     float verify_surprise_smooth        = 0.10f;  // EMA weight of the go-verify surprise accumulator (new sample
                                                   // weight; 1−this holds the old). Parity with fe_surprise_smooth.
-    float existence_verify_gain         = 5.0f;   // epistemic gain (nats) a wants_verification bed gets, so the
-                                                  // controller drives to a resolving ZED view (confirm-or-remove)
     // LiDAR carve: the WHOLE solid box z∈[0,H] from each available ray-set (helios + bpearl), OCCUPANCY only.
     // Free-space is model-consistent for a solid bed (unlike the thin-plate tabletop this was cloned from),
     // but removal deliberately stays the camera silhouette's job — it HOLDs out-of-FoV, so an unseen bed is

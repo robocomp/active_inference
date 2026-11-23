@@ -175,8 +175,9 @@ struct RefrigeratorInstance
     int   plaus_seen_frames   = -1;
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
     // CANNOT resolve the refrigerator (far / peripheral / edge-on) does NOT vote removal — it raises this decayed
-    // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification arms the epistemic planner
-    // to drive the robot to a good ZED viewpoint; only a HIGH-P(detect) view can then confirm-or-remove.
+    // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification is set — LOGGED ONLY since
+    // 2026-11-23: it no longer prices the offer (the 5-nat floor it armed was replaced by the information each view
+    // adds about existence, computed in the epistemic planner); only a HIGH-P(detect) view can confirm-or-remove.
     float verify_surprise    = 0.0f;
     bool  wants_verification = false;
 
@@ -284,7 +285,7 @@ struct RefrigeratorInstance
     // opposite sides of the cooldown suppression. The same column therefore answered two different questions
     // depending on which log you opened, and during a cooldown hold the two differ by the whole gain.
     float dbg_nbv_gain_raw = 0.0f;   // ΔH the planner computed — "how uncertain is the belief?"
-    float dbg_nbv_gain_pub = 0.0f;   // after the cooldown suppression and the verification floor: the number
+    float dbg_nbv_gain_pub = 0.0f;   // after the cooldown suppression: the number
                                      // the controller actually ranks on — "why did/didn't the robot come?"
     float dbg_nbv_vfov     = 0.0f;   // rad; 0 ⇒ the sensor model was incomplete and NO proposal was made
 };

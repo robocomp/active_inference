@@ -495,8 +495,6 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
             "decayed go-verify surprise (un-resolvable absence) above which");
     out.verify_surprise_smooth        = getf("HoodModel.VerifySurpriseSmooth", 0.10f,
             "EMA weight of the go-verify surprise accumulator (new sample");
-    out.existence_verify_gain         = getf("HoodModel.ExistenceVerifyGain", 5.0f,
-            "epistemic gain (nats) a wants_verification hood gets, so the");
 
     std::print("hood_concept: configuration loaded.\n");
     // Peripheral (ricoh) existence confirmation — see hood_config.h. OFF by default.

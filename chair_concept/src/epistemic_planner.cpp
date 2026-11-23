@@ -88,7 +88,8 @@ EpistemicPlanner::EpistemicPlanner(float d_obs)
 EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat_rate, float sigma_base,
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<rc::nbv::Obstacle>& obstacles,
-                                            const std::vector<Eigen::Vector2f>& room_polygon) const
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            const rc::nbv::ExistenceView& existence) const
 {
     // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
     // detector envelope is ours. Merging here keeps the two concerns in their right owners.
@@ -104,6 +105,9 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
     // template and only the pose (cx,cy,yaw) is a DOF — so sigma_extent_m stays 0 and only the range term
     // widens the framing. Honest by construction rather than by omission.
     rc::nbv::Target target;
+    // EXISTENCE: every face is also worth I(E;Y) — what its detector outcome says about whether the object is there
+    // at all. Replaced the 5-nat verification floor (owner ruling 2026-11-23); see rc::nbv::Target::p_exists.
+    target.set_existence(existence);
     target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
     target.w  = belief.seat_w(); target.h = belief.seat_d();
     target.z0 = belief.cz();

@@ -743,7 +743,11 @@ void SpecificWorker::step_epistemic(rc::CabinetInstance& inst, DSR::Node& node)
             epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), cfg_.verbose_log,
                                        rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
-                                       fitter_->room_polygon());
+                                       fitter_->room_polygon(),
+                                       // The existence belief + THIS agent's sensor model (the same rates cabinet_existence uses) — what the view adds about
+                                       // existence is part of its value (replaced the 5-nat verification floor, owner ruling 2026-11-23).
+                                       rc::nbv::ExistenceView{inst.existence.p_exists(), cfg_.existence_detection_prob,
+                                                              cfg_.existence_clutter_prob});
         // Degenerate (non-finite) fit — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;
@@ -760,8 +764,7 @@ void SpecificWorker::step_epistemic(rc::CabinetInstance& inst, DSR::Node& node)
     hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 
     rc::epistemic::step(inst, *G,
-                        {.cooldown_cycles   = cfg_.epistemic_cooldown_cycles,
-                         .verify_gain_floor = inst.wants_verification ? cfg_.existence_verify_gain : 0.0f},
+                        {.cooldown_cycles = cfg_.epistemic_cooldown_cycles},
                         hooks);
 }
 

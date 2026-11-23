@@ -71,7 +71,8 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
                                             const rc::nbv::Sensor& sensor_in,
                                             bool verbose,
                                             const std::vector<rc::nbv::Obstacle>& obstacles,
-                                            const std::vector<Eigen::Vector2f>& room_polygon) const
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            const rc::nbv::ExistenceView& existence) const
 {
     // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
     // detector envelope is ours. Merging here keeps the two concerns in their right owners.
@@ -99,6 +100,9 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
     // shoulder automatically. That is the model-level replacement for the 0.45 m margin constant.
     // z0/z1 are real DOFs here, so a wall-tier cabinet (z0≈1.4 m) is correctly framed on the VERTICAL axis.
     rc::nbv::Target target;
+    // EXISTENCE: every face is also worth I(E;Y) — what its detector outcome says about whether the object is there
+    // at all. Replaced the 5-nat verification floor (owner ruling 2026-11-23); see rc::nbv::Target::p_exists.
+    target.set_existence(existence);
     target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
     target.w  = s.L;  target.h  = s.d;
     target.z0 = s.z0; target.z1 = s.z1;
@@ -147,7 +151,11 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
     // The old `p_observable = 1.0` placeholder ("the standoff is a framed viewpoint by construction") is gone:
     // P(detect) is now REAL and already folded into best_raw by plan_faces, so a cabinet we cannot actually get
     // a mask of publishes a near-zero gain and stops bidding for travel.
-    const float best_gain = std::min(best_raw, adequacy_gap);
+    // The adequacy bound applies to the FIT part only (Σ* is a demand on the geometric DOFs); the information the view
+    // adds about the cabinet's EXISTENCE is a different variable and is added unbounded (≤ ln 2 nats, 0 when unpriced).
+    // That term replaced the 5-nat verification floor (owner ruling 2026-11-23).
+    const float best_gain = std::min(plan.face_geometric_gains[best_idx], adequacy_gap)
+                          + plan.face_existence_gains[best_idx];
 
     // Verification readout (throttled): the chosen face should be perpendicular to Σ's dominant
     // uncertainty direction — e.g. dom-unc = h ⇒ a ±y face wins. Confirms the NBV attacks the worst DOF.

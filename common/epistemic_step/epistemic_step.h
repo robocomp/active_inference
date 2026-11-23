@@ -4,7 +4,7 @@
  *
  * WHAT WAS DUPLICATED. Seven copies of the same lifecycle around one per-object call: decrement the
  * cooldown, notice that the controller has completed the affordance and start a hold, ask the planner for a
- * proposal, suppress or floor its gain, publish it, and remember that a proposal is pending. The planner call
+ * proposal, suppress its gain during the hold, publish it, and remember that a proposal is pending. The planner call
  * in the middle is genuinely per-object — every agent has its own `EpistemicPlanner` and its own
  * `EpistemicProposal` — but nothing around it was.
  *
@@ -13,7 +13,7 @@
  * camera model is not complete yet, the fit is degenerate. On those cycles `update()` is skipped, and the
  * RE-OFFER lives inside `update()`, so an affordance the controller had just completed stayed Completed FOR
  * EVER: skipped by every selection branch, its gain frozen at whatever it last published. Measured live
- * 2026-08-07 — `aff_table_1` sat at gain=5, the verify-me maximum, and Completed, while afford_room's gain
+ * 2026-08-07 — `aff_table_1` sat at gain=5, the then verify-me floor, and Completed, while afford_room's gain
  * ticked on beside it. `ObjectAffordance::hold_offered()` was added for exactly this and documents it, yet
  * FOUR agents still returned bare from SEVEN bail paths between them (bottle 2, cabinet 2, chair 2, door 1).
  * Here there is one bail path and it always calls hold_offered(), so the bug cannot be reintroduced by
@@ -28,7 +28,7 @@
  *
  * ★★TWO GAINS, TWO COLUMNS — `record` receives BOTH, and both are logged. There USED to be one
  * `dbg_nbv_gain` per agent, and it meant different things: hood/refrigerator/table mirrored it BEFORE the
- * cooldown suppression and the verification floor (the RAW planner ΔH), bottle/cabinet/chair AFTER (the
+ * cooldown suppression (the RAW planner ΔH), bottle/cabinet/chair AFTER (the
  * PUBLISHED value). The same `nbv_gain` column in ai2_log therefore answered two different questions
  * depending on which agent's log you opened, and during a cooldown hold the two differ by the whole gain.
  * Neither reading was wrong — they answer different questions, which is exactly why collapsing them into one
@@ -62,11 +62,11 @@ struct StepInputs
     // so the controller's EFE selection simply stops picking it.
     int   cooldown_cycles = 0;
 
-    // Verification pull, or 0 for none. An object whose predicted absence could NOT be resolved from recent
-    // views (far / peripheral / edge-on "I don't see it") must not be deleted — it should be LOOKED at. A
-    // floor under the gain sends the robot to get a verifying view. It OVERRIDES the cooldown on purpose: a
-    // "might be gone" alarm is not anti-chatter-suppressible. Agents with no verification channel pass 0.
-    float verify_gain_floor = 0.0f;
+    // ★There is NO verification floor any more (owner ruling 2026-11-23). It used to put a 5-nat floor under the
+    // gain of a "might be gone" object and override the cooldown. The pull to look at such an object now comes from
+    // the model: every candidate view is worth the information its detector outcome adds about the object's
+    // EXISTENCE (rc::nbv::Target::p_exists → Score::existence_gain, ≤ ln 2 nats), so the planner's own gain already
+    // carries it. The cooldown now applies to every offer.
 
     // Orient rather than Servo. A BEARING-ONLY hypothesis has no depth, so the robot can only turn to face
     // it and let a real detection resolve it. Agents with no hypothesis state pass false.
@@ -81,8 +81,8 @@ struct StepHooks
     std::function<std::optional<Proposal>()> compute;
 
     // Record the proposal: mirror it onto the instance for ai2_log, write it onto the object node.
-    // `published` carries the FINAL gain (after suppression and the verification floor); `raw_gain` is the
-    // planner's gain before either. See the divergence note in the header for why both are handed over.
+    // `published` carries the FINAL gain (after the cooldown suppression); `raw_gain` is the planner's gain
+    // before it. See the divergence note in the header for why both are handed over.
     std::function<void(const Proposal& published, float raw_gain)> record;
 
     // The affordance node did not exist before this cycle and does now (re-layout the graph view).
@@ -133,8 +133,6 @@ void step(Inst& inst, DSR::DSRGraph& G, const StepInputs& in, const StepHooks<Pr
 
     if (inst.epistemic_cooldown > 0)
         prop.epistemic_gain = 0.0f;
-    if (in.verify_gain_floor > 0.0f)
-        prop.epistemic_gain = std::max(prop.epistemic_gain, in.verify_gain_floor);
 
     if (hooks.record)
         hooks.record(prop, raw_gain);

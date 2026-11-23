@@ -82,7 +82,10 @@ public:
     ///                   nearest_reachable, measured FROM the robot, which snaps it to the floor at the object.
     ///                   Left empty, rc::nbv::is_reachable imposes no constraint (it refuses to guess).
                               const std::vector<rc::nbv::Obstacle>& obstacles = {},
-                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
+                              const std::vector<Eigen::Vector2f>& room_polygon = {},
+                              /// The instance's EXISTENCE belief + this agent's sensor model: each candidate view is also worth the
+                              /// information its detector outcome adds about existence (rc::nbv::Target::p_exists). Default = not priced.
+                              const rc::nbv::ExistenceView& existence = {}) const;
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
     // the one where the detector is most likely to fire — the same model the removal channel weights absence by.

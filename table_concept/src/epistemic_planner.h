@@ -88,7 +88,10 @@ public:
     EpistemicProposal compute(const TableBelief& belief, float lat_rate, float sigma_base,
                               const rc::nbv::Sensor& sensor_in,
                               const std::vector<Obstacle>& obstacles = {},
-                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
+                              const std::vector<Eigen::Vector2f>& room_polygon = {},
+                              /// The instance's EXISTENCE belief + this agent's sensor model: each candidate view is also worth the
+                              /// information its detector outcome adds about existence (rc::nbv::Target::p_exists). Default = not priced.
+                              const rc::nbv::ExistenceView& existence = {}) const;
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
     // the one where the detector is most likely to fire — the same model the removal channel weights absence by.

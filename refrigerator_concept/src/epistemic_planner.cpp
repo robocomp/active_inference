@@ -73,7 +73,8 @@ std::vector<Eigen::Vector3f> sample_face_surface(const RefrigeratorBeliefState& 
 EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, float lat_rate, float sigma_base,
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<EpistemicPlanner::Obstacle>& obstacles,
-                                            const std::vector<Eigen::Vector2f>& room_polygon) const
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            const rc::nbv::ExistenceView& existence) const
 {
     constexpr float kRobotRadiusM = 0.30f;   // Shadow's footprint radius — a physical dimension, not a knob
 
@@ -125,6 +126,9 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
     // poorly-known refrigerator asks for a safer framing on its own. That is the model-level replacement for the
     // hand-picked stand-off margin this planner used to carry.
     rc::nbv::Target target;
+    // EXISTENCE: every face is also worth I(E;Y) — what its detector outcome says about whether the object is there
+    // at all. Replaced the 5-nat verification floor (owner ruling 2026-11-23); see rc::nbv::Target::p_exists.
+    target.set_existence(existence);
     target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
     target.w  = s.w;  target.h  = s.h;
     target.z0 = 0.0f; target.z1 = s.H;   // the box stands on the floor; z1 is what binds the vertical framing

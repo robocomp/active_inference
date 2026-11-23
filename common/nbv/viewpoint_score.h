@@ -17,6 +17,11 @@
  * channel integrates — but that information lands on the EXISTENCE belief, on a different currency, and is
  * already weighted by this same P(detect) there. `Score` exposes p_detect so a caller that wants the full
  * mixture can add its own ΔH_miss term rather than re-deriving the geometry.
+ * ★EXISTENCE IS NOW PRICED HERE TOO (owner ruling 2026-11-23). A caller that sets Target::p_exists/p_hit/p_false gets
+ * Score::existence_gain = I(E;Y) — the information one detector outcome carries about whether the object exists, with
+ * P(detect|pose) folded into the hit rate — added to the geometric term. It replaced the 5-nat verification FLOOR the
+ * agents used to put under "might be gone" offers: the pull to look now comes from the model (≤ ln 2 nats, → 0 when
+ * existence is settled), not from a constant switched on by a surprise threshold. Unset (p_exists < 0) ⇒ unchanged.
  *
  * The consequence is the point: a viewpoint the detector cannot fire from has ~0 expected gain, so it can never
  * out-bid the travel cost in the controller's G = λ_cost·nav_dist − epistemic_gain. Undetectable poses stop
@@ -65,6 +70,7 @@
 #include <Eigen/Dense>
 
 #include "../detectability/detectability.h"   // rc::detect — P(detect | fill, visible_frac)
+#include "../existence_belief/existence_info.h"   // rc::exist::existence_mutual_info — what a look says about EXISTENCE
 
 namespace rc::nbv
 {
@@ -102,6 +108,14 @@ struct Sensor
     bool complete() const { return has_vertical() and height_m > 1e-3f and hfov_rad > 0.05f; }
 };
 
+// The existence inputs a caller hands a planner, copied onto Target by set_existence(). Default = "not priced".
+struct ExistenceView
+{
+    float p_exists = -1.0f;   // belief P(exists); < 0 ⇒ no existence term
+    float p_hit    = 0.0f;    // P(detector fires | exists & observable)
+    float p_false  = 0.0f;    // P(detector fires | ¬exists)
+};
+
 // ─── Target: the object as the BELIEF currently holds it — estimate AND uncertainty ───────────────────────
 //
 // σ_pos/σ_extent are what make the framing precision-aware. Left at 0 the module degrades gracefully to the
@@ -113,6 +127,20 @@ struct Target
     float z0 = 0.0f, z1 = 0.0f;               // vertical span, room frame; z1 ≤ z0 ⇒ vertical channel off
     float sigma_pos_m    = 0.0f;              // belief σ on the centre  (marginalisation)
     float sigma_extent_m = 0.0f;              // belief σ on the extent  (marginalisation)
+
+    // ── EXISTENCE, the other variable a look informs ─────────────────────────────────────────────────────
+    // A detector outcome from a candidate pose also carries I(E;Y) nats about whether the object is there at all
+    // (common/existence_belief/existence_info.h). It REPLACES the old 5-nat verification floor on object offers
+    // (owner ruling 2026-11-23): instead of a constant that switched on above a surprise threshold, every offer is
+    // worth the information the view adds about existence — ≤ ln 2 nats, large while existence is open, ~0 once it
+    // is settled either way. P(detect | pose) enters ONLY through the hit rate: P(Y|E=1) = p_hit · p_detect.
+    //   p_exists < 0 ⇒ NO existence term (the default): a caller that does not set it — door_concept, which adds
+    //   this MI itself — stays bit-identical to the geometric-only score.
+    float p_exists = -1.0f;                   // the belief's P(exists), or < 0 for "not priced here"
+    float p_hit    = 0.0f;                    // P(detector fires | exists & observable) — the agent's sensor model
+    float p_false  = 0.0f;                    // P(detector fires | ¬exists)            — its false-report rate
+    bool  prices_existence() const { return p_exists >= 0.0f; }
+    void  set_existence(const ExistenceView& e) { p_exists = e.p_exists; p_hit = e.p_hit; p_false = e.p_false; }
 
     Eigen::Vector2f centre() const { return {cx, cy}; }
     Eigen::Vector2f axis_x() const { return {std::cos(yaw), std::sin(yaw)}; }
@@ -240,7 +268,9 @@ struct Score
     float fill_sigma    = 0.0f;   // its σ, propagated from the belief
     float visible_frac  = 0.0f;   // frustum ∧ unoccluded fraction of the silhouette
     float p_detect      = 0.0f;   // E_belief[ P(detect | fill, visible_frac) ]
-    float expected_gain = 0.0f;   // p_detect · raw_gain  ← the only number selection should compare
+    float geometric_gain = 0.0f;  // p_detect · max(0, raw_gain) — the fit DOFs' expected ΔH
+    float existence_gain = 0.0f;  // I(E;Y) at this pose (0 unless Target::prices_existence()) — ≤ ln 2 nats
+    float expected_gain = 0.0f;   // geometric_gain + existence_gain  ← the only number selection should compare
     bool  stands_inside = false;  // the pose is inside an obstacle (feasibility, not detectability)
 };
 
@@ -610,7 +640,12 @@ inline Score score(const Candidate& c, const Target& t, const Sensor& sensor,
     s.fill_sigma    = predicted_fill_sigma(t, c.pos, sensor);
     s.visible_frac  = visible_fraction(t, c.pos, c.yaw, sensor, obstacles);
     s.p_detect      = expected_p_detect(s.fill, s.fill_min, s.fill_sigma, s.visible_frac, sensor.env);
-    s.expected_gain = s.p_detect * std::max(0.0f, c.raw_gain);
+    s.geometric_gain = s.p_detect * std::max(0.0f, c.raw_gain);
+    // Existence information, NOT multiplied by p_detect again: P(detect) is already inside the hit likelihood, and a
+    // miss is itself informative about existence (it is exactly the evidence the removal channel integrates).
+    if (t.prices_existence())
+        s.existence_gain = rc::exist::existence_mutual_info(t.p_exists, t.p_hit * s.p_detect, t.p_false);
+    s.expected_gain = s.geometric_gain + s.existence_gain;
     return s;
 }
 
@@ -716,6 +751,9 @@ struct Plan
     Eigen::Vector2f best_pos{0.0f, 0.0f};
     float best_yaw    = 0.0f;
     std::array<float, 4> face_gains{};      // EXPECTED (detection-weighted) nats — what selection ranks on
+                                            // = face_geometric_gains + face_existence_gains (0 for an unusable face)
+    std::array<float, 4> face_geometric_gains{};  // p_detect · raw — the part an adequacy bound may scale
+    std::array<float, 4> face_existence_gains{};  // I(E;Y) per face — never adequacy-bounded (a different variable)
     std::array<float, 4> face_raw_gains{};  // as supplied by the agent's belief, for logs/diagnosis
     std::array<float, 4> face_p_detect{};
     std::array<float, 4> face_visible{};
@@ -799,7 +837,11 @@ Plan plan_faces(const Target& t, const Sensor& sensor, float robot_radius_m,
         // A pose inside another object — or outside the room entirely — is not a viewpoint at all. These are
         // the two genuinely binary facts here; everything else degrades continuously.
         const bool usable       = not s.stands_inside and reachable;
-        plan.face_gains[i]      = usable ? s.expected_gain : 0.0f;
+        // The existence term rides on the same feasibility: a usable face keeps it even when its raw (fit) gain is 0
+        // — that is the case it exists for, an object whose fit is adequate but whose existence is still open.
+        plan.face_gains[i]           = usable ? s.expected_gain  : 0.0f;
+        plan.face_geometric_gains[i] = usable ? s.geometric_gain : 0.0f;
+        plan.face_existence_gains[i] = usable ? s.existence_gain : 0.0f;
 
         if (usable and std::isfinite(s.expected_gain) and s.expected_gain > best_score)
         {

@@ -821,7 +821,7 @@ void SpecificWorker::step_convergence(rc::HoodInstance& inst,
 void SpecificWorker::step_epistemic(rc::HoodInstance& inst, DSR::Node& node)
 {
     // The cycle around the planner call is SHARED (common/epistemic_step): the cooldown, the
-    // controller-completion hold, the gain suppression and verification floor, the affordance refresh, and —
+    // controller-completion hold, the gain suppression, the affordance refresh, and —
     // the reason it is shared rather than merely deduplicated — the single bail path that ALWAYS calls
     // hold_offered(). Only the planner call and what this agent records are hood's.
     rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
@@ -841,7 +841,11 @@ void SpecificWorker::step_epistemic(rc::HoodInstance& inst, DSR::Node& node)
                                        // viewpoint — including the ones behind the wall the hood is pushed
                                        // against — read as reachable. Empty until room_concept publishes, and
                                        // is_reachable then imposes no constraint (the pre-existing behaviour).
-                                       fitter_->room_polygon());
+                                       fitter_->room_polygon(),
+                                       // The existence belief + THIS agent's sensor model (the configured rates hood_existence starts from; its per-place p_FA needs a bearing a plan does not have yet) — what the view adds about
+                                       // existence is part of its value (replaced the 5-nat verification floor, owner ruling 2026-11-23).
+                                       rc::nbv::ExistenceView{inst.existence.p_exists(), cfg_.existence_detection_prob,
+                                                              cfg_.existence_clutter_prob});
         // Degenerate fit, or no sensor model yet — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;
@@ -869,10 +873,7 @@ void SpecificWorker::step_epistemic(rc::HoodInstance& inst, DSR::Node& node)
     hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 
     rc::epistemic::step(inst, *G,
-                        {.cooldown_cycles   = cfg_.epistemic_cooldown_cycles,
-                         // Verification pull: absence never deletes a hood the robot hasn't properly looked
-                         // at — it sends the robot to look.
-                         .verify_gain_floor = inst.wants_verification ? cfg_.existence_verify_gain : 0.0f},
+                        {.cooldown_cycles = cfg_.epistemic_cooldown_cycles},
                         hooks);
 }
 

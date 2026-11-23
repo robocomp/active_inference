@@ -294,8 +294,6 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
             "decay exponent (2 ≈ angular-area ∝ 1/range²); 0 disables");
     out.existence_verify_surprise     = getf("CabinetModel.ExistenceVerifySurprise", 20.0f,
             "decayed go-verify surprise (un-resolvable absence) above which");
-    out.existence_verify_gain         = getf("CabinetModel.ExistenceVerifyGain", 5.0f,
-            "epistemic gain (nats) a wants_verification cabinet gets, so the");
     out.wall_precision                = getf("CabinetModel.WallPrecision", 400.0f,
             "1/m^2 at zero gap (~1/sigma^2 with sigma=5 cm)");
     out.wall_reach_m                  = getf("CabinetModel.WallReachM", 0.35f,

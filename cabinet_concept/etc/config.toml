@@ -258,10 +258,9 @@ ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/ran
 # REMOVAL in proportion to P(detect | present, geometry) = range_conf × in_fov_frac × central_frac. The REMAINING
 # absence (from a far / peripheral / edge-on view that CAN'T resolve the cabinet) is epistemic surprise, not removal:
 # it feeds a decayed go-VERIFY accumulator. Above ExistenceVerifySurprise the cabinet is flagged wants_verification
-# and gets an epistemic pull (ExistenceVerifyGain nats) so the controller drives to a resolving ZED view — absence
-# never deletes a cabinet the robot never properly looked at; it sends the robot to look (confirm-or-remove).
+# (logged only since 2026-11-23: it no longer prices the offer — the 5-nat ExistenceVerifyGain floor was replaced by
+# the information each view adds about the cabinet's existence, computed in the planner).
 ExistenceVerifySurprise = 20.0    # decayed un-resolvable-absence surprise above which a cabinet wants verification
-ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification cabinet gets (drives a resolving view)
 
 # LiDAR removal reliability: the model top slab is a SOLID band but a real tabletop is a THIN plate, so
 # horizontal beams passing UNDER the top surface exit the band and read as false "free" (unreliable absence).

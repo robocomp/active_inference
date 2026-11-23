@@ -100,7 +100,11 @@ CountableResult plan_countable(const Target& t, const CountableInputs& in, RawGa
         return r;
     }
     const int   best = r.plan.best_face;
-    const float gain = r.plan.face_gains[best] * useful(r.plan.face_raw_gains[best]);
+    // The adequacy bound scales only the FIT part: Σ* is a demand on the geometric DOFs, so an adequate object's
+    // geometric value → 0 while the information a look adds about its EXISTENCE (Target::p_exists; 0 when unset)
+    // stays — that term is what replaced the 5-nat verification floor (owner ruling 2026-11-23).
+    const float gain = r.plan.face_geometric_gains[best] * useful(r.plan.face_raw_gains[best])
+                     + r.plan.face_existence_gains[best];
     const CountableProposal p{r.plan.best_pos.x(), r.plan.best_pos.y(), r.plan.best_yaw, gain, true};
     if (p.is_finite())
         r.proposal = p;

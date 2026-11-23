@@ -966,7 +966,12 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
                                                rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
                                                rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(),
                                                                                 inst.node_id),
-                                               room_polygon_);
+                                               room_polygon_,
+                                               // The existence belief + the same rates bottle_existence uses: the far-side
+                                               // view is also worth what it adds about existence (replaced the 5-nat
+                                               // verification floor's role, owner ruling 2026-11-23).
+                                               rc::nbv::ExistenceView{inst.existence.p_exists(), cfg_.existence_detection_prob,
+                                                                      cfg_.existence_clutter_prob});
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;   // no camera pose / degenerate ray this cycle
         return prop;

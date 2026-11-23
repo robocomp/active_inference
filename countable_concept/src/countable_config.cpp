@@ -465,8 +465,6 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "decayed go-verify surprise (un-resolvable absence) above which");
     out.verify_surprise_smooth        = getf("Model.VerifySurpriseSmooth", 0.10f,
             "EMA weight of the go-verify surprise accumulator (new sample");
-    out.existence_verify_gain         = getf("Model.ExistenceVerifyGain", 5.0f,
-            "epistemic gain (nats) a wants_verification bed gets, so the");
 
     std::print("{}: configuration loaded (class '{}').\n", out.agent_name, out.concept_class);
     // Peripheral (ricoh) existence confirmation — see countable_config.h. OFF by default.

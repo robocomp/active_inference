@@ -327,11 +327,9 @@ struct TableConfig
                                             // (absorbs the table's OWN returns + registration error)
     int   existence_los_azim_bins = 0;      // azimuth bins over 2π (720 ≈ 0.5° each); 0 = oracle OFF (default)
     float existence_verify_surprise     = 20.0f;  // decayed go-verify surprise (un-resolvable absence) above which
-                                                  // a table is flagged wants_verification (epistemic pull, not removal)
+                                                  // a table is flagged wants_verification (logged only; no longer prices the offer)
     float verify_surprise_smooth        = 0.10f;  // EMA weight of the go-verify surprise accumulator (new sample
                                                   // weight; 1−this holds the old). Parity with fe_surprise_smooth.
-    float existence_verify_gain         = 5.0f;   // epistemic gain (nats) a wants_verification table gets, so the
-                                                  // controller drives to a resolving ZED view (confirm-or-remove)
     // LiDAR removal reliability: the model's top slab is a SOLID band, but a real tabletop is a THIN plate, so
     // horizontal beams passing UNDER the top surface exit the band and read as false "free" — unreliable
     // ABSENCE. So by default the LiDAR carve contributes OCCUPANCY only (holds L up / confirms presence) and

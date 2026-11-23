@@ -76,7 +76,8 @@ std::vector<Eigen::Vector3f> sample_face_surface(const HoodBeliefState& s, int f
 EpistemicProposal EpistemicPlanner::compute(const HoodBelief& belief, float lat_rate, float sigma_base,
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<EpistemicPlanner::Obstacle>& obstacles,
-                                            const std::vector<Eigen::Vector2f>& room_polygon) const
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            const rc::nbv::ExistenceView& existence) const
 {
     constexpr float kRobotRadiusM = 0.30f;   // Shadow's footprint radius — a physical dimension, not a knob
 
@@ -128,6 +129,9 @@ EpistemicProposal EpistemicPlanner::compute(const HoodBelief& belief, float lat_
     // poorly-known hood asks for a safer framing on its own. That is the model-level replacement for the
     // hand-picked stand-off margin this planner used to carry.
     rc::nbv::Target target;
+    // EXISTENCE: every face is also worth I(E;Y) — what its detector outcome says about whether the object is there
+    // at all. Replaced the 5-nat verification floor (owner ruling 2026-11-23); see rc::nbv::Target::p_exists.
+    target.set_existence(existence);
     target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
     target.w  = s.w;  target.h  = s.h;
     // ★A HANGING BOX. z0 = 0 would tell the NBV the hood extends to the floor, so its vertical fill would
@@ -163,6 +167,9 @@ EpistemicProposal EpistemicPlanner::compute(const HoodBelief& belief, float lat_
     // would make it UNBOUNDED (5–15 nats, never falling to 0) and out-bid every agent whose gain is gap-bounded.
     // This keeps the pre-Phase-0 value (which was 0 by an unguarded gap). What an object with no consumer should
     // bid is an open question, to settle before the mirror agent (also wall-mounted, also no consumer).
+    // Since 2026-11-23 the scalar is no longer exactly 0: useful scales only the FIT part, and the information the
+    // view adds about the hood's EXISTENCE (≤ ln 2 nats, → 0 once settled) is added on top — it replaced the 5-nat
+    // verification floor, which was the only thing that used to give a hood a non-zero bid.
     const rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon};
     const auto useful = [](float) { return 0.0f; };
     const auto res = rc::nbv::plan_countable(target, in, raw_gain, useful);

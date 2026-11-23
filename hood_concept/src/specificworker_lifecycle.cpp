@@ -506,8 +506,9 @@ void SpecificWorker::apply_fridge_filter()
         // to a cabinet shape and then coasted OUT OF FoV, so it could never be immortal. That decay is gone — but
         // it was decay without observation, the same thing that killed real fridges. A diverged mis-detection now
         // sits frozen until looked at, and one measured frame is enough (its LLR ≈ −17 saturates the accumulator
-        // immediately). Meanwhile the silhouette channel HOLDs out-of-FoV and raises wants_verification, which is
-        // the designed answer: send the robot to LOOK, never delete what it has not seen.
+        // immediately). Meanwhile the silhouette channel HOLDs out-of-FoV and the planner's existence-information
+        // term (which replaced the wants_verification floor, 2026-11-23) is the designed answer: send the robot to
+        // LOOK, never delete what it has not seen.
         if (inst.matched_frames != inst.plaus_seen_frames and not inst.dbg_gated)
         {
             inst.plaus_seen_frames = inst.matched_frames;

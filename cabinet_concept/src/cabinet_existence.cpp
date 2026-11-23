@@ -150,8 +150,8 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
                 inst.existence.integrate(rc::exist::mask_evidence(sil.e_occ, sfree, sil.n_detectable, sm));
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
-                // builds up, the cabinet is flagged for verification (the epistemic planner drives the robot to a
-                // good ZED viewpoint). Removal then only ever fires from a HIGH-p_detect view — verification-gated.
+                // builds up, the cabinet is flagged for verification (logged only — it no longer prices the offer; the
+                // planner's existence-information term is what draws the robot to a resolving view). Removal then only ever fires from a HIGH-p_detect view — verification-gated.
                 inst.verify_surprise = 0.9f * inst.verify_surprise + 0.1f * verify;
                 inst.wants_verification = inst.verify_surprise > cfg_.existence_verify_surprise;
             }

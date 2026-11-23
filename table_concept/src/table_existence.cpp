@@ -278,8 +278,8 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
                 inst.existence.integrate(e_use, p_detect);
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
-                // builds up, the table is flagged for verification (the epistemic planner drives the robot to a
-                // good ZED viewpoint). Removal then only ever fires from a HIGH-p_detect view — verification-gated.
+                // builds up, the table is flagged for verification (logged only — it no longer prices the offer; the
+                // planner's existence-information term is what draws the robot to a resolving view). Removal then only ever fires from a HIGH-p_detect view — verification-gated.
                 const float vss = cfg_.verify_surprise_smooth;
                 inst.verify_surprise = (1.0f - vss) * inst.verify_surprise + vss * verify;
                 inst.wants_verification = inst.verify_surprise > cfg_.existence_verify_surprise;

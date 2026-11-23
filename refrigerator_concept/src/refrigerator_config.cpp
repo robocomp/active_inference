@@ -390,8 +390,6 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
             "decayed go-verify surprise (un-resolvable absence) above which");
     out.verify_surprise_smooth        = getf("RefrigeratorModel.VerifySurpriseSmooth", 0.10f,
             "EMA weight of the go-verify surprise accumulator (new sample");
-    out.existence_verify_gain         = getf("RefrigeratorModel.ExistenceVerifyGain", 5.0f,
-            "epistemic gain (nats) a wants_verification refrigerator gets, so the");
 
     std::print("refrigerator_concept: configuration loaded.\n");
     // Peripheral (ricoh) existence confirmation — see refrigerator_config.h. OFF by default.
