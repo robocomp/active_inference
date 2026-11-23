@@ -208,6 +208,19 @@ target_compile_definitions(door_apertures_selftest PRIVATE SHADOW_JSON="${CMAKE_
 target_link_libraries(door_apertures_selftest ${LIBS})
 set_target_properties(door_apertures_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
+# ── change_belief_test ────────────────────────────────────────────────────────
+# AuRo item B (2026-11-23): the room's change belief (Poisson hazard, grid posterior, episodes). Header-only.
+add_executable(change_belief_test EXCLUDE_FROM_ALL ../tools/change_belief_test.cpp)
+target_include_directories(change_belief_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(change_belief_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── change_planner_test ───────────────────────────────────────────────────────
+# AuRo item B: the known-room planner with the change belief on (L room). Links the planner.
+add_executable(change_planner_test EXCLUDE_FROM_ALL ../tools/change_planner_test.cpp ${CMAKE_CURRENT_LIST_DIR}/epistemic_planner.cpp)
+target_include_directories(change_planner_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(change_planner_test PRIVATE Eigen3::Eigen)
+set_target_properties(change_planner_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
 # ── coverage_info_test ────────────────────────────────────────────────────────
 # AuRo item A (2026-11-23): the room-building offer in nats. Header-only.
 add_executable(coverage_info_test EXCLUDE_FROM_ALL ../tools/coverage_info_test.cpp)

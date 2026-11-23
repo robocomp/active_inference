@@ -405,7 +405,7 @@ private:
     void learn_coverage_priors();
     /// One CSV row per afford_room publish: what the gain is made of (pose / neglect / coverage information).
     void log_room_offer(std::string_view source, const Eigen::Vector2f& target_pub, float pose_info, float neglect,
-                        float coverage_info, float total);
+                        float change_info, float coverage_info, float total);
     rc::coverage::BetaPrior occ_prior_, door_prior_;
     rc::coverage::LengthPrior ell_prior_;
     bool coverage_priors_set_ = false;

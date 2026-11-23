@@ -1106,6 +1106,13 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "exponent for IoR suppressor: score *= staleness^w_ior");
     reader.opt<float, double>("EpistemicController.WIorDrive", ep.w_ior_drive,
             "path_interest = mean staleness of intermediate path cells ∈ [0,1] higher → prefer routes through unexplored territory ---- Inhibition-of-Return…");
+    reader.opt<bool>("EpistemicController.ChangeBelief", ep.use_change_belief,
+            "AuRo item B: change information (Poisson hazard, learnt) instead of the neglect drive");
+    reader.opt<double>("EpistemicController.ChangeHazardMean", ep.change_hazard_mean, "prior mean λ, changes per m² per s");
+    reader.opt<double>("EpistemicController.ChangeHazardShape", ep.change_hazard_shape, "prior Gamma shape of λ");
+    reader.opt<double>("EpistemicController.ChangeDetect", ep.change_detect, "P(re-observation shows a change | changed)");
+    reader.opt<double>("EpistemicController.ChangeFalseAlarm", ep.change_false_alarm, "P(it shows one | unchanged)");
+    reader.opt<double>("EpistemicController.ChangeUnseenAgeS", ep.change_unseen_age_s, "prior age (s) of a cell not observed this run");
     reader.opt<float, double>("EpistemicController.WPathInterest", ep.w_path_interest,
             "weight: bonus for paths that traverse unvisited cells");
     reader.opt<float, double>("EpistemicController.IorPathRadius", ep.ior_path_radius,

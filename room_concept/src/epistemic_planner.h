@@ -9,6 +9,7 @@
 #include <random>
 #include <Eigen/Dense>
 #include "corner_visibility.h"
+#include "change_belief.h"   // rc::change — AuRo item B: the room's change belief
 
 namespace rc
 {
@@ -102,6 +103,17 @@ public:
         // is only logarithmic, so it stays commensurate with the pose-information term rather than
         // swamping it. 0 ⇒ off (pure info-seeking; the robot rests once the room is known).
         float w_ior_drive     = 0.5f;
+
+        // ---- AuRo item B (2026-11-23): CHANGE INFORMATION instead of the neglect drive (change_belief.h) ----
+        // On: the offer = marginal pose information + Σ over the cells a view would observe of the expected
+        // information of re-observing them (a Poisson change hazard with a learnt posterior); the target score is
+        // that gain minus travel. The IoR suppressor and w_ior_drive no longer enter. Off: exactly the old planner.
+        bool  use_change_belief   = false;
+        double change_hazard_mean = 3e-6;    // prior mean λ, changes per m² per s (~5 per 20 m² per day)
+        double change_hazard_shape = 1.0;    // prior Gamma shape (weak)
+        double change_detect      = 0.85;    // P(re-observation shows a change | changed)
+        double change_false_alarm = 0.05;    // P(it shows one | unchanged)
+        double change_unseen_age_s = 86400.0; // prior age of a cell not observed in this run (time since the last tour)
 
         // ---- FIM scoring ----
         float fim_corner_sigma  = 0.04f;     // isotropic corner detection noise σ (m)
@@ -227,6 +239,16 @@ public:
     /// `rotate_in_place` selects the ABSOLUTE reading instead of the marginal one: for a heading
     /// recovery the robot IS staying put, so "what do I gain over staying put" is the wrong
     /// question and would advertise 0 for the action needed exactly when the robot is most lost.
+    /// AuRo item B: cells of the visit grid a 360° scan from `v` would observe (inside the room contour, within
+    /// fim_max_range, not behind a wall). Furniture occlusion is not modelled.
+    std::vector<int> visible_cells(const Eigen::Vector2f& v) const;
+    /// AuRo item B: expected information (nats) of re-observing the cells visible from `v` (0 when the belief is off).
+    float change_info(const Eigen::Vector2f& v) const;
+    /// AuRo item B: furniture returns of one sweep, INTERNAL frame (the low-obstacle stream).
+    void observe_matter(const std::vector<Eigen::Vector2f>& xy_internal);
+    /// AuRo item B: the occupancy correlation length (m) — regions per cell = cell² / ℓ² (coverage_info.h).
+    void set_change_ell(float ell_m) { change_ell_ = std::max(0.01f, ell_m); }
+    const rc::change::ChangeBelief& change_belief() const { return change_; }
     float live_total_epistemic_gain(const Eigen::Vector2f& viewpoint,
                                     bool rotate_in_place = false) const;
 
@@ -373,6 +395,13 @@ private:
     bool room_bounds_set_ = false;
 
     std::vector<Eigen::Vector2f> room_corners_;
+    // AuRo item B
+    void change_sweep();                               ///< one observation sweep from the robot's pose
+    static double steady_s();
+    rc::change::ChangeBelief change_;
+    bool change_made_ = false;                         ///< λ's posterior is built once and kept across rooms
+    float change_ell_ = 0.3f;
+    std::vector<std::uint8_t> matter_hits_;            ///< cells with furniture returns since the last sweep
     mutable std::vector<Eigen::Vector2f> cached_grid_;
     mutable bool grid_dirty_ = true;
     mutable bool mask_dirty_ = true;   // observability mask needs a rebuild (bounds/polygon changed)

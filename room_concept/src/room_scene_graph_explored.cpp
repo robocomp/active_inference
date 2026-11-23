@@ -280,20 +280,22 @@ void RoomSceneGraph::learn_coverage_priors()
 }
 
 void RoomSceneGraph::log_room_offer(std::string_view source, const Eigen::Vector2f& target_pub, float pose_info, float neglect,
-                                    float coverage_info, float total)
+                                    float change_info, float coverage_info, float total)
 {
     if (params_->ROOM_OFFER_LOG.empty()) return;
     if (not room_offer_log_.is_open())
     {
         room_offer_log_.open(params_->ROOM_OFFER_LOG, std::ios::out | std::ios::trunc);
         room_offer_log_.imbue(std::locale::classic());
-        room_offer_log_ << "wall_ms,source,tx,ty,pose_info,neglect,coverage_info,total,p_occ,occ_a,occ_b,p_door,door_a,door_b,ell_m\n";
+        room_offer_log_ << "wall_ms,source,tx,ty,pose_info,neglect,change_info,coverage_info,total,p_occ,occ_a,occ_b,p_door,door_a,door_b,ell_m,hazard,change_tests\n";
     }
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto& cb = epistemic_->epistemic_planner().change_belief();
     room_offer_log_ << now << ',' << source << ',' << target_pub.x() << ',' << target_pub.y() << ',' << pose_info << ','
-                    << neglect << ',' << coverage_info << ',' << total << ',' << occ_prior_.mean() << ',' << occ_prior_.a
-                    << ',' << occ_prior_.b << ',' << door_prior_.mean() << ',' << door_prior_.a << ',' << door_prior_.b << ',' << ell_prior_.value() << '\n';
+                    << neglect << ',' << change_info << ',' << coverage_info << ',' << total << ',' << occ_prior_.mean() << ',' << occ_prior_.a
+                    << ',' << occ_prior_.b << ',' << door_prior_.mean() << ',' << door_prior_.a << ',' << door_prior_.b << ',' << ell_prior_.value()
+                    << ',' << cb.hazard() << ',' << cb.tests() << '\n';
     room_offer_log_.flush();
 }
 

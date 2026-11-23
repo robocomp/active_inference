@@ -32,7 +32,17 @@ void EpistemicPlanner::set_room_bounds(const Eigen::Vector2f& min_corner,
     room_bounds_set_ = true;
     if (changed) { grid_dirty_ = true; mask_dirty_ = true; }
     if (!visit_grid_.initialized)
+    {
         visit_grid_.init(room_min_, room_max_, params.ior_cell_size);
+        if (not change_made_)
+        {
+            change_ = rc::change::ChangeBelief({params.change_hazard_mean, params.change_hazard_shape, params.change_detect,
+                                                params.change_false_alarm, params.change_unseen_age_s});
+            change_made_ = true;
+        }
+        change_.init(visit_grid_.origin, visit_grid_.cols, visit_grid_.rows, visit_grid_.cell_size);
+        matter_hits_.assign(visit_grid_.cells.size(), 0);
+    }
 }
 
 void EpistemicPlanner::set_room_polygon(const std::vector<Eigen::Vector2f>& vertices)
@@ -372,6 +382,60 @@ float EpistemicPlanner::marginal_epistemic_gain(const Eigen::Vector2f& viewpoint
                        - info_gain_nats(Y, predicted_fim(robot_pos())));
 }
 
+double EpistemicPlanner::steady_s()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+std::vector<int> EpistemicPlanner::visible_cells(const Eigen::Vector2f& v) const
+{
+    std::vector<int> out;
+    if (not visit_grid_.initialized) return out;
+    const float r2 = params.fim_max_range * params.fim_max_range;
+    const int N = static_cast<int>(room_corners_.size());
+    for (int k = 0; k < static_cast<int>(visit_grid_.cells.size()); ++k)
+    {
+        if (not visit_grid_.is_observable(k)) continue;
+        const Eigen::Vector2f c = visit_grid_.cell_center(k);
+        if ((c - v).squaredNorm() > r2) continue;
+        if (N >= 3 and not corner_visibility::point_in_polygon(c, room_corners_)) continue;
+        bool blocked = false;
+        for (int i = 0; i < N and not blocked; ++i)
+            blocked = corner_visibility::segments_cross(v, c, room_corners_[i], room_corners_[(i + 1) % N]);
+        if (not blocked) out.push_back(k);
+    }
+    return out;
+}
+
+float EpistemicPlanner::change_info(const Eigen::Vector2f& v) const
+{
+    if (not params.use_change_belief or not change_.ready()) return 0.f;
+    const double now = steady_s();
+    double s = 0.0;
+    for (const int k : visible_cells(v)) s += change_.info(k, now, change_ell_);
+    return static_cast<float>(s);
+}
+
+void EpistemicPlanner::observe_matter(const std::vector<Eigen::Vector2f>& xy_internal)
+{
+    if (not visit_grid_.initialized or matter_hits_.size() != visit_grid_.cells.size()) return;
+    for (const auto& p : xy_internal)
+    {
+        const float fx = (p.x() - visit_grid_.origin.x()) / visit_grid_.cell_size;
+        const float fy = (p.y() - visit_grid_.origin.y()) / visit_grid_.cell_size;
+        if (fx < 0.f or fy < 0.f or fx >= visit_grid_.cols or fy >= visit_grid_.rows) continue;   // outside: not this room's
+        matter_hits_[visit_grid_.to_index(p)] = 1;
+    }
+}
+
+void EpistemicPlanner::change_sweep()
+{
+    if (not params.use_change_belief or not change_.ready() or not robot_state_set_) return;
+    const auto vis = visible_cells(robot_pos());
+    change_.sweep(vis, [this](int k) { return k < static_cast<int>(matter_hits_.size()) and matter_hits_[k] != 0; }, steady_s());
+    std::ranges::fill(matter_hits_, 0);
+}
+
 float EpistemicPlanner::live_total_epistemic_gain(const Eigen::Vector2f& viewpoint,
                                                   bool rotate_in_place) const
 {
@@ -383,6 +447,9 @@ float EpistemicPlanner::live_total_epistemic_gain(const Eigen::Vector2f& viewpoi
     // recovers on its own however long the room goes unattended, so afford_room can never fall
     // permanently out of the consumer's contention and exploration cannot stall. This is what the
     // old `patrol_gain_floor` was faking; here the gain is held up by a computed quantity instead.
+    // AuRo item B: with the change belief on, the second term is the expected information of re-observing the cells
+    // this view would see (change_belief.h) instead of the neglect drive.
+    if (params.use_change_belief) return info + change_info(viewpoint);
     const float drive = (params.w_ior_drive > 0.f)
         ? params.w_ior_drive * neglect_nats(viewpoint, std::chrono::steady_clock::now())
         : 0.f;
@@ -594,9 +661,12 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         // and not reached therefore keeps its (correct, growing) neglect and simply stops being
         // proposed for a while — no blacklist, and it returns on its own as the attempt decays.
         const float attempt_supp = attempt_suppressor(pos, now);
-        t.score = attempt_supp * (fim_gain * ior_suppressor
-                                  + params.w_ior_drive * route_neglect)
-                - params.w_travel_cost * (t.distance / room_diag);
+        if (params.use_change_belief)   // AuRo item B: the same gain the offer advertises, minus travel
+            t.score = attempt_supp * (fim_gain + change_info(pos)) - params.w_travel_cost * (t.distance / room_diag);
+        else
+            t.score = attempt_supp * (fim_gain * ior_suppressor
+                                      + params.w_ior_drive * route_neglect)
+                    - params.w_travel_cost * (t.distance / room_diag);
         t.eigenvector_score = fim_gain;
         // The decomposition, carried so the log can say WHY this cell won — see Target's fields.
         t.route_neglect = route_neglect;
@@ -759,6 +829,7 @@ void EpistemicPlanner::mark_and_refresh()
 {
     if (!robot_state_set_ || !visit_grid_.initialized) return;
     visit_grid_.mark_visited_with_falloff(robot_pos(), params.ior_path_radius, params.ior_decay_time);
+    change_sweep();   // AuRo item B: one observation sweep (episodes open/close; λ learns on re-observation)
     refresh_ior_overlay();
 }
 
@@ -842,6 +913,7 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::update_target()
 
     // ---- Update visit grid: mark robot position with neighbourhood falloff ----
     visit_grid_.mark_visited_with_falloff(robot_pos(), params.ior_path_radius, params.ior_decay_time);
+    change_sweep();   // AuRo item B: one observation sweep (episodes open/close; λ learns on re-observation)
 
     // ---- Refresh IoR overlay every cycle so the viewer shows live path ----
     refresh_ior_overlay();

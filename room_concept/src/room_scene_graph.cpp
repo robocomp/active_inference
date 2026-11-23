@@ -2219,6 +2219,13 @@ void RoomSceneGraph::stamp_low_obstacles()
         T.translate(t).rotate(th);
         for (auto& p : b.xy) p = T * p;
         free_space_->add_matter(b.xy);
+        if (epistemic_)   // AuRo item B: the same furniture returns, internal frame, for the room's change belief
+        {
+            std::vector<Eigen::Vector2f> xi; xi.reserve(b.xy.size());
+            const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+            for (const auto& p : b.xy) xi.push_back(T_int_pub * p);
+            epistemic_->epistemic_planner().observe_matter(xi);
+        }
     }
     low_obs_pending_ = std::move(keep);
     while (low_obs_pending_.size() > 16) low_obs_pending_.pop_front();
@@ -2772,7 +2779,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
                           t_pub.x(), t_pub.y(), yaw_pub, layout_gain_);
         // item A/C: the layout offer is all coverage information (unknown floor, contested floor, wall to show the
         // cameras, or the wall-map EIG of plan()), none of it pose or neglect
-        log_room_offer(layout_plan_camera_ ? "layout_camera" : "layout", t_pub, 0.f, 0.f, layout_gain_, layout_gain_);
+        log_room_offer(layout_plan_camera_ ? "layout_camera" : "layout", t_pub, 0.f, 0.f, 0.f, layout_gain_, layout_gain_);
     }
 }
 
@@ -3655,11 +3662,15 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // rather than frozen at selection time, so it tracks the pose precision as the robot drives in.
     // The neglect part is unbounded in neglect age, so the gain can never collapse and exploration
     // cannot stall. rotate_in_place switches to the absolute reading — see live_total_epistemic_gain.
+    (void)floor_nats(0.f);                              // sets the coverage priors on first use
+    planner.set_change_ell(static_cast<float>(ell_prior_.value()));   // item B: regions per cell from the learnt ℓ
     const float gain = planner.live_total_epistemic_gain(target_opt->position,
                                                          target_opt->rotate_in_place);
-    // item C: the two parts of the known-room offer, logged apart (pose information; the rest is the neglect drive)
+    // item C: the parts of the known-room offer, logged apart: pose information, then change information (item B,
+    // when on) or the neglect drive (off)
     const float pose_info = target_opt->rotate_in_place ? planner.live_epistemic_gain(target_opt->position)
                                                         : planner.marginal_epistemic_gain(target_opt->position);
+    const bool change_on = planner.params.use_change_belief;
 
     // Heading: face toward room centre so the robot maximises wall/corner visibility.
     const float cx  = (planner.room_min().x() + planner.room_max().x()) * 0.5f;
@@ -3702,7 +3713,8 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         gain,
         [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
-    if (published) log_room_offer("room", t_pub, pose_info, gain - pose_info, 0.f, gain);
+    if (published) log_room_offer("room", t_pub, pose_info, change_on ? 0.f : gain - pose_info,
+                                  change_on ? gain - pose_info : 0.f, 0.f, gain);
 
     pub_tx_ = tx; pub_ty_ = ty; pub_ok_ = published;
     // A new arming is a new affordance instance: latch what is really on the node and re-open the

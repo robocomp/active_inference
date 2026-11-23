@@ -1569,6 +1569,15 @@ WIorDrive          = 0.5    # NATS per unit neglect information log(1 + age/τ).
                             # / InfoExhaustedGain switch, which is gone — the pose-info term is now
                             # MARGINAL (value of moving over staying put) and extinguishes itself,
                             # so the hand-off to inhibition-of-return happens continuously.
+# AuRo item B (2026-11-23): the known-room offer's second term = expected information of re-observing cells that may
+# have changed (change_belief.h), instead of the neglect drive above. Poisson hazard λ per m² per s with a learnt
+# posterior; d / f = the re-observation as a test of "changed?"; UnseenAge = prior age of a cell not seen this run.
+ChangeBelief       = true
+ChangeHazardMean   = 3e-6    # prior mean λ (~5 changes per 20 m² room per day)
+ChangeHazardShape  = 1.0     # weak prior (one change's worth)
+ChangeDetect       = 0.85
+ChangeFalseAlarm   = 0.05
+ChangeUnseenAgeS   = 86400.0 # s — the time since the last tour
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
 # ---- Execution-stall watchdog (liveness on the affordance handshake, not a model threshold) ----
