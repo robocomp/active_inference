@@ -1,0 +1,458 @@
+room,truth,objects,vlm,vlm_cal,handwritten,claims_vlm_cal,image
+scene0001_00,living room,sofa;armchair;coffee table,corridor,living room,living room,living room,living room
+scene0002_00,living room,sofa;television;chair;refrigerator;microwave;cabinet;plant;lamp,living room,living room,living room,living room,dining room
+scene0003_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0004_00,corridor,chair,corridor,corridor,corridor,corridor,office
+scene0006_00,bedroom,bed;nightstand;television;chair;desk;mirror;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0007_00,corridor,cabinet,corridor,corridor,corridor,corridor,corridor
+scene0009_00,bathroom,sink;mirror,corridor,bathroom,bathroom,bathroom;corridor,bathroom
+scene0010_00,office,chair;desk;computer monitor,corridor,office,office,office,office
+scene0011_00,kitchen,armchair;television;chair;sink;refrigerator;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,living room
+scene0012_00,living room,armchair;coffee table,corridor,corridor,living room,corridor,living room
+scene0013_00,living room,armchair;coffee table,corridor,corridor,living room,corridor,living room
+scene0014_00,bathroom,toilet;sink;shower;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0017_00,office,chair;desk;computer monitor;plant,corridor,office,office,office,office
+scene0019_00,corridor,sofa;chair;lamp,corridor,living room,corridor,living room,corridor
+scene0021_00,living room,sofa;armchair,corridor,living room,living room,corridor;living room,living room
+scene0022_00,living room,sofa;armchair;chair;refrigerator,corridor,living room,living room,living room,living room
+scene0024_00,living room,chest of drawers;sofa;armchair;chair;cabinet;plant;lamp,living room,living room,living room,living room;office,dining room
+scene0025_00,office,sofa;desk;office chair;computer monitor;cabinet,corridor,office,office,office,office
+scene0026_00,bathroom,toilet;sink;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bedroom
+scene0027_00,living room,sofa;chair,corridor,living room,corridor,living room,living room
+scene0029_00,bathroom,toilet;bathtub,corridor,bathroom,bathroom,bathroom;corridor,bathroom
+scene0031_00,living room,sofa;armchair;plant,corridor,living room,living room,corridor;living room,living room
+scene0032_00,bedroom,bed;chair;desk,corridor,bedroom,bedroom,bedroom,bedroom
+scene0033_00,living room,armchair;coffee table;plant,corridor,corridor,living room,corridor,office
+scene0034_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0035_00,bedroom,bed;nightstand;chest of drawers;chair;desk,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0036_00,living room,sofa;coffee table,corridor,living room,living room,corridor;living room,living room
+scene0039_00,bedroom,bed;nightstand;chair;desk;lamp,bedroom,bedroom,bedroom,bedroom,office
+scene0040_00,office,sofa;bookshelf;chair;desk;office chair;computer monitor;cabinet,office,office,office,living room;office,office
+scene0042_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0043_00,corridor,chair;desk,corridor,office,corridor,,office
+scene0045_00,living room,sofa;television;chair,corridor,living room,living room,living room,living room
+scene0047_00,kitchen,dining table;chair;sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0049_00,living room,chest of drawers;sofa;armchair;coffee table;television;bookshelf;lamp,living room,living room,living room,living room,living room
+scene0050_00,living room,sofa;armchair;chair;desk;lamp,corridor,living room,living room,living room;office,living room
+scene0051_00,bedroom,bed;nightstand;chest of drawers;bookshelf;chair;computer monitor;toilet;sink;shower;mirror,bedroom,bedroom,bathroom,bedroom,bedroom
+scene0055_00,bedroom,bed;desk;office chair,corridor,bedroom,office,bedroom,bedroom
+scene0058_00,office,chair;desk;computer monitor;cabinet;plant,corridor,office,office,office,office
+scene0059_00,living room,sofa;armchair;chair;refrigerator;microwave;cabinet,corridor,kitchen,living room,,living room
+scene0060_00,corridor,computer monitor;cabinet,corridor,office,corridor,,office
+scene0061_00,living room,sofa;television;chair;plant,corridor,living room,living room,living room,dining room
+scene0062_00,bathroom,toilet;sink;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0063_00,kitchen,chair;refrigerator;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0065_00,bathroom,toilet;sink;bathtub;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0067_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0068_00,kitchen,sink;refrigerator;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0070_00,bedroom,bed;chair;computer monitor;cabinet,corridor,bedroom,bedroom,bedroom,office
+scene0071_00,corridor,,corridor,corridor,corridor,corridor,corridor
+scene0072_00,bedroom,bed;wardrobe;cabinet,corridor,bedroom,bedroom,bedroom,bedroom
+scene0073_00,bedroom,bed;chest of drawers;chair;coat rack,corridor,bedroom,bedroom,bedroom,living room
+scene0076_00,kitchen,television;chair;office chair;sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,office
+scene0077_00,office,cabinet;countertop,corridor,bathroom,corridor,bathroom,bedroom
+scene0078_00,bedroom,bed;chair;desk,corridor,bedroom,bedroom,bedroom,bedroom
+scene0080_00,bathroom,toilet;sink;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bedroom
+scene0081_00,living room,sofa,corridor,corridor,corridor,corridor,dining room
+scene0082_00,living room,chair,corridor,corridor,corridor,corridor,dining room
+scene0083_00,bathroom,toilet;sink;bathtub;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0084_00,bathroom,toilet;sink;shower;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0085_00,bedroom,bed;nightstand;television;chair;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0086_00,bathroom,toilet;sink;mirror;plant,corridor,bathroom,bathroom,bathroom,bathroom
+scene0087_00,living room,sofa;armchair;coffee table;dining table;chair,living room,living room,living room,living room,dining room
+scene0089_00,office,bookshelf;chair;desk;computer monitor,corridor,office,office,office,office
+scene0090_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0091_00,living room,sofa;coffee table;television;chair;desk;mirror,living room,living room,living room,living room,kitchen
+scene0092_00,bedroom,bed;nightstand;chest of drawers;bookshelf;chair;desk;computer monitor;lamp,bedroom,bedroom,bedroom,bedroom;office,bedroom
+scene0093_00,office,chair;computer monitor;cabinet,corridor,office,corridor,,office
+scene0094_00,kitchen,sink;refrigerator;stove;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0096_00,bathroom,chest of drawers;toilet;sink;mirror;coat rack,corridor,bathroom,bathroom,bathroom;corridor,corridor
+scene0097_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,corridor
+scene0098_00,office,bookshelf;chair;desk;computer monitor,corridor,office,office,office,office
+scene0100_00,bathroom,toilet;sink;bathtub;shower;mirror;cabinet;rug,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0105_00,bathroom,toilet;bathtub;shower,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0107_00,bedroom,bed;nightstand;armchair;television;chair;desk;refrigerator;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0108_00,office,television;bookshelf;chair;desk,corridor,living room,office,living room,office
+scene0110_00,bedroom,bed;wardrobe;chair;desk,corridor,bedroom,bedroom,bedroom,bedroom
+scene0111_00,kitchen,sofa;television;sink;refrigerator;stove;microwave;hood;cabinet,kitchen,kitchen,kitchen,kitchen,dining room
+scene0112_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0113_00,living room,armchair;coffee table,corridor,corridor,living room,corridor,living room
+scene0114_00,office,chair;desk;computer monitor;cabinet;plant,corridor,office,office,office,office
+scene0116_00,bathroom,toilet;sink;bathtub;shower;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0117_00,kitchen,chair;sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0118_00,corridor,coffee table;chair,corridor,living room,corridor,,corridor
+scene0119_00,bathroom,toilet;sink;bathtub;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0124_00,bathroom,toilet;sink;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0125_00,living room,armchair,corridor,corridor,corridor,corridor,corridor
+scene0126_00,office,bookshelf;chair;desk;office chair;computer monitor;cabinet;plant,office,office,office,bedroom;office,office
+scene0127_00,bedroom,bed;wardrobe;chest of drawers;chair;desk,corridor,bedroom,bedroom,bedroom,office
+scene0128_00,living room,sofa;coffee table;lamp,corridor,living room,living room,living room,living room
+scene0129_00,living room,chair,corridor,corridor,corridor,corridor,living room
+scene0131_00,office,sofa;chair;desk;office chair;computer monitor;refrigerator,office,office,office,office,office
+scene0133_00,corridor,chair,corridor,corridor,corridor,corridor,corridor
+scene0135_00,bathroom,toilet;sink;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0137_00,bedroom,bed;nightstand;armchair;television;desk;office chair;refrigerator;lamp,bedroom,bedroom,living room,bedroom,bedroom
+scene0138_00,office,chair;desk;computer monitor;cabinet,corridor,office,office,office,office
+scene0141_00,office,sofa;chair;desk;computer monitor,corridor,living room,office,living room;office,office
+scene0142_00,office,chair;desk;office chair;computer monitor;cabinet,office,office,office,office,office
+scene0143_00,bedroom,bed;nightstand;armchair;chair;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0144_00,bedroom,bed;nightstand;chest of drawers;armchair;chair;lamp,bedroom,bedroom,bedroom,bedroom,office
+scene0146_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,corridor
+scene0147_00,bedroom,bed;nightstand;chest of drawers;armchair;television;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0148_00,living room,sofa;cabinet,corridor,living room,corridor,,living room
+scene0149_00,kitchen,chair;sink;refrigerator;stove;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0150_00,living room,chair,corridor,corridor,corridor,corridor,office
+scene0151_00,living room,sofa;coffee table;television;chair;stove,living room,living room,living room,living room,living room
+scene0152_00,living room,coffee table;chair;cabinet;plant,corridor,living room,corridor,,corridor
+scene0153_00,bathroom,toilet;sink;bathtub;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0157_00,bedroom,bed;nightstand;chest of drawers;desk;office chair,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0158_00,kitchen,sink;refrigerator;stove;microwave;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0160_00,living room,sofa;coffee table;chair;lamp,corridor,living room,living room,living room,living room
+scene0161_00,living room,chair,corridor,corridor,corridor,corridor,office
+scene0162_00,living room,sofa;coffee table;chair,corridor,living room,living room,living room,living room
+scene0164_00,kitchen,refrigerator;oven;stove;microwave;dishwasher;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0165_00,living room,armchair;mirror,corridor,corridor,corridor,corridor,bedroom
+scene0166_00,office,sofa;bookshelf;chair;desk;computer monitor;cabinet;lamp,office,living room,office,living room;office,bedroom
+scene0168_00,office,coffee table;bookshelf;chair;desk;computer monitor;refrigerator;cabinet,office,office,office,living room;office,office
+scene0170_00,bathroom,toilet;sink;bathtub;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0172_00,bedroom,bed;cabinet;coat rack,corridor,corridor,corridor,corridor,bedroom
+scene0174_00,office,bookshelf;desk;computer monitor,corridor,office,office,office,office
+scene0175_00,bathroom,toilet;sink;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0177_00,office,sofa;bookshelf;chair;desk;computer monitor;cabinet;lamp,office,living room,office,living room;office,office
+scene0178_00,bedroom,bed;nightstand;chair;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0179_00,office,chair;desk;computer monitor;cabinet;plant,corridor,office,office,office,office
+scene0181_00,kitchen,sofa;coffee table;chair;sink;refrigerator;stove;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,corridor
+scene0184_00,bedroom,bed;nightstand;chest of drawers;television;chair;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0186_00,office,bookshelf;chair;desk;computer monitor;cabinet;plant,office,office,office,office,office
+scene0192_00,living room,coffee table;television;chair,corridor,living room,living room,living room,living room
+scene0193_00,bedroom,bed;desk;office chair,corridor,bedroom,office,bedroom,bedroom
+scene0195_00,bathroom,toilet;sink;bathtub;shower;mirror;cabinet;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0196_00,living room,chair,corridor,corridor,corridor,corridor,office
+scene0197_00,kitchen,sink;refrigerator;cabinet;countertop,bathroom,kitchen,kitchen,bathroom;kitchen,kitchen
+scene0198_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0200_00,bedroom,bed;nightstand;chair;desk;cabinet,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0201_00,kitchen,sofa;dining table;sink;refrigerator;stove;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,dining room
+scene0203_00,living room,sofa;armchair;coffee table;bookshelf,corridor,living room,living room,living room,living room
+scene0206_00,office,bookshelf;chair;computer monitor,corridor,office,office,office,bedroom
+scene0209_00,bedroom,bed;nightstand;armchair;television;desk;office chair;refrigerator;cabinet;lamp,bedroom,bedroom,living room,bedroom,bedroom
+scene0210_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,office
+scene0211_00,office,bookshelf;chair;desk;computer monitor,corridor,office,office,office,office
+scene0212_00,living room,chair,corridor,corridor,corridor,corridor,dining room
+scene0213_00,living room,sofa;armchair;coffee table;chair;mirror;lamp,living room,living room,living room,living room,living room
+scene0214_00,bathroom,toilet;sink;shower;mirror;refrigerator;stove;microwave;dishwasher;hood;cabinet;countertop,kitchen,kitchen,kitchen,bathroom;kitchen,bathroom
+scene0217_00,bedroom,bed;wardrobe;chest of drawers;chair;desk,corridor,bedroom,bedroom,bedroom,bedroom
+scene0219_00,bedroom,bed,corridor,corridor,corridor,bedroom;corridor,bedroom
+scene0220_00,kitchen,chair;sink;refrigerator;stove;microwave;cabinet;countertop;plant,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0221_00,bedroom,bed;nightstand;chair;desk;office chair;sink;bathtub;mirror;cabinet;lamp,bedroom,bedroom,bathroom,bedroom,bedroom
+scene0222_00,bedroom,bed;nightstand;chest of drawers;chair;desk;refrigerator,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0223_00,bedroom,bed;wardrobe;chair;desk;cabinet,corridor,bedroom,bedroom,bedroom,bedroom
+scene0224_00,bedroom,bed;wardrobe;sofa;bookshelf;mirror,corridor,bedroom,bedroom,bedroom,bedroom
+scene0226_00,living room,armchair;coffee table;plant;lamp,corridor,living room,living room,living room,living room
+scene0230_00,office,sofa;bookshelf;chair;desk;computer monitor;cabinet,office,living room,office,living room;office,living room
+scene0232_00,bathroom,toilet;sink;mirror;cabinet;washing machine,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0233_00,bedroom,bed;chest of drawers;chair;desk;mirror;refrigerator;cabinet,corridor,bedroom,bedroom,bedroom,bedroom
+scene0234_00,living room,sofa;computer monitor;plant;lamp,corridor,living room,corridor,living room,living room
+scene0235_00,bedroom,bed;nightstand;chest of drawers;armchair;television;chair;mirror;refrigerator;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,living room
+scene0236_00,bedroom,bed;nightstand;chest of drawers;bookshelf;mirror,corridor,bedroom,bedroom,bedroom,bedroom
+scene0237_00,bathroom,toilet;sink;bathtub;shower;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0238_00,office,chair;desk;office chair;computer monitor;lamp,office,office,office,bedroom;office,office
+scene0239_00,living room,sofa,corridor,corridor,corridor,corridor,living room
+scene0241_00,office,chest of drawers;bookshelf;desk;office chair;cabinet;lamp,office,office,office,bedroom;office,living room
+scene0242_00,corridor,chair,corridor,corridor,corridor,corridor,office
+scene0243_00,bedroom,bed;wardrobe;chest of drawers;chair;desk,corridor,bedroom,bedroom,bedroom,bedroom
+scene0244_00,living room,sofa;chair,corridor,living room,corridor,living room,dining room
+scene0246_00,bedroom,bed;nightstand;wardrobe;chest of drawers;chair;toilet;sink;mirror;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bathroom
+scene0247_00,living room,sofa;armchair;coffee table;chair;sink;refrigerator;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,office
+scene0248_00,living room,chair,corridor,corridor,corridor,corridor,dining room
+scene0250_00,bathroom,toilet;bathtub;shower;mirror;cabinet;plant;rug,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0251_00,corridor,chair;cabinet,corridor,corridor,corridor,,dining room
+scene0253_00,bedroom,bed;wardrobe;sofa;chair;desk,corridor,bedroom,bedroom,bedroom,office
+scene0254_00,bathroom,toilet;sink;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0255_00,office,cabinet;countertop,corridor,bathroom,corridor,bathroom,office
+scene0256_00,office,chair;lamp,corridor,office,corridor,,bedroom
+scene0259_00,bedroom,bed;nightstand;desk;office chair;lamp,bedroom,bedroom,office,bedroom;office,office
+scene0260_00,bathroom,toilet;sink;bathtub;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0262_00,office,sofa;bookshelf;chair;desk;office chair;plant,corridor,office,office,living room;office,living room
+scene0263_00,office,chair;desk;computer monitor;cabinet,corridor,office,office,office,office
+scene0264_00,office,chair;desk;office chair;computer monitor,corridor,office,office,office,office
+scene0265_00,bathroom,toilet;sink;bathtub;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0267_00,corridor,,corridor,corridor,corridor,corridor,office
+scene0268_00,bathroom,toilet;sink;bathtub;shower;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0270_00,bedroom,bed;nightstand;television;chair;desk;office chair;sink;mirror;refrigerator;microwave;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0271_00,bedroom,bed;chest of drawers;television;chair;desk;mirror;cabinet;plant;lamp,bedroom,bedroom,bedroom,bedroom;living room,bedroom
+scene0272_00,office,chest of drawers;bookshelf;chair;desk;cabinet;plant,corridor,office,office,office,living room
+scene0273_00,living room,sofa;armchair;plant,corridor,living room,living room,corridor;living room,living room
+scene0274_00,office,chair;computer monitor,corridor,office,corridor,,office
+scene0275_00,living room,chair,corridor,corridor,corridor,corridor,office
+scene0277_00,bedroom,bed;chest of drawers;chair;desk;cabinet,corridor,bedroom,bedroom,bedroom,office
+scene0279_00,bedroom,bed;nightstand;sofa;television;chair;desk;office chair;sink;mirror;refrigerator;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0280_00,bedroom,bed;nightstand;chest of drawers,corridor,bedroom,bedroom,bedroom,bedroom
+scene0281_00,living room,sofa;armchair;coffee table;chair,corridor,living room,living room,living room,office
+scene0282_00,bedroom,bed;chest of drawers;chair;lamp,corridor,bedroom,bedroom,bedroom,bedroom
+scene0286_00,bedroom,bed;nightstand;chest of drawers;chair;mirror;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0287_00,bedroom,bed;desk;office chair,corridor,bedroom,office,bedroom,bedroom
+scene0290_00,corridor,,corridor,corridor,corridor,corridor,corridor
+scene0293_00,corridor,bookshelf;desk,corridor,office,office,,office
+scene0294_00,living room,sofa;coffee table;television;chair;cabinet,living room,living room,living room,living room,office
+scene0295_00,bedroom,bed;nightstand;chest of drawers;bookshelf;chair;desk,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0296_00,bedroom,bed;nightstand;sofa;armchair;coffee table;television;chair;cabinet;lamp,living room,living room,living room,bedroom;living room,living room
+scene0297_00,living room,sofa;coffee table;television;chair;cabinet,living room,living room,living room,living room,living room
+scene0298_00,bedroom,bed;chair;desk,corridor,bedroom,bedroom,bedroom,bedroom
+scene0299_00,living room,sofa;chair;plant,corridor,living room,corridor,living room,office
+scene0301_00,living room,sofa;coffee table;television;plant,corridor,living room,living room,living room,living room
+scene0305_00,office,bookshelf;chair;desk;office chair;computer monitor;cabinet;lamp,office,office,office,bedroom;office,office
+scene0306_00,bedroom,bed;bookshelf;chair;desk,corridor,bedroom,office,bedroom,bedroom
+scene0308_00,bedroom,bed;television;chair;desk;mirror;cabinet,corridor,bedroom,bedroom,bedroom,kitchen
+scene0309_00,office,armchair;chair;desk;computer monitor;cabinet;countertop;plant,office,office,office,office,office
+scene0310_00,kitchen,sink;stove;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0313_00,living room,sofa;coffee table;chair;lamp,corridor,living room,living room,living room,living room
+scene0315_00,living room,sofa;armchair;coffee table;chair;cabinet;plant;lamp,living room,living room,living room,living room,dining room
+scene0316_00,living room,armchair;chair,corridor,office,corridor,,corridor
+scene0319_00,living room,sofa;armchair;coffee table;lamp,corridor,living room,living room,living room,living room
+scene0321_00,bedroom,bed;nightstand;desk;office chair;lamp,bedroom,bedroom,office,bedroom;office,bedroom
+scene0322_00,living room,chair;cabinet,corridor,corridor,corridor,,kitchen
+scene0323_00,kitchen,sink;refrigerator;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0324_00,living room,,corridor,corridor,corridor,corridor,dining room
+scene0326_00,living room,sofa;chair;plant;lamp,corridor,living room,corridor,living room,living room
+scene0328_00,kitchen,sink;refrigerator;oven;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0330_00,living room,sofa;coffee table;chair,corridor,living room,living room,living room,living room
+scene0331_00,bedroom,bed;chest of drawers;bookshelf;chair;desk;plant,corridor,bedroom,bedroom,bedroom;office,bedroom
+scene0332_00,bedroom,bed;chest of drawers;bookshelf;desk;office chair,corridor,bedroom,office,bedroom;office,bathroom
+scene0333_00,office,chair;desk;computer monitor;cabinet,corridor,office,office,office,office
+scene0334_00,living room,sofa;coffee table,corridor,living room,living room,corridor;living room,corridor
+scene0335_00,kitchen,television;chair;sink;refrigerator;stove;microwave;dishwasher;cabinet;countertop;plant,kitchen,kitchen,kitchen,kitchen,dining room
+scene0336_00,office,coffee table;bookshelf;chair;desk;computer monitor;cabinet,office,living room,office,living room;office,office
+scene0339_00,living room,sofa;armchair,corridor,living room,living room,corridor;living room,living room
+scene0340_00,bedroom,bed;nightstand;armchair;television;chair;desk;refrigerator;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,living room
+scene0341_00,office,sofa;bookshelf;desk;office chair;computer monitor;plant,corridor,office,office,living room;office,office
+scene0344_00,living room,sofa;armchair;lamp,corridor,living room,living room,living room,living room
+scene0346_00,bathroom,toilet;sink;bathtub;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,corridor
+scene0347_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0348_00,kitchen,sink;refrigerator;stove;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0350_00,bathroom,sink;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0351_00,office,chair;desk;computer monitor;cabinet;plant,corridor,office,office,office,office
+scene0352_00,office,sofa;chair;cabinet;plant;lamp,corridor,living room,corridor,living room,office
+scene0353_00,bedroom,bed;wardrobe;chest of drawers;sofa;bookshelf;chair;desk;refrigerator;lamp,bedroom,bedroom,bedroom,bedroom;living room,living room
+scene0356_00,bedroom,bed;chest of drawers;chair;desk,corridor,bedroom,bedroom,bedroom,office
+scene0359_00,bedroom,bed;chest of drawers;chair;desk,corridor,bedroom,bedroom,bedroom,office
+scene0362_00,living room,sofa;coffee table;television;desk;office chair;lamp,living room,living room,living room,living room,bedroom
+scene0364_00,bedroom,bed;chest of drawers;chair;desk;cabinet,corridor,bedroom,bedroom,bedroom,corridor
+scene0365_00,bathroom,toilet;sink;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0366_00,bathroom,toilet;sink;mirror;cabinet;countertop;plant,bathroom,bathroom,bathroom,bathroom,living room
+scene0367_00,living room,sofa;coffee table;dining table;chair,corridor,living room,living room,living room,corridor
+scene0368_00,living room,sofa;armchair;chair;office chair,corridor,office,living room,living room;office,office
+scene0369_00,office,chair;desk;cabinet,corridor,office,corridor,,office
+scene0371_00,living room,chair,corridor,corridor,corridor,corridor,corridor
+scene0374_00,corridor,sofa;coffee table;chair,corridor,living room,living room,living room,office
+scene0375_00,bathroom,toilet;sink;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0376_00,bedroom,bed;nightstand;desk,corridor,bedroom,bedroom,bedroom,office
+scene0378_00,office,bookshelf;chair;desk;office chair;computer monitor;cabinet,office,office,office,bedroom;office,office
+scene0379_00,office,chair;computer monitor;cabinet;plant,corridor,office,corridor,,office
+scene0380_00,office,chair;desk;computer monitor;cabinet,corridor,office,office,office,office
+scene0382_00,bedroom,chair;desk,corridor,office,corridor,,bedroom
+scene0383_00,office,chair;desk;cabinet,corridor,office,corridor,,office
+scene0385_00,living room,nightstand;sofa;armchair;television;chair;cabinet;lamp,living room,living room,living room,living room,living room
+scene0386_00,living room,sofa;chair;desk;cabinet,corridor,living room,corridor,living room,office
+scene0387_00,living room,coffee table;chair,corridor,living room,corridor,,office
+scene0389_00,bedroom,bed;nightstand;television;chair;refrigerator;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0390_00,kitchen,chair;sink;refrigerator;stove;dishwasher;hood;cabinet;countertop;plant,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0394_00,bedroom,bed;nightstand;wardrobe;chest of drawers;armchair;sink;mirror;cabinet;plant;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0395_00,office,sofa;bookshelf;chair;desk;computer monitor;cabinet,office,living room,office,living room;office,office
+scene0396_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0397_00,bedroom,bed;nightstand;chair;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0398_00,bedroom,bed;wardrobe;chest of drawers;chair;desk;office chair,bedroom,bedroom,bedroom,bedroom;office,bedroom
+scene0399_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0400_00,bedroom,bed;wardrobe;chest of drawers;chair;desk,corridor,bedroom,bedroom,bedroom,corridor
+scene0406_00,bathroom,toilet;sink;bathtub;shower;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0407_00,living room,sofa;coffee table;bookshelf;chair;cabinet;plant;lamp,living room,living room,living room,living room,living room
+scene0409_00,kitchen,dining table;chair;refrigerator;stove;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0410_00,bathroom,toilet;bathtub;shower,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0412_00,kitchen,sink,corridor,corridor,corridor,bathroom;corridor,office
+scene0413_00,bathroom,toilet;sink;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0415_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0416_00,bedroom,bed;nightstand;armchair;television;desk;office chair;computer monitor;refrigerator;cabinet;lamp,bedroom,bedroom,office,bedroom;office,bedroom
+scene0418_00,bedroom,bed;nightstand;chair;coat rack,corridor,bedroom,bedroom,bedroom;corridor,bedroom
+scene0423_00,living room,armchair,corridor,corridor,corridor,corridor,living room
+scene0424_00,office,sofa;television;bookshelf;chair;desk;computer monitor,living room,living room,office,living room,office
+scene0425_00,bedroom,bed;wardrobe;chest of drawers;chair;desk;computer monitor;microwave,office,bedroom,bedroom,bedroom,bedroom
+scene0426_00,bedroom,bed;chest of drawers;television;chair;desk;computer monitor;lamp;coat rack,bedroom,bedroom,bedroom,bedroom;living room;office,bedroom
+scene0429_00,bathroom,toilet;sink;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0431_00,corridor,plant,corridor,corridor,corridor,corridor,corridor
+scene0432_00,living room,armchair;coffee table,corridor,corridor,living room,corridor,living room
+scene0433_00,kitchen,dining table;chair;sink;refrigerator;oven;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0434_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0435_00,bedroom,bed;nightstand;armchair;television;desk;office chair;toilet;sink;bathtub;shower;mirror;refrigerator;cabinet;lamp,bedroom,bathroom,bathroom,,living room
+scene0436_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0437_00,living room,armchair,corridor,corridor,corridor,corridor,dining room
+scene0438_00,bedroom,bed;nightstand;chest of drawers;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0439_00,kitchen,sink;refrigerator;stove;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0440_00,bedroom,bed;wardrobe;chest of drawers;desk;office chair,corridor,bedroom,bedroom,bedroom,corridor
+scene0441_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0442_00,living room,armchair;chair;plant,corridor,office,corridor,,living room
+scene0445_00,bedroom,bed;chest of drawers;desk,corridor,bedroom,bedroom,bedroom,office
+scene0446_00,bathroom,toilet;sink;shower,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0447_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0448_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0449_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0457_00,bedroom,bed;chest of drawers;armchair;desk;office chair;cabinet,corridor,office,office,bedroom;office,bedroom
+scene0458_00,bathroom,toilet;sink;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0460_00,bathroom,toilet;sink;bathtub;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0464_00,office,bookshelf;chair;desk;computer monitor;plant;lamp,office,office,office,bedroom;living room;office,office
+scene0465_00,kitchen,chair;sink;refrigerator;oven;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0467_00,living room,sofa;coffee table;television;chair;cabinet;lamp,living room,living room,living room,living room,kitchen
+scene0468_00,bedroom,bed;wardrobe;chest of drawers;bookshelf;desk;office chair,corridor,bedroom,office,bedroom;office,office
+scene0469_00,office,chair;desk;computer monitor;cabinet,corridor,office,office,office,office
+scene0471_00,bathroom,toilet,corridor,bathroom,corridor,bathroom;corridor,bathroom
+scene0473_00,corridor,,corridor,corridor,corridor,corridor,corridor
+scene0474_00,office,sofa;bookshelf;chair;desk;computer monitor,corridor,living room,office,living room;office,office
+scene0476_00,office,office chair;computer monitor;cabinet,corridor,office,office,office,office
+scene0477_00,bedroom,bed;nightstand;chest of drawers;chair;office chair;toilet;sink;bathtub;shower;mirror;cabinet;lamp,bedroom,bathroom,bathroom,bathroom;bedroom,bedroom
+scene0479_00,kitchen,sink;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0480_00,living room,sofa;coffee table;television;chair;cabinet;plant;lamp,living room,living room,living room,living room,living room
+scene0484_00,bathroom,sofa;chair,corridor,living room,corridor,living room,living room
+scene0485_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0486_00,kitchen,sink;refrigerator;oven;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0487_00,kitchen,sofa;armchair;sink;refrigerator;microwave;cabinet;countertop;lamp,kitchen,kitchen,kitchen,kitchen,office
+scene0488_00,kitchen,sink;refrigerator;stove;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0492_00,bathroom,chair;toilet;sink;countertop,corridor,bathroom,bathroom,bathroom,bathroom
+scene0497_00,living room,armchair;chair;sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,dining room
+scene0498_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0499_00,living room,sofa;armchair;chair;lamp;rug,corridor,living room,living room,living room,living room
+scene0501_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0503_00,living room,sofa;plant,corridor,corridor,corridor,corridor,corridor
+scene0505_00,office,sofa;chair;desk;office chair;computer monitor;cabinet,office,office,office,office,office
+scene0506_00,bedroom,bed;nightstand;chest of drawers;bookshelf;desk;office chair;mirror,bedroom,bedroom,office,bedroom;office,bedroom
+scene0507_00,bedroom,sofa;lamp;rug,corridor,living room,corridor,living room,bedroom
+scene0509_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0510_00,bathroom,toilet;sink;shower;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0513_00,living room,chair,corridor,corridor,corridor,corridor,dining room
+scene0514_00,living room,sofa;coffee table;chair,corridor,living room,living room,living room,living room
+scene0517_00,bedroom,bed;wardrobe;chest of drawers;sofa;coffee table;chair;desk;computer monitor;sink;mirror;refrigerator,bedroom,bedroom,bedroom,,bedroom
+scene0518_00,living room,sofa;coffee table;television;desk;office chair;cabinet,living room,living room,living room,living room,office
+scene0519_00,bathroom,sink;mirror,corridor,bathroom,bathroom,bathroom;corridor,bathroom
+scene0520_00,living room,sofa;armchair;chair,corridor,living room,living room,living room,office
+scene0521_00,bedroom,bed;nightstand;chest of drawers;sofa;bookshelf;toilet;sink;shower;mirror,bathroom,bathroom,bathroom,bathroom,living room
+scene0522_00,kitchen,sink;cabinet;countertop;washing machine;plant,bathroom,kitchen,kitchen,bathroom;kitchen,bathroom
+scene0523_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0525_00,office,bookshelf;office chair;cabinet;plant,corridor,office,office,,office
+scene0526_00,living room,chair,corridor,corridor,corridor,corridor,living room
+scene0527_00,bathroom,sink;cabinet,corridor,bathroom,corridor,bathroom,bedroom
+scene0529_00,kitchen,sofa;coffee table;bookshelf;chair;sink;refrigerator;stove;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,living room
+scene0530_00,corridor,,corridor,corridor,corridor,corridor,corridor
+scene0532_00,kitchen,sink;refrigerator;stove;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,corridor
+scene0535_00,office,bookshelf;chair;desk;cabinet,corridor,office,office,office,office
+scene0537_00,living room,sofa;armchair;chair;lamp,corridor,living room,living room,living room,dining room
+scene0538_00,bathroom,toilet;sink;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0539_00,bathroom,toilet;sink;bathtub;shower;mirror;plant,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0540_00,kitchen,sink;refrigerator;stove;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,bathroom
+scene0541_00,bedroom,bed;nightstand;wardrobe;chest of drawers;mirror;coat rack,corridor,bedroom,bedroom,bedroom;corridor,bedroom
+scene0542_00,kitchen,chair;sink;refrigerator;oven;stove;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0543_00,corridor,armchair;coffee table,corridor,corridor,living room,corridor,living room
+scene0545_00,bedroom,bed;bookshelf;desk;office chair,corridor,bedroom,office,bedroom;office,bedroom
+scene0546_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0547_00,bedroom,bed;wardrobe;chest of drawers;sofa;coffee table;chair;desk;computer monitor;sink;mirror;refrigerator,bedroom,bedroom,bedroom,,bathroom
+scene0548_00,bedroom,bed;chest of drawers;bookshelf;chair;desk;mirror;cabinet;lamp,bedroom,bedroom,bedroom,bedroom;office,bedroom
+scene0550_00,bathroom,toilet;sink;shower;mirror,bathroom,bathroom,bathroom,bathroom,corridor
+scene0552_00,kitchen,chair;sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0553_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0554_00,bedroom,bed;chest of drawers;chair;desk;refrigerator,corridor,bedroom,bedroom,bedroom,office
+scene0556_00,bedroom,bed;chest of drawers;chair;desk,corridor,bedroom,bedroom,bedroom,office
+scene0557_00,bedroom,bed;nightstand;chest of drawers;sofa;mirror,corridor,bedroom,bedroom,bedroom,bedroom
+scene0559_00,living room,sofa,corridor,corridor,corridor,corridor,office
+scene0560_00,bedroom,bed;nightstand;chest of drawers;chair;desk;lamp,bedroom,bedroom,bedroom,bedroom,office
+scene0564_00,bathroom,toilet;sink;shower,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0567_00,bedroom,bed;nightstand;chair;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0568_00,living room,sofa;television;bookshelf;chair,corridor,living room,living room,living room,bedroom
+scene0570_00,bathroom,toilet;sink;bathtub;shower;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0571_00,bathroom,toilet;sink;bathtub;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bedroom
+scene0572_00,living room,armchair;coffee table;chair,corridor,living room,living room,living room,office
+scene0573_00,kitchen,sink;refrigerator;stove;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0574_00,bathroom,sink;mirror,corridor,bathroom,bathroom,bathroom;corridor,bathroom
+scene0576_00,bedroom,bed;nightstand;chest of drawers;armchair;bookshelf;chair;desk;office chair;mirror;lamp,bedroom,bedroom,bedroom,bedroom;office,bedroom
+scene0577_00,bedroom,bed;mirror;cabinet,corridor,bedroom,corridor,bedroom,bedroom
+scene0579_00,bathroom,sink;mirror,corridor,bathroom,bathroom,bathroom;corridor,corridor
+scene0580_00,bedroom,bed;nightstand;chest of drawers;bookshelf;chair;mirror;lamp,bedroom,bedroom,bedroom,bedroom,living room
+scene0581_00,bathroom,toilet;sink;bathtub;shower;mirror;plant,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0582_00,office,sofa;bookshelf;desk;office chair;computer monitor;cabinet;lamp,office,office,office,bedroom;living room;office,office
+scene0583_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0586_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0587_00,living room,sofa,corridor,corridor,corridor,corridor,living room
+scene0588_00,living room,sofa;armchair;coffee table;cabinet,corridor,living room,living room,living room,living room
+scene0589_00,bedroom,bed;nightstand;bookshelf;chair;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0590_00,bedroom,bed;nightstand;sofa;television;chair;desk;sink;mirror;refrigerator;microwave;cabinet;countertop;lamp,bedroom,bedroom,kitchen,,bedroom
+scene0591_00,office,sofa;bookshelf;chair;desk;computer monitor;cabinet;plant,office,living room,office,living room;office,office
+scene0593_00,living room,sofa;cabinet,corridor,living room,corridor,,office
+scene0594_00,living room,coffee table;chair,corridor,living room,corridor,,office
+scene0600_00,bedroom,bed;nightstand;bookshelf,corridor,bedroom,bedroom,bedroom,bedroom
+scene0602_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0603_00,living room,sofa;television;bookshelf;chair;desk;computer monitor;cabinet,living room,living room,office,living room,living room
+scene0604_00,living room,bed;nightstand;sofa;coffee table;television;chair;cabinet;lamp,bedroom,living room,living room,bedroom;living room,living room
+scene0607_00,kitchen,chair;sink;refrigerator;oven;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,office
+scene0608_00,living room,sofa;armchair;coffee table;television;plant;lamp,living room,living room,living room,living room,living room
+scene0609_00,living room,chair,corridor,corridor,corridor,corridor,dining room
+scene0610_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0612_00,bathroom,toilet;sink;mirror;countertop,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0613_00,bedroom,bed;chest of drawers,corridor,bedroom,bedroom,bedroom,bedroom
+scene0614_00,office,bookshelf;chair;desk;office chair;computer monitor;cabinet,office,office,office,bedroom;office,office
+scene0615_00,bedroom,bed;nightstand;chest of drawers;chair;desk;plant;lamp,bedroom,bedroom,bedroom,bedroom,office
+scene0616_00,living room,armchair;chair;lamp,corridor,office,corridor,office,office
+scene0617_00,living room,sofa;coffee table;television;cabinet;plant,corridor,living room,living room,living room,living room
+scene0619_00,office,desk;computer monitor,corridor,office,office,office,office
+scene0620_00,bedroom,bed;chest of drawers;desk;office chair,corridor,bedroom,office,bedroom;office,office
+scene0622_00,living room,chair;plant,corridor,corridor,corridor,corridor,office
+scene0623_00,living room,sofa;coffee table;television;chair;computer monitor;cabinet,living room,living room,living room,living room,corridor
+scene0625_00,bathroom,toilet;bathtub;shower,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0626_00,office,sofa;coffee table;chair;computer monitor,corridor,living room,living room,living room,living room
+scene0628_00,office,chair;desk,corridor,office,corridor,,office
+scene0630_00,office,bookshelf;chair;desk;computer monitor,corridor,office,office,office,office
+scene0631_00,bathroom,toilet;sink;bathtub;mirror;plant,bathroom,bathroom,bathroom,bathroom,living room
+scene0633_00,bedroom,wardrobe;chest of drawers;armchair;lamp,corridor,bedroom,bedroom,bedroom,bedroom
+scene0638_00,living room,chair,corridor,corridor,corridor,corridor,living room
+scene0639_00,bathroom,toilet;sink;bathtub;shower;mirror;cabinet,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0640_00,bedroom,bed;nightstand;sofa;chair;desk;sink;refrigerator;stove;microwave;dishwasher;cabinet;countertop;lamp,kitchen,kitchen,kitchen,kitchen,dining room
+scene0642_00,bedroom,bed;nightstand;armchair;television;desk;office chair;toilet;sink;bathtub;shower;mirror;refrigerator;cabinet;lamp,bedroom,bathroom,bathroom,,office
+scene0643_00,office,bookshelf;chair;desk;computer monitor;refrigerator,corridor,office,office,office,office
+scene0644_00,office,chair;computer monitor;cabinet,corridor,office,corridor,,office
+scene0645_00,bedroom,bed;nightstand;sofa;armchair;coffee table;television;chair;desk;toilet;sink;bathtub;shower;mirror;cabinet;lamp,bedroom,living room,bathroom,living room,bedroom
+scene0646_00,living room,sofa;chair;desk;computer monitor;lamp,office,living room,office,living room;office,living room
+scene0647_00,living room,sofa;television;chair,corridor,living room,living room,living room,dining room
+scene0648_00,bedroom,bed;chest of drawers;bookshelf;chair;desk;cabinet;plant;lamp,office,bedroom,bedroom,bedroom;office,office
+scene0649_00,kitchen,sink;refrigerator;stove;microwave;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0651_00,kitchen,dining table;chair;sink;refrigerator;stove;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0652_00,bedroom,bed;nightstand;chest of drawers;sofa;television;cabinet,bedroom,bedroom,bedroom,bedroom;living room,bedroom
+scene0653_00,office,chair;desk;office chair;computer monitor,corridor,office,office,office,office
+scene0654_00,kitchen,sofa;armchair;chair;sink;oven;stove;dishwasher;hood;cabinet;countertop;lamp,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0656_00,bedroom,bed;nightstand;chest of drawers;bookshelf,corridor,bedroom,bedroom,bedroom,bedroom
+scene0658_00,bedroom,bed;chair;desk;cabinet;lamp,corridor,bedroom,bedroom,bedroom,bedroom
+scene0659_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0660_00,living room,chair,corridor,corridor,corridor,corridor,office
+scene0662_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0663_00,office,chair;desk;office chair;computer monitor;cabinet,office,office,office,office,office
+scene0664_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0668_00,living room,sofa;coffee table;television;chair;cabinet,living room,living room,living room,living room,dining room
+scene0670_00,kitchen,sink;refrigerator;stove;dishwasher;hood;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0672_00,living room,sofa;television;bookshelf;chair;plant,corridor,living room,living room,living room,living room
+scene0673_00,living room,nightstand;sofa;coffee table;television;bookshelf;chair,living room,living room,living room,living room,living room
+scene0674_00,bedroom,bed;nightstand;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0675_00,bedroom,bed;wardrobe;desk;office chair,corridor,bedroom,office,bedroom,bedroom
+scene0676_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0677_00,bedroom,bed;nightstand;armchair;television;desk;office chair;refrigerator;lamp,bedroom,bedroom,living room,bedroom,bedroom
+scene0679_00,bedroom,bed;nightstand;armchair;television;chair;desk;mirror;refrigerator;microwave;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,living room
+scene0681_00,kitchen,sink;refrigerator;stove;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0682_00,kitchen,sink;refrigerator;microwave;dishwasher;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0683_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0684_00,office,chair,corridor,corridor,corridor,corridor,corridor
+scene0686_00,bathroom,toilet;sink;mirror,corridor,bathroom,bathroom,bathroom,bathroom
+scene0687_00,kitchen,sink;refrigerator;microwave;cabinet;countertop,kitchen,kitchen,kitchen,kitchen,kitchen
+scene0688_00,bedroom,bed;nightstand;cabinet;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0693_00,bathroom,toilet;sink;bathtub;shower;mirror,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0694_00,living room,sofa;armchair;coffee table;chair;cabinet,living room,living room,living room,living room,office
+scene0695_00,bedroom,bed;bookshelf;desk;office chair;computer monitor;cabinet;lamp,office,bedroom,office,bedroom;office,bedroom
+scene0697_00,bedroom,bed;nightstand;chest of drawers;television;mirror;lamp,bedroom,bedroom,bedroom,bedroom,bedroom
+scene0698_00,bedroom,bed;nightstand;sofa;television;desk;office chair;refrigerator;microwave;cabinet;countertop;lamp,bedroom,bedroom,kitchen,bedroom,bedroom
+scene0699_00,bedroom,bed;nightstand;chair;toilet;cabinet,corridor,bedroom,bedroom,bedroom,dining room
+scene0700_00,office,armchair;bookshelf;chair;desk;computer monitor;cabinet,office,office,office,living room;office,living room
+scene0701_00,living room,sofa,corridor,corridor,corridor,corridor,living room
+scene0702_00,bathroom,toilet;bathtub;shower,bathroom,bathroom,bathroom,bathroom,bathroom
+scene0703_00,corridor,chair,corridor,corridor,corridor,corridor,corridor
+scene0706_00,bedroom,bed;nightstand;wardrobe;television;chair;cabinet;plant;lamp,bedroom,bedroom,bedroom,bedroom,bedroom

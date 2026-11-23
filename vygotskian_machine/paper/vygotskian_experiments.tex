@@ -96,52 +96,54 @@ to 1.85 has an untested cost.
 \subsection{E2: Function evidence offline}
 \label{sec:experiments:e2}
 
-On the corpus, with each annotated object a certain detection and each unannotated class searched, we compare five
-sources of $\pi_{cf}$ (the VLM as elicited; the VLM with its five answer levels calibrated; a uniform prior; a
-hand-written table; and co-occurrence frequencies measured on half of the corpus and tested on the other half) and
-a sixth baseline, the VLM asked for the function from one image of the room. Calibration is done once: each answer
-level is replaced by the frequency, on ProcTHOR-10k, with which a class is present in a room of the function the VLM
-was asked about, pooled over all the pairs the VLM gave that level and kept monotone by isotonic regression. The
-order comes from the VLM and the level from counts, as E1 suggests, and ScanNet is held out. We report macro F1 of
-the functions with positive evidence and top-1 accuracy of the largest $\Lambda_f$, with differences bootstrapped in
-pairs over rooms, and L1 holds on the corpus if the VLM source beats the uniform and hand-written sources.
-Co-occurrence bounds what any prior can achieve, and the image baseline, which needs no belief hierarchy, is what the
-machine must justify.
+Each ScanNet room is scored from its annotated objects, taken as certain detections, with every other class taken
+as searched and absent. Five sources of $\pi_{cf}$ are compared:
+\begin{itemize}
+    \item \emph{VLM, as elicited}: the five answer levels of E1 used as probabilities;
+    \item \emph{VLM, calibrated}: the same answers, with each level replaced once by how often ProcTHOR-10k rooms
+          actually contain an object the VLM gave that level (monotone, by isotonic regression; ScanNet is held out);
+    \item \emph{uniform} (0.5 everywhere), \emph{hand-written} (the authors' table of signature objects), and
+          \emph{co-occurrence} counted on the other half of ScanNet, the best a prior can do.
+\end{itemize}
+A sixth baseline asks the VLM for the function from one photograph of the room. We report macro F1 of the functions
+with $\Lambda_f > 0$ and top-1 accuracy of the largest $\Lambda_f$, with paired bootstrap intervals over rooms. L1
+holds on the corpus if the VLM source beats the uniform and hand-written sources.
 
-As elicited, the VLM fails L1 on ScanNet (Table~\ref{tab:exp_e2}). It beats the uniform prior but trails the hand-written table by 0.22 in
-macro F1 (0.53 against 0.75, 95\% interval $[-0.27,-0.18]$). The cause is the overstatement found in E1: a class the
-VLM expects but the room lacks costs every function heavily, so bedrooms and living rooms are rejected and the
-corridor, which expects almost nothing, is claimed in 252 of 457 rooms. Calibration maps the levels 0.05, 0.25, 0.5,
-0.75 and 0.95 to 0.03, 0.03, 0.38, 0.38 and 0.68, and the calibrated VLM reaches a macro F1 of 0.75 and a top-1
-accuracy of 0.84. It ties the hand-written table in macro F1 ($-0.00$, $[-0.03,+0.03]$) and beats it in top-1
-($+0.06$, $[+0.02,+0.09]$), stays below co-occurrence (0.80 and 0.92), and beats one image (0.69 and 0.70). L1
-therefore holds on the corpus for the ranking of functions but not for the decision of which functions to claim,
-and only after a calibration that uses counts. The corridor is the weakest function for every source of $\pi_{cf}$ (F1 0.15 to 0.32),
-because a ScanNet hallway holds few annotated objects.
-The corpus assumes perfect detection, so the robot's recorded tours test the evidence under its own perception, where
-each $\Lambda_f$ should leave its prior log-odds only as the room is explored (Figure~\result{--}).
+The results are in Figures~\ref{fig:exp_e2} and~\ref{fig:exp_e2_rooms}:
+\begin{itemize}
+    \item \textbf{As elicited, the VLM fails L1} (macro F1 0.53 against 0.75 hand-written, $[-0.27,-0.18]$). It
+          overstates presence (E1), so an expected object that is missing sinks the right function, and the
+          corridor, which expects nothing, wins 252 of 457 rooms.
+    \item \textbf{Calibrated, it ties the hand-written table in F1 and beats it in top-1} (0.75 and 0.84;
+          differences $-0.00$ $[-0.03,+0.03]$ and $+0.06$ $[+0.02,+0.09]$). The levels 0.05, 0.25, 0.5, 0.75, 0.95
+          become 0.03, 0.03, 0.38, 0.38, 0.68. On ProcTHOR, in sample, it reaches 0.93 and 0.96.
+    \item \textbf{It beats one photograph} (0.69 and 0.70), which often shows a wall, a wardrobe or a radiator,
+          and stays below co-occurrence (0.80 and 0.92).
+    \item \textbf{The corridor is weak for every source} (F1 at most 0.41), because a ScanNet hallway holds few
+          annotated objects.
+\end{itemize}
+L1 therefore holds for ranking functions, not for deciding which to claim, and only once counts have set the
+levels. The corpus assumes perfect detection, so the robot's recorded tours test the evidence under its own
+perception, where each $\Lambda_f$ should leave its prior log-odds only as the room is explored
+(Figure~\result{--}).
 
-\begin{table}[!htb]
+\begin{figure}[!htb]
     \centering
-    \small
-    \setlength{\tabcolsep}{2.8pt}
-    \begin{tabular}{|l|r|r|r|r|r|r||r|r||r|r|}
-        \hline
-        & \multicolumn{8}{c||}{ScanNet (457 rooms, held out)} & \multicolumn{2}{c|}{ProcTHOR-10k} \\ \hline
-        Source of $\pi_{cf}$ & bath & bed & corr & kitch & living & office & F1 & top-1 & F1 & top-1 \\ \hline
-        VLM, as elicited      & 0.94 & 0.64 & 0.14 & 0.87 & 0.20 & 0.40 & 0.53 & 0.53 & 0.65 & 0.91 \\ \hline
-        VLM, calibrated       & 0.96 & 0.91 & 0.30 & 0.95 & 0.64 & 0.73 & \textbf{0.75} & \textbf{0.84} & 0.93$^\dagger$ & 0.96$^\dagger$ \\ \hline
-        Uniform               & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 & 0.00 & 0.20 & 0.00 & 0.24 \\ \hline
-        Hand-written          & 0.95 & 0.84 & 0.32 & 0.93 & 0.75 & 0.73 & \textbf{0.75} & 0.78 & 0.83 & 0.95 \\ \hline
-        Co-occurrence         & 0.97 & 0.97 & 0.15 & 0.95 & 0.88 & 0.86 & 0.80 & 0.92 & 0.99 & 1.00 \\ \hline\hline
-        One image, no $\pi$   & 0.90 & 0.77 & 0.41 & 0.80 & 0.59 & 0.64 & 0.69 & 0.70 & -- & -- \\ \hline
-    \end{tabular}
-    \caption{Function evidence on the corpora (E2): F1 per function of the claims $\Lambda_f > 0$, macro F1, and top-1
-    accuracy of the largest $\Lambda_f$. Co-occurrence is measured on the other half of each corpus and bounds what a
-    prior can achieve. $^\dagger$In-sample: the levels were calibrated on ProcTHOR-10k. Paired bootstrap on ScanNet,
-    calibrated VLM minus hand-written: macro F1 $-0.00$ $[-0.03,+0.03]$, top-1 $+0.06$ $[+0.02,+0.09]$.}
-    \label{tab:exp_e2}
-\end{table}
+    \includegraphics[width=\textwidth]{figures/e2_results.pdf}
+    \caption{Function evidence on ScanNet (E2, 457 rooms, held out). (a) Macro F1 and top-1 accuracy per source;
+    co-occurrence is fitted on the other half of the corpus. (b) F1 per function.}
+    \label{fig:exp_e2}
+\end{figure}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=\textwidth]{figures/e2_rooms.pdf}
+    \caption{Six ScanNet rooms (E2). Title: the annotated function; photograph: the frame the image baseline saw;
+    italics: the annotated objects the evidence uses; below: the top function under each source. The last room is
+    labelled a living room but holds a kitchen run, so every source fails.}
+    \label{fig:exp_e2_rooms}
+\end{figure}
+
 
 \subsection{E3: The function agent, live and read-only}
 \label{sec:experiments:e3}
