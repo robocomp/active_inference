@@ -133,7 +133,7 @@ FixationCentreFrac = 0.60   # CENTRED: max off-axis radius, the "fovea". <=0 dis
 # 6 m over hundreds of frames. The metric belief has no per-viewpoint novelty budget the way flip_acc_
 # does, so a peripheral frame repeated hundreds of times can still walk the pose. Watch for a chair being
 # repositioned from far away, not merely for whether peripheral evidence arrives.
-FixationCentrePrecision = false
+FixationCentrePrecision = true
 FixationPeriphFloor = 0.05   # a fully peripheral look is worth little, not nothing (R scale caps at 1/0.05)
 
                             # AI2PeriphRef (0.50 ~ tan 27 deg) where this codebase's own periphery penalty
