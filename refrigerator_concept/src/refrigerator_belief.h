@@ -24,6 +24,7 @@
 
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
+#include "../../common/ai_belief/box_engine_model.h"     // the shared persistent engine + its box-belief adapter (Task 10)
 
 namespace rc
 {
@@ -223,6 +224,21 @@ struct RefrigeratorBeliefParams
     float footprint_moment_precision = 0.0f;
     float footprint_moment_completeness_gain = 0.0f;
     float footprint_moment_min_completeness  = 0.02f;
+
+    // ── WHICH UPDATE (Model.Engine; shared-engine Task 10) ───────────────────────────────────────────────────────
+    // false = "legacy": the per-frame recursive-Laplace update (ai::update, the Woodbury common mode, the lidar_ray_factor
+    // first-hit rays) — bit for bit the path before the port (refrigerator_concept/tests/legacy_golden_test).
+    // true = "persistent": the shared persistent engine (common/ai_belief/persistent_engine.h) — the joint (θ, b) with the
+    // persistent shared-error latents, the class prior at the class mean counted once, the beam model of the staged rays
+    // (frame.persist.beam), the neighbours' foreign density and the offer gain. Reads frame.persist; never reads the frame's
+    // chain_cov_* / lidar / lidar_extra (the legacy inputs).
+    bool persistent = false;
+    // The smooth beam model of the persistent path's rays (spec 7c.8 a, b), built by BeamConfig::make; a default BeamConfig{}
+    // is refused by the engine (logged once; the LiDAR channel then does not measure). Read only when persistent.
+    rc::ai::beam::BeamConfig beam;
+    // Δ, the class's layer spread per θ component (spec shared-engine G4; the manifest's shape.layer_spread_m): the persistent
+    // path's shape latents s_cam / s_L are born at Δ²/12 and carried with ρ = 1. Zeros ⇒ no shape latent.
+    std::array<float, 6> layer_spread_m{};
 };
 
 // One fitted frame's evidence: room-frame points and per-point measurement variance R (m²). Empty R ⇒ base
@@ -252,6 +268,10 @@ struct RefrigeratorFrame
     rc::ai::LidarRays lidar;
     // Additional per-device ray-sets (e.g. the low "bpearl" LiDAR); each keeps its OWN origin.
     std::vector<rc::ai::LidarRays> lidar_extra;
+
+    // The persistent path's inputs (READ ONLY when params.persistent; the legacy path never reads them): the latents' ρ,
+    // marginals and fresh shares, the robot's pose error, the staged beam rays and the neighbours.
+    rc::ai::engine::PersistentInputs<6> persist;
 };
 
 // The refrigerator generative model wired onto the shared rc::ai recursive-Laplace engine. Supplies only the
@@ -302,6 +322,7 @@ public:
     // (Belongs in common/ai_belief eventually — every agent on this engine has the same exposure.)
     void sanitize_covariance()
     {
+        if (params_.persistent) { sanitize_joint(); return; }
         bool bad = not Sigma_.allFinite();
         for (int i = 0; i < N and not bad; ++i) bad = not (Sigma_(i, i) > 0.0f);
         if (not bad) return;
@@ -313,6 +334,7 @@ public:
 
     float update(const RefrigeratorFrame& frame)
     {
+        if (params_.persistent) return update_persistent_cycle(frame);
         point_wall_ = frame.wall;
         sanitize_covariance();
         const Eigen::Matrix<float, 6, 1> before = state_.vec();
@@ -328,9 +350,57 @@ public:
     const Eigen::Matrix<float, 6, 1>& log_volatility() const { return omega_; }
     // Retention time constant per DOF: τ = Σ_ii / exp(ω_i) frames — "how long this DOF remembers".
     Eigen::Matrix<float, 6, 1> retention_frames() const;
-    void  predict()                               { sanitize_covariance(); ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
+    void  predict()
+    {
+        sanitize_covariance();
+        if (params_.persistent) predict_theta_joint(1.0f);
+        else ai::predict<N>(*this, Sigma_, state_, prior_mean_);
+    }
     void  inflate_for_age(float dt_s, float dt_nominal_s)
-    { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
+    {
+        if (params_.persistent) predict_theta_joint(dt_nominal_s > 1e-6f ? dt_s / dt_nominal_s : 1.0f);   // ai::inflate_for_age's q_scale
+        else ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s);
+    }
+
+    // ── The persistent path (params.persistent; shared-engine Task 10) ──────────────────────────────────────────
+    // The update runs on the shared engine (rc::ai::engine::PersistentEngine) with this belief as its model through the
+    // shared box adapter (common/ai_belief/box_engine_model.h). covariance() is P's θθ block in float.
+    using EngineModel = rc::ai::engine::BoxEngineModel<RefrigeratorBelief>;
+    using Engine = rc::ai::engine::PersistentEngine<EngineModel>;
+    using VecKd = Engine::VecKd;
+    using MatJd = Engine::MatJd;
+    const VecKd& latent_mean() const { return engine_.latent_mean(); }
+    VecKd        latent_std()  const { return engine_.latent_std(); }
+    const MatJd& joint_covariance() const { return engine_.P(); }
+    // The offer gain (G5): the θ-marginal entropy drop of a look from standpoint `s` under the engine's own update, and what
+    // the last update delivered (the same quantity; NaN after a predict-only update).
+    double predicted_gain(const rc::ai::offer::Standpoint& s, const rc::ai::offer::OfferSensors& sn) const
+    { return engine_.predicted_gain(model(), s, sn); }
+    double last_delivered_nats() const { return engine_.last_delivered_nats(); }
+    int    last_gn_iters()     const { return engine_.last_gn_iters(); }
+    bool   last_gn_converged() const { return engine_.last_gn_converged(); }
+    int    last_beam_staged()  const { return engine_.last_beam_staged(); }
+    int    last_gap_rays()     const { return engine_.last_gap_rays(); }
+    double last_beam_ms()      const { return engine_.last_beam_ms(); }
+    bool   first_update_done() const { return engine_.first_update_done(); }
+    bool   wall_prior_added()  const { return wall_prior_added_; }
+    // spec 7c.8 rev 3.3.14: the birth cloud's EXCESS position covariance (room frame), added on (cx, cy) of the first update's
+    // class prior (persistent) and of the birth Σ.
+    void set_birth_position_cov(const Eigen::Matrix2f& excess)
+    {
+        Sigma_.topLeftCorner<2, 2>() += excess;
+        engine_.set_birth_position_cov(excess);
+    }
+    // The localisation share a publisher adds to covariance()'s (cx, cy): legacy, the fitter's per-frame chain cov; persistent,
+    // nothing — Σθθ already integrates the robot's pose error e (adding it again would count it twice).
+    Eigen::Vector2f published_chain_var(float chain_xx, float chain_yy) const
+    { return params_.persistent ? Eigen::Vector2f::Zero() : Eigen::Vector2f(chain_xx, chain_yy); }
+    // The box as the beam model's convex part: c = (cx, cy, H/2), half = (w/2, h/2, H/2), J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ.
+    std::vector<rc::ai::beam::BeamPart> beam_parts(const RefrigeratorBeliefState& s) const;
+    // One camera point's −log of the mixture (box + clutter + wall), in double from the float SDF (the engine's point energy).
+    double point_energy(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s, float R) const;
+    // The class prior at the class mean (spec 7c.1 amendment 11-17): seed cx, cy and yaw; class H, w, depth.
+    Eigen::Matrix<double, 6, 1> class_prior_mean(const RefrigeratorBeliefState& seed) const;
     Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 
@@ -459,9 +529,39 @@ public:
     static bool self_test();
 
 private:
-    // Wall-flush + wall-parallel structural factor (ported from cabinet_concept). Inert if f.wall.ok==false.
+    // Wall-flush + wall-parallel structural factor (ported from cabinet_concept). Inert if f.wall.ok==false. The flush
+    // precision is wgt·(lam_base + depth_unobs_precision·depth_unobs): `base` keeps the anchor share, `boost` the
+    // depth-unobservability share, `parallel` the wall-parallel term (all true = the legacy factor, bit for bit). E (persistent
+    // path): when non-null each term ALSO adds its energy ½λr², the GN acceptance objective; (Id, bd) are unchanged by it.
     void accumulate_wall(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
-                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                         bool base = true, bool boost = true, bool parallel = true, double* E = nullptr) const;
+    // The blocks of accumulate_extra, in its historic order (the legacy path is bit-identical); the persistent path routes
+    // them to its channels. anchor = false keeps only the footprint's depth_unobs boost (the class Gaussian is Σ₀ there);
+    // fixed_precision = the persistent θ-only form (a constant λ, exact Hessian; false = the legacy λ ∝ violation).
+    void accumulate_footprint(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, Eigen::Matrix<float, 6, 6>& Id,
+                              Eigen::Matrix<float, 6, 1>& bd, bool anchor, double* E = nullptr) const;
+    void accumulate_height(const RefrigeratorBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+    void accumulate_top(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, Eigen::Matrix<float, 6, 6>& Id,
+                        Eigen::Matrix<float, 6, 1>& bd, double* E = nullptr) const;
+    void accumulate_short_height(const RefrigeratorBeliefState& s, Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                                 bool fixed_precision = false, double* E = nullptr) const;
+    void accumulate_no_cross(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, Eigen::Matrix<float, 6, 6>& Id,
+                             Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision = false, double* E = nullptr) const;
+
+    // ── The persistent path's pieces around the engine ──
+    friend struct rc::ai::engine::BoxEngineModel<RefrigeratorBelief>;
+    EngineModel model() const { return EngineModel{const_cast<RefrigeratorBelief*>(this)}; }   // the engine's const paths
+                                                                                                 // take it const
+    // CAMERA, beside the points: the robust top (2d) and the depth_unobs_precision shares (wall boost, footprint boost).
+    void persistent_camera_extra(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, Eigen::Matrix<float, 6, 6>& Id,
+                                 Eigen::Matrix<float, 6, 1>& bd, double* E) const;
+    // θ-ONLY (unsaturated): the wall flush/parallel prior once (wall_prior_added_), the short-height and no-cross constraints.
+    void persistent_theta_only(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, Eigen::Matrix<float, 6, 6>& Id,
+                               Eigen::Matrix<float, 6, 1>& bd, double* E) const;
+    void  sanitize_joint();                                // sanitize_covariance under persistent
+    void  predict_theta_joint(float q_scale);              // the engine's θ predict
+    float update_persistent_cycle(const RefrigeratorFrame& frame);   // update() under persistent
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
     float two_sided_along(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, bool along_x) const;
     float flush_posterior(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f) const;
@@ -519,6 +619,11 @@ private:
     mutable float   dbg_wall_gap_    = 0.0f;
     mutable float   dbg_wall_lambda_ = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
+
+    // The persistent joint state (params.persistent): the engine holds P over (θ, b), b, the latents' last σ, e's lever, the
+    // class-prior and birth-spread flags; wall_prior_added_ = the wall flush/parallel prior has entered (once).
+    Engine engine_;
+    bool   wall_prior_added_ = false;
 };
 
 }  // namespace rc

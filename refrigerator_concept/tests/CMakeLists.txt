@@ -30,3 +30,11 @@ target_compile_definitions(legacy_golden_test PRIVATE GOLDEN_FILE="${CMAKE_CURRE
 target_compile_options(legacy_golden_test PRIVATE -O2)
 target_link_libraries(legacy_golden_test PRIVATE Eigen3::Eigen)
 add_test(NAME legacy_golden_test COMMAND legacy_golden_test)
+
+# shared-engine Task 10: the refrigerator belief on the shared persistent engine — 60 updates on a synthetic fridge (toy_model.h's
+# scene builder) end within 3σ of the truth; the beam part's Jacobian; the legacy switch. Run: ./fridge_engine_test
+add_executable(fridge_engine_test fridge_engine_test.cpp ../src/refrigerator_belief.cpp)
+target_include_directories(fridge_engine_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(fridge_engine_test PRIVATE -O2)
+target_link_libraries(fridge_engine_test PRIVATE Eigen3::Eigen)
+add_test(NAME fridge_engine_test COMMAND fridge_engine_test)

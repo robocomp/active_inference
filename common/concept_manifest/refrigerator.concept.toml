@@ -129,3 +129,21 @@ peripheral = "ricoh.bearing"    # attention only: never births, never fits
 
 [display]
 mesh = "meshes/fridge.obj"
+
+# ── Shape misfit (spec 2026-11-23 shared-engine G4): the LAYER SPREAD Δ per state DOF ──
+# The box is one solid, but the surface a sensor reports is not always the same layer of it: the camera's mask outline takes in
+# the door handles, the LiDAR rings mostly strike the flat door face between them, and the hinge caps stand above the case top.
+# The shape latents s_cam / s_L are born at Δ²/12 (uniform over the layer range) and carried with ρ = 1 (the object does not
+# change which layer it has). Δ is their spread on a typical REAL refrigerator (class knowledge, NOT the Webots fridge mesh), in
+# [model].state order.
+[shape]
+from = "nominal"
+layer_spread_m = [
+    0.03,   # cx: the depth layers are all at the FRONT (handles), so the outer layer's centre sits half the depth spread forward of the case's; room-frame cx/cy, so the full shift on each (the yaw is not class knowledge)
+    0.03,   # cy: as cx
+    0.025,  # H: the hinge caps stand about 1 inch above the case top
+    0.0,    # w: the doors are flush with the case sides and the handles lie within the width
+    0.06,   # h: door handles stand 2 to 3 inches proud of the door face
+    0.0,    # yaw: every layer shares the case's axes
+]
+layer_spread_source = "appliance specification-sheet conventions for a real freestanding refrigerator: manufacturers list the depth both without and with handles (the two differ by about 2 to 3 inches, 5-7.5 cm, for bar handles) and the height both to the top of the case and to the top of the hinge (about 1 inch, 2.5 cm, apart). Not from the Webots fridge mesh."

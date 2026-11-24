@@ -376,7 +376,8 @@ float RefrigeratorBelief::flush_weight(const RefrigeratorBeliefState& s, const R
 // (width-axis · wall-normal → 0). Both precisions are scaled by the flush mixture weight, so an island
 // feels ~nothing. Finite-difference Jacobians (slope-clamped), mirroring cabinet_concept::accumulate_wall.
 void RefrigeratorBelief::accumulate_wall(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
-                                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+                                         Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                                         bool base, bool boost, bool parallel, double* E) const
 {
     dbg_wall_gap_ = 0.0f; dbg_wall_lambda_ = 0.0f;
     if (not f.wall.ok or params_.wall_precision <= 0.0f) return;
@@ -398,7 +399,7 @@ void RefrigeratorBelief::accumulate_wall(const RefrigeratorBeliefState& s, const
     const float depth_unobs = 1.0f - two_sided_along(s, f, false);
     const float wgt = flush_posterior(s, f);
     const float lam_base = 1.0f / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
-    const float lam_flush = wgt * (lam_base + params_.depth_unobs_precision * depth_unobs);
+    const float lam_flush = wgt * ((base ? lam_base : 0.0f) + (boost ? params_.depth_unobs_precision * depth_unobs : 0.0f));
     dbg_wall_lambda_ = lam_flush;
     if (not(lam_flush > 1e-6f)) return;
 
@@ -416,8 +417,9 @@ void RefrigeratorBelief::accumulate_wall(const RefrigeratorBeliefState& s, const
     }
     Id.noalias() += lam_flush * (Jg * Jg.transpose());
     bd.noalias() += -lam_flush * Jg * gap;
+    if (E) *E += 0.5 * double(lam_flush) * double(gap) * double(gap);
 
-    if (params_.wall_parallel_precision > 0.0f)
+    if (parallel and params_.wall_parallel_precision > 0.0f)
     {
         // ★★AN OBJECT ADJACENT TO A WALL IS ALIGNED TO IT, WHATEVER POSE THE MASKS CAME FROM. The yaw was
         // decided by a flat constant of 200 against thousands of mask points seen obliquely, and the points
@@ -439,6 +441,7 @@ void RefrigeratorBelief::accumulate_wall(const RefrigeratorBeliefState& s, const
         const float rp = par_of(s);
         Id.noalias() += lam_par * (Jp * Jp.transpose());
         bd.noalias() += -lam_par * Jp * rp;
+        if (E) *E += 0.5 * double(lam_par) * double(rp) * double(rp);
     }
 }
 
@@ -447,16 +450,32 @@ void RefrigeratorBelief::accumulate_wall(const RefrigeratorBeliefState& s, const
 void RefrigeratorBelief::accumulate_extra(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
+    // The LEGACY path (params.persistent = false): every block, in this historic order (legacy_golden_test is bit-exact).
     // (1) Wall-flush + wall-parallel structural term (supplies the missing back-face/depth information).
     accumulate_wall(s, f, Id, bd);
+    accumulate_footprint(s, f, Id, bd, /*anchor*/ true);
+    accumulate_height(s, Id, bd);
+    accumulate_top(s, f, Id, bd);
+    accumulate_short_height(s, Id, bd);
+    accumulate_no_cross(s, f, Id, bd);
 
-    // (2) FOOTPRINT prior: a TIGHT Gaussian pulling w → prior_footprint_m and h(depth) → prior_footprint_m
-    //     (a standard fridge footprint ≈ 0.60×0.60 is very consistent), precision λ_wd = 1/prior_footprint_std².
-    //     H (index 2) is anchored separately just below (2a) — the top-of-box float needs a static anchor too.
+    // (3) YOLO-independent LiDAR first-hit range factor, once per device ray-set (each own origin).
+    rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
+    for (const auto& lr : f.lidar_extra)   // extra per-device ray-sets (e.g. low bpearl) — each own origin
+        rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd);
+}
+
+// (2) FOOTPRINT prior: a TIGHT Gaussian pulling w → prior_footprint_m and h(depth) → prior_footprint_m
+//     (a standard fridge footprint ≈ 0.60×0.60 is very consistent), precision λ_wd = 1/prior_footprint_std².
+//     H (index 2) is anchored separately (2a) — the top-of-box float needs a static anchor too.
+//     anchor = false keeps only the depth_unobs_precision boost (the persistent path: the class Gaussian is Σ₀, counted once).
+void RefrigeratorBelief::accumulate_footprint(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
+                                              Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool anchor,
+                                              double* E) const
+{
     if (params_.prior_footprint_std > 0.0f)
     {
-        const float lam_wd = 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std);
-
+        const float lam_wd = anchor ? 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std) : 0.0f;
         // An extent is IDENTIFIABLE only when the cloud spans it — points on BOTH opposing faces, which is what
         // separates the extent from the centre. A one-face view puts points on a single face and its many points
         // still drag that extent outward (the size common-mode caps σ, not the mean), so the footprint prior must
@@ -482,59 +501,90 @@ void RefrigeratorBelief::accumulate_extra(const RefrigeratorBeliefState& s, cons
         const float lam_h = lam_wd + params_.depth_unobs_precision * depth_unobs * (1.0f - w_flush);
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
         Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.prior_footprint_m - s.h);   // h≡depth(index 4)
+        if (E)
+        {
+            const double rw = double(params_.prior_footprint_m - s.w), rh = double(params_.prior_footprint_m - s.h);
+            *E += 0.5 * (double(lam_w) * rw * rw + double(lam_h) * rh * rh);
+        }
     }
+}
 
-    // (2a) HEIGHT anchor (H, index 2): the box TOP is unconstrained-from-above — points at the real fridge top
-    //      (z ≈ 1.9 m) sit on a SIDE face of any TALLER box, so they never pull H down, and prior_cov_diag's broad
-    //      hh is only the recursive-filter DRIFT allowance, NOT a static anchor. Without this term H random-walks
-    //      UP (observed: 2.37 m for a 1.9 m cloud) with no restoring force. This is a static Gaussian anchor toward
-    //      prior_height_m with precision 1/prior_height_std² — the DATA still sets the LOWER bound (points force
-    //      H ≥ cloud-top), the anchor only prevents float ABOVE it. Broad enough to let a genuinely tall/short
-    //      fridge move when the cloud top demands it, firm enough to stop the runaway.
+// (2a) HEIGHT anchor (H, index 2): the box TOP is unconstrained-from-above — points at the real fridge top
+//      (z ≈ 1.9 m) sit on a SIDE face of any TALLER box, so they never pull H down, and prior_cov_diag's broad
+//      hh is only the recursive-filter DRIFT allowance, NOT a static anchor. Without this term H random-walks
+//      UP (observed: 2.37 m for a 1.9 m cloud) with no restoring force. This is a static Gaussian anchor toward
+//      prior_height_m with precision 1/prior_height_std² — the DATA still sets the LOWER bound (points force
+//      H ≥ cloud-top), the anchor only prevents float ABOVE it. Broad enough to let a genuinely tall/short
+//      fridge move when the cloud top demands it, firm enough to stop the runaway.
+void RefrigeratorBelief::accumulate_height(const RefrigeratorBeliefState& s, Eigen::Matrix<float, 6, 6>& Id,
+                                           Eigen::Matrix<float, 6, 1>& bd) const
+{
     if (params_.prior_height_std > 0.0f)
     {
         const float lam_H = 1.0f / (params_.prior_height_std * params_.prior_height_std);
         Id(2, 2) += lam_H;  bd(2) += lam_H * (params_.prior_height_m - s.H);        // H (index 2)
     }
+}
 
-    // (2d) TOP TRACKS THE OBSERVED ROBUST CLOUD TOP. The floor-anchored box top is a "free" upper boundary — empty
-    //      surface above the cloud is unpenalised, so H ratchets up on the over-segmented JUNK TAIL above the fridge
-    //      (a mask whose real top is ~1.93 m still has a few % of points running to ~2.3 m → H floated to 2.37). A
-    //      soft one-sided cap loses to that tail (its force grows AS H drops and more junk is exposed). Instead pin H
-    //      FIRMLY to z_top_obs (the p97 top, which sits BELOW the junk tail): a two-sided anchor whose force competes
-    //      directly with the tail. The data lower-bound (front points force H ≥ real top) keeps it from under-fitting.
-    //      z_top_obs is data-derived (the observed top), so a firm precision is honest, not a magic height number.
+// (2d) TOP TRACKS THE OBSERVED ROBUST CLOUD TOP. The floor-anchored box top is a "free" upper boundary — empty
+//      surface above the cloud is unpenalised, so H ratchets up on the over-segmented JUNK TAIL above the fridge
+//      (a mask whose real top is ~1.93 m still has a few % of points running to ~2.3 m → H floated to 2.37). A
+//      soft one-sided cap loses to that tail (its force grows AS H drops and more junk is exposed). Instead pin H
+//      FIRMLY to z_top_obs (the p97 top, which sits BELOW the junk tail): a two-sided anchor whose force competes
+//      directly with the tail. The data lower-bound (front points force H ≥ real top) keeps it from under-fitting.
+//      z_top_obs is data-derived (the observed top), so a firm precision is honest, not a magic height number.
+void RefrigeratorBelief::accumulate_top(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
+                                        Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, double* E) const
+{
     if (f.z_top_obs > 0.0f and params_.top_no_float_precision > 0.0f)
     {
         const float lam_tf = params_.top_no_float_precision;
         const float target = f.z_top_obs + params_.top_no_float_margin_m;
         Id(2, 2) += lam_tf;  bd(2) += lam_tf * (target - s.H);   // pull H → observed robust top (both directions)
+        if (E) *E += 0.5 * double(lam_tf) * double(target - s.H) * double(target - s.H);
     }
+}
 
-    // (2b) SHORT-HEIGHT prior (the "a 70 cm fridge is improbable" term): a ONE-SIDED Gaussian factor that acts
-    //      ONLY when H < plaus_height_min, pulling H up toward it. Its precision GROWS as H falls further below
-    //      (λ_h = gain·deficit/soft), so a mildly-short fridge is nudged gently and a 70 cm cloud is resisted
-    //      hard. A plausibly-tall fridge (deficit ≤ 0) feels NOTHING. Continuous covariance, not a clamp — the
-    //      effect is that fitting a short cloud as a fridge fights this prior → worse data fit → lower plausibility.
+// (2b) SHORT-HEIGHT prior (the "a 70 cm fridge is improbable" term): a ONE-SIDED Gaussian factor that acts
+//      ONLY when H < plaus_height_min, pulling H up toward it. Its precision GROWS as H falls further below
+//      (λ_h = gain·deficit/soft), so a mildly-short fridge is nudged gently and a 70 cm cloud is resisted
+//      hard. A plausibly-tall fridge (deficit ≤ 0) feels NOTHING. Continuous covariance, not a clamp — the
+//      effect is that fitting a short cloud as a fridge fights this prior → worse data fit → lower plausibility.
+//      PERSISTENT θ-ONLY CHANNEL (fixed_precision, spec §7c.6): E = ½·gain·deficit² on violation, λ = gain CONSTANT. The
+//      growing λ carries only half its energy's Hessian and overshoots on the unsaturated θ-only channel; the fixed
+//      precision's GN step is exact (as the countable belief's).
+void RefrigeratorBelief::accumulate_short_height(const RefrigeratorBeliefState& s, Eigen::Matrix<float, 6, 6>& Id,
+                                                 Eigen::Matrix<float, 6, 1>& bd, bool fixed_precision, double* E) const
+{
     if (params_.plaus_height_prior_gain > 0.0f and params_.plaus_height_soft > 1e-4f)
     {
         const float deficit = params_.plaus_height_min - s.H;   // >0 ⇒ implausibly short
         if (deficit > 0.0f)
         {
-            const float lam_h = params_.plaus_height_prior_gain * (deficit / params_.plaus_height_soft);
+            const float lam_h = fixed_precision ? params_.plaus_height_prior_gain
+                                                : params_.plaus_height_prior_gain * (deficit / params_.plaus_height_soft);
             Id(2, 2) += lam_h;  bd(2) += lam_h * deficit;   // residual = (height_min − H) = deficit ⇒ pull H up (idx 2)
+            if (E) *E += 0.5 * double(lam_h) * double(deficit) * double(deficit);
         }
     }
+}
 
-    // (2c) WALL NO-CROSS (one-sided): the flush term (accumulate_wall) is TWO-SIDED — it drives the back-face gap
-    //      → 0 but does NOT resist the box being fit CROSSING the wall (back extending PAST it into the wall/
-    //      exterior), and its flush weight exp(−(gap/reach)²) has decayed to ~0 once the back is well past, so it
-    //      cannot pull it back. This ONE-SIDED factor (same form as the short-height prior above) resists
-    //      penetration only: with gap = (back_centre − wall.p)·(inward normal) (>0 inside the room, <0 crossed),
-    //      residual = min(0, gap − margin) is driven to 0 with a precision that GROWS as the back penetrates
-    //      further (λ = wall_no_cross_precision · how-far-past). Flush (gap≈0) feels ~nothing; a wall is a hard
-    //      boundary so it is strong. Continuous (soft), no clamp. Inert when f.wall.ok==false.
-    if (f.wall.ok and params_.wall_no_cross_precision > 0.0f)
+// (2c) WALL NO-CROSS (one-sided): the flush term (accumulate_wall) is TWO-SIDED — it drives the back-face gap
+//      → 0 but does NOT resist the box being fit CROSSING the wall (back extending PAST it into the wall/
+//      exterior), and its flush weight exp(−(gap/reach)²) has decayed to ~0 once the back is well past, so it
+//      cannot pull it back. This ONE-SIDED factor (same form as the short-height prior above) resists
+//      penetration only: with gap = (back_centre − wall.p)·(inward normal) (>0 inside the room, <0 crossed),
+//      residual = min(0, gap − margin) is driven to 0 with a precision that GROWS as the back penetrates
+//      further (λ = wall_no_cross_precision · how-far-past). Flush (gap≈0) feels ~nothing; a wall is a hard
+//      boundary so it is strong. Continuous (soft), no clamp. Inert when f.wall.ok==false.
+//      PERSISTENT θ-ONLY CHANNEL (fixed_precision, spec §7c.6): a censored Gaussian "the back face is not beyond the wall, as
+//      known to σ_wall": E = ½·r²/σ_wall² on violation, λ = 1/f.wall.sigma_m² CONSTANT, exact Hessian. f.wall.sigma_m ≤ 0 ⇒
+//      inert there (a wall of unknown position std states no precision).
+void RefrigeratorBelief::accumulate_no_cross(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
+                                             Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd,
+                                             bool fixed_precision, double* E) const
+{
+    if (f.wall.ok and params_.wall_no_cross_precision > 0.0f and (not fixed_precision or f.wall.sigma_m > 0.0f))
     {
         const auto gap_of = [&](const RefrigeratorBeliefState& st)
         { return (back_centre(st) - f.wall.p).dot(f.wall.n); };   // >0 interior side, <0 crossed the wall
@@ -543,7 +593,8 @@ void RefrigeratorBelief::accumulate_extra(const RefrigeratorBeliefState& s, cons
         if (residual < 0.0f)
         {
             const float how_far_past = -residual;                                       // m past the boundary (>0)
-            const float lam_nc = params_.wall_no_cross_precision * how_far_past;         // precision grows with penetration
+            const float lam_nc = fixed_precision ? 1.0f / (f.wall.sigma_m * f.wall.sigma_m)
+                                                 : params_.wall_no_cross_precision * how_far_past;   // grows with penetration
             const float eps = params_.fd_eps;
             const float g   = params_.jac_slope_clamp;
             const Eigen::Matrix<float, 6, 1> v = s.vec();
@@ -557,13 +608,110 @@ void RefrigeratorBelief::accumulate_extra(const RefrigeratorBeliefState& s, cons
             }
             Id.noalias() += lam_nc * (Jg * Jg.transpose());
             bd.noalias() += -lam_nc * Jg * residual;   // residual<0 ⇒ push the gap UP (back out of the wall)
+            if (E) *E += 0.5 * double(lam_nc) * double(residual) * double(residual);
         }
     }
+}
 
-    // (3) YOLO-independent LiDAR first-hit range factor, once per device ray-set (each own origin).
-    rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
-    for (const auto& lr : f.lidar_extra)   // extra per-device ray-sets (e.g. low bpearl) — each own origin
-        rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd);
+// ─── The persistent path (params.persistent; shared-engine Task 10) ─────────────────────────────────────────────────
+// The update is the shared engine's (common/ai_belief/persistent_engine.h) through the shared box adapter
+// (common/ai_belief/box_engine_model.h); what stays here is the refrigerator model behind it and the cycle around it.
+
+// One point's −log of the mixture (box + clutter + wall), in double from the float SDF. Its gradient is Σ r_box·(d/R)·∇d — the
+// EM identity, so the responsibilities need not be held fixed (as the countable belief's).
+double RefrigeratorBelief::point_energy(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s, float R) const
+{
+    const double eps = double(std::clamp(params_.clutter_frac, 0.0f, 0.99f));
+    const double pw  = double(wall_component_frac());
+    const double cs2 = double(params_.clutter_scale_m) * double(params_.clutter_scale_m);
+    const double Rd  = double(std::max(1e-9f, R));
+    const double d   = double(sdf_box(p, s));
+    const double sum = (1.0 - eps - pw) * std::exp(-0.5 * d * d / Rd) + eps * std::exp(-0.5 * cs2 / Rd)
+                     + double(wall_component(p, R, float(pw)));
+    return -std::log(std::max(1e-300, sum));
+}
+
+// CAMERA, beside the points: (2d) the robust top and the depth_unobs_precision shares (§7c.1: the one class-mean term still
+// counted per frame, counted once while parked through b_cam).
+void RefrigeratorBelief::persistent_camera_extra(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
+                                                 Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, double* E) const
+{
+    accumulate_top(s, f, Id, bd, E);
+    accumulate_wall(s, f, Id, bd, /*base*/ false, /*boost*/ true, /*parallel*/ false, E);
+    accumulate_footprint(s, f, Id, bd, /*anchor*/ false, E);
+}
+
+// θ-ONLY, unsaturated: the biases cannot absorb a wall crossing or the class's relational prior. The wall flush/parallel prior
+// enters ONCE, on the first camera update whose frame stages a wall (the class footprint and height Gaussians are Σ₀, counted
+// once by the engine at the class mean); the one-sided constraints stay, zero unless violated.
+void RefrigeratorBelief::persistent_theta_only(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
+                                               Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, double* E) const
+{
+    if (not f.points.empty() and f.wall.ok and not wall_prior_added_)
+        accumulate_wall(s, f, Id, bd, /*base*/ true, /*boost*/ false, /*parallel*/ true, E);
+    accumulate_short_height(s, Id, bd, /*fixed_precision*/ true, E);
+    accumulate_no_cross(s, f, Id, bd, /*fixed_precision*/ true, E);
+}
+
+// The box: c = (cx, cy, H/2), half = (w/2, h/2, H/2); rows of J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ, θ = (cx, cy, H, w, h, yaw).
+std::vector<rc::ai::beam::BeamPart> RefrigeratorBelief::beam_parts(const RefrigeratorBeliefState& s) const
+{
+    rc::ai::beam::BeamPart P;
+    P.c = {double(s.cx), double(s.cy), 0.5 * double(s.H)};
+    P.yaw = double(s.yaw);
+    P.half = {0.5 * double(s.w), 0.5 * double(s.h), 0.5 * double(s.H)};
+    P.J.setZero();
+    P.J(0, 0) = 1.0; P.J(1, 1) = 1.0; P.J(2, 2) = 0.5; P.J(3, 5) = 1.0; P.J(4, 3) = 0.5; P.J(5, 4) = 0.5; P.J(6, 2) = 0.5;
+    return {P};
+}
+
+// The size has a class mean (a square footprint), the position and the yaw have none (centred on the seed: a fridge's door
+// direction is the appearance resolver's, not the prior's).
+Eigen::Matrix<double, 6, 1> RefrigeratorBelief::class_prior_mean(const RefrigeratorBeliefState& seed) const
+{
+    Eigen::Matrix<double, 6, 1> x = seed.vec().cast<double>();
+    x(2) = double(params_.prior_height_m);
+    x(3) = double(params_.prior_footprint_m);
+    x(4) = double(params_.prior_footprint_m);
+    return x;
+}
+
+// sanitize_covariance under persistent: the engine re-seeds the joint (θθ the class P, latents at their last marginals, e at
+// the last Σ_pose, b = 0, the class prior re-enters); the wall prior re-enters once with it.
+void RefrigeratorBelief::sanitize_joint()
+{
+    EngineModel m = model();
+    if (not engine_.sanitize(m)) return;
+    wall_prior_added_ = false;
+    omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();
+    std::printf("RefrigeratorBelief: DEGENERATE joint P (non-finite or non-positive diagonal) — re-seeded from prior\n");
+}
+
+void RefrigeratorBelief::predict_theta_joint(float q_scale)
+{
+    EngineModel m = model();
+    engine_.predict(m, q_scale);
+    prior_mean_ = state_.vec();
+}
+
+// update() under persistent: the engine's update with the cycle around it. The camera measures when the frame has points;
+// the LiDAR when the staged beam set measures, and only with the camera (this agent has no LiDAR-only frames). ω learns from
+// camera-measured cycles only, post minus previous posterior; the first update's step is the class prior correcting the data
+// seed, not object motion.
+float RefrigeratorBelief::update_persistent_cycle(const RefrigeratorFrame& frame)
+{
+    point_wall_ = frame.wall;
+    sanitize_covariance();
+    const Eigen::Matrix<float, 6, 1> before = state_.vec();
+    const bool first = not engine_.first_update_done();
+    const bool camera = not frame.points.empty();
+    EngineModel m = model();
+    const float fe = engine_.update(m, frame, rc::ai::engine::frame_latents(frame.persist, camera, camera));
+    prior_mean_ = before;
+    if (camera and frame.wall.ok) wall_prior_added_ = true;           // the wall prior has entered, once
+    sanitize_covariance();
+    if (not first and camera) update_volatility(state_.vec() - before);
+    return fe;
 }
 
 // ─── Footprint second-moment (geometry helper for the optional birth seed) ──────────────────────────
@@ -681,6 +829,9 @@ void RefrigeratorBelief::apply_mode_rotation(int k)
         Sigma_.row(3).swap(Sigma_.row(4));
         Sigma_.col(3).swap(Sigma_.col(4));
         std::swap(prior_mean_(3), prior_mean_(4));
+        // the persistent joint state relabels with θ: w, h of θ and of every 6-sized latent block; e and ℓ are room-frame
+        // (a no-op before the joint is seeded, and on the legacy path)
+        engine_.permute_theta({0, 1, 2, 4, 3, 5});
     }
 }
 
