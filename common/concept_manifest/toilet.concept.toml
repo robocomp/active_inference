@@ -113,19 +113,19 @@ peripheral = "ricoh.bearing"
 mesh = "meshes/toilet.obj"
 
 # ── Layer spread (spec 2026-11-23 shared-engine G4): which layer of a REAL toilet the box means ──
-# A toilet is a tank on a bowl on a pedestal, each a different width, depth and top: a sensor sees one of them. Δ is their
+# A toilet is a tank on a bowl on a pedestal, each a different width and depth: a sensor sees one of them. Its top is the tank lid. Δ is their
 # spread on a typical real two-piece toilet (class knowledge, NOT the Webots mesh), in [model].state order.
 [shape]
 from = "nominal"
 layer_spread_m = [
     0.06,   # cx: the depth layers are all at the FRONT (the pedestal foot is set back from the bowl's front by 10-15 cm; the tank's back is the back of every layer), so the outer layer's centre sits ~half the depth spread forward; room-frame cx/cy, so the full shift on each (the yaw is not class knowledge)
     0.06,   # cy: as cx
-    0.30,   # H: the tank lid (71-79 cm) vs the seat/bowl rim (38-48 cm) a sensor below or in front of the tank sees as the top
+    0.0,    # H: not graded: the tank lid is the top every sensor sees on a toilet with a tank; tank vs tankless is variation WITHIN the class, which belongs to the H prior std ([prior.height] std_m 0.15), not to a rho = 1 layer latent. The toilet is graded on its footprint (w, h)
     0.25,   # w: tank 43-53 cm wide vs bowl 36-39 cm vs pedestal foot 22-30 cm
     0.12,   # h: the bowl's front vs the pedestal foot's front, 10-15 cm back
     0.0,    # yaw: every layer shares the toilet's axes
 ]
-layer_spread_source = "plumbing-fixture dimension conventions for a real two-piece toilet: tank 17-21 in (43-53 cm) wide, bowl about 14-15 in (36-39 cm) wide, pedestal foot 9-12 in (22-30 cm) wide; seat height 15-19 in (38-48 cm, standard to comfort height), tank top 28-31 in (71-79 cm); the pedestal foot set 4-6 in (10-15 cm) back from the bowl's front. Not from the Webots Toilet.proto."
+layer_spread_source = "plumbing-fixture dimension conventions for a real two-piece toilet: tank 17-21 in (43-53 cm) wide, bowl about 14-15 in (36-39 cm) wide, pedestal foot 9-12 in (22-30 cm) wide; the pedestal foot set 4-6 in (10-15 cm) back from the bowl's front. H is not graded (Delta_H = 0): the tank lid is the top every sensor sees; tank vs tankless is variation within the class, carried by the H prior std. Not from the Webots Toilet.proto."
 
 # ── Solid parts (fractions of the fitted w, h, H; H = true top 1.02) ──
 
