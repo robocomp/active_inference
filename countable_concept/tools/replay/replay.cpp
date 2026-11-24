@@ -16,6 +16,7 @@
 //   wall_in             1 when this update entered the wall latent's priors (a new wall edge for the instance, F1.4)
 //   back_gap            the back face's gap to the frame's STAGED wall, (back_centre − wall.p)·n (< 0: through it; NaN: no wall)
 //   gn_cap              1 when the update's GN ran into its iteration cap without converging
+//   range_m             the camera's (else the robot's) distance to θ's centre at this update (for NEES by range bin)
 //   pstd_cx..pstd_yaw   √ of the PREDICTED θθ diagonal this update started from (Σ̄: the class prior on the first update)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
@@ -110,7 +111,7 @@ int main(int argc, char** argv)
     }
     std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                 "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
-                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,dth_live,dP_live\n");
+                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,range_m,dth_live,dP_live\n");
 
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
@@ -146,7 +147,7 @@ int main(int argc, char** argv)
             char row[1024];
             std::snprintf(row, sizeof row,
                           "%ld,%lld,%d,%zu,%d,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%d,%.6g,"
-                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%.6g,%d",
+                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%.6g,%d,%.4f",
                           upd, static_cast<long long>(ev.cycle), ev.gated ? 1 : 0, ev.frame.points.size(),
                           ev.frame.lidar_only ? 1 : 0, ev.frame.beam.endpoints.size(),
                           s.cx, s.cy, s.H, s.w, s.h, s.yaw, sd(0), sd(1), sd(2), sd(3), sd(4),
@@ -155,7 +156,8 @@ int main(int argc, char** argv)
                           om(0), om(1), om(2), om(3), om(4), om(5), fe, pd(0), pd(1), pd(2), pd(3), pd(4), pd(5), b.last_wall_entered() ? 1 : 0,
                           ev.frame.wall.ok ? double((b.back_centre(s) - ev.frame.wall.p).dot(ev.frame.wall.n))
                                            : std::numeric_limits<double>::quiet_NaN(),
-                          (b.last_gn_iters() >= b.params().gn_iters_max and not b.last_gn_converged()) ? 1 : 0);
+                          (b.last_gn_iters() >= b.params().gn_iters_max and not b.last_gn_converged()) ? 1 : 0,
+                          double((ev.frame.camera_xy.value_or(ev.frame.robot_xy) - Eigen::Vector2f(s.cx, s.cy)).norm()));
             pending = row;
         },
         [&](const rc::replay::ResultEv& live, const rc::CountableBelief& b)
