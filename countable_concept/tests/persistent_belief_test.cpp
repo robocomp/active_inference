@@ -272,81 +272,9 @@ static void prior_added_once()
     CHECK(not entered2);
 }
 
-// Under persistent, (2c) wall no-cross is a θ-only term every frame: a belief whose back face is 3 cm THROUGH the wall is
-// pushed back toward the legal side, by a camera update and by a LiDAR-only update. Isolated: the relational anchors are
-// already in (flags set), the depth boost is off, and both views look at the LEFT face (x = const), which says nothing about
-// the depth direction (cy, h); control = the same update with (2c) off.
-static void no_cross_pushes_back_persistent()
-{
-    const float cy = 0.03f - 0.5f * tw;                                       // back face at y = +0.03 (wall at y = 0)
-    auto gap = [](const CountableBelief& b) { return 0.0f - (b.state().cy + 0.5f * b.state().h); };
-    CountableFrame fcam;                                                      // left face only, truth box
-    for (int i = 0; i < 8; ++i) for (int j = 0; j < 10; ++j)
-        fcam.points.emplace_back(tx - 0.5f * tw, ty - 0.5f * tw + tw * (i + 0.5f) / 8.0f, tH * (j + 0.5f) / 10.0f);
-    fcam.R.assign(fcam.points.size(), params().sigma_base_m * params().sigma_base_m);
-    stage_wall(fcam);
-    CountableFrame flid = lidar_frame(scene_rays(Eigen::Vector3f(tx - 0.5f * tw - 1.5f, ty, 1.1075f), ty, 0.10f));
-    for (const bool camera : {true, false})
-    {
-        CountableFrame f = camera ? fcam : flid; set_latents(f, 1.0f);
-        float g[2], th = 0.0f;
-        Eigen::Matrix<double, 6, 1> last_step = Eigen::Matrix<double, 6, 1>::Zero(), sig = Eigen::Matrix<double, 6, 1>::Zero();
-        float g_off = 0.0f;
-        {   // diagnostic: the flag-off path on the same update
-            CountableBeliefParams p = params(); p.persistent = false; p.depth_unobs_precision = 0.0f;
-            CountableBelief b(CountableBeliefState{tx, cy, tH, tw, tw, 0.0f}, p);
-            b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
-            b.update(f);
-            g_off = gap(b);
-        }
-        for (const bool on : {true, false})
-        {
-            CountableBeliefParams p = params();
-            p.depth_unobs_precision = 0.0f;
-            if (not on) p.wall_no_cross_precision = 0.0f;
-            CountableBelief b(CountableBeliefState{tx, cy, tH, tw, tw, 0.0f}, p);
-            b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
-            b.set_prior_added(true, true);
-            b.update(f);
-            g[on ? 0 : 1] = gap(b);
-            if (on)
-            {
-                th = b.last_wall_entered() ? 1.0f : 0.0f;   // F1.4: (2c) is the wall latent's probit, entered in its own channel
-                const auto& its = b.dbg_iterates();
-                std::printf("    iterates (gap):");
-                for (const auto& v : its) std::printf(" %+.5f", 0.0f - (v(1) + 0.5f * v(4)));
-                std::printf("\n");
-                if (its.size() >= 2) last_step = (its.back() - its[its.size() - 2]).cast<double>();
-                for (int k = 0; k < 6; ++k) sig(k) = std::sqrt(std::max(0.0, double(b.covariance()(k, k))));
-            }
-        }
-        std::printf("  no_cross (%s, %zu data): start gap -0.03000 ; after one update gap %.5f with (2c), %.5f without ; |Id_th| %.3e ; "
-                    "flag-off path %.5f\n",
-                    camera ? "camera" : "LiDAR-only", camera ? f.points.size() : f.lidar.endpoints.size(), g[0], g[1], th, g_off);
-        // spec 7c.8 rev 3.3.9 "No-cross contact": penetration ≤ ½σ_wall (σ_wall = the staged wall's sigma_m)
-        const float half_sw = 0.5f * f.wall.sigma_m;
-        std::printf("    penetration %.5f m (gap %+.5f) ; bound %.5f m (half sigma_wall %.3f)\n", std::max(0.0f, -g[0]), g[0], half_sw,
-                    f.wall.sigma_m);
-        // rev 3.3.8 stop rule, per component: |last step_k| < 0.1·σ_k, σ_k = √P_kk of the returned posterior
-        std::printf("    last GN step / sigma per DOF (cx cy H w h yaw):");
-        bool step_small = true;
-        for (int k = 0; k < 6; ++k)
-        {
-            std::printf(" %+.3e/%.3e", last_step(k), sig(k));
-            step_small = step_small and std::abs(last_step(k)) < 0.1 * sig(k);
-        }
-        std::printf("  (bound 0.1 sigma)\n");
-        // camera: the view says nothing about depth, so the whole move is (2c)'s and it is toward the legal side. LiDAR-only:
-        // this sweep's rays (left face + top, belief 3 cm off) themselves push the box deeper; (2c) must counter that push.
-        if (camera) CHECK(g[0] > -0.03f + 0.005f);
-        CHECK(g[0] - g[1] > 0.005f);          // the (2c)-attributable move toward the legal side
-        CHECK(th > 0.0f);                     // the wall priors (the probit with them) entered on this update
-        // (spec 7c.6, bounds by rev 3.3.9) the iterates converge (no half-Hessian overshoot, no wall ray switching on and off):
-        // the last step per component below 0.1σ_k; and they land at the wall: penetration ≤ ½σ_wall
-        CHECK(step_small);
-        CHECK(-g[0] <= half_sw);
-    }
-}
+// (no_cross_pushes_back_persistent removed, plan rev 2 F1.4 / coordinator ruling 11-24: the persistent path has no no-cross term
+// any more — the class stand-off prior, entered once on the wall latent, carries "the back stands at or off the wall"; a
+// separate one-sided term counted σ_wall twice. The legacy path's hinge keeps its own self-test in countable_belief.cpp.)
 
 static void aged_belief_returns_to_class_P()
 {
@@ -1336,7 +1264,6 @@ int main()
     nonlinear_restart_matches_eliminated();
     rho0_regression_zero_pose_cov(true);   // camera-only frames only (spec 7c.8: frames with rays differ by design)
     prior_added_once();
-    no_cross_pushes_back_persistent();
     aged_belief_returns_to_class_P();
     wall_behind_does_not_pull();
     physical_lidar_only_sigma_bounded();

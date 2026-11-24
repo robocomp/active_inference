@@ -67,7 +67,10 @@ class_prior = 0.95                  # P(against a wall): the concept holds it (o
 why  = "the back rests against a room wall — a toilet's tank is plumbed into a wall"
 standoff_m = 0.03                   # F1.4: the tank's back off the finished wall
 standoff_std_m = 0.02
-standoff_source = "weakly cited convention for a two-piece toilet on its matching rough-in (the drain 12 in / 305 mm from the finished wall, the US norm): the tank clears the wall by roughly 0.5-2 in (13-50 mm) depending on the model; a 12 in toilet on a 14 in rough-in leaves about 2 in (TOTO, 'Toilet rough-ins and the cleverness of TOTO's Unifit rough-in', totousa.com); 1-2 in reported on 12 in toilets and ~0.5 in preferred so the lid lifts clear (alt.home.repair; forum.heatinghelp.com); no manufacturer spec sheet read. Not from the Webots world (its toilet stands 17-18 cm off: about 7 sigma, reported, not fitted)."
+# Persistent path: this stand-off IS the no-cross knowledge ("the back stands at or off the wall"); no separate no-cross term is
+# entered for a class that declares it (coordinator ruling 11-24: a probit on top counted sigma_wall twice). no_cross_precision
+# above is the legacy path's hinge only.
+standoff_source = "weak: rough-in note and forum reports. Convention for a two-piece toilet on its matching rough-in (the drain 12 in / 305 mm from the finished wall, the US norm): the tank clears the wall by roughly 0.5-2 in (13-50 mm) depending on the model; a 12 in toilet on a 14 in rough-in leaves about 2 in (TOTO, 'Toilet rough-ins and the cleverness of TOTO's Unifit rough-in', totousa.com); 1-2 in reported on 12 in toilets and ~0.5 in preferred so the lid lifts clear (alt.home.repair; forum.heatinghelp.com); no manufacturer spec sheet read. Not from the Webots world (its toilet stands 17-18 cm off: about 7 sigma, reported, not fitted)."
 
 [prior.alignment]
 kind = "room_axis"

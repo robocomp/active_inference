@@ -20,7 +20,8 @@
 // another fact) so the count above is the whole model.
 // Second case, the engine1 pin itself: the staged wall is 5 mm off so the data put the back 5 mm PAST it (the no-cross term
 // active). Before F1.4 the fixed-precision hinge re-entered every update and σ_n fell with the update count (measured on the code
-// before F1.4: 0.0184 → 0.0154 m); now the probit enters once. Asserted: σ_n(128) ≥ 0.99·σ_n(1) (no prediction of its value: it
+// before F1.4: 0.0184 → 0.0154 m); now there is no no-cross term at all (the stand-off prior, entered once, says "at or off
+// the wall"; coordinator ruling 11-24). Asserted: σ_n(128) ≥ 0.99·σ_n(1) (no prediction of its value: it
 // depends on where the first GN leaves the gap).
 // Run: ./toilet_wall_test
 #include <cmath>

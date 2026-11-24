@@ -823,9 +823,13 @@ float CountableBelief::wall_offset_mean(const WallRef& w) const { return float(e
 //    placement — weighted by the flush posterior (adjacency earns it, as before). σ_wall is NOT in its variance any more:
 //    it is δ's marginal. standoff_std_m ≤ 0 keeps the old flush form (mean 0, precision wall_precision).
 //  · parallel: the back face parallel to the wall, λ = 1/(σ_wall/L)², flush-weighted (as accumulate_wall).
-//  · no-cross: the one-sided probit E = −log Φ((gap − margin)/σ_wall) (Fable review §2.2, the exact form of "the back is not
-//    beyond the wall, as known to σ_wall"), with its exact GN curvature (φ/Φ)(z + φ/Φ)/σ² ≥ 0. Zero force deep on the legal
-//    side, no fixed-precision hinge.
+//  · NO separate no-cross term (coordinator ruling 11-24, option 1). The stand-off prior N(gap − δ; μ ≥ 0, σ) already carries
+//    the class knowledge "the back stands at or off the wall"; a one-sided probit on top (−log Φ(gap/σ_wall), tried in the first
+//    F1.4 commit) counted σ_wall twice (δ's marginal AND its scale) and pushed a FLUSH box ~2 cm into the room on its one entry
+//    (φ/Φ(0) = 0.80): creep_set_test's wall-on cases and four persistent_belief_test checks failed on it. The probit was to stay
+//    only for a class declaring no stand-off; every class on this binary (bed, nightstand, toilet) declares one, so it is
+//    deleted. A class without a stand-off gets the old flush form once (mean 0, precision wall_precision) and no no-cross.
+//    The legacy path keeps its own no-cross hinge (wall_no_cross_precision).
 void CountableEngineModel::accumulate_wall_prior(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const
 {
     const CountableBeliefParams& P = b->params_;
@@ -862,18 +866,6 @@ void CountableEngineModel::accumulate_wall_prior(const State& s, const Frame& f,
             bd.noalias() += -lp * Jp * rp;
             if (E) *E += 0.5 * double(lp) * double(rp) * double(rp);
         }
-    }
-    if (P.wall_no_cross_precision > 0.0f and f.wall.sigma_m > 0.0f)
-    {
-        const double sig = double(f.wall.sigma_m);
-        const double z = (double(gap) - double(P.wall_no_cross_margin_m)) / sig;
-        const double log_Phi = std::log(0.5 * std::erfc(-z / std::sqrt(2.0)));
-        const double ratio = std::exp(-0.5 * z * z - 0.5 * std::log(2.0 * M_PI) - log_Phi);   // φ(z)/Φ(z)
-        const double h = ratio * (z + ratio) / (sig * sig);                                     // d²E/dgap²
-        const double dE = -ratio / sig;                                                          // dE/dgap
-        Id.noalias() += float(h) * (Jg * Jg.transpose());
-        bd.noalias() += float(-dE) * Jg;
-        if (E) *E += -log_Phi;
     }
 }
 

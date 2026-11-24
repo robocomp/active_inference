@@ -228,8 +228,9 @@ concept HasOfferContext =
 // A model with M::kWallLatents = 1 carries ONE more ρ = 1 latent δ: the error of the staged wall line along its inward normal n
 // (the true wall is the staged line + δ·n), marginal σ_wall² from the room, born when the instance first associates with a wall
 // edge. Moving the wall by δ·n equals moving the object by −δ·n relative to it, so the model's wall PRIORS (flush / stand-off,
-// parallel, the one-sided no-cross) read it through the selector column (−n_x, −n_y, 0, …) on (cx, cy): they are evaluated at
-// θ + B_w b. They enter ONCE, into the joint prior, at that first association (re-linearised by that update's GN, then frozen
+// parallel; NO separate no-cross probit: a stand-off prior N(gap − δ; μ ≥ 0, σ) already says "at or off the wall", and a
+// probit on top counted σ_wall twice — coordinator ruling 11-24) read it through the selector column (−n_x, −n_y, 0, …) on
+// (cx, cy): they are evaluated at θ + B_w b. They enter ONCE, into the joint prior, at that first association (re-linearised by that update's GN, then frozen
 // in P); afterwards only data (points, rays) update θ and δ. A fixed relation re-entered as a measurement on every update is
 // what pinned the parked toilet to the millimetre (engine1 diagnosis item 2).
 // Identity: one latent per (room, polygon edge) as room_concept publishes the outline (`keyed`); a small move of the derived

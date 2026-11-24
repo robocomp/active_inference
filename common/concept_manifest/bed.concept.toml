@@ -75,6 +75,9 @@ class_prior = 0.90                  # P(against a wall): the concept holds it (o
 why  = "the back rests against a room wall — a bed's headboard stands against a wall"
 standoff_m = 0.02                   # F1.4: the headboard's back off the wall
 standoff_std_m = 0.02
+# Persistent path: this stand-off IS the no-cross knowledge ("the back stands at or off the wall"); no separate no-cross term is
+# entered for a class that declares it (coordinator ruling 11-24: a probit on top counted sigma_wall twice). no_cross_precision
+# above is the legacy path's hinge only.
 standoff_source = "uncited convention: a bed pushed against a wall stands off it by the skirting board under it (commonly 10-20 mm) plus a centimetre or so of slack; not measured, no source read. Not from the Webots world."
 
 [prior.alignment]

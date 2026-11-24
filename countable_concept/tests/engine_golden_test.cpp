@@ -20,6 +20,8 @@
 // Re-recorded for plan rev 2 F1.5: the camera channel no longer enters the wall's depth_unobs boost (the fixture stages a wall).
 // Re-recorded for plan rev 2 F1.4: the wall latent (one more latent: P is 46×46) and the wall priors entered once at the first
 // association, not per update (flush/parallel once as before, the no-cross hinge every update → a probit once).
+// Re-recorded again for F1.4 after the ruling of 11-24 (option 1): no no-cross term on the persistent path (the stand-off prior
+// carries it; this fixture declares none, so it gets the old flush form once and no no-cross).
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
