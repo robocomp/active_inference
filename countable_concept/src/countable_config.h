@@ -198,6 +198,8 @@ struct CountableConfig
     // bed). Continuous, no gate. lat feeds R + position common-mode (m per m of range); yaw feeds the yaw
     // common-mode (rad per m), the binding term. Set 0 to disable. Range Z comes from the retina (mask_range).
     float ai2_range_noise_lat_per_m  = 0.02f;  // lateral deprojection std growth (m per m of range)
+    // yaw / size: read only by the flag-off (per-frame Woodbury) path since shared-engine Task 5; the persistent latents'
+    // camera marginal is the constant common-mode stds. lat also feeds the per-point R on both paths.
     float ai2_range_noise_yaw_per_m  = 0.03f;  // yaw common-mode std growth (rad per m of range)
     float ai2_range_noise_size_per_m = 0.08f;  // SIZE (w,h,H) common-mode std growth (m per m of range): a distant
                                                // mask can't reshape/inflate a converged bed (freezes geometry afar)

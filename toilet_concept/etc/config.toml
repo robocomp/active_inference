@@ -187,12 +187,9 @@ AI2AgeNominalDtS = 0.1      # stale-belief aging: mask stream nominal period (s,
 AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of the mask silhouette is on the image border (truncated → biased)
 # Static range weighting (motion-free): common-mode error grows with view distance so a far, vague mask
 # can confirm existence but NOT resolve pose/orientation (can't rotate a converged toilet). Continuous, no gate.
-AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range) → feeds R + position common-mode
-AI2RangeNoiseYawPerM = 0.03 # yaw common-mode std growth (rad per m of range) → the binding term vs far-view rotation
-AI2RangeNoiseSizePerM = 0.08 # SIZE (w,h,H) common-mode std growth (m per m of range): the per-frame size info
-                             # SATURATES lower with range, so a distant/vague mask can't reshape or INFLATE a
-                             # converged toilet (freezes geometry afar; also caps the coverage grow-term). Raise
-                             # to freeze harder at range; the sibling of the lat/yaw range terms. 0 = off.
+AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range) → feeds the per-point R (and the flag-off path's position common-mode)
+# AI2RangeNoiseYawPerM / AI2RangeNoiseSizePerM removed (shared-engine Task 5): the persistent path's camera shared error is
+# the constant AI2CommonMode* stds below; the range growth now only lives in the flag-off path, at the loader's defaults.
 AI2GnIters = 4              # Gauss-Newton iterations per frame
 # Per-frame SHARED-ERROR common-mode stds — the information-saturation FLOORS (CLAUDE.md "encode the effect as a
 # continuous covariance"): N correlated points from one frame cannot collapse Σ below these. LOAD-BEARING. They

@@ -1302,18 +1302,21 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         const rc::StageTimer t_mem(timing_ ? &timing_->membership : nullptr);
         membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var, &persistent_label);
     }
-    // The latents' marginals (§7c.2): b_cam = the config floors + range lateral/size + the obliquity yaw cap (today's camera
-    // fill WITHOUT chain and ego-motion); b_L = the config floors. e's marginal is Σ_pose, staged by stage_persistent (§7c.7).
-    // The ego-motion terms are FRESH every frame (ρ = 0): the belief's per-frame latents u_cam / u_L (spec 7c.8 rev 3.3.13).
-    const auto latent_inputs = [&](float obliquity_yaw_var)
+    // The latents' marginals (§7c.2; shared-engine G1, controller ruling for Task 5): b_cam and b_L = the constant metric
+    // common-mode stds squared (AI2CommonMode{Pos,Size,Yaw}Std). The range growth (AI2RangeNoise{Yaw,Size}PerM, and the lat
+    // term on b_cam) and the obliquity yaw term (kObliquityYawGain with its cos clamp) are NOT in them: the mask boundary
+    // error is shape-dominated and neither pixel- nor metre-constant (step 0, docs/superpowers/results/2026-11-24-step0.md),
+    // so no measured sensor row replaces them yet and they are dropped from the persistent path rather than kept as patch.
+    // The pose-chain share is e (marginal Σ_pose, staged by stage_persistent, §7c.7), as before. The ego-motion terms
+    // (MotionCm* · motion_magnitude · periphery, unchanged) are FRESH every frame (ρ = 0): u_cam / u_L (rev 3.3.13).
+    const auto latent_inputs = [&]
     {
         const float p2 = cfg_.ai2_common_mode_pos_std  * cfg_.ai2_common_mode_pos_std;
         const float s2 = cfg_.ai2_common_mode_size_std * cfg_.ai2_common_mode_size_std;
         const float y2 = cfg_.ai2_common_mode_yaw_std  * cfg_.ai2_common_mode_yaw_std;
         LatentInputs li;
-        li.sig2_cam = {p2 + range_lat_var, p2 + range_lat_var, s2 + range_size_var, s2 + range_size_var,
-                       s2 + range_size_var, y2 + range_yaw_var + obliquity_yaw_var};
-        li.sig2_L   = {p2, p2, s2, s2, s2, y2};
+        li.sig2_cam = {p2, p2, s2, s2, s2, y2};
+        li.sig2_L   = li.sig2_cam;
         li.fresh    = {mot_pos_var, mot_pos_var, mot_size_var, mot_size_var, mot_size_var, mot_yaw_var};
         return li;
     };
@@ -1428,7 +1431,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             frame.chain_cov_yaw  = mot_yaw_var;
             frame.chain_cov_size = mot_size_var;
             stage_room(frame);
-            stage_persistent(inst, frame, latent_inputs(0.0f));
+            stage_persistent(inst, frame, latent_inputs());
             {
                 const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
                 if (cfg_.label_dump_enabled and membership) dump_labels(inst, anchor, true);
@@ -1510,6 +1513,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // grazing frame confirms the bed but cannot rotate it — the same continuous-covariance form as the range
         // term, keyed on view angle instead of distance. Validated live 2026-07-11 → always on.
         //
+        // FLAG-OFF (per-frame Woodbury) PATH ONLY since shared-engine Task 5: the persistent path's latents no longer read it
+        // (latent_inputs above). It remains the yaw cap of the legacy chain_cov_yaw below.
+        //
         // THIS IS THE LIVE YAW CAP on the shipped (FootprintResidual == false) branch below — a tuned coefficient,
         // deliberately kept. Its intended derived replacement, CountableBelief::tilt_yaw_common_mode() (a2′), is WIP and
         // NOT wired here: the fitter never calls it, and its self_test drift check is disabled. So on the
@@ -1551,8 +1557,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // Flag on: the persistent latents' inputs (ρ from the odometry paths, marginals, fresh ego-motion) and the camera's
         // membership on the rays (empty ⇒ today's unweighted selection, bit for bit).
         if (cfg_.lidar_measures_on_gated)
-            stage_persistent(inst, frame, latent_inputs(cfg_.footprint_residual
-                                                         ? 0.0f : obliquity_yaw_std * obliquity_yaw_std));
+            stage_persistent(inst, frame, latent_inputs());
         {
             const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
             if (cfg_.label_dump_enabled and membership) dump_labels(inst, frame.points, false);

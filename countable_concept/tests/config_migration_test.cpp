@@ -142,7 +142,10 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
     // keys removed by the class factor (spec 2026-11-14 countable class existence): the plaus_evidence accumulator's
     // clamp, its tanh gain into the existence log-odds, and the shape LLR's alternative footprint (class_log_evidence
     // reads the manifest's class prior and Model.ClassAltStdM instead). Present in the old config, ABSENT in the new.
-    const std::set<std::string> removed = {"Model.PlausClamp", "Model.PlausToExistenceGain", "Model.AltSizeScale"};
+    // Shared-engine Task 5 (sig2_cam = the constant common-mode stds): the range growth on yaw / size is read only by the
+    // flag-off path now, at the loader's defaults, so the class configs drop it.
+    const std::set<std::string> removed = {"Model.PlausClamp", "Model.PlausToExistenceGain", "Model.AltSizeScale",
+                                           "Model.AI2RangeNoiseYawPerM", "Model.AI2RangeNoiseSizePerM"};
     int moved = 0, same = 0, renamed = 0;
     for (const auto& [ok, ov] : old_v)
     {
@@ -152,7 +155,7 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
         produced.insert(nk);
         if (removed.contains(nk))
         {
-            if (new_v.contains(nk)) { std::printf("  %s: %s is still in the config (removed by the class factor)\n", obj.c_str(), nk.c_str()); ++bad; }
+            if (new_v.contains(nk)) { std::printf("  %s: %s is still in the config (removed)\n", obj.c_str(), nk.c_str()); ++bad; }
             continue;
         }
         if (excluded.contains(ok))

@@ -286,9 +286,9 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     out.ai2_range_noise_lat_per_m = getf("Model.AI2RangeNoiseLatPerM", 0.02f,
             "lateral deprojection std growth (m per m of range)");
     out.ai2_range_noise_yaw_per_m = getf("Model.AI2RangeNoiseYawPerM", 0.03f,
-            "yaw common-mode std growth (rad per m of range)");
+            "yaw common-mode std growth (rad per m of range); FLAG-OFF path only (shared-engine Task 5)");
     out.ai2_range_noise_size_per_m = getf("Model.AI2RangeNoiseSizePerM", 0.08f,
-            "SIZE (w,h,H) common-mode std growth (m per m of range): a distant");
+            "SIZE (w,h,H) common-mode std growth (m per m of range); FLAG-OFF path only (shared-engine Task 5)");
     out.ai2_trunc_gate_frac    = getf("Model.AI2TruncGateFrac", 0.10f,
             "mask can't reshape/inflate a converged bed (freezes geometry afar) THRESHOLD (truncation gate): skip the geometric update (predict only)…");
     out.ai2_gn_iters         = geti("Model.AI2GnIters", 4,
