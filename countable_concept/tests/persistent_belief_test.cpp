@@ -189,7 +189,7 @@ static void rho0_regression_zero_pose_cov(bool camera)
     // legitimately live around the converged state, and it enters unsaturated here but saturated in the engine.
     p.wall_no_cross_precision = 0.0f;
     CountableBelief fx = make_belief(0.05f, -0.04f, 0.03f, p);
-    fx.set_prior_added(true, true);
+    fx.set_axis_prior_added(true);
     fx.set_first_update_done(true);   // the recursion (x̄ = the current mean), not the class-mean first update (Task 6c)
     CountableFrame f = camera ? camera_frame() : lidar_frame(two_face_rays());
     set_latents(f, 0.0f, 0.0f);
@@ -244,14 +244,14 @@ static void prior_added_once()
     const bool entered0 = b.last_wall_entered();
     std::printf("  prior_added_once: wall priors entered on the first (LiDAR-only) association: %d\n", int(entered0));
     CHECK(entered0);
-    std::printf("  prior_added_once: after LiDAR-only wall=%d axis=%d  |Id_th| %.3e\n", int(b.wall_prior_added()), int(b.axis_prior_added()), n0);
-    CHECK(not b.wall_prior_added() and not b.axis_prior_added());
+    std::printf("  prior_added_once: after LiDAR-only wall latent=%d axis=%d  |Id_th| %.3e\n", int(b.wall_latent_set()), int(b.axis_prior_added()), n0);
+    CHECK(b.wall_latent_set() and not b.axis_prior_added());
     CHECK(n0 == 0.0f);
     b.update(fn);
     const Mat6 I0 = b.dbg_Id_th();
     std::printf("  prior_added_once: camera, no wall: wall=%d axis=%d  Id_th(1,1) %.3e (flush)  Id_th(5,5) %.3e (axis)  |Id_th| %.3e\n",
-                int(b.wall_prior_added()), int(b.axis_prior_added()), I0(1, 1), I0(5, 5), I0.norm());
-    CHECK(not b.wall_prior_added() and b.axis_prior_added());
+                int(b.wall_latent_set()), int(b.axis_prior_added()), I0(1, 1), I0(5, 5), I0.norm());
+    CHECK(b.axis_prior_added());
     CHECK(I0(5, 5) > 0.0f);
     {   // only the axis term: (5,5) and nothing else
         Mat6 rest = I0; rest(5, 5) = 0.0f;
@@ -262,8 +262,8 @@ static void prior_added_once()
     // F1.4: the wall priors are the wall latent's, entered ONCE in their own channel at the first association — not θ-only.
     const bool entered1 = b.last_wall_entered();
     std::printf("  prior_added_once: camera, wall staged: wall=%d axis=%d  wall priors entered %d  |Id_th| %.3e\n",
-                int(b.wall_prior_added()), int(b.axis_prior_added()), int(entered1), I1.norm());
-    CHECK(b.wall_prior_added() and b.axis_prior_added());
+                int(b.wall_latent_set()), int(b.axis_prior_added()), int(entered1), I1.norm());
+    CHECK(b.wall_latent_set() and b.axis_prior_added());
     CHECK(not entered1);
     CHECK(I1.norm() == 0.0f);
     b.update(fc);
@@ -479,7 +479,7 @@ static void sanitize_reseeds_e()
     CountableFrame f = camera_frame(); set_latents(f, 1.0f); stage(f, two_face_rays());
     f.sigma_pose = full_sigma_pose();
     b.update(f);
-    CHECK(b.wall_prior_added() and b.axis_prior_added());
+    CHECK(b.wall_latent_set() and b.axis_prior_added());
     const ChainLever L0 = b.chain_lever();
     b.joint_covariance_for_test()(0, 0) = std::numeric_limits<double>::quiet_NaN();
     b.sanitize_covariance();
@@ -499,10 +499,10 @@ static void sanitize_reseeds_e()
             if (r != c and not in_e) cross_ok = cross_ok and P(r, c) == 0.0;
         }
     std::printf("  sanitize: thetatheta = P %d ; e = Sigma_pose %d ; latents = marginals %d ; cross 0 %d ; wall/axis added %d/%d ; "
-                "b = 0 %d ; lever kept %d\n", int(th_ok), int(e_ok), int(lat_ok), int(cross_ok), int(b.wall_prior_added()),
+                "b = 0 %d ; lever kept %d\n", int(th_ok), int(e_ok), int(lat_ok), int(cross_ok), int(b.wall_latent_set()),
                 int(b.axis_prior_added()), int(b.latent_mean().isZero(0.0)), int(b.chain_lever().l == L0.l));
     CHECK(th_ok and e_ok and lat_ok and cross_ok);
-    CHECK(not b.wall_prior_added() and not b.axis_prior_added());
+    CHECK(not b.wall_latent_set() and not b.axis_prior_added());
     CHECK(not b.first_update_done());
     CHECK(b.latent_mean().isZero(0.0));
     CHECK(b.chain_lever().l == L0.l and b.chain_lever().set);
@@ -596,12 +596,12 @@ static void chain_once_for_both_3x3(bool with_fresh = false)
     p.depth_unobs_precision = 0.0f;
     p.wall_no_cross_precision = 0.0f;
     CountableBelief b = make_belief(0.05f, -0.04f, 0.03f, p);
-    b.set_prior_added(true, true);
+    b.set_axis_prior_added(true);
     b.set_first_update_done(true);
     // Camera points on all four sides (a two-face view leaves cx + w/2 and cy + h/2 unobserved: a zero-information direction
     // makes the channels' combined covariance, and so the comparison, undefined).
     CountableFrame f = camera_frame(); set_latents(f, 1.0f); stage(f, two_face_rays());
-    f.wall.ok = false;   // F1.4: the wall latent's one-time prior entry (set_prior_added no longer bypasses it) is not this identity
+    f.wall.ok = false;   // F1.4: the wall latent's one-time prior entry (the wall priors are the wall latent's, entered at first association) is not this identity
     for (int i = 0; i < 12; ++i) for (int j = 0; j < 10; ++j)
         f.points.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 12.0f, ty + 0.5f * tw, tH * (j + 0.5f) / 10.0f);
     for (int i = 0; i < 8; ++i) for (int j = 0; j < 10; ++j)

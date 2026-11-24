@@ -25,9 +25,8 @@
 //   marginal with today's rule (rc::persistent_latent_inputs: the measured ZED boundary std, F1.6) from the frame's yaw entry,
 //   so a dump recorded before that change replays with it; dth_live / dP_live then measure the change, not a stream defect.
 //   --neighbour-size-std DIR does the same for the neighbours' size std (F1.7: Δ_w/√12, Δ_h/√12 of the neighbour class's
-//   manifest in DIR). The dump does not record a neighbour's class, so the TOOL infers it from the footprint: a box longer than
-//   1.2 m is a bed, else a nightstand — true of every neighbour in objects_replay1 (room_3: one bed, its nightstands), not
-//   general; the agent reads the class from the node name.
+//   manifest in DIR), the class read from the recorded ForeignBox::cls (the neighbour's node name without its serial, F1 round
+//   6.7). A dump recorded before cls existed carries none: those neighbours are left as recorded and counted (stderr).
 //   --standoff DIR sets the seed's wall stand-off (F1.4) from the manifest of the dumped node's class in DIR
 //   (rc::manifest::wall_standoff), as a dump recorded before the stand-off existed lacks it. --permanence DIR does the same for
 //   the class permanence prior (F1 round 6; predict_period_s then keeps its default 0.1 s, the configs' AI2AgeNominalDtS).
@@ -84,6 +83,7 @@ int main(int argc, char** argv)
     bool allow_defaults = false, sig2_cam_measured = false;
     std::string neighbour_manifests, standoff_manifests, permanence_manifests;
     bool seed_h_rule = false;
+    long neighbours_without_class = 0;
     for (int i = 2; i < argc; ++i)
     {
         const std::string_view k = argv[i];
@@ -187,8 +187,8 @@ int main(int argc, char** argv)
             if (not neighbour_manifests.empty())
                 for (auto& nb : f.foreign_boxes)
                 {
-                    const std::string cls = std::max(nb.w, nb.h) > 1.2f ? "bed" : "nightstand";
-                    if (const auto sd = rc::neighbour_size_std(neighbour_manifests + "/" + cls + ".concept.toml"))
+                    if (nb.cls.empty()) { ++neighbours_without_class; continue; }
+                    if (const auto sd = rc::neighbour_size_std(neighbour_manifests + "/" + nb.cls + ".concept.toml"))
                     { nb.std(3) = (*sd)[0]; nb.std(4) = (*sd)[1]; }
                 }
         },
@@ -235,6 +235,9 @@ int main(int argc, char** argv)
                      sd_max[2], sd_max[3], sd_max[4], sd_max[5]);
         std::fprintf(stderr, "replay: gn steps %ld\n", gn_total);
     }
+    if (neighbours_without_class > 0)
+        std::fprintf(stderr, "replay: %ld recorded neighbours carry no class (a dump older than ForeignBox::cls): their size std "
+                     "left as recorded\n", neighbours_without_class);
     const bool defaults = not reader.diag().missing.empty() or not reader.diag().bad.empty();
     if (defaults and not allow_defaults)
         std::fprintf(stderr, "replay: FAIL — fields ran at their defaults (missing/bad above); pass --allow-defaults if intended\n");

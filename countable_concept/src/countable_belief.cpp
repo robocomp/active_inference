@@ -985,7 +985,6 @@ void CountableBelief::sanitize_joint()
 {
     CountableEngineModel m = model();
     if (not engine_.sanitize(m)) return;
-    wall_prior_added_ = false;
     axis_prior_added_ = false;
     omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();
     size_lik_ = {};
@@ -1106,7 +1105,6 @@ float CountableBelief::update_persistent_cycle(const CountableFrame& frame)
     prior_mean_ = before;                                              // the engine's θ predict, as predict_theta_joint
     if (fl.camera_measured and not frame.lidar_only)                   // each relational anchor has entered, once
     {
-        if (frame.wall.ok)      wall_prior_added_ = true;
         if (frame.room_axis_ok) axis_prior_added_ = true;
     }
     sanitize_covariance();

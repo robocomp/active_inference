@@ -643,13 +643,13 @@ public:
     Eigen::Vector2f published_chain_var(float chain_xx, float chain_yy) const
     { return params_.persistent ? Eigen::Vector2f::Zero() : Eigen::Vector2f(chain_xx, chain_yy); }
     const Eigen::Matrix3d& last_sigma_pose()  const { return engine_.last_sigma_pose(); }
-    // The relational class anchors, ONE FLAG PER ANCHOR (ruling T6-1): wall flush/parallel and room axis each enter once, on
-    // the first admissible camera update whose frame stages their context (f.wall.ok / f.room_axis_ok); the flag is set only
-    // then, so an object first seen without a wall still gets the wall prior when the wall becomes known. No recall path
-    // stores them or the latents: an LTOM recall cold-starts the belief in run_inference's lazy init, so the anchors
-    // re-enter once and every latent is a new source (the first look after a recall is new). sanitize_covariance clears
-    // both flags (the prior re-enters once). set_prior_added is a test hook.
-    bool wall_prior_added() const { return wall_prior_added_; }
+    // The relational class anchors (ruling T6-1): the room axis enters once, on the first admissible camera update whose frame
+    // stages it (axis_prior_added_). The WALL priors are the wall latent's (F1.4, F1 round 6.3): the engine enters them once per
+    // physical wall at the instance's first association with it — no countable flag (the old wall_prior_added_ was dead on this
+    // path and is gone). No recall path stores them or the latents: an LTOM recall cold-starts the belief in run_inference's lazy
+    // init, so the anchors re-enter once and every latent is a new source. sanitize_covariance clears both (the priors re-enter
+    // once). set_axis_prior_added is a test hook.
+    bool wall_latent_set() const { return engine_.wall_latent_set(); }   // the wall latent exists (its priors entered, F1.4)
     // F1.4: the wall latent's current mean for a staged wall (0 when the instance has none for that edge): the offset the
     // camera mixture and the beam's foreign density shift that wall by (mean-field, option A).
     float wall_offset_mean(const WallRef& w) const;
@@ -661,7 +661,7 @@ public:
     float seed_height(const std::vector<Eigen::Vector3f>& pts, float sigma_top) const;
     bool  last_wall_entered() const { return engine_.last_wall_entered(); }
     bool axis_prior_added() const { return axis_prior_added_; }
-    void set_prior_added(bool wall, bool axis) { wall_prior_added_ = wall; axis_prior_added_ = axis; }
+    void set_axis_prior_added(bool axis) { axis_prior_added_ = axis; }
     // The CLASS prior at the class mean, counted once (spec 7c.1 amendment 11-17): the instance's FIRST measured update (camera
     // or LiDAR-only, whichever comes first) has prior mean x̄_θ = (seed cx, seed cy, class H, class w, class depth, the room
     // axis' multiple of 90° nearest the seed yaw when f.room_axis_ok else the seed yaw) and P̄_θθ = diag(prior_cov_diag()),
@@ -966,7 +966,6 @@ private:
     // (model-side: the θ-only channel reads them). Sigma_ mirrors P's θθ block in float for every reader of covariance().
     // Neither e nor ℓ is stored by any recall (a pose error is not an object property).
     Engine engine_;
-    bool   wall_prior_added_ = false;   // flush + parallel have entered (T6-1)
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
     bool   first_crossing_for_test_ = false;   // see set_first_crossing_for_test
     mutable bool   beam_unready_logged_ = false;        // "BeamConfig not built by make" printed once per belief

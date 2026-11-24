@@ -46,8 +46,7 @@ static CountableBeliefParams params()
     p.wall_flush_prior = 1.0f;                                   // one face seen ⇒ the flush weight is π_flush: 1
     p.depth_unobs_precision = 0.0f;                              // see the header
     p.room_axis_std = 3.0f * 0.017453293f;
-    p.volatility_infer = false;                                  // Q₀ only: the count above has no process noise to learn
-    p.process_std_m = 1e-4f; p.process_std_yaw = 1e-4f;          // a parked object barely ages between the 10 Hz updates
+    p.volatility_infer = false;                                  // Q = the class q₀, 0 here (no [prior.permanence] set): the count above has no process noise
     p.persistent = true;
     // (generic lambdas so the same file also builds against the code before F1.4, for the before/after numbers)
     [](auto& q) { if constexpr (requires { q.wall_standoff_m; }) { q.wall_standoff_m = 0.03f; q.wall_standoff_std_m = 0.02f; } }(p);

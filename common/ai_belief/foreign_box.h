@@ -25,6 +25,7 @@
 
 #include <cmath>
 #include <limits>
+#include <string>
 
 #include <Eigen/Core>
 
@@ -37,6 +38,7 @@ struct ForeignBox
     float H = 0.0f, w = 0.0f, h = 0.0f, yaw = 0.0f;  // height, extent along local x, along local y; yaw about +z
     Eigen::Matrix<float, 6, 1> std = Eigen::Matrix<float, 6, 1>::Zero();   // published std of (cx, cy, H, w, h, yaw)
     float z0 = 0.0f;                                 // base height, room frame (0 for a floor-standing object)
+    std::string cls;                                 // the neighbour's class (its node name without the _<n> serial), for the record
 };
 
 // Whether a neighbour is a belief the foreign density may use: every std component finite and ≥ 0, not all zero, and a

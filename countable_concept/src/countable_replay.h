@@ -127,7 +127,7 @@ template <class V> void fields(V& v, rc::ai::beam::BeamRays& x)
 }
 
 template <class V> void fields(V& v, rc::ai::beam::ForeignBox& x)
-{ v("c", x.c); v("H", x.H); v("w", x.w); v("h", x.h); v("yaw", x.yaw); v("std", x.std); v("z0", x.z0); }
+{ v("c", x.c); v("H", x.H); v("w", x.w); v("h", x.h); v("yaw", x.yaw); v("std", x.std); v("z0", x.z0); v("cls", x.cls); }
 
 template <class V> void fields(V& v, CountableFrame& x)
 {

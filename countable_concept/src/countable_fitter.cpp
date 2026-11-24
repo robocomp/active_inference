@@ -407,6 +407,7 @@ void CountableFitter::refresh_neighbours()
             b.z0  = t[3 * newest + 2];
             b.yaw = r[3 * newest + 2];
             b.w = w.value(); b.h = d.value(); b.H = H.value();
+            b.cls = rc::node_class(n.name());
             // Size std (F1.7, interim until the published attribute, S1): the neighbour class's layer spread Δ/√12 on w and h,
             // from its manifest (countable_neighbour_size.h); 0 when its class declares none (logged once per class).
             const std::string cls = rc::node_class(n.name());
@@ -1018,8 +1019,11 @@ std::optional<float> CountableFitter::room_axis() const
 //  · width/depth: the CLASS MEANS. The cloud's extent is not the object's: a mask that took in a neighbour
 //    (live14fixA: 2.46 m for a 0.51 m nightstand) seeded a 2.13 m-deep box under the old depth-band rule;
 //  · centre: the cloud's middle along the wall, half the class depth in from it;
-//  · the cloud's extent beyond the class size widens the first update's POSITION covariance instead:
-//    σ² = σ_pos² + (E − L)²/12 per wall axis (an object of length L uniform inside a cloud of length E).
+//  · the cloud's extent widens the first update's POSITION covariance instead (F1.3): along the wall (w̄ − E)²/12 for
+//    either sign (a cloud wider than the class, or one clipped/partial and shorter); across it max(0, E − h̄)²/12 (the
+//    centre across is set by the wall, so only a cloud reaching deeper than the class says the object may stand off);
+//  · H: NOT here — re-derived after the belief is built (CountableBelief::seed_height, F1 round 6.2: the class-prior MAP
+//    with the top of the points the box explains, box-vs-headboard shares at this born pose).
 // Not a gate on the fit: the belief starts here and the data then moves and sizes it.
 std::optional<Eigen::Matrix2f> CountableFitter::birth_on_priors(CountableBeliefState& s0, const std::vector<Eigen::Vector3f>& pts,
                                                                 float z_lo, float z_hi, const std::string& name) const
