@@ -19,8 +19,15 @@
 //       the stop rule's bound on a reported variance (the engine's GN stops within tol_sigma·σ of the fixed point).
 //   (b) One more update at A: the delivered θ-marginal entropy drop ≤ predicted_gain(A) · 1.05.
 //   (c) Ranking (Step 2): seen only from its long face, the box ranks a short face first among its four face standpoints.
-//   (d) LiDAR: with a BeamConfig built by make and an OfferLidar, the look also stages rays; the hits carry m = 1 − ε, and
+//   (d) LiDAR: with a BeamConfig built by make and an OfferLidar, the look also stages rays; the hits carry m ≈ 1 − ε, and
 //       the promise with them is not below the camera-only promise (more channels cannot lose information).
+//   (e) The L channel on its own: a toy that names kHeight (so ρ_L differs on H) is updated 20 times at A with camera and
+//       rays; then, with the camera made uninformative (σ_m = 1 km), the promise at B and at C is checked within 5 % of an
+//       analytic computed here from the engine's P: b_cam and b_L predicted with ρ_cam = rho_camera and
+//       ρ_L = rho_lidar_lateral (rho_lidar_height on H) over the same 10-chord paths (A→X camera, A→X LiDAR origin, g = the
+//       widest ring gap), then one information update through the selectors B_cam = [0 | 𝟙 kCam, kFc, kSc] and
+//       B_L = [0 | 𝟙 kL, kFL, kSL] (e has zero variance here), with the look's camera Λ and the rays' W
+//       (accumulate_beam_rays at θ + b_L). The L-only analytic (camera channel dropped) must agree too.
 //
 // Run: ./offer_return_view_test
 #include <cmath>
@@ -31,6 +38,7 @@
 #include <vector>
 
 #include "toy_model.h"
+#include "ai_belief/beam_ray.h"
 #include "ai_belief/offer_view.h"
 
 static int bad = 0;
@@ -43,6 +51,7 @@ constexpr int N = Engine::N;
 using Mat12 = Eigen::Matrix<double, 2 * N, 2 * N>;
 using MatN = Eigen::Matrix<double, N, N>;
 namespace of = rc::ai::offer;
+struct ToyH : toy::ToyBox { static constexpr int kHeight = 2; };   // (e): names H, so ρ_L's height term applies there
 
 const toy::ToyState kTruth{0.0f, 0.0f, 0.6f, 1.6f, 0.6f, 0.0f};   // long along x (w = 1.6), short along y (h = 0.6)
 constexpr float kStandoff = 2.0f;                                 // from each face (m)
@@ -55,6 +64,22 @@ rc::nbv::Sensor camera()
     s.vfov_rad = 70.0f * std::numbers::pi_v<float> / 180.0f;
     s.height_m = 0.945f;
     return s;
+}
+
+// The test's Helios: Shadow's ring span (ROBOT_GEOMETRY: +54.5..−15.5° in the body), a 0.2° azimuth step, ε 0.05, the floor,
+// and a select box about the toy's footprint with a 0.1 m margin (countable_select_box's form).
+of::OfferLidar test_lidar(const rc::ai::beam::StudentT& st)
+{
+    of::OfferLidar L;
+    L.offset = {0.0f, -0.08f, 1.075f};
+    for (int k = 0; k < 32; ++k) L.ring_elev_rad.push_back((-15.5 + k * 70.0 / 31.0) * std::numbers::pi / 180.0);
+    L.azimuth_step_rad = 0.2 * std::numbers::pi / 180.0;
+    L.eps_px = 0.05;
+    L.room.floor_sigma = 0.005;
+    L.st = st;
+    constexpr float margin = 0.1f;
+    L.box = {0.5f * std::hypot(1.6f, 0.6f) + margin, -margin, 0.6f + margin};
+    return L;
 }
 
 of::Standpoint looking_at_centre(const Eigen::Vector2f& p) { return {p, std::atan2(-p.y(), -p.x())}; }
@@ -195,22 +220,114 @@ int main()
     // ── (d) ──
     {
         m.beam_cfg = rc::ai::beam::BeamConfig::make(*rc::ai::beam::StudentT::make(2500.0, 0.05));
-        of::OfferLidar L;
-        L.offset = {0.0f, -0.08f, 1.075f};                        // the Helios over the camera (the ROBOT_GEOMETRY mount)
-        for (int k = 0; k < 32; ++k) L.ring_elev_rad.push_back((-15.5 + k * 70.0 / 31.0) * std::numbers::pi / 180.0);
-        L.azimuth_step_rad = 0.2 * std::numbers::pi / 180.0;
-        L.eps_px = 0.05;
-        L.room.floor_sigma = 0.005;
-        L.st = m.beam_cfg.st;
+        const of::OfferLidar L = test_lidar(m.beam_cfg.st);
         const of::OfferSensors with_lidar{sensor, no_obstacles, L};
         const auto o = eng.offer_observation(m, B, with_lidar);
         int hits = 0;
-        for (const double mi : o.rays.m) hits += (mi == 1.0 - L.eps_px) ? 1 : 0;
+        for (const double mi : o.rays.m) hits += (mi > 0.5) ? 1 : 0;   // m = ε + (1 − 2ε)q: q = 1 on the object
         const double g_cam = eng.predicted_gain(m, B, cam), g_both = eng.predicted_gain(m, B, with_lidar);
         std::printf("(d) rays %zu (hits %d), measured %d; B camera-only %.4f, camera + LiDAR %.4f nats\n",
                     o.rays.endpoints.size(), hits, int(o.lidar), g_cam, g_both);
         CHECK(o.lidar and hits > 0);
         CHECK(std::isfinite(g_both) and g_both >= g_cam);
+    }
+
+    // ── (e) ──
+    {
+        using EngH = rc::ai::engine::PersistentEngine<ToyH>;
+        constexpr int K = EngH::K;
+        using MatJ = Eigen::Matrix<double, N + K, N + K>;
+        ToyH mh;
+        mh.s = kTruth;
+        mh.prior_mean = m.prior_mean;
+        mh.Sigma = mh.prior_diag.asDiagonal();
+        mh.sigma_m = 0.05f;
+        mh.beam_cfg = rc::ai::beam::BeamConfig::make(*rc::ai::beam::StudentT::make(2500.0, 0.05));
+        const of::OfferLidar L = test_lidar(mh.beam_cfg.st);
+        const of::OfferSensors sns{sensor, no_obstacles, L};
+        EngH e;
+        for (int t = 0; t < 20; ++t)
+        {
+            const auto o = e.offer_observation(mh, A, sns);
+            toy::ToyFrame f = toy::make_frame(o.points, o.rays);
+            f.R.resize(o.points.size());
+            for (std::size_t k = 0; k < o.points.size(); ++k) f.R[k] = o.R / o.weight[k];
+            auto fl = latents_at(A);
+            fl.lidar_measured = true;
+            e.update(mh, f, fl);
+        }
+        mh.sigma_m = 1000.0f;                                     // the camera now carries no information worth the name
+        const Eigen::Vector3d oA = of::lidar_origin(A, L);
+        const float g = of::max_ring_gap(L.ring_elev_rad);
+        const auto path10 = [&](const Eigen::Vector2f& from, const Eigen::Vector2f& to)
+        {
+            rc::ai::view::ViewpointPath path;
+            const Eigen::Vector2f step = (to - from) / 10.0f;
+            for (int k = 0; k < 10; ++k) rc::ai::view::accumulate_path(path, from + float(k) * step, step, c);
+            return path;
+        };
+        const auto block_predict = [&](MatJ& P, int off, const std::array<double, N>& rho)
+        {   // b' = ρ b + w, Var w = (1 − ρ²) Σ: rows and columns of the block scale by ρ
+            const int r0 = N + off;
+            for (int j = 0; j < N; ++j) { P.row(r0 + j) *= rho[j]; P.col(r0 + j) *= rho[j]; }
+            for (int j = 0; j < N; ++j) P(r0 + j, r0 + j) += (1.0 - rho[j] * rho[j]) * sig2(j);
+        };
+        const auto selector = [&](std::initializer_list<int> offs)
+        {
+            Eigen::Matrix<double, N, K> B = Eigen::Matrix<double, N, K>::Zero();
+            for (const int off : offs) B.block<N, N>(0, off) = MatN::Identity();
+            return B;
+        };
+        const auto add_channel = [&](MatJ& W, const MatN& I, const Eigen::Matrix<double, N, K>& B)
+        {
+            Eigen::Matrix<double, N, N + K> H;
+            H << MatN::Identity(), B;
+            W += H.transpose() * I * H;
+        };
+        for (const auto& [name, X] : {std::pair{"B", B}, std::pair{"C", C}})
+        {
+            const auto o = e.offer_observation(mh, X, sns);
+            const Eigen::Vector3d oX = of::lidar_origin(X, L);
+            // ρ_cam, ρ_L as the brief's analytic: rho_camera, rho_lidar_lateral, rho_lidar_height
+            const float zX = (X.xy - c).norm();
+            const double rc_ = rc::ai::view::rho_camera(path10(A.xy, X.xy), zX, of::extent_across(mh.beam_parts(kTruth), X.xy, c));
+            const auto pL = path10(oA.head<2>().cast<float>(), oX.head<2>().cast<float>());
+            const float zl = (oX.head<2>().cast<float>() - c).norm();
+            const double rl = rc::ai::view::rho_lidar_lateral(pL, g);
+            const double rh = rc::ai::view::rho_lidar_height(pL, zl, float(std::atan2(kTruth.H - oX.z(), double(zl))), g);
+            std::array<double, N> rho_cam{}, rho_L{};
+            rho_cam.fill(rc_);
+            rho_L.fill(rl);
+            rho_L[2] = rh;
+            MatJ P = e.P();
+            const double before = half_logdet(P.topLeftCorner<N, N>());
+            block_predict(P, EngH::kCam, rho_cam);
+            block_predict(P, EngH::kL, rho_L);
+            // information: the look's camera Λ (weights, R) and the rays' W at θ + b_L
+            const MatN Lc = info_of(mh, {o.points, o.weight, o.R, {}, false});
+            Eigen::Matrix<double, N, 1> th = mh.s.vec().cast<double>();
+            const toy::ToyState sL = toy::ToyState::from_vec((th + e.latent_mean().segment<N>(EngH::kL)).cast<float>());
+            MatN WL = MatN::Zero();
+            Eigen::Matrix<double, N, 1> gL = Eigen::Matrix<double, N, 1>::Zero();
+            rc::ai::beam::accumulate_beam_rays<N>(mh.beam_parts(sL), o.rays, mh.beam_cfg, WL, gL, nullptr);
+            const auto drop = [&](bool with_camera)
+            {
+                MatJ W = MatJ::Zero();
+                if (with_camera) add_channel(W, Lc, selector({EngH::kCam, EngH::kFc, EngH::kSc}));
+                add_channel(W, WL, selector({EngH::kL, EngH::kFL, EngH::kSL}));
+                const MatJ WP = W * P;
+                const MatJ Pa = P - P * (MatJ::Identity() + WP).partialPivLu().solve(WP);
+                return before - half_logdet(Pa.topLeftCorner<N, N>());
+            };
+            const double pred = e.predicted_gain(mh, X, sns), an = drop(true), an_L = drop(false);
+            const double cam_only = e.predicted_gain(mh, X, cam);
+            std::printf("(e) %s: ρ_cam %.4g, ρ_L lateral %.4g, height %.4g; rays %zu; predicted %.6g, analytic %.6g (ratio %.6f),"
+                        " L-only analytic %.6g (ratio %.6f); camera-only promise %.3g\n",
+                        name, rc_, rl, rh, o.rays.endpoints.size(), pred, an, pred / an, an_L, pred / an_L, cam_only);
+            CHECK(o.lidar);
+            CHECK(std::abs(pred / an - 1.0) <= tol - 1.0);
+            CHECK(std::abs(pred / an_L - 1.0) <= tol - 1.0);
+        }
     }
 
     std::printf(bad ? "FAILED\n" : "OK\n");

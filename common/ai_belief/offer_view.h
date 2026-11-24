@@ -18,13 +18,17 @@
  * for a share dΩ/Ω of the look's points and a grazing face gets few. kGrid is the quadrature resolution, not a decision
  * threshold.
  *
- * The LiDAR half (synth_rays): the rays the Helios would stage on the object from the standpoint — its origin at the
- * standpoint (OfferLidar::offset, measured by the caller from the RT chain the way the fitter stages its sweep origin), its
- * own ring elevations (room frame) and azimuth step (the advertised SensorModel), cast against the beam parts. A ray that
- * enters a part carries the camera's label m = 1 − ε_px (the camera sees that surface, q = 1); one that passes through the
- * parts' vertical span without entering them carries m = ε_px (q = 0) and ends at the room's first known surface or ρ_max;
- * a ray an obstacle hides before the object is not staged. p_f per ray from the room's known surfaces (beam_room.h), as
- * the fitter stages it.
+ * The LiDAR half (synth_rays): the sweep the Helios would return from the standpoint, staged by the LIVE staging function.
+ *   - the sweep: the sensor's origin at the standpoint (OfferLidar::offset, measured by the caller from the RT chain), its own
+ *     ring elevations (room frame) and azimuth step (the advertised SensorModel); each ray returns at its first surface — a
+ *     beam part, an obstacle (viewpoint_score.h's footprint/height test), or the room's known surfaces (floor, walls,
+ *     neighbours) within the sensor's range; a ray that meets none returns nothing, as on the device;
+ *   - the label: the camera's, as the live persistent label is formed — nullopt where the return does not project into the
+ *     camera's field of view from the standpoint, else q = 1 on the object (the return is the part's) and 0 elsewhere,
+ *     m = ε_px + (1 − 2ε_px)q;
+ *   - the staging: rc::lidar_select::select_rays_beam itself, with the agent's select box (OfferLidar::box: the fitter's
+ *     countable_select_box) about the look's mask centroid, then p_f from the room's known surfaces (beam_room.h) — so the
+ *     promise stages the same free-space rays a live look stages.
  *
  * Not modelled: one beam part hiding another part of the same model (the countable's headboard behind its box). Parts are
  * tested against the obstacles only.
@@ -46,6 +50,7 @@
 
 #include "beam_ray.h"                      // rc::ai::beam::BeamPart, BeamRays
 #include "beam_room.h"                     // rc::ai::beam::RoomSurfaces, stage_room_foreign_density
+#include "../lidar_select/lidar_select.h"  // rc::lidar_select::Box, select_rays_beam (the live staging)
 #include "../nbv/viewpoint_score.h"        // rc::nbv::Sensor, Obstacle, the occlusion test
 
 namespace rc::ai::offer
@@ -67,6 +72,8 @@ struct OfferLidar
     std::vector<double> ring_elev_rad;                  // each ring's elevation, room frame
     double azimuth_step_rad = 0.0;                      // the sensor's azimuth step
     double rho_max = 6.0, sigma_s = 0.01;               // the staging's ρ_max and the model σ (BeamRays fields)
+    double range_max = 6.0;                             // the sensor's own range: a surface beyond it returns nothing
+    rc::lidar_select::Box box;                          // the agent's select box (radius about the mask centroid, z band)
     double eps_px = 0.0;                                // the camera mask's pixel-error rate (the persistent label's ε)
     rc::ai::beam::RoomSurfaces room;                    // the known surfaces of p_f (floor, walls, neighbours)
     rc::ai::beam::StudentT st;                          // the beam density (p_f's)
@@ -211,62 +218,67 @@ inline double part_entry(const rc::ai::beam::BeamPart& P, const Eigen::Vector3d&
     return a;
 }
 
-// The ray-set the LiDAR would stage on the parts from `origin` (see the file header). Every ring × every azimuth on the
-// sensor's step grid whose bearing lies within the parts' circumscribed circle seen from the origin.
+// Entry t ∈ (0, t_far] of o + t·u into an obstacle (viewpoint_score.h's test decides; its footprint entry gives t); +inf
+// when it does not block.
+inline double obstacle_entry(const rc::nbv::Obstacle& ob, const Eigen::Vector3d& o, const Eigen::Vector3d& u, double t_far)
+{
+    const Eigen::Vector3f a = o.cast<float>(), b = (o + t_far * u).cast<float>();
+    if (not rc::nbv::detail::segment_blocked_3d(a, b, ob)) return std::numeric_limits<double>::infinity();
+    float t0 = 0.0f, t1 = 0.0f;
+    rc::nbv::detail::segment_box_interval(a.head<2>(), b.head<2>(), ob, t0, t1);
+    return std::max(0.0, double(t0)) * t_far;
+}
+
+// The ray-set a live look from the standpoint would stage (see the file header). `cam`/`heading`: the camera at the
+// standpoint (for the label); `centroid_xy`: the look's mask centroid (the select box's anchor, as live).
 inline rc::ai::beam::BeamRays synth_rays(std::span<const rc::ai::beam::BeamPart> parts, const Eigen::Vector3d& origin,
-                                         const OfferLidar& L, std::span<const rc::nbv::Obstacle> obstacles)
+                                         const OfferLidar& L, const OfferSensors& sn, const Eigen::Vector3f& cam,
+                                         float heading, const Eigen::Vector2f& centroid_xy)
 {
     rc::ai::beam::BeamRays out;
     out.origin = origin;
     out.rho_max = L.rho_max;
     out.sigma_s = L.sigma_s;
-    if (parts.empty() or L.ring_elev_rad.empty() or not (L.azimuth_step_rad > 0.0)) return out;
-    // the parts' footprint circle and vertical span (the select box, without the fitter's margin)
-    Eigen::Vector2d c = Eigen::Vector2d::Zero();
-    for (const auto& P : parts) c += P.c.head<2>();
-    c /= double(parts.size());
-    double r = 0.0, z_lo = std::numeric_limits<double>::infinity(), z_hi = -z_lo;
-    for (const auto& P : parts)
+    if (L.ring_elev_rad.empty() or not (L.azimuth_step_rad > 0.0)) return out;
+    // azimuths over the select cylinder's angular span from the origin (the whole circle from inside it)
+    const Eigen::Vector2d to_c = centroid_xy.cast<double>() - origin.head<2>();
+    const double dist = to_c.norm(), r = double(L.box.radius_xy);
+    const double bearing = std::atan2(to_c.y(), to_c.x());
+    const double half = dist > r ? std::asin(r / dist) : std::numbers::pi;
+    std::vector<Eigen::Vector3f> sweep;
+    std::vector<char> on_object;
+    for (long k = long(std::ceil((bearing - half) / L.azimuth_step_rad)); double(k) * L.azimuth_step_rad <= bearing + half; ++k)
     {
-        r = std::max(r, (P.c.head<2>() - c).norm() + P.half.head<2>().norm());
-        z_lo = std::min(z_lo, P.c.z() - P.half.z()); z_hi = std::max(z_hi, P.c.z() + P.half.z());
-    }
-    const Eigen::Vector2d to_c = c - origin.head<2>();
-    const double dist = to_c.norm();
-    if (dist <= r) return out;                                         // degenerate geometry: the sensor inside the circle
-    const double bearing = std::atan2(to_c.y(), to_c.x()), half = std::asin(r / dist);
-    const double step = L.azimuth_step_rad;
-    const bool z_aware = std::ranges::any_of(obstacles, [](const rc::nbv::Obstacle& o) { return o.has_height(); });
-    for (long k = long(std::ceil((bearing - half) / step)); double(k) * step <= bearing + half; ++k)
-    {
-        const double az = double(k) * step;
+        const double az = double(k) * L.azimuth_step_rad;
         for (const double el : L.ring_elev_rad)
         {
             const Eigen::Vector3d u(std::cos(el) * std::cos(az), std::cos(el) * std::sin(az), std::sin(el));
-            double t = std::numeric_limits<double>::infinity();
-            for (const auto& P : parts) t = std::min(t, part_entry(P, origin, u));
-            if (std::isfinite(t) and t <= L.rho_max)
-            {
-                const Eigen::Vector3d hit = origin + t * u;
-                bool blocked = false;
-                for (const auto& o : obstacles)
-                    if (z_aware ? rc::nbv::detail::segment_blocked_3d(origin.cast<float>(), hit.cast<float>(), o)
-                                : rc::nbv::detail::segment_hits_box(origin.head<2>().cast<float>(), hit.head<2>().cast<float>(), o))
-                    { blocked = true; break; }
-                if (blocked) continue;                                 // hidden: it would measure the occluder, not the object
-                out.endpoints.push_back(hit);
-                out.m.push_back(1.0 - L.eps_px);
-                out.q_sum += 1.0;
-                continue;
-            }
-            // a miss: staged only while it crosses the parts' vertical span at their distance (the select box's z band)
-            const double zc = origin.z() + std::tan(el) * dist;
-            if (zc < z_lo or zc > z_hi) continue;
-            const double t_room = rc::ai::beam::first_room_crossing(origin, u, L.rho_max, L.room).t;
-            out.endpoints.push_back(origin + std::min(t_room, L.rho_max) * u);
-            out.m.push_back(L.eps_px);
+            double t_part = std::numeric_limits<double>::infinity();
+            for (const auto& P : parts) t_part = std::min(t_part, part_entry(P, origin, u));
+            double t = std::min(t_part, rc::ai::beam::first_room_crossing(origin, u, L.range_max, L.room).t);
+            for (const auto& ob : sn.obstacles) t = std::min(t, obstacle_entry(ob, origin, u, std::min(t, L.range_max)));
+            if (not (t <= L.range_max)) continue;                         // nothing within the sensor's range: no return
+            sweep.push_back((origin + t * u).cast<float>());
+            on_object.push_back(t == t_part ? 1 : 0);
         }
     }
+    // the camera's label: nullopt outside its field of view from the standpoint (visible_surface's frustum test)
+    const float half_h = 0.5f * std::clamp(sn.sensor.hfov_rad, 0.1f, 3.0f), half_v = 0.5f * std::clamp(sn.sensor.vfov_rad, 0.1f, 3.0f);
+    const auto label = [&](const Eigen::Vector3f& p) -> std::optional<std::pair<double, float>>
+    {
+        const Eigen::Vector3f rel = p - cam;
+        const float range = rel.head<2>().norm();
+        if (range < 1e-3f) return std::nullopt;                           // degenerate geometry: over the camera
+        if (std::abs(std::remainder(std::atan2(rel.y(), rel.x()) - heading, 2.0f * std::numbers::pi_v<float>)) > half_h)
+            return std::nullopt;
+        if (sn.sensor.has_vertical() and std::abs(std::atan2(rel.z(), range)) > half_v) return std::nullopt;
+        // select_rays_beam calls label(sweep[i]): the index is the element's position in `sweep`
+        const float q = on_object[std::size_t(&p - sweep.data())] ? 1.0f : 0.0f;
+        return std::pair<double, float>{L.eps_px + (1.0 - 2.0 * L.eps_px) * double(q), q};
+    };
+    rc::lidar_select::select_rays_beam(sweep, origin.cast<float>(), centroid_xy, L.box, rc::lidar_select::Weights{}, L.rho_max,
+                                       label, out);
+    out.sigma_s = L.sigma_s;                                              // as stage_beam_cycle: the model σ is the caller's
     rc::ai::beam::stage_room_foreign_density(out, L.room, L.st);
     return out;
 }

@@ -192,6 +192,29 @@ concept PersistentModel =
         m.set_covariance(S);
     };
 
+// Optional (G5): the context a look's extra terms read, kept per update instead of a copy of the whole frame.
+//   typename M::OfferContext                    what the camera-extra and θ-only terms read from a frame besides its points;
+//   offer_context(f) -> OfferContext            taken from each measured frame;
+//   offer_frame(ctx) -> Frame                   a frame carrying only that context (built once per planning cycle);
+//   offer_look(Frame&, points, R)               put one look's points (R per point) into it, with whatever the model derives
+//                                               from them (countable: lidar_only = no points).
+// Absent ⇒ the offer has no extra terms.
+template <class M>
+concept HasOfferContext =
+    requires { typename M::OfferContext; }
+    and requires(const M& cm, const typename M::Frame& f, typename M::Frame& g, const typename M::OfferContext& c,
+                 std::span<const Eigen::Vector3f> p, std::span<const float> r) {
+        { cm.offer_context(f) } -> std::same_as<typename M::OfferContext>;
+        { cm.offer_frame(c) } -> std::same_as<typename M::Frame>;
+        cm.offer_look(g, p, r);
+    };
+namespace detail
+{
+struct NoOfferContext {};
+template <class M, bool = HasOfferContext<M>> struct OfferContextOf { using type = NoOfferContext; };
+template <class M> struct OfferContextOf<M, true> { using type = typename M::OfferContext; };
+}  // namespace detail
+
 template <PersistentModel M>
 class PersistentEngine
 {
@@ -726,12 +749,8 @@ public:
             last_cam_n_ = f.points.size();
         }
         if (lidar) last_lidar_origin_ = m.beam_rays(f).origin;
-        if constexpr (requires(Frame& g) { g.points.clear(); g.R.clear(); })
-        {   // the frame's context (wall, room axis, top, …) for the offer's extra terms; its points are the offer's own
-            last_ctx_ = f;
-            last_ctx_->points.clear();
-            last_ctx_->R.clear();
-        }
+        if constexpr (HasOfferContext<M>)
+            last_ctx_ = m.offer_context(f);                            // the offer's extra terms' context (G5), not the frame
         offer_cache_.valid = false;                                    // Ω at the last camera position is recomputed once
         if (lidar)
         {   // the beam log (spec 7c.8 a0 + stated limit 1), at the returned θ and what the rays measure there (θ + B_L b)
@@ -806,7 +825,15 @@ public:
         }
         if (sn.lidar.has_value())
         {
-            o.rays = of::synth_rays(parts, of::lidar_origin(s, *sn.lidar), *sn.lidar, sn.obstacles);
+            // the select box's anchor: the look's mask centroid (points spread by solid angle), as live; θ's centre without one
+            Eigen::Vector2f centroid(m.state().vec()(0), m.state().vec()(1));
+            if (not v.points.empty() and v.solid_angle > 0.0)
+            {
+                Eigen::Vector2d acc = Eigen::Vector2d::Zero();
+                for (std::size_t k = 0; k < v.points.size(); ++k) acc += v.d_omega[k] * v.points[k].head<2>().template cast<double>();
+                centroid = (acc / v.solid_angle).template cast<float>();
+            }
+            o.rays = of::synth_rays(parts, of::lidar_origin(s, *sn.lidar), *sn.lidar, sn, cam3, s.yaw, centroid);
             o.lidar = rc::ai::beam::beam_readiness(o.rays, m.beam_config()) == rc::ai::beam::Readiness::kMeasured;
         }
         return o;
@@ -906,15 +933,16 @@ public:
         const State s_th  = State::from_vec(th);
         const State s_cam = State::from_vec((th.template cast<double>() + B_cam * b).template cast<float>());
         const State s_L   = State::from_vec((th.template cast<double>() + B_L * b).template cast<float>());
-        // the look's frame for the model's extra terms: the last context with the look's points (R = R/weight per point)
-        std::optional<Frame> ctx;
-        if constexpr (requires(Frame& g) { g.points.clear(); g.R.clear(); })
+        // the look's frame for the model's extra terms: the cycle's context frame with this look's points in it (R/weight each)
+        Frame* ctx = nullptr;
+        if constexpr (HasOfferContext<M>)
             if (last_ctx_.has_value())
             {
-                ctx = *last_ctx_;
-                ctx->points.assign(obs.points.begin(), obs.points.end());
-                ctx->R.resize(obs.points.size());
-                for (std::size_t k = 0; k < obs.points.size(); ++k) ctx->R[k] = obs.R / obs.weight[k];
+                if (not offer_cache_.frame.has_value()) offer_cache_.frame.emplace(m.offer_frame(*last_ctx_));
+                offer_cache_.R.resize(obs.points.size());
+                for (std::size_t k = 0; k < obs.points.size(); ++k) offer_cache_.R[k] = obs.R / obs.weight[k];
+                m.offer_look(*offer_cache_.frame, obs.points, offer_cache_.R);
+                ctx = &*offer_cache_.frame;
             }
         std::vector<pu::Channel<N, K>> chans;
         if (camera)
@@ -922,7 +950,7 @@ public:
             MatNf Id = MatNf::Zero();
             VecNf bd = VecNf::Zero();
             accumulate_offer_points(m, s_cam, obs.points, obs.weight, obs.R, Id);
-            if (ctx.has_value()) camera_extra(m, s_cam, *ctx, Id, bd, nullptr);
+            if (ctx != nullptr) camera_extra(m, s_cam, *ctx, Id, bd, nullptr);
             pu::Channel<N, K> ch;
             ch.info = pu::marginalise_fresh<N>(Id, VecNf::Zero(), MatNf::Zero());
             ch.B = B_cam;
@@ -932,16 +960,15 @@ public:
         {
             Eigen::Matrix<double, N, N> W = Eigen::Matrix<double, N, N>::Zero();
             Eigen::Matrix<double, N, 1> g = Eigen::Matrix<double, N, 1>::Zero();
-            double E = 0.0;
             const std::vector<rc::ai::beam::BeamPart> parts_L = m.beam_parts(s_L);
-            rc::ai::beam::accumulate_beam_rays<N>(parts_L, obs.rays, m.beam_config(), W, g, &E);
+            rc::ai::beam::accumulate_beam_rays<N>(parts_L, obs.rays, m.beam_config(), W, g, nullptr);   // information only
             pu::Channel<N, K> ch;
             ch.info = pu::marginalise_fresh<N>(MatNf(W.template cast<float>()), VecNf::Zero(), MatNf::Zero());
             ch.B = B_L;
             chans.push_back(ch);
         }
         pu::FreshInfo<N> theta_only;
-        if (ctx.has_value())
+        if (ctx != nullptr)
         {
             MatNf Id_th = MatNf::Zero();
             VecNf bd_th = VecNf::Zero();
@@ -996,6 +1023,7 @@ private:
             offer_cache_.parts = m.beam_parts(m.state());
             offer_cache_.key = key;
             offer_cache_.omega_last.reset();
+            offer_cache_.frame.reset();                                 // the context frame is rebuilt from the new update's context
             offer_cache_.valid = true;
         }
         return offer_cache_.parts;
@@ -1222,13 +1250,15 @@ private:
     std::array<float, N> last_sig2_cam_{};            // the latents' marginals at the last measured update
     std::array<float, N> last_sig2_L_{};
     std::optional<Eigen::Vector3d> last_lidar_origin_;   // the LiDAR origin at the last LiDAR update
-    std::optional<Frame> last_ctx_;                   // the last measured frame without its points (the extra terms' context)
+    std::optional<typename detail::OfferContextOf<M>::type> last_ctx_;   // the extra terms' context at the last measured update
     struct OfferCache
     {
         bool valid = false;
         VecNf key = VecNf::Zero();
         std::vector<rc::ai::beam::BeamPart> parts;
         std::optional<double> omega_last;
+        std::optional<Frame> frame;                   // the context frame of this cycle's looks (offer_frame), points reassigned
+        std::vector<float> R;
     };
     mutable OfferCache offer_cache_;                  // offer_parts / Ω_last, per state and per update
 };

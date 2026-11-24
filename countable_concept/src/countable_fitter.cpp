@@ -186,6 +186,7 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
                     helios_ring_gap_rad_ = *g;
                     helios_ring_elev_dev_deg_ = sm->ring_elev_deg;                    // the offer's ray pattern (G5)
                     if (sm->azimuth_step_deg.has_value()) helios_az_step_rad_ = *sm->azimuth_step_deg * float(M_PI / 180.0);
+                    if (sm->range_max_m.has_value()) helios_range_max_m_ = *sm->range_max_m;
                     std::print("[lidar-measures] Helios SensorModel: max ring gap {:.4f} rad\n", *g);
                 }
             // The beam density was built with kHeliosRangeSigmaM at start (spec 7c.8); the advertised value is logged beside it.
@@ -1997,7 +1998,7 @@ void CountableFitter::log_delivered(const CountableInstance& inst)
 
 std::optional<rc::ai::offer::OfferLidar> CountableFitter::offer_lidar(const CountableInstance& inst) const
 {
-    if (not cfg_.lidar_measures_on_gated or not have_helios_ or not have_pose_now_ or not G_ or not inner_eigen_
+    if (not cfg_.lidar_measures_on_gated or not have_pose_now_ or not G_ or not inner_eigen_
         or helios_ring_elev_dev_deg_.empty() or not (helios_az_step_rad_ > 0.0f))
         return std::nullopt;
     auto L = lidar_channel_.offer_lidar_base(neighbours_of(inst.node_id));
@@ -2012,10 +2013,13 @@ std::optional<rc::ai::offer::OfferLidar> CountableFitter::offer_lidar(const Coun
         L->ring_elev_rad.push_back(std::asin(std::clamp(r22 * std::sin(double(e) * M_PI / 180.0), -1.0, 1.0)));
     L->azimuth_step_rad = helios_az_step_rad_;
     L->eps_px = cfg_.mask_pixel_error_rate;
-    // the Helios origin relative to the camera, in the heading frame (x right, y forward; robot forward = R(yaw)·(0, 1))
+    if (helios_range_max_m_ > 0.0f) L->range_max = helios_range_max_m_;
+    // the Helios origin relative to the camera, in the heading frame (x right, y forward; robot forward = R(yaw)·(0, 1)), from
+    // THIS cycle's room←helios translation and room_T_zed (not the last staged sweep's origin, which may be cycles old)
+    const Eigen::Vector3f h = rth->translation().cast<float>();
     const Eigen::Vector2f fwd(-std::sin(robot_yaw_now_), std::cos(robot_yaw_now_)), right(fwd.y(), -fwd.x());
-    const Eigen::Vector2f d = helios_now_.head<2>() - zed_xy_now_;
-    L->offset = {d.dot(right), d.dot(fwd), helios_now_.z()};
+    const Eigen::Vector2f d = h.head<2>() - zed_xy_now_;
+    L->offset = {d.dot(right), d.dot(fwd), h.z()};
     return L;
 }
 

@@ -194,7 +194,7 @@ public:
     void log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats);
 
     // The LiDAR an offer from this instance puts to work (shared-engine G5), staged as feed_beam stages a sweep: the Helios
-    // origin relative to the camera from this cycle's RT chain (staged sweep origin vs room_T_zed), its rings' room-frame
+    // origin relative to the camera from this cycle's RT chain (room←helios vs room_T_zed), its rings' room-frame
     // elevations (the SensorModel's device-frame table through the room←helios rotation), its azimuth step, ρ_max, the model
     // σ, ε_px, the room's known surfaces with the neighbours, and the beam density. nullopt (⇒ a camera-only offer) on the
     // flag-off path or while any of these is not available yet.
@@ -295,6 +295,7 @@ private:
     float           helios_ring_gap_rad_ = 0.0f;     // max_ring_gap_rad of the Helios SensorModel; ≤ 0 ⇒ absent ⇒ ρ_L = 1
     std::vector<float> helios_ring_elev_dev_deg_;     // its per-ring elevations, DEVICE frame (the offer's ray pattern, G5)
     float           helios_az_step_rad_ = 0.0f;      // its azimuth step; ≤ 0 ⇒ absent ⇒ the offer is camera-only
+    float           helios_range_max_m_ = 0.0f;      // its range; ≤ 0 ⇒ absent ⇒ ρ_max (the staging's)
     void read_odometry_and_pose(const std::optional<Eigen::Matrix4d>& room_T_zed);   // fills the members above
     // Per instance, every run_inference call (stale ones included): integrate the odometry since inst.last_odo_ts into
     // the camera and LiDAR viewpoint paths and into the chain's odometry displacement.

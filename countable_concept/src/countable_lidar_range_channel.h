@@ -64,13 +64,17 @@ public:
                    const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label) const;
     // The beam config's Student-t (for p_f); set once by the fitter from the BeamConfig it built. Unset ⇒ feed_beam stages nothing.
     void set_beam_density(const rc::ai::beam::StudentT& st) { beam_st_ = st; }
-    // The parts of an offer's LiDAR (shared-engine G5) feed_beam would stage with: ρ_max, the model σ, the room's known
-    // surfaces (floor, walls, the neighbours), the beam density. nullopt without a beam density (flag off).
+    // The parts of an offer's LiDAR (shared-engine G5) feed_beam would stage with: the select box (select_box(), the same
+    // countable_select_box), ρ_max, the model σ, the room's known surfaces (floor, walls, the neighbours), the beam density.
+    // nullopt without a beam density (flag off).
     std::optional<rc::ai::offer::OfferLidar> offer_lidar_base(std::vector<rc::ai::beam::ForeignBox> neighbours) const
     {
         if (not beam_st_) return std::nullopt;
         rc::ai::offer::OfferLidar L;
+        const auto b = select_box();
+        L.box = {b.rxy, b.z_lo, b.z_hi};
         L.rho_max = static_cast<double>(rc::ai::LidarRays{}.max_range_m);
+        L.range_max = L.rho_max;                    // the caller replaces it with the sensor's own range when advertised
         L.sigma_s = static_cast<double>(cfg_.model_sigma_m);
         L.room.floor = true;
         L.room.floor_z = 0.0;

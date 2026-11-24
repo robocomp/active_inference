@@ -713,6 +713,26 @@ CountableEngineModel::Vec6 CountableEngineModel::sdf_jacobian(const Eigen::Vecto
 std::array<float, 3> CountableEngineModel::responsibilities(const Eigen::Vector3f& p, const State& s, float R) const
 { return b->responsibilities(p, s, R); }
 int   CountableEngineModel::n_prims() const { return b->n_prims(); }
+CountableEngineModel::OfferContext CountableEngineModel::offer_context(const Frame& f) const
+{
+    return {f.wall, f.room_axis_ok, f.room_axis, f.z_top_obs, f.chain_cov_xx, f.chain_cov_yy, f.chain_cov_yaw, f.chain_cov_size};
+}
+CountableFrame CountableEngineModel::offer_frame(const OfferContext& c) const
+{
+    CountableFrame f;
+    f.wall = c.wall;
+    f.room_axis_ok = c.room_axis_ok;
+    f.room_axis = c.room_axis;
+    f.z_top_obs = c.z_top_obs;
+    f.chain_cov_xx = c.chain_cov_xx; f.chain_cov_yy = c.chain_cov_yy; f.chain_cov_yaw = c.chain_cov_yaw; f.chain_cov_size = c.chain_cov_size;
+    return f;
+}
+void CountableEngineModel::offer_look(Frame& f, std::span<const Eigen::Vector3f> pts, std::span<const float> R) const
+{
+    f.points.assign(pts.begin(), pts.end());
+    f.R.assign(R.begin(), R.end());
+    f.lidar_only = pts.empty();
+}
 float CountableEngineModel::standing_point_variance(float range_m) const
 {
     const auto& P = b->params_;

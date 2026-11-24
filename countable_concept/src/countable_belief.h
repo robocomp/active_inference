@@ -408,6 +408,21 @@ struct CountableEngineModel
     // a STANDING look's per-point R at range d (the offer gain, shared-engine G5): the fitter's R without the ego-motion
     // term — σ_base² + (AI2RangeNoiseLatPerM·d)²; mask_depth_var is 0 for the ZED masks that fit (ricoh slices never fit)
     float standing_point_variance(float range_m) const;
+    // The offer's context (shared-engine G5; PersistentEngine's HasOfferContext): what the camera-extra and θ-only terms read
+    // from a frame besides its points — the wall (flush, no-cross, two_sided_fraction), the room axis, the robust top — and the
+    // frame's common-mode fields, kept with them. offer_frame builds a frame of only these; offer_look puts a look's points
+    // in it, and a look without points is LiDAR-only (lidar_only = points.empty()), as the fitter's frames are.
+    struct OfferContext
+    {
+        WallRef wall;
+        bool  room_axis_ok = false;
+        float room_axis = 0.0f;
+        float z_top_obs = -1.0f;
+        float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f, chain_cov_size = 0.0f;
+    };
+    OfferContext offer_context(const Frame& f) const;
+    Frame offer_frame(const OfferContext& c) const;
+    void  offer_look(Frame& f, std::span<const Eigen::Vector3f> pts, std::span<const float> R) const;
     // the camera channel's non-point terms: (2d) top and the depth_unobs_precision shares (flush boost, footprint boost)
     void accumulate_camera_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
     // the θ-only channel
