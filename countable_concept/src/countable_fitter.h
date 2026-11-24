@@ -187,6 +187,12 @@ public:
     void log_existence_cycle(const CountableInstance& inst)
     { log_ai2_csv(inst, 0, inst.dbg_R, /*gated=*/true, inst.dbg_energy); }
 
+    // The promise/delivery log (spec shared-engine G5; persistent path, Model.LidarMeasuresOnGated, and an AI2CsvPath): one
+    // offers.csv row per published offer — the standpoint and the nats it promises — and one delivered.csv row per accepted
+    // persistent update (log_delivered) — the θ-marginal entropy drop of the published Σ, the same quantity. Both beside the
+    // ai2 log; concept_agents.sh harvest copies them as <class>_offers.csv / <class>_delivered.csv. Classic locale.
+    void log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats);
+
     // YOLO-independent LiDAR range channel: stage this cycle's sweep (room frame) + sensor origin for the
     // range factor. clear_lidar_sweep() each cycle first so a stale sweep never leaks into a frame with no
     // fresh LiDAR. Set/cleared from the compute() main thread by SpecificWorker (fed by ConceptLidarIngestor).
@@ -329,6 +335,9 @@ private:
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
     std::ofstream                  gn_steps_csv_, gn_fd_csv_;   // Model.GnTrace (diagnostic)
     void log_gn_trace(const CountableInstance& inst);
+    std::ofstream                  offers_csv_, delivered_csv_;   // the G5 promise/delivery log (log_offer, log_delivered)
+    void log_delivered(const CountableInstance& inst);
+    bool open_g5_csv(std::ofstream& out, std::string_view name, std::string_view header);
     std::unordered_map<std::string, long> gn_trace_serial_;   // last update written per node
 
     // YOLO-independent LiDAR range channel: owns the staged per-cycle sweep + return selection (feed).

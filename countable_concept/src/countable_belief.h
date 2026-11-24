@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <vector>
 #include <limits>
+#include <optional>
 #include <Eigen/Dense>
 
 #include "countable_class_evidence.h"
@@ -355,6 +356,9 @@ struct CountableFrame
     Eigen::Matrix3d sigma_pose = Eigen::Matrix3d::Zero();
     Eigen::Vector2f chain_dr   = Eigen::Vector2f::Zero();
     Eigen::Vector2f robot_xy   = Eigen::Vector2f::Zero();
+    // The camera's room position (floor plane) at this frame — where the offer gain's ρ path starts (shared-engine G5;
+    // FrameLatents::camera_xy). Absent ⇒ robot_xy.
+    std::optional<Eigen::Vector2f> camera_xy;
     // The latents' marginal variances at THIS frame (σ_now²): b_cam = floors + range + obliquity + moments (no chain, no
     // ego-motion); b_L = the config floors. 0 = a zero-variance latent.
     std::array<float, 6> sig2_cam{};
@@ -555,6 +559,12 @@ public:
     }
     Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
+    // The persistent path's offer gain (shared-engine G5): the θ-marginal entropy drop of a camera look from standpoint `s`
+    // under the engine's own joint update (PersistentEngine::predicted_gain), and what the last update delivered (the same
+    // quantity; NaN after a predict-only update).
+    double predicted_gain(const rc::ai::offer::Standpoint& s, const rc::ai::offer::OfferCamera& cam) const
+    { return engine_.predicted_gain(model(), s, cam); }
+    double last_delivered_nats() const { return engine_.last_delivered_nats(); }
 
     // ── Persistent shared errors (params.persistent; spec lidar-measures §7c.1–7c.2) ─────────────────────────────────
     // The update runs on the shared engine (rc::ai::engine::PersistentEngine, common/ai_belief/persistent_engine.h; shared-engine

@@ -308,6 +308,7 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
     frame.sigma_pose = ps.sigma;
     frame.chain_dr   = inst.chain_dr;
     frame.robot_xy   = ps.ok ? ps.robot_xy : robot_xy_now_;
+    if (have_pose_now_) frame.camera_xy = zed_xy_now_;   // the camera ρ_cam's path is measured from (G5: the offer's start)
     frame.sig2_cam   = li.sig2_cam;
     frame.sig2_L     = li.sig2_L;
     frame.fresh_cam  = li.fresh;
@@ -1423,6 +1424,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         };
         inst.dbg_itr_cam = camera ? itr(inst.ai2_belief.dbg_Id_cam(), f.fresh_cam) : 0.0f;
         inst.dbg_itr_L   = lidar  ? itr(inst.ai2_belief.dbg_Id_L(),   f.fresh_L)   : 0.0f;
+        log_delivered(inst);                       // G5: what this accepted update delivered
     };
 
     // WALL-FLUSH factor: give the interior (picks the BACK face) to the belief and stage the nearest room
@@ -1952,6 +1954,44 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
 }
 
 // Model.GnTrace (diagnostic): the last persistent update's GN steps and finite-difference check, beside the ai2 log.
+// ─── The promise/delivery log (spec shared-engine G5) ─────────────────────────────────────────────────────────────────
+// Wall-clock epoch ms, the clock the ai2 log's pkt_ts and the tour's gt_pose.tsv share (promise_delivery.py joins on it).
+namespace {
+long long wall_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+}  // namespace
+
+bool CountableFitter::open_g5_csv(std::ofstream& out, std::string_view name, std::string_view header)
+{
+    if (out.is_open()) return true;
+    if (cfg_.ai2_csv_path.empty() or not cfg_.lidar_measures_on_gated) return false;
+    const std::filesystem::path p = std::filesystem::path(cfg_.ai2_csv_path).parent_path() / std::string(name);
+    rc::diag::open_rotating(out, p.string());
+    out.imbue(std::locale::classic());             // data file: a point decimal separator whatever the global locale
+    if (not out.is_open()) return false;
+    out << header << '\n';
+    out << std::setprecision(10);
+    return true;
+}
+
+void CountableFitter::log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats)
+{
+    if (not open_g5_csv(offers_csv_, "offers.csv", "t_ms,node,standpoint_x,standpoint_y,standpoint_yaw,promised_nats")) return;
+    offers_csv_ << wall_ms() << ',' << inst.node_name << ',' << x << ',' << y << ',' << yaw << ',' << promised_nats << '\n';
+    offers_csv_.flush();
+}
+
+void CountableFitter::log_delivered(const CountableInstance& inst)
+{
+    const double d = inst.ai2_belief.last_delivered_nats();
+    if (not std::isfinite(d)) return;              // the update measured nothing (predict-only): no delivery to log
+    if (not open_g5_csv(delivered_csv_, "delivered.csv", "t_ms,node,delivered_nats")) return;
+    delivered_csv_ << wall_ms() << ',' << inst.node_name << ',' << d << '\n';
+    delivered_csv_.flush();
+}
+
 void CountableFitter::log_gn_trace(const CountableInstance& inst)
 {
     const auto& steps = inst.ai2_belief.dbg_gn_steps();

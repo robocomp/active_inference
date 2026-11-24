@@ -135,8 +135,17 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     // Rᵢ = σ_base² + (lat_rate·d)² — range-aware, so the same face is worth less from further away. rc::nbv
     // calls this at each face's own stand-off, so the trade "further ⇒ detectable but less informative" is
     // resolved with the real numbers on both sides instead of one shared range.
+    // On the persistent path the belief runs on the shared engine, and so does its offer (spec shared-engine G5): face i at its
+    // stand-off is the standpoint plan_faces publishes (rc::nbv::face_viewpoint), and its raw gain is the engine's predicted
+    // θ-marginal entropy drop of a camera look from there — the camera the planner scores (sensor) and the occluders it sees
+    // (obstacles). The flag that selects the engine for the update selects it for the offer: one switch, one engine.
+    const rc::ai::offer::OfferCamera offer_cam{sensor, obstacles};
+    const auto engine_gain = rc::nbv::raw_gain_from_standpoints(target, [&](const Eigen::Vector2f& pos, float yaw)
+    { return belief.predicted_gain(rc::ai::offer::Standpoint{pos, yaw}, offer_cam); });
+    const bool persistent = belief.params().persistent;
     const auto raw_gain = [&](int face_idx, float standoff) -> float
     {
+        if (persistent) return engine_gain(face_idx, standoff);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const Eigen::Matrix<float, 6, 6> dI =
             belief.predicted_information(sample_face_surface(s, face_idx), Ri).topLeftCorner<6, 6>();
@@ -221,6 +230,7 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     proposal.sigma_star     = sigma_star_array<6>(kCountableDofs);   // the SAME demands the adequacy gap used
     proposal.chosen_standoff_m = plan.best_standoff_m;
     proposal.chosen_p_detect   = plan.face_p_detect[bi];
+    proposal.promised_nats     = best_raw;
     proposal.sensor_vfov_rad   = sensor.vfov_rad;
     if (not proposal.is_finite())
         return {};

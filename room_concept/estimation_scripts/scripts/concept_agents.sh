@@ -4,7 +4,9 @@
 #   concept_agents.sh stop              SIGTERM, then wait (never kill -9: they own nodes in the shared graph, and
 #                                       ltom_agent saves its repertory only on a graceful stop)
 #   concept_agents.sh status            which are running
-#   concept_agents.sh harvest <out_dir> copy each agent's etc/ai2_log.csv from the checkout it RAN from (agents.txt) to <out_dir>/<class>_ai2_log.csv
+#   concept_agents.sh harvest <out_dir> copy each agent's etc/ai2_log.csv from the checkout it RAN from (agents.txt) to <out_dir>/<class>_ai2_log.csv,
+#                                       and, where the agent wrote them, its promise/delivery log (shared-engine G5: etc/offers.csv,
+#                                       etc/delivered.csv) to <out_dir>/<class>_offers.csv, <class>_delivered.csv (promise_delivery.py)
 # THE LIST is $CONCEPT_AGENTS — a NEW concept agent (or countable class: folder + bin link, see CONCEPT_AGENT_RECIPE.md) is one word added to the default below.
 # Binary: $WT/<agent>/bin/<agent> when present (default WT = the phase0 worktree), else the main checkout's; a SYMLINK there
 # (a countable class) pins the agent to the worktree — a dangling one is reported and skipped, never replaced by main's.
@@ -76,16 +78,20 @@ case "${1:-}" in
     # the LAST launch: 11-22 c3a_w2_*, hood/refrigerator logs created 4 s before it were wrongly refused). Fallback: mtime - 60 s.
     t_start=$(stat -c %W $OUT/agents.txt); [ "${t_start:-0}" -gt 0 ] || t_start=$(( $(stat -c %Y $OUT/agents.txt) - 60 ))
     t_end=$([ -f $OUT/gt_pose.tsv ] && stat -c %Y $OUT/gt_pose.tsv || date +%s)
+    # The same checks for every log an agent writes beside its ai2 log: offers.csv / delivered.csv are the promise/delivery log
+    # of the shared engine's offers (spec shared-engine G5), written only on the persistent path, so their absence is not news.
     while IFS=$'\t' read -r a exe _; do
       [ "$a" = ltom_agent ] && continue
-      log=$(dirname "$(dirname "$exe")")/etc/ai2_log.csv
-      dst=$OUT/${a%_concept}_ai2_log.csv
+      for f in ai2_log offers delivered; do
+      log=$(dirname "$(dirname "$exe")")/etc/$f.csv
+      dst=$OUT/${a%_concept}_$f.csv
       born=$([ -f "$log" ] && stat -c %W "$log")
-      if [ ! -f "$log" ]; then echo "$a: no $log"
+      if [ ! -f "$log" ]; then [ $f = ai2_log ] && echo "$a: no $log"
       elif [ "$(stat -c %Y "$log")" -lt "$t_start" ]; then echo "$a: REFUSED $log (last written $(date -r "$log" +%T), before this run started $(date -d @$t_start +%T))"
       elif [ "${born:-0}" -gt 0 ] && { [ "$born" -lt "$t_start" ] || [ "$born" -gt "$t_end" ]; }; then
         echo "$a: REFUSED $log (created $(date -d @$born +%T), outside this run $(date -d @$t_start +%T)..$(date -d @$t_end +%T): another run's log)"
       else cp -p "$log" "$dst" && echo "$a: $log -> $dst"; fi
+      done
     done < $OUT/agents.txt;;
   status)
     for a in $ALL; do

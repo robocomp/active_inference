@@ -54,6 +54,10 @@ struct EpistemicProposal
     float chosen_standoff_m = 0.0f;   // FACE-relative distance the proposal realises
     float chosen_p_detect   = 0.0f;   // P(detect) there — ~0 means we are proposing a blind spot
     float sensor_vfov_rad   = 0.0f;   // the vertical FoV actually used (0 ⇒ no proposal was made)
+    // What the winning standpoint PROMISES (nats): its raw gain given a look, before P(detect) and before the adequacy
+    // scaling — on the persistent path the engine's predicted θ-marginal entropy drop, the quantity <class>_delivered.csv
+    // logs per update (shared-engine G5, promise/delivery log).
+    float promised_nats     = 0.0f;
 
     bool is_finite() const
     {
@@ -79,6 +83,9 @@ public:
     /// Each vertical face contributes the D-optimal expected entropy reduction on the belief's FULL covariance Σ:
     ///   raw(i) = ½·ln det( I₆ + Σ · ΔI(i) ),   ΔI(i) = Σₚ (1/Rᵢ) Jₚ Jₚᵀ  (belief.predicted_information)
     /// with Rᵢ = sigma_base² + (lat_rate·standoffᵢ)² — range-aware so far faces yield less information.
+    /// On the persistent path (Model.LidarMeasuresOnGated: the belief runs on the shared engine) raw(i) is instead the
+    /// engine's offer gain at face i's standpoint (CountableBelief::predicted_gain; spec shared-engine G5): the θ-marginal
+    /// entropy drop of a look from there under the same shared errors the update is capped by.
     ///
     /// That raw number is the information a detection WOULD yield; what selection needs is the information we
     /// EXPECT TO GET, so `rc::nbv` weights it by P(detect | framing) and places each face at its own stand-off.
