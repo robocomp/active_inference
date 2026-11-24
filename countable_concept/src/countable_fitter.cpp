@@ -1366,6 +1366,17 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     //      mask is a shared smear whose centroid is unreliable, so it may only CONFIRM the bed, not move/reshape
     //      it (a well-centred mask is trusted even while moving — the exception). The continuous common-mode above
     //      is the graceful backstop; this discrete gate concentrates geometry updates at stillness (matches chair).
+    // GATE AUDIT (plan rev 2 F1.8, persistent path; .superpowers/sdd/2026-11-23-shared-engine/task-F1-report.md): both gates
+    // are KEPT, each with its reason, neither replaced on hope.
+    //  - truncation (AI2TruncGateFrac 0.10): fired on 0 of 1034 bed and 0 of 2448 nightstand rows in objects_replay1. Under the
+    //    point-to-surface likelihood a clipped mask gives fewer, not biased, surface points; what IS biased is z_top_obs (the
+    //    p97 top of a cloud clipped at the top border) and the birth extent (F1.3 handles birth). Model replacement: z_top_obs
+    //    as a censored observation when the clip is at the top. Not done: no recorded frame exercises it.
+    //  - confirm_only (moving AND off-centre): 959 of 1034 bed rows gated, 324 of them with a mask (LiDAR-only instead). The
+    //    fresh latent u_cam models the same ego-motion smear, so the two count it twice. Model replacement: u_cam alone.
+    //    Not done: the replay cannot see it (a gated cycle records only its LiDAR-only frame, not the camera frame it skipped)
+    //    and u_cam's MotionCm gains are unmeasured (τ, T5 ruling) — removing the gate would hand the smear to an unmeasured
+    //    term. Next: record the skipped camera frame in the replay tap, and measure τ_eff (Fable review 2.8).
     const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac or confirm_only(inst);
 
     // Pose-chain covariance at the bed centre (cx,cy) — the per-frame SHARED localization error. Fed
