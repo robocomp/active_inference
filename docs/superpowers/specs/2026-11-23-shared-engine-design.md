@@ -217,3 +217,23 @@ For box-part classes (chair, table) the parts are fixed functions of θ, so the 
 
 
 **AuRo A3 (11-25):** for every class and graded DOF, the reference is the extent of the mesh surfaces the likelihood fits (from the manifest and the measurement model), never chosen from the estimates. Base-world-measured priors: bed, nightstand, toilet = yes; chair = partly (template heights and leg size from the Webots SimpleChair); refrigerator, hood, table = no (nominal).
+
+## Amendment (F1, 2026-11-25): no-cross is replaced by the stand-off prior on the persistent path
+
+On the persistent path a class that declares a wall stand-off (`[prior.attachment] standoff_m / standoff_std_m`, cited or
+marked "uncited convention") gets **no separate no-cross term**. Spec 7c.8 rev 3.3.9's "no-cross contact" (penetration ≤ ½σ_wall,
+the one-sided hinge λ = 1/σ_wall² re-entered on every update) is **superseded on the persistent path**; the legacy path keeps it.
+
+Why:
+- The hinge re-entered as a measurement on every update pinned a parked toilet's back to the millimetre (engine1 diagnosis
+  item 2): a fixed relation counted as new evidence each frame.
+- The wall's position error is now the wall latent δ (one ρ = 1 latent per physical wall, σ_wall² from the room), and the wall
+  priors enter ONCE, at the instance's first association, on (θ, δ). The stand-off prior N(gap − δ; μ ≥ 0, σ) already carries
+  the class knowledge "the back stands at or off the wall".
+- The exact one-sided form of no-cross on top (−log Φ(gap/σ_wall), tried in the first F1.4 commit) counted σ_wall twice — as δ's
+  marginal and as its own scale — and pushed a flush box about 2 cm into the room on its one entry (φ/Φ(0) = 0.80); the creep
+  set's wall-on cases failed on it.
+- Every class on the countable binary (bed, nightstand, toilet) declares a stand-off, so the persistent no-cross is deleted. A
+  future class without a stand-off gets the old flush form once (mean 0) and no no-cross; if it needs one, it declares a stand-off.
+- For T14: `WallNoCrossPrecision` / `WallNoCrossMarginM` do not vanish — they remain the legacy path's terms; on the persistent
+  path the wall's containment knowledge moved into the stand-off prior and the wall latent.
