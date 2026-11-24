@@ -37,7 +37,7 @@ import cv2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'gt_mesh'))
-from mesh_extents import KNOWN_EXTENTS, obj_extents   # THE source of the graded-layer extents (tools/gt_mesh)
+from mesh_extents import known_extents, obj_extents   # THE source of the graded-layer extents (tools/gt_mesh)
 SC = os.path.join(HERE, '..', '..', 'room_concept', 'estimation_scripts', 'scripts')
 CAM_BACK_M = 0.075        # ZED sits 0.075 m behind the body origin (ROBOT_GEOMETRY.md)
 HALF_PX = 0.5             # see the pixel-centre convention above
@@ -321,7 +321,7 @@ def main(argv):
     ap.add_argument('--out')
     a = ap.parse_args(argv)
     classes = a.classes.split(',')
-    extents = dict(KNOWN_EXTENTS)
+    extents = dict(known_extents())
     extents.update({k: tuple(map(float, v.split(','))) for k, v in (e.split('=') for e in a.extents)})
     rows = measure(a.dump_dir, a.wbt, classes, extents, a.hfov)
     if a.out:

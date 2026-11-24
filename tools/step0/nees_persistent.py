@@ -69,10 +69,11 @@ def run_rows(run, polys, gt):
     out = []
     if USE_CENTRE and N.GT == 'boundingobject':   # (--gt mesh already carries the footprint centre)
         sys.path.insert(0, os.path.join(HERE, '..', 'gt_mesh'))
-        from mesh_extents import KNOWN_EXTENTS
+        from mesh_extents import known_extents
+        KE = known_extents()
         import mesh_extents as ME
         yaw = {n: v['yaw'] for n, v in ME.world_layers(W.WBT).items() if v['cls'] == 'toilet'}
-        gt = [(o[0], o[1], *ME.to_world(o[2], o[3], yaw[o[0]], KNOWN_EXTENTS['toilet'][4], KNOWN_EXTENTS['toilet'][5]))
+        gt = [(o[0], o[1], *ME.to_world(o[2], o[3], yaw[o[0]], KE['toilet'][4], KE['toilet'][5]))
               if o[1] == 'toilet' and o[0] in yaw else o for o in gt]
     for cls in CLASSES:
         p = f'{run}/{cls}_ai2_log.csv'

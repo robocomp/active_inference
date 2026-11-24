@@ -18,7 +18,10 @@ The spec (docs/superpowers/specs/2026-11-23-shared-engine-design.md, "Graded qua
 A layer is a centred box (lx, ly, z0, z1, ox, oy) in the OBJECT frame: size along the object x and y, z range, and the
 box centre (ox, oy) from the object's origin. Those six numbers are what measure_mask_error.py calls an extent.
 The Webots protos come from the asset cache (~/.cache/Cyberbotics/Webots/assets, file name = sha1 of the raw URL), the
-meshes of the world from the world's own folder. A class with no mesh layer here (Desk, WoodenTable, RoundTable) has
+meshes of the world from the world's own folder. Assumptions inherited from furniture.py: a node's pose is (x, y, yaw) only (F.T reads a rotation about +-z and ignores tilt), and a node
+inside a Group is placed with its own translation, with NO offset from the Group (world_nodes does not compose Group transforms; every Group
+in threerooms-piso.wbt is an identity grouping).
+A class with no mesh layer here (Desk, WoodenTable, RoundTable) has
 no entry: callers keep their boundingObject number for it and say so.
 """
 import hashlib, math, os, re, sys
@@ -70,10 +73,27 @@ def points_of(text):
     return np.vstack([np.array(m.split(), float).reshape(-1, 3) for m in re.findall(r'point \[([^\]]*)\]', text)])
 
 
+# A "layer gap" is a gap between consecutive vertex heights that is at least GAP_RATIO times the next-largest gap. This is the
+# definition of two separate layers (slab vs legs / backrest), not a tuned number: with a ratio below 2 the largest gap is not
+# distinguishable from the ordinary spacing of the mesh. Measured: chair seat 2.5, table top 3.4.
+GAP_RATIO = 2.0
+
+
+def z_gaps(v):
+    """(z0, z1, gap) of the largest and second-largest gaps between consecutive vertex heights (rounded to 0.1 mm)."""
+    z = np.unique(np.round(v[:, 2], 4)); d = np.diff(z); o = np.argsort(d)[::-1]
+    return [(float(z[k]), float(z[k + 1]), float(d[k])) for k in o[:2]]
+
+
 def split_at_largest_z_gap(v, keep):
-    """The vertices below ('low') or above ('high') the largest gap between consecutive vertex heights."""
-    z = np.unique(np.round(v[:, 2], 4)); k = int(np.argmax(np.diff(z)))
-    return v[v[:, 2] <= z[k]] if keep == 'low' else v[v[:, 2] > z[k]]
+    """The vertices below ('low') or above ('high') the largest gap between consecutive vertex heights. Raises unless that gap is a
+    layer gap (>= GAP_RATIO x the second largest). Returns (vertices, (largest gap, second gap))."""
+    g = z_gaps(v)
+    if len(g) < 2 or g[0][2] < GAP_RATIO * g[1][2]:
+        raise ValueError(f'no layer gap in the vertex heights: largest {g[0] if g else None}, second {g[1] if len(g) > 1 else None} '
+                         f'(need largest >= {GAP_RATIO} x second)')
+    z0 = g[0][0]
+    return (v[v[:, 2] <= z0] if keep == 'low' else v[v[:, 2] > z0]), (g[0], g[1])
 
 
 def box_of(v):
@@ -122,22 +142,26 @@ def _mesh_of(node, wbt):
 # ---------------------------------------------------------------- the graded layers
 def layer_vertices(cls, node=None, wbt=None):
     """Vertices (N, 3), object frame, of the graded layer of a class; None when the class has no mesh layer here."""
+    return layer(cls, node, wbt)[0]
+
+
+def layer(cls, node=None, wbt=None):
+    """(vertices or None, gaps): gaps = (largest, second) z gaps when the layer was cut by a z split, else None."""
     if cls == 'bed':
-        return obj_vertices(asset('bedroom/protos/Bed/meshes/mattress.obj'), 'mattress')
+        return obj_vertices(asset('bedroom/protos/Bed/meshes/mattress.obj'), 'mattress'), None
     if cls == 'toilet':
         t = open(asset('bathroom/protos/Toilet.proto')).read()
         i = t.index('Transform {'); s = float(re.match(r'Transform \{\s*scale ([-0-9.e]+)', t[i:]).group(1))
-        return points_of(t[i:]) * s
+        return points_of(t[i:]) * s, None
     if cls == 'chair':
         t = open(asset('chairs/protos/Chair.proto')).read()
         i = t.index('DEF SEAT')
         seat = np.array(re.search(r'coord Coordinate \{\s*point \[([^\]]*)\]', t[i:]).group(1).split(), float).reshape(-1, 3)
         return split_at_largest_z_gap(seat, 'low')
-    if cls == 'nightstand': return _mesh_of(node, wbt)
-    if cls == 'refrigerator': return _mesh_of(node, wbt)
-    if cls == 'table': return split_at_largest_z_gap(_mesh_of(node, wbt), 'high') if list(_urls(node)) else None
-    if cls == 'hood': return _first_ifs(node)
-    return None
+    if cls in ('nightstand', 'refrigerator'): return _mesh_of(node, wbt), None
+    if cls == 'table': return split_at_largest_z_gap(_mesh_of(node, wbt), 'high') if list(_urls(node)) else (None, None)
+    if cls == 'hood': return _first_ifs(node), None
+    return None, None
 
 
 def layer_box(cls, node=None, wbt=None):
@@ -147,11 +171,14 @@ def layer_box(cls, node=None, wbt=None):
 
 # Extents of the layers whose meshes are not in the world folder, for measure_mask_error.py and nees_persistent.py: one source.
 # Toilet: the footprint of bowl + tank (+ lid), Toilet.proto x 0.2.  Bed: the mattress.
-def _known():
-    return {'toilet': layer_box('toilet'), 'bed': layer_box('bed')}
+_KNOWN = None
 
 
-KNOWN_EXTENTS = _known()
+def known_extents():
+    """{'toilet': box, 'bed': box}, computed on first call (needs the Webots asset cache, so importing this module does not)."""
+    global _KNOWN
+    if _KNOWN is None: _KNOWN = {'toilet': layer_box('toilet'), 'bed': layer_box('bed')}
+    return _KNOWN
 
 
 # ---------------------------------------------------------------- the world
@@ -248,12 +275,15 @@ def world_layers(wbt):
 def main(argv):
     wbt, key = argv[0], argv[1]
     nm, c, x, y, z, yaw, n = graded(wbt, key)
-    v = layer_vertices(c, n, wbt)
+    v, gaps = layer(c, n, wbt)
     if v is None: print(f'{nm}: class {c} has no mesh layer here (kept as boundingObject)'); return 1
     b = box_of(v); cx, cy = to_world(x, y, yaw, b[4], b[5])
     print(f'{nm} class {c}: Webots origin ({x:.4f}, {y:.4f}) yaw {yaw:.4f} rad')
     print(f'  graded layer, object frame: size {b[0]:.4f} x {b[1]:.4f}, z {b[2]:.4f} .. {b[3]:.4f}, box centre ({b[4]:+.4f}, {b[5]:+.4f})')
     print(f'  graded layer, world: centre ({cx:.4f}, {cy:.4f}) yaw {yaw:.4f} rad')
+    if gaps:
+        (a0, a1, ag), (b0, b1, bg) = gaps
+        print(f'  z split: largest gap {ag:.4f} m ({a0:.4f} to {a1:.4f}), second {bg:.4f} m ({b0:.4f} to {b1:.4f}), ratio {ag / bg:.2f} (>= {GAP_RATIO} required)')
     print(f'  origin vs layer: bbox centre offset ({b[4]:+.4f}, {b[5]:+.4f}) = {math.hypot(b[4], b[5]):.4f} m; '
           f'vertex mean offset ({v[:, 0].mean():+.4f}, {v[:, 1].mean():+.4f}) = {math.hypot(v[:, 0].mean(), v[:, 1].mean()):.4f} m ({len(v)} vertices)')
     if c == 'hood':

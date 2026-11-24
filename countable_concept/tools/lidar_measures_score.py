@@ -77,7 +77,7 @@ ROOM_OF = {'bed': 'bedroom', 'nightstand': 'bedroom', 'toilet': 'bathroom'}
 # True top height per class as the box fit sees it: bed = mattress top, nightstand = body top, toilet = highest part (tank).
 TOP = {'bed': 0.65, 'nightstand': 0.62, 'toilet': 0.90}   # toilet 0.90 as in the live6 results doc (tank top is 1.018)
 # Webots node centre of the toilet (the live6 comparison used it; the bbox centre of its parts is (-0.884, 12.929)).
-NODE_CENTRE = {'toilet': (-0.874478, 12.8652)}
+NODE_CENTRE = {'toilet': (-0.54448, 12.8652)}   # the live world's toilet origin (the scene csv and this were 0.33 m further -x until Task 9)
 SHIFT_TOL = {'w': 0.03, 'h': 0.03, 'H': 0.05}   # nightstand prior shifted +0.06 / +0.10: closer to the truth than to the shifted mean
 
 
@@ -181,25 +181,41 @@ def load_scene(path):
     return gt, walls
 
 
+# scene csv object name -> Webots node name (the csv numbers its nightstands by increasing x: left is the smaller x)
+WORLD_NAME = {'bed': 'bed(1)', 'nightstand_0': 'nightstand_bed1_left', 'nightstand_1': 'nightstand_bed1_right', 'toilet': 'Toilet'}
+
+
+def world_layers(wbt):
+    sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'gt_mesh'))
+    import mesh_extents as ME
+    return ME.world_layers(wbt)
+
+
 def mesh_gt(gtobjs, wbt):
     """The scene's bed / nightstands / toilet re-read from the VISUAL meshes of the world (tools/gt_mesh/mesh_extents.py): the bed's
     mattress, the nightstand body, the footprint of the toilet's bowl + tank. cx, cy = the graded box's centre in the world, dx, dy =
-    its axis-aligned world extents. `top` keeps its value: height is not a graded quantity. Objects the world does not have are kept."""
-    sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'gt_mesh'))
-    import mesh_extents as ME
-    lay = ME.world_layers(wbt)
-    by = {'bed': [], 'nightstand': [], 'toilet': []}
-    for L in lay.values():
-        if L['cls'] in by: by[L['cls']].append(L)
-    for c in by: by[c].sort(key=lambda L: L['cx'])           # nightstand_%d of load_scene is numbered by x
-    idx = {'bed': 0, 'nightstand': 0, 'toilet': 0}
+    its axis-aligned world extents. `top` keeps its value: height is not a graded quantity. Objects are paired by NAME (WORLD_NAME);
+    an object the world does not have is an error, never a silent fallback to the csv."""
+    lay = world_layers(wbt)
     out = []
     for g in gtobjs:
-        k = idx[g['cls']]; idx[g['cls']] += 1
-        if k >= len(by[g['cls']]): out.append(g); continue
-        L = by[g['cls']][k]; c, sn = abs(math.cos(L['yaw'])), abs(math.sin(L['yaw'])); lx, ly = L['box'][0], L['box'][1]
+        w = WORLD_NAME.get(g['name'])
+        if w is None or w not in lay: sys.exit('--gt mesh: scene object %r has no match (%r) among the world objects %s of %s' % (g['name'], w, sorted(lay), wbt))
+        L = lay[w]; c, sn = abs(math.cos(L['yaw'])), abs(math.sin(L['yaw'])); lx, ly = L['box'][0], L['box'][1]
         out.append(dict(g, cx=L['cx'], cy=L['cy'], dx=c * lx + sn * ly, dy=sn * lx + c * ly))
     return out
+
+
+def warn_scene_vs_world(gtobjs, wbt, tol=0.001):
+    """Print a warning for every scene-csv object whose centre is more than tol (1 mm) from the world's graded layer centre."""
+    try: lay = world_layers(wbt)
+    except Exception as e:
+        print('WARNING: scene csv vs world check skipped (%s)' % e); return
+    for g in gtobjs:
+        L = lay.get(WORLD_NAME.get(g['name']))
+        if L is None: print('WARNING: scene object %s has no object in %s' % (g['name'], wbt)); continue
+        d = math.hypot(g['cx'] - L['cx'], g['cy'] - L['cy'])
+        if d > tol: print('WARNING: scene csv %s centre (%.4f, %.4f) is %.4f m from the world layer centre (%.4f, %.4f) in %s' % (g['name'], g['cx'], g['cy'], d, L['cx'], L['cy'], wbt))
 
 
 def room_tf(room, rooms):
@@ -641,6 +657,7 @@ def main():
         k, v = s.split('=')
         rooms[k] = tuple(float(x) for x in v.split(','))
     gtobjs, walls = load_scene(a.scene)
+    warn_scene_vs_world(gtobjs, a.wbt)
     if a.gt == 'mesh': gtobjs = mesh_gt(gtobjs, a.wbt)
     print('ground truth: ' + ('mesh layers of ' + a.wbt if a.gt == 'mesh' else 'boundingobject numbers of ' + a.scene))
     print('lidar_measures_score  (spec 2026-11-15 §8)')

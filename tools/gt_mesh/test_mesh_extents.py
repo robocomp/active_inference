@@ -27,7 +27,25 @@ def near(a, b, tol, what):
 
 def test_largest_z_gap_splits_a_slab_from_its_legs():
     v = np.array([[0, 0, 0.0], [1, 0, 0.1], [0, 1, 0.2], [0, 0, 1.0], [1, 1, 1.05]])
-    assert len(M.split_at_largest_z_gap(v, 'low')) == 3 and len(M.split_at_largest_z_gap(v, 'high')) == 2
+    assert len(M.split_at_largest_z_gap(v, 'low')[0]) == 3 and len(M.split_at_largest_z_gap(v, 'high')[0]) == 2
+
+
+def test_split_refuses_a_mesh_without_a_layer_gap():
+    v = np.array([[0, 0, z] for z in (0.0, 0.1, 0.2, 0.35, 0.5)])      # gaps 0.1, 0.1, 0.15, 0.15: ratio 1
+    try: M.split_at_largest_z_gap(v, 'low')
+    except ValueError as e: assert 'largest' in str(e) and 'second' in str(e)
+    else: raise AssertionError('no ValueError')
+    v2 = np.array([[0, 0, z] for z in (0.0, 0.1, 0.2, 0.39)])          # 0.19 vs 0.1: ratio 1.9 < 2
+    try: M.split_at_largest_z_gap(v2, 'low')
+    except ValueError: pass
+    else: raise AssertionError('ratio 1.9 accepted')
+
+
+def test_the_real_splits_are_layer_gaps():
+    n = M.graded(WBT, 'Table1')[6]
+    for cls, node in (('chair', None), ('table', n)):
+        gaps = M.layer(cls, node, WBT)[1]
+        assert gaps[0][2] >= M.GAP_RATIO * gaps[1][2], (cls, gaps)
 
 
 def test_bed_is_the_mattress():
@@ -69,11 +87,12 @@ def test_def_and_name_lookups_agree_and_world_centre_is_rotated():
 
 def test_one_source_of_known_extents():
     import measure_mask_error as MM
-    assert MM.KNOWN_EXTENTS is M.KNOWN_EXTENTS and MM.obj_extents is M.obj_extents
+    assert MM.known_extents is M.known_extents and MM.obj_extents is M.obj_extents
+    assert M.known_extents() is M.known_extents() and set(M.known_extents()) == {'toilet', 'bed'}
     here = os.path.dirname(M.__file__)
     for f in ('../mask_error/measure_mask_error.py', '../step0/nees_persistent.py'):
         src = open(os.path.join(here, f)).read()
-        assert 'KNOWN_EXTENTS = {' not in src and 'from mesh_extents import' in src, f
+        assert 'KNOWN_EXTENTS' not in src and 'from mesh_extents import' in src, f
 
 
 if __name__ == '__main__':
