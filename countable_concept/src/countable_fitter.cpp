@@ -1135,8 +1135,12 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // Khronos's spatio-temporal local consistency (arXiv:2402.13817 eq. 8) failing over a birth window —
         // and at BirthFrames=8 / ~10 Hz the robot cannot reach a second face anyway, so the union can only ever
         // be the same face smeared. See [[bed-birth-burst-smear]].
+        std::vector<Eigen::Vector3f> birth_cloud;   // F1 round 6.2: the seed H is re-derived from it once the belief knows its shape
         if (npts > 0)
         {
+            birth_cloud.reserve(static_cast<std::size_t>(npts));
+            birth_cloud.insert(birth_cloud.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+            birth_cloud.insert(birth_cloud.end(), observation.residual_pts.begin(), observation.residual_pts.end());
             Eigen::Vector3f sum = Eigen::Vector3f::Zero();
             std::vector<float> zs; zs.reserve(npts);
             const auto scan = [&](const std::vector<Eigen::Vector3f>& v)
@@ -1279,6 +1283,14 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.layer_spread_m = cfg_.layer_spread_m;        // the class's layer spread Δ (manifest; the persistent path's shape latent)
         p.gn_trace = cfg_.gn_trace;                    // diagnostic only (Model.GnTrace)
         inst.ai2_belief = CountableBelief(s0, p);
+        if (p.persistent and not birth_cloud.empty())
+        {   // F1 round 6.2: the seed H from the model the update uses (class-prior MAP ⊕ the top of the points the BOX explains,
+            // box-vs-headboard shares at the born pose), not the p95 of a cloud that holds the headboard (bed: 1.02 vs 0.65).
+            const float H_p95 = s0.H;
+            s0.H = inst.ai2_belief.seed_height(birth_cloud, rc::kZedYoloBoundaryStdM);
+            inst.ai2_belief = CountableBelief(s0, p);
+            std::print("[{}] birth seed H: p95 of the cloud {:.3f} → box-explained top ⊕ class prior {:.3f}\n", inst.node_name, H_p95, s0.H);
+        }
         if (birth_pos_cov) inst.ai2_belief.set_birth_position_cov(*birth_pos_cov);   // spec 7c.8 rev 3.3.14
         inst.replay.reset();                                                           // a new birth starts a new stream
         inst.offer_cache.reset();                                                      // a new belief: its update serial restarts

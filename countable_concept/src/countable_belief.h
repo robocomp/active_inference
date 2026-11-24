@@ -646,6 +646,12 @@ public:
     // F1.4: the wall latent's current mean for a staged wall (0 when the instance has none for that edge): the offset the
     // camera mixture and the beam's foreign density shift that wall by (mean-field, option A).
     float wall_offset_mean(const WallRef& w) const;
+    // The birth seed's H (F1 round 6.2, the bed-depth diagnosis 11-25): the class-prior MAP N(prior_height_m, prior_height_std²)
+    // combined with the robust top (weighted p95 of z) of the points the BOX explains, each point weighted by its box-versus-
+    // headboard share under the box ∪ headboard shape at this belief's pose (exp(−d²/2R) per part, R = sigma_base²), the top's
+    // own std = sigma_top (the detector's boundary error). EM: H₀ = the class mean, then shares → top → MAP, 10 iterations.
+    // Without a headboard every share is 1. The p95 of the WHOLE cloud took the bed's headboard (1.02 against a box top 0.65).
+    float seed_height(const std::vector<Eigen::Vector3f>& pts, float sigma_top) const;
     bool  last_wall_entered() const { return engine_.last_wall_entered(); }
     bool axis_prior_added() const { return axis_prior_added_; }
     void set_prior_added(bool wall, bool axis) { wall_prior_added_ = wall; axis_prior_added_ = axis; }

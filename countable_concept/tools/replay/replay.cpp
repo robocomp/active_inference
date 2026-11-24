@@ -14,6 +14,8 @@
 //   omega_cx..omega_yaw the log-volatility ω (the ai2 log has omega_w and omega_yaw)
 //   fe_upd              update()'s return value (NOT the ai2 log's `energy`, which is the mean mixture energy)
 //   wall_in             1 when this update entered the wall latent's priors (a new wall edge for the instance, F1.4)
+//   back_gap            the back face's gap to the frame's STAGED wall, (back_centre − wall.p)·n (< 0: through it; NaN: no wall)
+//   gn_cap              1 when the update's GN ran into its iteration cap without converging
 //   pstd_cx..pstd_yaw   √ of the PREDICTED θθ diagonal this update started from (Σ̄: the class prior on the first update)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
@@ -29,6 +31,8 @@
 //   --standoff DIR sets the seed's wall stand-off (F1.4) from the manifest of the dumped node's class in DIR
 //   (rc::manifest::wall_standoff), as a dump recorded before the stand-off existed lacks it. --permanence DIR does the same for
 //   the class permanence prior (F1 round 6; predict_period_s then keeps its default 0.1 s, the configs' AI2AgeNominalDtS).
+//   --seed-h-rule re-derives the seed's H with the birth rule (CountableBelief::seed_height, F1 round 6.2) from the dump's FIRST
+//   camera frame (the birth cloud itself is not recorded), at the recorded born pose.
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
@@ -73,12 +77,13 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--seed-h-rule]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
     std::string neighbour_manifests, standoff_manifests, permanence_manifests;
+    bool seed_h_rule = false;
     for (int i = 2; i < argc; ++i)
     {
         const std::string_view k = argv[i];
@@ -87,6 +92,7 @@ int main(int argc, char** argv)
         if (k == "--neighbour-size-std" and i + 1 < argc) { neighbour_manifests = argv[++i]; continue; }
         if (k == "--standoff" and i + 1 < argc) { standoff_manifests = argv[++i]; continue; }
         if (k == "--permanence" and i + 1 < argc) { permanence_manifests = argv[++i]; continue; }
+        if (k == "--seed-h-rule") { seed_h_rule = true; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -104,7 +110,7 @@ int main(int argc, char** argv)
     }
     std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                 "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
-                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,dth_live,dP_live\n");
+                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,dth_live,dP_live\n");
 
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
@@ -140,13 +146,16 @@ int main(int argc, char** argv)
             char row[1024];
             std::snprintf(row, sizeof row,
                           "%ld,%lld,%d,%zu,%d,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%d,%.6g,"
-                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d",
+                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%.6g,%d",
                           upd, static_cast<long long>(ev.cycle), ev.gated ? 1 : 0, ev.frame.points.size(),
                           ev.frame.lidar_only ? 1 : 0, ev.frame.beam.endpoints.size(),
                           s.cx, s.cy, s.H, s.w, s.h, s.yaw, sd(0), sd(1), sd(2), sd(3), sd(4),
                           std::sqrt(std::max(0.0f, b.yaw_marginal_var())), sd(5),
                           b.last_gn_iters(), b.last_gn_converged() ? 1 : 0, b.last_lambda(),
-                          om(0), om(1), om(2), om(3), om(4), om(5), fe, pd(0), pd(1), pd(2), pd(3), pd(4), pd(5), b.last_wall_entered() ? 1 : 0);
+                          om(0), om(1), om(2), om(3), om(4), om(5), fe, pd(0), pd(1), pd(2), pd(3), pd(4), pd(5), b.last_wall_entered() ? 1 : 0,
+                          ev.frame.wall.ok ? double((b.back_centre(s) - ev.frame.wall.p).dot(ev.frame.wall.n))
+                                           : std::numeric_limits<double>::quiet_NaN(),
+                          (b.last_gn_iters() >= b.params().gn_iters_max and not b.last_gn_converged()) ? 1 : 0);
             pending = row;
         },
         [&](const rc::replay::ResultEv& live, const rc::CountableBelief& b)
@@ -185,6 +194,13 @@ int main(int argc, char** argv)
         },
         [&](rc::replay::SeedEv& seed)
         {
+            if (seed_h_rule)
+            {   // F1 round 6.2's rule on the first camera frame (the birth cloud is not in the dump), at the recorded born pose
+                const auto pts = rc::replay::first_camera_points(argv[1]);
+                const float H0 = seed.state.H;
+                if (not pts.empty()) seed.state.H = rc::CountableBelief(seed.state, seed.params).seed_height(pts, rc::kZedYoloBoundaryStdM);
+                std::fprintf(stderr, "replay: seed H %.4f -> %.4f (the rule on the first camera frame, %zu points)\n", H0, seed.state.H, pts.size());
+            }
             if (not permanence_manifests.empty())
                 if (const auto pm = rc::manifest::permanence(permanence_manifests + "/" + rc::node_class(seed.node) + ".concept.toml"))
                 {

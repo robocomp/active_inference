@@ -592,4 +592,16 @@ bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& o
     return seeded and reader.error().empty();
 }
 
+// The first camera frame's points of a dump (a stand-in for the birth cloud, which the dump does not record: the birth happens
+// before the stream opens). Empty when the dump has none. F1 round 6.2's seed-H rule replays through it.
+inline std::vector<Eigen::Vector3f> first_camera_points(const std::string& path)
+{
+    Reader r;
+    if (not r.open(path)) return {};
+    Event e;
+    while (r.next(e))
+        if (const auto* u = std::get_if<UpdateEv>(&e); u and not u->frame.points.empty()) return u->frame.points;
+    return {};
+}
+
 }   // namespace rc::replay

@@ -816,6 +816,37 @@ rc::ai::engine::WallAnchor anchor_of(const WallRef& w)
 
 rc::ai::engine::WallAnchor CountableEngineModel::wall_anchor(const Frame& f) const { return anchor_of(f.wall); }
 
+float CountableBelief::seed_height(const std::vector<Eigen::Vector3f>& pts, float sigma_top) const
+{
+    const float H0 = params_.prior_height_m, sH = params_.prior_height_std;
+    if (pts.empty() or not (sH > 0.0f) or not (sigma_top > 0.0f)) return H0;
+    const double R = double(params_.sigma_base_m) * double(params_.sigma_base_m);
+    std::vector<std::pair<float, double>> zw(pts.size());   // (z, box share)
+    CountableBeliefState s = state_;
+    s.H = H0;
+    constexpr int kEmIters = 10;                            // EM iterations (a solver constant)
+    for (int it = 0; it < kEmIters; ++it)
+    {
+        double wsum = 0.0;
+        for (std::size_t i = 0; i < pts.size(); ++i)
+        {
+            const double db = sdf_box(pts[i], s), dh = sdf_headboard(pts[i], s);
+            // share = e^{−db²/2R} / (e^{−db²/2R} + e^{−dh²/2R}) in the log domain; no headboard (dh = +inf) ⇒ 1
+            const double share = std::isinf(dh) ? 1.0 : 1.0 / (1.0 + std::exp((db * db - dh * dh) / (2.0 * R)));
+            zw[i] = {pts[i].z(), share};
+            wsum += share;
+        }
+        if (not (wsum > 0.0)) return H0;
+        std::ranges::sort(zw, {}, &std::pair<float, double>::first);
+        double acc = 0.0;
+        float top = zw.back().first;
+        for (const auto& [z, w] : zw) { acc += w; if (acc >= 0.95 * wsum) { top = z; break; } }
+        const float a = 1.0f / (sH * sH), b = 1.0f / (sigma_top * sigma_top);
+        s.H = (a * H0 + b * top) / (a + b);                // the MAP of the class prior and the box's own top
+    }
+    return s.H;
+}
+
 float CountableBelief::wall_offset_mean(const WallRef& w) const { return float(engine_.wall_offset_mean(anchor_of(w))); }
 
 // The wall latent's priors (F1.4), entered ONCE at the instance's first association with a wall edge, at s = θ + B_w b (the

@@ -263,3 +263,15 @@ target_include_directories(toilet_wall_test PRIVATE ../src ../../common ../../co
 target_compile_options(toilet_wall_test PRIVATE -O2)
 target_link_libraries(toilet_wall_test PRIVATE Eigen3::Eigen)
 add_test(NAME toilet_wall_test COMMAND toilet_wall_test)
+
+# F1 round 6.2: the birth seed's H is the class-prior MAP with the top of the points the BOX explains (box-vs-headboard shares),
+# not the p95 of a cloud holding the headboard. Run: ./birth_seed_headboard_test
+add_executable(birth_seed_headboard_test birth_seed_headboard_test.cpp ../src/countable_belief.cpp)
+target_include_directories(birth_seed_headboard_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(birth_seed_headboard_test PRIVATE -O2)
+target_link_libraries(birth_seed_headboard_test PRIVATE Eigen3::Eigen)
+add_test(NAME birth_seed_headboard_test COMMAND birth_seed_headboard_test)
+
+# F1 round 6.2: the bed_1 replay pin (gated on the objects_replay1 dump; SKIP without it). Bounds derived in the script.
+add_test(NAME bed_replay_pin COMMAND python3 -I ${CMAKE_CURRENT_LIST_DIR}/bed_replay_pin.py $<TARGET_FILE:replay>
+         ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
