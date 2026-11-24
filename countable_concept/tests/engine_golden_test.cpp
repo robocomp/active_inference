@@ -10,12 +10,13 @@
 //   - one mode rotation (w ↔ h);
 //   - 10 parked updates at the last standpoint on the box moved 6 cm along x (the GN has somewhere to go), GnTrace = 2 on
 //     the first of them and GnTrace = 1 on the rest.
-// After each step it records θ, the diagonal of P (the 33 entries the pre-extraction layout had), the GN step count, the
-// returned energy and the GnTrace rows. Compare: every double within 1e-9 relative, every count equal; any P diagonal entry
-// beyond the recorded 33 (the shape latents, zero variance until Task 5) must be exactly 0.
+// After each step it records θ, the whole diagonal of P (θ and the 39 latents, the shape latents s_cam / s_L included), the
+// GN step count, the returned energy and the GnTrace rows. Compare: every double within 1e-9 relative, every count equal.
+// Re-recorded for shared-engine Task 5 (the shape latent): the fixture now carries the nightstand manifest's layer spread Δ,
+// so s_cam / s_L have non-zero variance.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
-//      ./engine_golden_test --record   (rewrite the golden file; only with the pre-extraction code)
+//      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -34,7 +35,7 @@ namespace ts = rc::test;
 
 static constexpr float ty = -0.255f, tH = 0.62f, tw = 0.51f;
 static float tx = 0.30f;                   // the box centre x; the last stretch moves the box
-static constexpr int kDiagRecorded = 33;   // N + 27: θ, e, b_cam, b_L, u_cam, u_L (the pre-extraction joint)
+static constexpr int kDiagRecorded = 45;   // N + K: θ, e, b_cam, b_L, u_cam, u_L, s_cam, s_L
 
 static CountableBeliefParams params()
 {
@@ -46,6 +47,7 @@ static CountableBeliefParams params()
     p.volatility_infer = true;
     p.persistent       = true;
     p.beam             = ts::test_beam_config();
+    p.layer_spread_m   = {0.025f, 0.025f, 0.0f, 0.04f, 0.05f, 0.0f};   // nightstand.concept.toml [shape].layer_spread_m (Task 5)
     return p;
 }
 
@@ -296,7 +298,7 @@ int main(int argc, char** argv)
         const Record& g = got[i];
         const Record& w = want[i];
         bool ok = g.tag == w.tag and g.steps == w.steps and g.n_trace == w.n_trace and g.n_fd == w.n_fd
-                  and g.theta.size() == w.theta.size() and int(g.pdiag.size()) >= kDiagRecorded
+                  and g.theta.size() == w.theta.size() and int(g.pdiag.size()) == kDiagRecorded
                   and int(w.pdiag.size()) == kDiagRecorded;
         if (not ok)
         {
@@ -308,7 +310,6 @@ int main(int argc, char** argv)
         ok = close(g.fe, w.fe, worst);
         for (std::size_t k = 0; k < g.theta.size(); ++k) ok = close(g.theta[k], w.theta[k], worst) and ok;
         for (int k = 0; k < kDiagRecorded; ++k) ok = close(g.pdiag[k], w.pdiag[k], worst) and ok;
-        for (std::size_t k = kDiagRecorded; k < g.pdiag.size(); ++k) ok = g.pdiag[k] == 0.0 and ok;   // the shape latents
         for (std::size_t k = 0; k < g.trace.size(); ++k) ok = close(g.trace[k], w.trace[k], worst) and ok;
         for (std::size_t k = 0; k < g.fd.size(); ++k) ok = close(g.fd[k], w.fd[k], worst) and ok;
         if (not ok)
