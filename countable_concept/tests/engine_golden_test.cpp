@@ -26,6 +26,8 @@
 // estimate only, whose prior mean is 0), so no predict adds variance.
 // Re-recorded for F1 round 6 (owner ruling 11-25): Q from the nightstand class permanence prior (fixture params), inferred
 // around q0 by the spike-and-slab statistic.
+// Re-recorded for F1 round 6.1b: the spike-and-slab statistic is JOINT over θ and counts the latents' predicted covariance in what
+// the data's gradient may legitimately be.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)

@@ -698,10 +698,25 @@ public:
         int steps = 0;
         bool undamped_checked = false;                                     // the λ = 0 proposal at this linearisation was tested
         build(theta, b_);                                                  // step 2: x̃_0 = (θ_0, b̄)
-        // the jump statistic's view of this update's data (learn_volatility): per θ component, the data's own information W_ii and
-        // Newton step g_i/W_ii from the PREDICTED state (θ̄, b̄), i.e. where the data alone would put θ_i — independent of how far
-        // the prior let the GN follow
-        const VecNd w_data = (Id_cam + Id_L + Id_th).diagonal().template cast<double>();
+        // the jump statistic's view of this update's data (learn_volatility): the data's own information W and gradient g on θ at
+        // the PREDICTED state (θ̄, b̄), every channel — independent of how far the prior lets the GN follow a shove
+        // A = Σ_c W_c H_c with H_c = [𝟙 | B_c] (what channel c measures of x = (θ, b)), Wsum = Σ_c W_c: the data's gradient on θ is
+        // g = A (x_true − x̄) + noise of covariance Wsum, so the LATENTS' predicted covariance (b_cam, b_L, e, …) is part of what g
+        // may legitimately be — a shared sensor error is not a move.
+        Eigen::Matrix<double, N, N + K> A_data = Eigen::Matrix<double, N, N + K>::Zero();
+        Eigen::Matrix<double, N, N> W_data = Eigen::Matrix<double, N, N>::Zero();
+        {
+            const auto add = [&](const MatN& Wf, const Eigen::Matrix<double, N, K>* B)
+            {
+                const Eigen::Matrix<double, N, N> Wc = Wf.template cast<double>();
+                W_data += Wc;
+                A_data.template leftCols<N>() += Wc;
+                if (B) A_data.template rightCols<K>() += Wc * (*B);
+            };
+            if (camera) add(Id_cam, &B_cam);
+            if (lidar)  add(Id_L, &B_L);
+            add(Id_th, nullptr);
+        }
         const VecNd g_data = (bd_cam + bd_L + bd_th).template cast<double>();
         while (steps < cfg.iters_max)
         {
@@ -878,7 +893,7 @@ public:
         }
         b_ = b_post;
         m.set_covariance(Sigma_theta());
-        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, w_data, g_data, theta_post);
+        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, W_data, A_data, g_data, theta_post);
         steps_since_update_ = 0.0;
         dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
         // G5: what this update delivered (the θ-marginal entropy drop of the published Σ), and what the next offer's
@@ -1203,7 +1218,8 @@ private:
     // Running mean, conjugate in the per-step variance: n ← λn + 1, S ← λS + E[w²], Q = (n₀Q₀ + S)/(n₀ + n), ω = log Q; Q is a
     // weighted mean of Q₀ and of non-negative statistics, so it stays positive with no clamp.
     void learn_volatility(const M& m, const VecNf& q_used, const VecNd& theta_pred, const MatJd& P_bar, const VecNd& post_var,
-                          const VecNd& w_data, const VecNd& g_data, const VecNd& theta_post)
+                          const Eigen::Matrix<double, N, N>& W_data, const Eigen::Matrix<double, N, N + K>& A_data,
+                          const VecNd& g_data, const VecNd& theta_post)
     {
         const VolatilityConfig vc = volatility_of(m);
         if (not vc.infer) return;
@@ -1220,6 +1236,47 @@ private:
         const double k_steps = std::max(1.0, steps_since_update_);      // the update's own predict is always one
         // P(at least one move in the interval) = 1 − (1 − π)^k
         const double pi_int = jumps ? -std::expm1(k_steps * std::log1p(-std::min(vc.jump_prob, 1.0))) : 0.0;
+        // Spike-and-slab, JOINT over θ (one move moves the object as a whole). Linearised at the predicted joint state x̄, the
+        // data's gradient on θ is g = A (x_true − x̄) + noise of covariance W (A, W: every channel, see update()), so under "stayed"
+        // g ~ N(0, S_s = A P̄ Aᵀ + W) — P̄ the predicted JOINT covariance, latents included — and under "moved by v ~ N(0, M)" on θ
+        // g ~ N(0, S_m = S_s + W M W) (A's θ columns are W), M = diag(jump_var). p = P(moved | g) by Bayes with prior π_int;
+        // E[v | moved, g] = M W S_m⁺ g, Cov = M − M W S_m⁺ W M; per component E[w_i²] = p·E[v_i² | moved, g], ÷ k per predict step. Pseudo-inverses / pseudo-determinants on S's range: a direction the data do not inform (W's null
+        // space) carries no evidence either way, so coupled DOFs (a front view's cy and h) are read together, not one by one.
+        VecNd ew2_jump = VecNd::Zero();
+        if (jumps)
+        {
+            Eigen::Matrix<double, N, N> Mj = Eigen::Matrix<double, N, N>::Zero();
+            for (int i = 0; i < N; ++i) Mj(i, i) = vc.jump_var[std::size_t(i)];
+            const Eigen::Matrix<double, N, N> W = 0.5 * (W_data + W_data.transpose());
+            const Eigen::Matrix<double, N, N> Ss = A_data * P_bar * A_data.transpose() + W, Sm = Ss + W * Mj * W;
+            // log N(g; 0, S) on S's range (eigen-decomposition; eigenvalues ≤ 1e-12·max are its null space: a numerical rank, not
+            // a modelling threshold)
+            const auto logN = [&](const Eigen::Matrix<double, N, N>& S, Eigen::Matrix<double, N, N>* pinv)
+            {
+                const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, N, N>> es(0.5 * (S + S.transpose()));
+                const double tol = 1e-12 * std::max(1e-300, es.eigenvalues().cwiseAbs().maxCoeff());
+                double l = 0.0;
+                Eigen::Matrix<double, N, N> Pi = Eigen::Matrix<double, N, N>::Zero();
+                for (int j = 0; j < N; ++j)
+                {
+                    const double ev = es.eigenvalues()(j);
+                    if (not (ev > tol)) continue;
+                    const Eigen::Matrix<double, N, 1> u = es.eigenvectors().col(j);
+                    const double c = u.dot(g_data);
+                    l += -0.5 * std::log(2.0 * M_PI * ev) - 0.5 * c * c / ev;
+                    Pi += (u * u.transpose()) / ev;
+                }
+                if (pinv) *pinv = Pi;
+                return l;
+            };
+            Eigen::Matrix<double, N, N> Sm_pinv;
+            const double ls = logN(Ss, nullptr), lm = logN(Sm, &Sm_pinv);
+            const double lo = std::log(pi_int) + lm, lst = std::log1p(-pi_int) + ls, mx = std::max(lo, lst);
+            const double p = std::exp(lo - mx) / (std::exp(lo - mx) + std::exp(lst - mx));
+            const VecNd ev_mean = Mj * W * Sm_pinv * g_data;
+            const Eigen::Matrix<double, N, N> ev_cov = Mj - Mj * W * Sm_pinv * W * Mj;
+            for (int i = 0; i < N; ++i) ew2_jump(i) = p * (ev_mean(i) * ev_mean(i) + ev_cov(i, i)) / k_steps;
+        }
         vol_n_ = vc.memory * vol_n_ + 1.0;
         for (int i = 0; i < N; ++i)
         {
@@ -1232,33 +1289,7 @@ private:
                 const double k = q / sbar;
                 ew2 = q + k * k * (dth * dth - (sbar - spost));
             }
-            else
-            {   // Spike-and-slab. Per component, the update is read as a scalar Kalman step on THIS update's data: measurement
-                // variance R = 1/W_ii and innovation ν = g_i/W_ii, the data's own Newton step from the predicted state (both at the
-                // first linearisation, every channel); S = Σ̄ + R. Not ν = δθ/κ from the posterior: the GN follows a shove only as far
-                // as the prior lets it in one update, and on a converged belief the marginal gain 1 − Σ⁺/Σ̄ is ~1e-3. Under "moved by v ~ N(0, M)" the predicted variance is Σ̄ + M and S_m = S + M.
-                // p = P(moved | ν) by Bayes with prior π_int; E[v² | moved, ν] = M + (M/(Σ̄+M))²(δ_m² − (Σ̄ + M − Σ⁺_m)) with
-                // δ_m = κ_m ν, κ_m = (Σ̄+M)/S_m, Σ⁺_m = (1 − κ_m)(Σ̄+M); "stayed" contributes no step. The interval's E[w²] = p·E[v²],
-                // per predict step ÷ k. A component the update did not inform (κ = 0) carries the prior, π_int·M.
-                const double Mj = vc.jump_var[std::size_t(i)];
-                const double Wd = w_data(i);
-                (void)spost; (void)dth;
-                if (not (Wd > 0.0) or not (Mj > 0.0)) ew2 = pi_int * Mj;
-                else
-                {
-                    const double kap = Wd * sbar / (1.0 + Wd * sbar);
-                    const double nu = g_data(i) / Wd, S = sbar + 1.0 / Wd, Sm = S + Mj;
-                    const double llr = -0.5 * std::log(Sm / S) - 0.5 * nu * nu * (1.0 / Sm - 1.0 / S);   // log N(ν;0,S_m) − log N(ν;0,S)
-                    const double lo = std::log(pi_int) + llr, ls = std::log1p(-pi_int);
-                    const double mx = std::max(lo, ls);
-                    const double p = std::exp(lo - mx) / (std::exp(lo - mx) + std::exp(ls - mx));
-                    const double km = (sbar + Mj) / Sm, dm = km * nu, spm = (1.0 - km) * (sbar + Mj);
-                    const double r = Mj / (sbar + Mj);
-                    const double ev2 = Mj + r * r * (dm * dm - (sbar + Mj - spm));
-                    ew2 = p * ev2;
-                }
-                ew2 /= k_steps;
-            }
+            else ew2 = ew2_jump(i);
             vol_s_(i) = vc.memory * vol_s_(i) + ew2;
             vol_omega_(i) = std::log((n0 * q0(i) + vol_s_(i)) / (n0 + vol_n_));
         }
