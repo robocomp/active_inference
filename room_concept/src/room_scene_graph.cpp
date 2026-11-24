@@ -2201,7 +2201,9 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
 // A batch newer than the last pose waits for the next update; one older than the history is dropped.
 void RoomSceneGraph::stamp_low_obstacles()
 {
-    if (not free_space_) return;
+    // AuRo item B: the change belief needs these returns in KNOWN rooms too, where there is no free-space raster
+    // (live 2026-11-23 roi_live1: 471 cells, 0 ever with matter — the stream was only consumed while building a room)
+    if (not free_space_ and not (epistemic_ and epistemic_->epistemic_planner().params.use_change_belief)) return;
     for (auto& b : room_concept_->take_low_obstacles()) low_obs_pending_.push_back(std::move(b));
     std::deque<RoomConcept::LowObstacles> keep;
     for (auto& b : low_obs_pending_)
@@ -2218,7 +2220,7 @@ void RoomSceneGraph::stamp_low_obstacles()
         Eigen::Affine2f T = Eigen::Affine2f::Identity();
         T.translate(t).rotate(th);
         for (auto& p : b.xy) p = T * p;
-        free_space_->add_matter(b.xy);
+        if (free_space_) free_space_->add_matter(b.xy);
         if (epistemic_)   // AuRo item B: the same furniture returns, internal frame, for the room's change belief
         {
             std::vector<Eigen::Vector2f> xi; xi.reserve(b.xy.size());
@@ -3376,6 +3378,15 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     auto& planner = epistemic_->epistemic_planner();
     change_room_step(planner);   // AuRo item B: the room's change grid (per room, published frame), its record and log
+    if (planner.params.use_change_belief)
+    {
+        // AuRo item B: furniture returns for the change test, in a known room (the free-space path that stamps them
+        // while a room is built does not run here). Same pose history, same interpolation.
+        const Eigen::Affine2f pose_pub = T_pub_int_ * res.robot_pose;
+        if (pose_hist_.empty() or pose_hist_.back().first < res.timestamp_ms) pose_hist_.emplace_back(res.timestamp_ms, pose_pub);
+        while (pose_hist_.size() > 2 and pose_hist_.back().first - pose_hist_.front().first > 10000) pose_hist_.pop_front();
+        stamp_low_obstacles();
+    }
 
     // Always update robot state so mark_and_refresh uses the correct position.
     epistemic_->set_robot_state(res.robot_pose, res.covariance);
