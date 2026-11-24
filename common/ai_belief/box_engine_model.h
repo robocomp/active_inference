@@ -81,7 +81,11 @@ struct BoxEngineModel
 {
     static constexpr int N = 6;
     static constexpr int kYaw = 5;                 // θ = [cx, cy, H, w, h, yaw]
-    static constexpr int kHeight = 2;              // H: the DOF the LiDAR's top-grazing ring decorrelates (ρ_L height)
+    // H: the DOF the LiDAR's top-grazing ring decorrelates (ρ_L height, PersistentEngine::predicted_gain). ★ASSUMES A
+    // FLOOR-STANDING box whose TOP lies above the Helios and is grazed from below-and-beside, as the refrigerator's. The hood
+    // HANGS above the sensor: its rings strike the underside (z = H − extent), not the top, so ρ_L on H is the wrong geometry
+    // for it. Left as is for the belief port; the hood's fitter task (10d) must give the hood its own height decorrelation.
+    static constexpr int kHeight = 2;
     using State = typename B::State;
     using Frame = typename B::Frame;
     using Mat6 = Eigen::Matrix<float, 6, 6>;

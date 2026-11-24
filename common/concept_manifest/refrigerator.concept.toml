@@ -139,11 +139,11 @@ mesh = "meshes/fridge.obj"
 [shape]
 from = "nominal"
 layer_spread_m = [
-    0.03,   # cx: the depth layers are all at the FRONT (handles), so the outer layer's centre sits half the depth spread forward of the case's; room-frame cx/cy, so the full shift on each (the yaw is not class knowledge)
-    0.03,   # cy: as cx
-    0.025,  # H: the hinge caps stand about 1 inch above the case top
+    0.025,  # cx: the depth layers are all at the FRONT (handles), so the outer layer's centre sits half the depth spread forward of the case's; room-frame cx/cy, so the full shift on each (the yaw is not class knowledge)
+    0.025,  # cy: as cx
+    0.025,  # H: the hinge caps stand 1 inch above the case top (69-15/16 vs 68-15/16 in)
     0.0,    # w: the doors are flush with the case sides and the handles lie within the width
-    0.06,   # h: door handles stand 2 to 3 inches proud of the door face
+    0.05,   # h: the door handles stand 2 inches proud of the doors (31-5/8 vs 29-5/8 in)
     0.0,    # yaw: every layer shares the case's axes
 ]
-layer_spread_source = "appliance specification-sheet conventions for a real freestanding refrigerator: manufacturers list the depth both without and with handles (the two differ by about 2 to 3 inches, 5-7.5 cm, for bar handles) and the height both to the top of the case and to the top of the hinge (about 1 inch, 2.5 cm, apart). Not from the Webots fridge mesh."
+layer_spread_source = "GE GZE24N side-by-side refrigerator spec sheet (dimension table): height to top of hinge and door 69-15/16 in vs height to top of case 68-15/16 in (1 in = 2.5 cm, H); overall depth with doors and handles 31-5/8 in vs depth with doors without handles 29-5/8 in (2 in = 5.1 cm, h); cx/cy = half of h (layers at the front). The standard-depth GSE28N in the same sheet: 34-3/4 vs 32-3/4 in, 69-7/8 vs 69 in. Not from the Webots fridge mesh."

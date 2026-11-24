@@ -615,6 +615,8 @@ private:
 public:
     // self_test only: drive one volatility step directly, so the test exercises the production update.
     void update_volatility_for_test(const Eigen::Matrix<float, 6, 1>& d) { update_volatility(d); }
+    // test only: adopt door mode k (yaw + k·π/2; w ↔ h and the joint's θ / latent blocks permuted for k = 1, 3).
+    void apply_mode_rotation_for_test(int k) { apply_mode_rotation(k); }
 private:
     mutable float   dbg_wall_gap_    = 0.0f;
     mutable float   dbg_wall_lambda_ = 0.0f;
