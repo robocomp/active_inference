@@ -13,14 +13,18 @@
 //   gn_it,gn_conv,gn_lambda   the damped GN of the replayed update
 //   omega_cx..omega_yaw the log-volatility ω (the ai2 log has omega_w and omega_yaw)
 //   fe_upd              update()'s return value (NOT the ai2 log's `energy`, which is the mean mixture energy)
+//   pstd_cx..pstd_yaw   √ of the PREDICTED θθ diagonal this update started from (Σ̄: the class prior on the first update)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
 // Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults]   (N = update index; rows outside are computed, not printed)
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
-// The last line (stderr) is always the summary: the max dth_live and dP_live over the whole dump.
+// The last lines (stderr) are always the summary: the final θ and σ, the max σ per DOF over every event after the first update (predicts
+// included),
+// the total GN steps, and the max dth_live and dP_live over the whole dump.
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -79,9 +83,8 @@ int main(int argc, char** argv)
     }
     std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                 "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
-                "dth_live,dP_live\n");
+                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,dth_live,dP_live\n");
 
-    long upd = -1;
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
     {
@@ -91,7 +94,14 @@ int main(int argc, char** argv)
     };
     rc::CountableBelief belief;
     double worst_th = 0.0, worst_P = 0.0;
-    long compared = 0;
+    long compared = 0, gn_total = 0;
+    std::array<double, 6> sd_max{};
+    long upd = -1;
+    const auto track = [&](const rc::CountableBelief& b)
+    {   // after the first update only: before it Σ is the birth prior, not anything the estimator concluded
+        if (upd < 0) return;
+        for (int i = 0; i < 6; ++i) sd_max[std::size_t(i)] = std::max(sd_max[std::size_t(i)], std::sqrt(std::max(0.0, double(b.covariance()(i, i)))));
+    };
     const bool ok = rc::replay::play(reader, belief,
         [&](const rc::replay::UpdateEv& ev, const rc::CountableBelief& b, float fe)
         {
@@ -103,16 +113,19 @@ int main(int argc, char** argv)
             const auto& S = b.covariance();
             const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
             const auto& om = b.log_volatility();
+            const auto& Pb = b.dbg_Pbar_tt();
+            const auto pd = [&](int i) { return std::sqrt(std::max(0.0f, Pb(i, i))); };
+            gn_total += b.last_gn_iters();
             char row[1024];
             std::snprintf(row, sizeof row,
                           "%ld,%lld,%d,%zu,%d,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%d,%.6g,"
-                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g",
+                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g",
                           upd, static_cast<long long>(ev.cycle), ev.gated ? 1 : 0, ev.frame.points.size(),
                           ev.frame.lidar_only ? 1 : 0, ev.frame.beam.endpoints.size(),
                           s.cx, s.cy, s.H, s.w, s.h, s.yaw, sd(0), sd(1), sd(2), sd(3), sd(4),
                           std::sqrt(std::max(0.0f, b.yaw_marginal_var())), sd(5),
                           b.last_gn_iters(), b.last_gn_converged() ? 1 : 0, b.last_lambda(),
-                          om(0), om(1), om(2), om(3), om(4), om(5), fe);
+                          om(0), om(1), om(2), om(3), om(4), om(5), fe, pd(0), pd(1), pd(2), pd(3), pd(4), pd(5));
             pending = row;
         },
         [&](const rc::replay::ResultEv& live, const rc::CountableBelief& b)
@@ -132,7 +145,8 @@ int main(int argc, char** argv)
             worst_P  = std::max(worst_P, dP);
             ++compared;
             flush(dth, dP);
-        });
+        },
+        track);
     flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
 
     print_set("missing (default kept)", reader.diag().missing);
@@ -141,6 +155,16 @@ int main(int argc, char** argv)
     if (reader.skipped_events() > 0) std::fprintf(stderr, "replay: %d events of unknown type skipped\n", reader.skipped_events());
     if (not ok)
         std::fprintf(stderr, "replay: stream error: %s\n", reader.error().empty() ? "an event before the seed" : reader.error().c_str());
+    {
+        const auto& s = belief.state();
+        const auto& S = belief.covariance();
+        const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
+        std::fprintf(stderr, "replay: final theta cx %.6f cy %.6f H %.6f w %.6f h %.6f yaw %.6f\n", s.cx, s.cy, s.H, s.w, s.h, s.yaw);
+        std::fprintf(stderr, "replay: final std   cx %.6f cy %.6f H %.6f w %.6f h %.6f yaw %.6f\n", sd(0), sd(1), sd(2), sd(3), sd(4), sd(5));
+        std::fprintf(stderr, "replay: max std     cx %.6f cy %.6f H %.6f w %.6f h %.6f yaw %.6f (every event after the first update)\n", sd_max[0], sd_max[1],
+                     sd_max[2], sd_max[3], sd_max[4], sd_max[5]);
+        std::fprintf(stderr, "replay: gn steps %ld\n", gn_total);
+    }
     const bool defaults = not reader.diag().missing.empty() or not reader.diag().bad.empty();
     if (defaults and not allow_defaults)
         std::fprintf(stderr, "replay: FAIL — fields ran at their defaults (missing/bad above); pass --allow-defaults if intended\n");

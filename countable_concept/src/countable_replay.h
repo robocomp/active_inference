@@ -548,9 +548,11 @@ private:
 // ── Player: rebuilds the belief from the seed and re-runs every call through the CURRENT engine ──────────────────────────
 // on_update(const UpdateEv&, const CountableBelief& after, float fe) runs after each replayed update; on_result(const
 // ResultEv& live, const CountableBelief& replayed) after each recorded live result (the same update's). Returns false on
-// a stream error (reader.error()) or an event before the seed.
-template <class OnUpdate, class OnResult>
-bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& on_result)
+// a stream error (reader.error()) or an event before the seed. on_change(const CountableBelief&), when given, runs after
+// EVERY event that changes the belief (predicts, ageing and restores included), e.g. to track σ between updates.
+struct NoChange { void operator()(const CountableBelief&) const {} };
+template <class OnUpdate, class OnResult, class OnChange = NoChange>
+bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& on_result, OnChange&& on_change = {})
 {
     bool seeded = false;
     CountableBelief pre;   // the belief before the last update (RestoreEv)
@@ -574,6 +576,7 @@ bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& o
             else if constexpr (std::is_same_v<E, InflateEv>) b.inflate_for_age(ev.dt_s, ev.dt_nominal_s);
             else if constexpr (std::is_same_v<E, RestoreEv>) b = pre;
             else if constexpr (std::is_same_v<E, ResolveFrontEv>) b.resolve_front(ev.cue, ev.weight);
+            if constexpr (not std::is_same_v<E, ResultEv>) on_change(std::as_const(b));
         }, e);
     }
     return seeded and reader.error().empty();
