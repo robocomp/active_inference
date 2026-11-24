@@ -129,7 +129,23 @@ public:
     // [Agent] name for the log prefix (set once from the config by the worker).
     void set_agent_name(std::string n) { agent_name_ = std::move(n); }
 
+    /// The engine's offer gain (nats) for a look from ONE given standpoint (room frame pos, heading yaw), on the persistent
+    /// path: the same call compute() makes for each face (standpoint_gain), with the same sensor (+ this planner's detector
+    /// envelope), obstacles and Helios. At the proposal's own standpoint it equals promised_nats bit for bit. The P1 A/B/A
+    /// visit asks it at the scripted standpoints (SpecificWorker::serve_gain_queries).
+    float gain_at(const CountableBelief& belief, const Eigen::Vector2f& pos, float yaw,
+                  const rc::nbv::Sensor& sensor = {}, const std::vector<Obstacle>& obstacles = {},
+                  const std::optional<rc::ai::offer::OfferLidar>& offer_lidar = std::nullopt) const;
+
 private:
+    // The ONE per-standpoint evaluation both compute() (through raw_gain_from_standpoints, which casts to float the same way)
+    // and gain_at() use: PersistentEngine::predicted_gain, as float.
+    static float standpoint_gain(const CountableBelief& belief, const Eigen::Vector2f& pos, float yaw,
+                                 const rc::ai::offer::OfferSensors& cam)
+    { return static_cast<float>(belief.predicted_gain(rc::ai::offer::Standpoint{pos, yaw}, cam)); }
+    // The camera the planner scores with: the caller's FoVs and mount + this planner's detector envelope.
+    rc::nbv::Sensor with_envelope(const rc::nbv::Sensor& in) const { rc::nbv::Sensor s = in; s.env = det_env_; return s; }
+
     rc::detect::DetectorEnvelope det_env_{};
     mutable rc::nbv::StandBody   stand_body_{};   // G6: the body's covered cells per heading, rebuilt when residual's cell size changes
     std::string                  agent_name_ = "countable_concept";

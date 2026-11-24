@@ -22,6 +22,7 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -193,6 +194,15 @@ public:
     // persistent update (log_delivered) — the θ-marginal entropy drop of the published Σ, the same quantity. Both beside the
     // ai2 log; concept_agents.sh harvest copies them as <class>_offers.csv / <class>_delivered.csv. Classic locale.
     void log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats);
+    // The answer to one external gain query (countable_gain_query.h; P1 A/B/A visit): gain_query.csv beside offers.csv, one row per
+    // (request, instance) — the engine's gain at the requested standpoint, the instance's update serial, and, when the offer cache
+    // holds a proposal of this same serial, that proposal's promised_nats beside the gain recomputed at its standpoint (a live
+    // bit-for-bit check that the query is the offer's computation). Classic locale.
+    struct OfferCheck { long serial = 0; float x = 0.0f, y = 0.0f, yaw = 0.0f, promised = 0.0f, recomputed = 0.0f; };
+    void log_gain_query(const CountableInstance& inst, long request_id, float x, float y, float yaw, float gain_nats,
+                        const std::optional<OfferCheck>& offer);
+    // Where gain_query.txt is read from (the G5 logs' folder); empty when the G5 logs are off.
+    std::filesystem::path gain_query_request_path() const;
 
     // The LiDAR an offer from this instance puts to work (shared-engine G5), staged as feed_beam stages a sweep: the Helios
     // origin relative to the camera from this cycle's RT chain (room←helios vs room_T_zed), its rings' room-frame
@@ -349,6 +359,7 @@ private:
     std::ofstream                  gn_steps_csv_, gn_fd_csv_;   // Model.GnTrace (diagnostic)
     void log_gn_trace(const CountableInstance& inst);
     std::ofstream                  offers_csv_, delivered_csv_;   // the G5 promise/delivery log (log_offer, log_delivered)
+    std::ofstream                  gain_query_csv_;     // answers to external gain queries (log_gain_query)
     void log_delivered(const CountableInstance& inst);
     bool open_g5_csv(std::ofstream& out, std::string_view name, std::string_view header);
     std::unordered_map<std::string, long> gn_trace_serial_;   // last update written per node

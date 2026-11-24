@@ -29,6 +29,7 @@
  */
 
 #include "specificworker.h"
+#include "countable_gain_query.h"   // P1: external gain queries
 #include "countable_card.h"   // make_card(): this agent's perception card
 #include "../../common/perception_card/card_io.h"   // write_card_file
 #include <filesystem>
@@ -543,6 +544,7 @@ void SpecificWorker::compute()
             const rc::StageTimer t(&timing_.inst_total);   // [timing] per-instance total (summed)
             process_countable_node(node);
         }
+    serve_gain_queries();   // P1: the A/B/A visit's promise at a scripted standpoint (after the fits: this tick's beliefs)
 
     // Ricoh 360 = peripheral attention: associate ricoh detections to beds BY DIRECTION (after the ZED fits,
     // so bed positions are current); an unassigned bearing becomes a "seek a ZED view here" attention target.
@@ -915,10 +917,10 @@ void SpecificWorker::step_convergence(rc::CountableInstance& inst,
 // One instance's offer from the planner (Σ-based D-optimal NBV; the engine's predicted gain on the persistent path).
 std::optional<rc::EpistemicProposal> SpecificWorker::compute_offer(rc::CountableInstance& inst)
 {
+    const OfferInputs in = offer_inputs(inst);
     rc::EpistemicProposal prop =
         epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
-                                   zed_sensor_model(),
-                                   rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
+                                   in.sensor, in.obstacles,
                                    // The reachable region. refresh_room_geometry() already loads this
                                    // polygon for the fit's wall factor; the NBV never saw it, so every
                                    // viewpoint — including the ones behind the wall the bed is pushed
@@ -926,13 +928,51 @@ std::optional<rc::EpistemicProposal> SpecificWorker::compute_offer(rc::Countable
                                    // is_reachable then imposes no constraint (the pre-existing behaviour).
                                    fitter_->room_polygon(),
                                    // G5: the Helios the offer's look stages rays with (persistent path; else none)
-                                   fitter_->offer_lidar(inst),
+                                   in.lidar,
                                    // G6: residual's latched occupied cells (the controller reads the same attribute)
                                    &occupied_cells_);
     // Degenerate fit, or no sensor model yet — retry next cycle.
     if (not prop.valid or not prop.is_finite())
         return std::nullopt;
     return prop;
+}
+
+SpecificWorker::OfferInputs SpecificWorker::offer_inputs(const rc::CountableInstance& inst)
+{
+    return {zed_sensor_model(), rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id), fitter_->offer_lidar(inst)};
+}
+
+void SpecificWorker::serve_gain_queries()
+{
+    const std::filesystem::path req = fitter_->gain_query_request_path();
+    if (req.empty()) return;
+    std::error_code ec;
+    const auto mt = std::filesystem::last_write_time(req, ec);
+    if (ec or mt == gain_query_mtime_) return;          // no file, or nothing new since the last read
+    gain_query_mtime_ = mt;
+    std::ifstream f(req);
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    for (const rc::GainQuery& q : rc::new_gain_queries(text, gain_query_last_id_))
+    {
+        gain_query_last_id_ = std::max(gain_query_last_id_, q.id);
+        for (auto& [id, inst] : fitter_->instances())
+        {
+            if (q.node != "*" and q.node != inst.node_name) continue;
+            if (not inst.ai2_initialized or not inst.ai2_belief.params().persistent) continue;   // no engine offer to ask
+            const OfferInputs in = offer_inputs(inst);
+            const float g = epistemic_planner_.gain_at(inst.ai2_belief, {q.x, q.y}, q.yaw, in.sensor, in.obstacles, in.lidar);
+            std::optional<rc::CountableFitter::OfferCheck> chk;
+            if (const auto& h = inst.offer_cache.held; h.has_value() and inst.offer_cache.serial == inst.ai2_belief.gn_update_serial())
+                chk = rc::CountableFitter::OfferCheck{
+                    inst.offer_cache.serial, h->epistemic_target_x_m, h->epistemic_target_y_m, h->epistemic_target_yaw_rad,
+                    h->promised_nats,
+                    epistemic_planner_.gain_at(inst.ai2_belief, {h->epistemic_target_x_m, h->epistemic_target_y_m},
+                                               h->epistemic_target_yaw_rad, in.sensor, in.obstacles, in.lidar)};
+            fitter_->log_gain_query(inst, q.id, q.x, q.y, q.yaw, g, chk);
+            std::print("{}: [gain-query {}] {} at ({:.3f}, {:.3f}, {:.3f}) -> {:.4f} nats (serial {})\n", log_name(), q.id,
+                       inst.node_name, q.x, q.y, q.yaw, g, inst.ai2_belief.gn_update_serial());
+        }
+    }
 }
 
 // Publish/refresh the epistemic next-best-view affordance for one bed from its belief Σ (D-optimal NBV),

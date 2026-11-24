@@ -143,6 +143,20 @@ private:
                                   float free_energy);
     void step_convergence(rc::CountableInstance& inst, DSR::Node& node, float free_energy);
     std::optional<rc::EpistemicProposal> compute_offer(rc::CountableInstance& inst);   // the planner call (F1.1: cached by the caller)
+    // What an offer of this instance is computed against (camera, the other objects, the Helios): ONE gathering for the planner
+    // call and for an external gain query, so the query cannot see a different world than the offer.
+    struct OfferInputs
+    {
+        rc::nbv::Sensor sensor;
+        std::vector<rc::EpistemicPlanner::Obstacle> obstacles;
+        std::optional<rc::ai::offer::OfferLidar> lidar;
+    };
+    OfferInputs offer_inputs(const rc::CountableInstance& inst);
+    // P1 A/B/A visit: answer <etc>/gain_query.txt (countable_gain_query.h) — the engine's offer gain at a GIVEN standpoint,
+    // EpistemicPlanner::gain_at on offer_inputs(), logged to gain_query.csv. One stat() per tick when nothing is asked.
+    void serve_gain_queries();
+    std::filesystem::file_time_type gain_query_mtime_{};
+    long gain_query_last_id_ = 0;
     void step_epistemic(rc::CountableInstance& inst, DSR::Node& node);
     void trigger_graph_layout_twopi();   // injected into CountableSceneGraph as the relayout callback
 

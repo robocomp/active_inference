@@ -282,3 +282,13 @@ target_include_directories(wall_identity_test PRIVATE ../src ../../common ../../
 target_compile_options(wall_identity_test PRIVATE -O2)
 target_link_libraries(wall_identity_test PRIVATE Eigen3::Eigen)
 add_test(NAME wall_identity_test COMMAND wall_identity_test)
+
+# P1 follow-up (shared-engine plan rev 2): the engine's offer gain at a GIVEN standpoint — at the planner's own standpoint it is
+# the proposal's promised_nats bit for bit; a seen standpoint promises less than an unseen one; request lines parse locale-free.
+# Run: ./gain_query_test
+add_executable(gain_query_test gain_query_test.cpp ../src/countable_belief.cpp ../src/epistemic_planner.cpp
+               ../../common/robot_footprint/robot_footprint.cpp ../../common/robot_footprint/mesh_hull.cpp)
+target_include_directories(gain_query_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(gain_query_test PRIVATE -O2)
+target_link_libraries(gain_query_test PRIVATE Eigen3::Eigen)
+add_test(NAME gain_query_test COMMAND gain_query_test)

@@ -86,8 +86,7 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     // The sensor arrives from the caller with the camera's real FoVs + mount height; the detector envelope is
     // ours (the same one the removal channel weights absence by, so create and remove agree on "could we have
     // seen it?"). One model, both directions.
-    rc::nbv::Sensor sensor = sensor_in;
-    sensor.env = det_env_;
+    const rc::nbv::Sensor sensor = with_envelope(sensor_in);
 
     // ★NO SENSOR MODEL ⇒ NO PROPOSAL. A bed is a TALL box, so the VERTICAL axis is the one that binds:
     // without vfov the fill model silently reverts to horizontal-only and proposes ~0.9 m, which is precisely
@@ -150,7 +149,7 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     // for the update selects it for the offer: one switch, one engine.
     const rc::ai::offer::OfferSensors offer_cam{sensor, obstacles, offer_lidar};
     const auto engine_gain = rc::nbv::raw_gain_from_standpoints(target, [&](const Eigen::Vector2f& pos, float yaw)
-    { return belief.predicted_gain(rc::ai::offer::Standpoint{pos, yaw}, offer_cam); });
+    { return standpoint_gain(belief, pos, yaw, offer_cam); });
     const bool persistent = belief.params().persistent;
     const auto raw_gain = [&](int face_idx, float standoff) -> float
     {
@@ -253,6 +252,18 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     if (not proposal.is_finite())
         return {};
     return proposal;
+}
+
+// The engine's offer gain at ONE given standpoint (shared-engine plan rev 2, P1 follow-up): the call compute() makes for every
+// face, with the same sensor (the caller's camera + this planner's detector envelope), obstacles and Helios. At the planner's own
+// winning standpoint it IS the proposal's promised_nats, bit for bit (gain_query_test).
+float EpistemicPlanner::gain_at(const CountableBelief& belief, const Eigen::Vector2f& pos, float yaw,
+                                const rc::nbv::Sensor& sensor_in, const std::vector<Obstacle>& obstacles,
+                                const std::optional<rc::ai::offer::OfferLidar>& offer_lidar) const
+{
+    const rc::nbv::Sensor sensor = with_envelope(sensor_in);
+    const rc::ai::offer::OfferSensors offer_cam{sensor, obstacles, offer_lidar};
+    return standpoint_gain(belief, pos, yaw, offer_cam);
 }
 
 }  // namespace rc

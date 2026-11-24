@@ -2074,6 +2074,28 @@ void CountableFitter::log_offer(const CountableInstance& inst, float x, float y,
     offers_csv_.flush();
 }
 
+std::filesystem::path CountableFitter::gain_query_request_path() const
+{
+    if (cfg_.ai2_csv_path.empty() or not cfg_.lidar_measures_on_gated) return {};
+    return std::filesystem::path(cfg_.ai2_csv_path).parent_path() / "gain_query.txt";
+}
+
+void CountableFitter::log_gain_query(const CountableInstance& inst, long request_id, float x, float y, float yaw, float gain_nats,
+                                     const std::optional<OfferCheck>& offer)
+{
+    if (not open_g5_csv(gain_query_csv_, "gain_query.csv",
+                        "t_ms,request_id,node,update_serial,x,y,yaw,gain_nats,"
+                        "offer_serial,offer_x,offer_y,offer_yaw,offer_promised_nats,offer_recomputed_nats")) return;
+    gain_query_csv_ << wall_ms() << ',' << request_id << ',' << inst.node_name << ',' << inst.ai2_belief.gn_update_serial() << ','
+                    << x << ',' << y << ',' << yaw << ',' << gain_nats << ',';
+    if (offer)
+        gain_query_csv_ << offer->serial << ',' << offer->x << ',' << offer->y << ',' << offer->yaw << ','
+                        << offer->promised << ',' << offer->recomputed << '\n';
+    else
+        gain_query_csv_ << ",,,,,\n";
+    gain_query_csv_.flush();
+}
+
 void CountableFitter::log_delivered(const CountableInstance& inst)
 {
     const double d = inst.ai2_belief.last_delivered_nats();
