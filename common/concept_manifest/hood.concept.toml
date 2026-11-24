@@ -133,12 +133,22 @@ fitted hood to p(exists) = 0.018 whenever the robot turned away.
 """
 
 # ── Shape misfit (spec 2026-11-23 shared-engine G4): the LAYER SPREAD Δ per state DOF ──
-# Δ = 0 on every DOF: a box canopy offers the sensors no second layer to report. Its front is one face (the visor lip and the
-# control buttons stand within about a centimetre of it, below the surface σ), and the top the state's H names is the canopy top
-# where it meets the wall or the chimney, which no layer stands over. The taper of a pyramid chimney hood is a different SHAPE
-# of the class (as the toilet's tank/tankless split, ledger ruling for Task 5), not a layer of this one: it belongs to the size
-# prior, not to Δ. Revisit if the graded canopy box disagrees with the fit by more than the posterior σ on h.
+# A chimney hood's canopy is not one box surface: it TAPERS from a wide lip at the bottom to the chimney (flue cover) at the
+# top, and the sensors report different layers of that one object. The camera's mask outline takes the widest part, the lip;
+# the near-horizontal Helios rings strike the underside and the sloped faces, which sit INSIDE the lip's box and narrow to the
+# chimney's cross-section towards the top of the state's vertical extent. That is a within-instance layer disagreement, which is
+# what Δ encodes (it is not the class-level shape variation the toilet tank ruling is about). Δ is the taper of a typical REAL
+# 36-inch pyramid chimney hood, the Bosch HCP36651UC (spec sheet "36\" Pyramid Canopy Chimney Hood, 300 Series", BSH, 07/18,
+# Installation Details): canopy lip 36" × 19 11/16" (914 × 500 mm), chimney 13 3/16" wide × 10 3/4" deep (335 × 273 mm),
+# a 5" (127 mm) vertical lip edge, then the slope up to the chimney.
+#   w  (along the wall):  914 − 335 = 579 mm;
+#   h  (out from the wall): 500 − 273 = 227 mm;
+#   cx, cy: the depth layers all lie at the FRONT (the back is on the wall), so the outer layer's centre sits half the depth
+#           spread forward: 0.11 m, room-frame, the full shift on each (the yaw is not class knowledge) — the refrigerator's,
+#           nightstand's and toilet's convention;
+#   H, yaw: 0 (the top the state names is one height; every layer shares the canopy's axes).
+# Not from the Webots hood mesh.
 [shape]
 from = "nominal"
-layer_spread_m = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-layer_spread_source = "no layering on a box canopy: the visor lip and controls lie within about 1 cm of the canopy face, and the taper of pyramid chimney hoods is within-class shape variation (the size prior's), not a layer; Webots hood mesh not used."
+layer_spread_m = [0.11, 0.11, 0.0, 0.58, 0.23, 0.0]
+layer_spread_source = "taper of a real 36-inch pyramid chimney hood, Bosch HCP36651UC spec sheet (BSH, 07/18, Installation Details): canopy lip 914 x 500 mm narrowing to a 335 x 273 mm chimney; w = 914-335, h = 500-273, cx/cy = half of h (layers at the front). Not from the Webots hood mesh."
