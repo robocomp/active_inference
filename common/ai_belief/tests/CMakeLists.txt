@@ -29,8 +29,9 @@ add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)
 # Task 6: a neighbour's published belief as a foreign density (G3, Review Focus 5). Run: ./engine_neighbour_test
 # Task 7: offers under the same cap (G5, Review Focus 4) — a return view promises little, a new one a lot; promised vs delivered;
 # the face ranking. Run: ./offer_return_view_test
+# F1.2: the inferred process noise is the EM statistic (a wide prior corrected is not motion; a shove is). Run: ./engine_volatility_test
 foreach(t engine_no_beam_test engine_predict_only_test engine_shape_latent_test parked_synthetic_test engine_neighbour_test
-          offer_return_view_test)
+          offer_return_view_test engine_volatility_test)
     add_executable(${t} ${t}.cpp)
     target_include_directories(${t} PRIVATE ../..)
     target_compile_options(${t} PRIVATE -O2)

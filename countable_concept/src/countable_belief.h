@@ -448,6 +448,7 @@ struct CountableEngineModel
     Mat6  covariance() const;
     void  set_covariance(const Mat6& S);
     rc::ai::engine::SolverConfig solver() const;
+    rc::ai::engine::VolatilityConfig volatility() const;
 };
 
 // The bed generative model wired onto the shared rc::ai recursive-Laplace engine. Supplies only the
@@ -561,7 +562,8 @@ public:
     const rc::countable::SizeGaussian& size_likelihood() const { return size_lik_; }
 
     // Per-DOF log-volatility ω (Q = exp ω) and its hyperprior mean ω₀ — the accumulated experience.
-    const Eigen::Matrix<float, 6, 1>& log_volatility() const { return omega_; }
+    // ω = log Q per DOF: the engine's on the persistent path (F1.2), else the legacy estimate's.
+    Eigen::Matrix<float, 6, 1> log_volatility() const;
     // Retention time constant per DOF: τ = Σ_ii / exp(ω_i) frames — "how long this DOF remembers".
     Eigen::Matrix<float, 6, 1> retention_frames() const;
     void  predict()
@@ -730,7 +732,8 @@ public:
     int   n_prims()  const { return 1; }             // one box (clutter is the +1 mixture component)
     float sigma2()   const { return params_.sigma_base_m * params_.sigma_base_m + params_.model_sigma_m * params_.model_sigma_m; }
     Eigen::Matrix<float, 6, 6> transition() const { return Eigen::Matrix<float, 6, 6>::Identity(); }  // static
-    Eigen::Matrix<float, 6, 1> process_noise_diag() const;
+    Eigen::Matrix<float, 6, 1> process_noise_diag() const;        // the Q in force (the engine's on the persistent path)
+    Eigen::Matrix<float, 6, 1> configured_process_noise() const;  // Q₀ from the params (the volatility's prior mean)
     Eigen::Matrix<float, 6, 1> prior_cov_diag() const;
     Eigen::Matrix<float, 6, 1> common_mode_inv_diag(const CountableFrame& frame) const;
     // Extra GN factor (engine calls it via C++23 requires): the YOLO-independent LiDAR first-hit range factor.

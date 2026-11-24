@@ -211,12 +211,18 @@ Eigen::Matrix<float, 6, 1> CountableBelief::prior_cov_diag() const
     return (Eigen::Matrix<float, 6, 1>() << pp, pp, hh, wd, wd, yy).finished();   // [cx,cy,H,w,h,yaw]
 }
 
-Eigen::Matrix<float, 6, 1> CountableBelief::process_noise_diag() const
+Eigen::Matrix<float, 6, 1> CountableBelief::configured_process_noise() const
 {
     const float qm = params_.process_std_m   * params_.process_std_m;
     const float qy = params_.process_std_yaw * params_.process_std_yaw;
-    const Eigen::Matrix<float, 6, 1> q0 =
-        (Eigen::Matrix<float, 6, 1>() << qm, qm, qm, qm, qm, qy).finished();
+    return (Eigen::Matrix<float, 6, 1>() << qm, qm, qm, qm, qm, qy).finished();
+}
+
+Eigen::Matrix<float, 6, 1> CountableBelief::process_noise_diag() const
+{
+    // Persistent path: the engine owns Q (its volatility learns from the EM statistic of each update, F1.2).
+    if (params_.persistent) return engine_.process_noise(model());
+    const Eigen::Matrix<float, 6, 1> q0 = configured_process_noise();
     // Q = exp(ω) once volatility is inferred. Until the first measured cycle ω is unset and we return the
     // configured constant, so a belief that never updates behaves exactly as before.
     if (not params_.volatility_infer or not omega_init_)
@@ -288,6 +294,12 @@ void CountableBelief::update_volatility(const Eigen::Matrix<float, 6, 1>& dtheta
         const float q  = (n0 * q0 + vol_s_(i)) / (n0 + vol_n_);    // bounded by construction
         omega_(i) = std::clamp(std::log(std::max(1e-12f, q)), params_.volatility_omega_min, 4.0f);
     }
+}
+
+Eigen::Matrix<float, 6, 1> CountableBelief::log_volatility() const
+{
+    if (params_.persistent) return engine_.log_volatility(model()).cast<float>();
+    return omega_;
 }
 
 // τ = Σ_ii / Q_ii frames: how many predict-only frames double this DOF's variance — "how long it remembers".
@@ -803,7 +815,15 @@ void CountableEngineModel::canonicalize(State& s) const { b->canonicalize(s); }
 CountableEngineModel::Vec6 CountableEngineModel::shape_spread() const
 { return Eigen::Map<const Vec6>(b->params_.layer_spread_m.data()); }
 CountableEngineModel::Vec6 CountableEngineModel::prior_cov_diag() const { return b->prior_cov_diag(); }
-CountableEngineModel::Vec6 CountableEngineModel::process_noise_diag() const { return b->process_noise_diag(); }
+CountableEngineModel::Vec6 CountableEngineModel::process_noise_diag() const { return b->configured_process_noise(); }
+rc::ai::engine::VolatilityConfig CountableEngineModel::volatility() const
+{
+    const CountableBeliefParams& P = b->params_;
+    rc::ai::engine::VolatilityConfig v;
+    v.infer = P.volatility_infer;
+    v.sigma_omega = P.volatility_sigma;
+    return v;
+}
 
 // The size has a class mean, the position has none (centred on the seed), the yaw's class mean is the room axis' multiple of
 // 90° nearest the seed (4-fold: it never decides front/back).
@@ -950,15 +970,14 @@ std::vector<rc::ai::beam::BeamPart> CountableBelief::beam_parts(const CountableB
     return parts;
 }
 
-// update() under persistent: the engine's update with the cycle around it. The size summary is unchanged (§7c.1). ω learns from
-// camera-measured cycles only (post minus previous posterior), as today: a LiDAR-only frame is the rays' correction of a belief
-// the camera cycles built, and a point-free cycle measured nothing.
+// update() under persistent: the engine's update with the cycle around it. The size summary is unchanged (§7c.1). ω is the
+// engine's: it learns from every measured update after the first (camera or LiDAR-only), through the EM statistic of the step,
+// which already discounts a correction by how wide the prior was (F1.2; before, camera cycles only, on the raw step).
 float CountableBelief::update_persistent_cycle(const CountableFrame& frame)
 {
     point_wall_ = frame.wall;
     sanitize_covariance();
     const Eigen::Matrix<float, 6, 1> before = state_.vec();
-    const bool first = not engine_.first_update_done();               // `before` is the birth seed, not a posterior
     rc::ai::engine::FrameLatents<N> fl = frame_latents(frame);
     // A point-free frame measures only as a LiDAR-only frame (spec lidar-measures §7b); otherwise it is predict-only.
     fl.lidar_measured = fl.lidar_measured and (fl.camera_measured or frame.lidar_only);
@@ -973,9 +992,7 @@ float CountableBelief::update_persistent_cycle(const CountableFrame& frame)
     sanitize_covariance();
     predict_size_likelihood(1.0f);
     if (not frame.points.empty()) update_size_likelihood(frame);
-    // ω learns from the post-minus-previous-posterior step (T6c-2): the first update has no previous posterior — its step is
-    // the class prior correcting the data seed, not object motion.
-    if (not first and not frame.lidar_only and not frame.points.empty()) update_volatility(state_.vec() - before);
+    // ω is the engine's (F1.2): it learns inside update() from the EM statistic of every measured update after the first.
     return fe;
 }
 

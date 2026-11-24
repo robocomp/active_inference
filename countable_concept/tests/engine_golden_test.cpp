@@ -14,6 +14,9 @@
 // GN step count, the returned energy and the GnTrace rows. Compare: every double within 1e-9 relative, every count equal.
 // Re-recorded for shared-engine Task 5 (the shape latent): the fixture now carries the nightstand manifest's layer spread Δ,
 // so s_cam / s_L have non-zero variance.
+// Re-recorded for plan rev 2 F1.2 (the volatility): the fixture infers Q, which the engine now learns from the EM statistic of
+// every measured update (it was the raw camera step, in CountableBelief), so P's θ diagonal and the steps move from the second
+// update on.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)

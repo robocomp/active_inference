@@ -102,6 +102,17 @@ struct SolverConfig
     bool   restart   = false;
 };
 
+// Inferred process noise (the HISTORY stage, MODEL_HISTORY.md §3; plan rev 2 F1.2), optional model hook volatility(). Between
+// updates θ takes random-walk steps w ~ N(0, Q), Q = diag(e^ω) unknown and per object. Q's conjugate running estimate is the
+// mean of the EM statistic of the steps (see update()), with the configured Q₀ (the model's process_noise_diag) as a prior
+// worth n₀ = 1/σ_ω² pseudo-observations and a memory λ per measured update. infer = false: Q = Q₀ throughout.
+struct VolatilityConfig
+{
+    bool   infer = false;
+    double sigma_omega = 2.0;            // the hyperprior's width; its strength n₀ = 1/σ_ω² in pseudo-observations
+    double memory = 0.995;               // λ per measured update (~200 updates): long enough to earn stiffness, short to recant
+};
+
 // GnTrace (diagnostic): one row per GN step of the last update, and the finite-difference check.
 template <int N>
 struct GnTraceStep
@@ -138,7 +149,8 @@ struct GnTraceFd
 //   beam_parts(s), beam_rays(f), beam_config() the LiDAR channel's convex parts, staged rays and beam config;
 //   chain_jacobian(s, lever)                   how a robot pose error (δx, δy, δψ) moves θ;
 //   class_prior_mean(seed, f)                  the first update's prior mean (the class mean; position at the seed);
-//   prior_cov_diag(), process_noise_diag()     Σ₀ and Q diagonals (as recursive_laplace.h);
+//   prior_cov_diag(), process_noise_diag()     Σ₀ and the CONFIGURED Q₀ diagonals (the engine's Q is Q₀, or e^ω once the
+//                                              volatility learns: process_noise());
 //   state(), set_state(s), covariance(), set_covariance(Σ)   the model's θ and its float N×N mirror of P_θθ (the model's
 //                                              own terms may read the mirror: the engine sets it to the predicted P̄_θθ
 //                                              before the first linearisation, and to the posterior after);
@@ -148,6 +160,7 @@ struct GnTraceFd
 // Optional (detected by requires-expressions; absent ⇒ the stated default):
 //   accumulate_camera_extra(s, f, I, b, E)     the camera channel's non-point terms, same energy convention (absent: none);
 //   solver()                                   SolverConfig (absent: SolverConfig{});
+//   volatility()                               VolatilityConfig (absent: infer = false, Q = Q₀ throughout);
 //   accumulate_lidar_override(s, f, I*, b*, E*) -> bool   route the LiDAR channel elsewhere (a test hook; absent: never).
 // The camera channel's flag is FrameLatents::camera_measured alone: it gates both the camera's accumulation (information and
 // energy) and its channel in the joint step, so G and J cannot disagree about whether the camera measured.
@@ -282,6 +295,7 @@ public:
         P_.template block<3, 3>(N + kChain, N + kChain) = last_sigma_pose_;
         b_.setZero();
         first_update_done_ = false;                                       // the class prior re-enters once, at the class mean
+        vol_init_ = false;                                                // the volatility estimate is suspect too: back to Q₀
         m.set_covariance(Sigma_theta());
         return true;
     }
@@ -294,6 +308,19 @@ public:
         ensure_joint(m.covariance());
         predict_theta(m, q_scale);
         m.set_covariance(Sigma_theta());
+    }
+
+    // Q per predict step: e^ω once the volatility has learned from an update, else the model's configured Q₀.
+    VecNf process_noise(const M& m) const
+    {
+        if (not vol_init_) return m.process_noise_diag();
+        return vol_omega_.array().exp().matrix().template cast<float>();
+    }
+    // ω = log Q per θ component (log Q₀ until the first update the volatility learns from).
+    VecNd log_volatility(const M& m) const
+    {
+        if (vol_init_) return vol_omega_;
+        return m.process_noise_diag().template cast<double>().array().log().matrix();
     }
 
     // Step 1 on the latents (spec 7c.7 a, b). e is predicted whenever a channel measures: a NEW SOURCE when it has no lever
@@ -465,6 +492,8 @@ public:
         if (not camera and not lidar)
             return 0.0f;                                                   // predict-only
 
+        const bool had_posterior = first_update_done_;                     // the volatility learns from a posterior's step only
+        const VecNf q_used = process_noise(m);                             // the Q of this update's (and the interval's) predicts
         FrameLatents<N> fl_used = fl;
         fl_used.lidar_measured = lidar;                                    // the latents follow the channels that measure
         predict_latents(m, fl_used);                                       // step 1, latents
@@ -735,6 +764,7 @@ public:
         }
         b_ = b_post;
         m.set_covariance(Sigma_theta());
+        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, theta_post);
         dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
         // G5: what this update delivered (the θ-marginal entropy drop of the published Σ), and what the next offer's
         // hypothetical look starts from: the camera's position, how many points it gave and their mean variance, b_cam's
@@ -870,7 +900,7 @@ public:
             b.setZero(); sp.setZero(); lev = {}; lsp.setZero();
         }
         const double H_before = half_logdet_theta(P);
-        predict_theta_on(P, m, 1.0f);
+        predict_theta_on(P, process_noise(m), m.prior_cov_diag(), 1.0f);
 
         const OfferObservation obs = offer_observation(m, s, sn);
         const bool camera = not obs.points.empty(), lidar = obs.lidar;
@@ -1029,6 +1059,51 @@ private:
         return offer_cache_.parts;
     }
 
+    // The model's optional volatility settings: VolatilityConfig{} (infer = false) when absent.
+    static VolatilityConfig volatility_of(const M& m)
+    {
+        if constexpr (requires { { m.volatility() } -> std::convertible_to<VolatilityConfig>; })
+            return m.volatility();
+        else
+            return VolatilityConfig{};
+    }
+
+    // The EM statistic of the process steps over one update interval (plan rev 2 F1.2; Fable order review §2.3). Per θ component,
+    // with q the per-step Q the interval was predicted with, Σ̄ the predicted (prior) variance this update started from, Σ⁺ the
+    // posterior and δθ the posterior mean minus the predicted mean, each of the interval's random-walk steps w has
+    //     E[w | data] = (q/Σ̄)·δθ ,   Var[w | data] = q − (q/Σ̄)²·(Σ̄ − Σ⁺) ,
+    // so E[w² | data] = q + (q/Σ̄)²·(δθ² − (Σ̄ − Σ⁺)). It is ≥ 0 whenever q ≤ Σ̄ (Σ̄ holds at least one q), so it takes no
+    // rectifier, and its fixed point is "the innovations are as large as the filter expected", which is what the right Q means.
+    // The weight (q/Σ̄)² is the share of the prior variance motion accounts for: a large correction of a wide prior (a seed
+    // collapsing onto data) reads as the prior being corrected, a shove of a converged object (Σ̄ a few q) as motion.
+    // Running mean, conjugate in the per-step variance: n ← λn + 1, S ← λS + E[w²], Q = (n₀Q₀ + S)/(n₀ + n), ω = log Q; Q is a
+    // weighted mean of Q₀ and of non-negative statistics, so it stays positive with no clamp.
+    void learn_volatility(const M& m, const VecNf& q_used, const VecNd& theta_pred, const MatJd& P_bar, const VecNd& theta_post)
+    {
+        const VolatilityConfig vc = volatility_of(m);
+        if (not vc.infer) return;
+        const VecNd q0 = m.process_noise_diag().template cast<double>();
+        if (not vol_init_)
+        {
+            vol_omega_ = q0.array().log().matrix();
+            vol_s_.setZero();
+            vol_n_ = 0.0;
+            vol_init_ = true;
+        }
+        const double n0 = 1.0 / (vc.sigma_omega * vc.sigma_omega);
+        vol_n_ = vc.memory * vol_n_ + 1.0;
+        for (int i = 0; i < N; ++i)
+        {
+            double dth = theta_post(i) - theta_pred(i);
+            if (i == kYaw) dth = std::remainder(dth, 2.0 * M_PI);
+            const double q = double(q_used(i)), sbar = P_bar(i, i), spost = P_(i, i);
+            const double k = q / sbar;
+            const double ew2 = q + k * k * (dth * dth - (sbar - spost));
+            vol_s_(i) = vc.memory * vol_s_(i) + ew2;
+            vol_omega_(i) = std::log((n0 * q0(i) + vol_s_(i)) / (n0 + vol_n_));
+        }
+    }
+
     // ½ log det of P's θθ block (LDLT; a non-positive pivot ⇒ NaN, so a degenerate Σ cannot pass as a number).
     static double half_logdet_theta(const MatJd& P)
     {
@@ -1039,11 +1114,9 @@ private:
     }
 
     // θ's predict on P (Σ += q_scale·Q, then the clamp_to_prior congruence; see predict()).
-    void predict_theta(const M& m, float q_scale) { predict_theta_on(P_, m, q_scale); }
-    static void predict_theta_on(MatJd& P_, const M& m, float q_scale)
+    void predict_theta(const M& m, float q_scale) { predict_theta_on(P_, process_noise(m), m.prior_cov_diag(), q_scale); }
+    static void predict_theta_on(MatJd& P_, const VecNf& q, const VecNf& p0, float q_scale)
     {
-        const VecNf q  = m.process_noise_diag();
-        const VecNf p0 = m.prior_cov_diag();
         for (int i = 0; i < N; ++i) P_(i, i) += double(std::max(0.0f, q_scale)) * double(q(i));
         for (int i = 0; i < N; ++i)
             if (p0(i) > 0.0f and P_(i, i) > double(p0(i)))
@@ -1237,6 +1310,11 @@ private:
     double last_lambda_ = 0.0;
     VecNd  last_gn_step_ = VecNd::Zero();
     MatNf  dbg_Pbar_tt_ = MatNf::Zero();
+    // the inferred volatility (learn_volatility): ω = log Q per θ component, the running statistic S and count n
+    bool   vol_init_ = false;
+    VecNd  vol_omega_ = VecNd::Zero();
+    VecNd  vol_s_ = VecNd::Zero();
+    double vol_n_ = 0.0;
     MatNf  dbg_Id_th_ = MatNf::Zero();
     MatNf  dbg_Id_cam_ = MatNf::Zero();
     MatNf  dbg_Id_L_ = MatNf::Zero();
