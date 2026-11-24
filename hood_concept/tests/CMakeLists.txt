@@ -19,3 +19,13 @@ add_executable(planner_ab_test planner_ab_test.cpp legacy_epistemic_planner.cpp 
 target_include_directories(planner_ab_test PRIVATE . ../src ../../common ../../common/media_transport)
 target_compile_options(planner_ab_test PRIVATE -O2)
 target_link_libraries(planner_ab_test PRIVATE Eigen3::Eigen)
+
+# shared-engine Task 10: the LEGACY belief trajectory (Model.Engine = "legacy", the per-frame recursive-Laplace update),
+# recorded with the sources BEFORE the port into golden/legacy_golden.bin and compared EXACTLY after it.
+# Run: ./legacy_golden_test [--record]
+add_executable(legacy_golden_test legacy_golden_test.cpp ../src/hood_belief.cpp)
+target_include_directories(legacy_golden_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(legacy_golden_test PRIVATE GOLDEN_FILE="${CMAKE_CURRENT_LIST_DIR}/golden/legacy_golden.bin")
+target_compile_options(legacy_golden_test PRIVATE -O2)
+target_link_libraries(legacy_golden_test PRIVATE Eigen3::Eigen)
+add_test(NAME legacy_golden_test COMMAND legacy_golden_test)
