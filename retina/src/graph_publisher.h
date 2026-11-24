@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <dsr/api/dsr_api.h>
@@ -27,6 +28,7 @@
 #include "rgbd_data.h"
 #include "retina_params.h"
 #include "mask_hover_info.h"
+#include "mask_dump_csv.h"
 
 struct SegDetection;
 namespace rc::human_pose { struct PoseDetection; }
@@ -78,6 +80,12 @@ public:
     // Main-thread only, like publish itself.
     [[nodiscard]] rc::MaskHoverSnapshotPtr zed_hover_snapshot() const { return zed_hover_; }
     [[nodiscard]] rc::MaskHoverSnapshotPtr ricoh_hover_snapshot() const { return ricoh_hover_; }
+
+    // Mask dump ([ZedDump] dump_masks): when on, each masks_zed upload also keeps a copy of exactly what
+    // it published (label, id, confidence, segmenter tag, silhouette pixels, camera-frame support points)
+    // keyed by its capture stamp. Off (default) = one bool test per mask, nothing copied. Main-thread only.
+    void set_capture_zed_masks(bool on) { capture_zed_masks_ = on; if (not on) zed_mask_record_.reset(); }
+    [[nodiscard]] const std::optional<rc::diag::MaskDumpRecord>& last_zed_mask_record() const { return zed_mask_record_; }
 
     // Publish human skeletons on the dedicated 'skeleton' node. Keypoints are BODY_18, deprojected
     // to the CAMERA (zed) frame — NOT room frame — so a consumer interacting with a person can
@@ -145,6 +153,9 @@ private:
     bool            motion_csv_open_attempted_ = false;
 
     rc::MaskHoverSnapshotPtr zed_hover_, ricoh_hover_;
+
+    bool                                    capture_zed_masks_ = false;
+    std::optional<rc::diag::MaskDumpRecord> zed_mask_record_;
 
     bool          masks_ready_    = false;
     bool          thumbs_ready_   = false;

@@ -341,6 +341,10 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     if (rgbd.depth.empty() || rgbd.width <= 0 || rgbd.height <= 0 || rgbd.focal_x <= 0.f || rgbd.focal_y <= 0.f)
     {
         zed_hover_ = hover;   // no masks this frame
+        if (capture_zed_masks_)
+            zed_mask_record_ = rc::diag::MaskDumpRecord{.stamp_ms = frame_ts_ms,
+                                                        .frame_id = static_cast<int>(sensing_frame),
+                                                        .img_w = rgbd.width, .img_h = rgbd.height};
         MaskArrays empty;
         empty.frame_id = static_cast<int>(sensing_frame);
         empty.ts_ms    = frame_ts_ms;
@@ -469,6 +473,13 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     mask_pixel_offsets.push_back(0.0f);
 
     const std::size_t mask_stride = std::max<std::size_t>(1, params_.VOXEL_DECIMATION_FACTOR);
+
+    // Mask dump capture (gate off ⇒ stays empty and nothing below copies anything).
+    std::optional<rc::diag::MaskDumpRecord> dump_rec;
+    if (capture_zed_masks_)
+        dump_rec = rc::diag::MaskDumpRecord{.stamp_ms = frame_ts_ms, .frame_id = static_cast<int>(sensing_frame),
+                                            .img_w = rgbd.width, .img_h = rgbd.height,
+                                            .pixel_stride = static_cast<int>(mask_stride)};
 
     for (std::size_t det_idx = 0; det_idx < detections.size(); ++det_idx)
     {
@@ -637,6 +648,17 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             labels_joined << '|';
         labels_joined << det.label;
 
+        // Same mask, same arrays, same order as published below (index = position in mask_label_ids).
+        if (dump_rec)
+        {
+            rc::diag::MaskDumpEntry e{.label = det.label, .label_id = det.class_id, .confidence = det.confidence,
+                                      .segmenter = det.segmenter, .pixels_xy = det_pixels, .points_cam = {}};
+            e.points_cam.reserve(mask_points.size() * 3);
+            for (const auto& p : mask_points)
+                e.points_cam.insert(e.points_cam.end(), {p.x(), p.y(), p.z()});
+            dump_rec->masks.push_back(std::move(e));
+        }
+
         {
             const bool accepted = not whitelist_active
                 or std::ranges::find(params_.YOLO_ACCEPTED_LABELS, det.label) != params_.YOLO_ACCEPTED_LABELS.end();
@@ -800,6 +822,8 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     out.rt_gap_s            = rt_gap_s;
     const int mask_count = static_cast<int>(out.label_ids.size());
     zed_hover_ = hover;
+    if (dump_rec)
+        zed_mask_record_ = std::move(dump_rec);
     write_mask_node(*G_, params_, masks_node, out);
     G_->update_node(std::move(masks_node));
 

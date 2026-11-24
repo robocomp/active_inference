@@ -148,7 +148,9 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
             }
 
             // class_id offset by 1000 keeps semantic ids clear of the COCO id range (consumers key on label).
-            new_dets.push_back(SegDetection{bbox, 1000 + id, label, conf, comp});
+            SegDetection det{bbox, 1000 + id, label, conf, comp};
+            det.segmenter = rc::MaskSegmenter::semantic;   // provenance for the mask dump (not on DSR)
+            new_dets.push_back(std::move(det));
             ++per_class[ci];
             ++drops_[ci].kept;
         }

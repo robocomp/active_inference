@@ -156,6 +156,7 @@ struct RetinaParams
     int         ZED_DUMP_JPEG_QUALITY   = 92;     // ZedDump.jpeg_quality
     float       ZED_DUMP_MIN_MOVE_M     = 0.05f;  // ZedDump.min_move_m
     float       ZED_DUMP_MIN_TURN_DEG   = 3.0f;   // ZedDump.min_turn_deg
+    bool        ZED_DUMP_MASKS          = false;  // ZedDump.dump_masks (needs enabled) — <stamp>.masks*.csv, mask_dump_csv.h
 
     // ── Door SECOND OPINION (door_specialist_stage.h) ──────────────────────────────────────────────
     // A model trained on doors, run only on frames where the ADE20K path produced no door mask. It

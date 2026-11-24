@@ -29,9 +29,11 @@ float wrap_pi(float a)
 } // namespace
 
 void ZedFrameDump::configure(bool enabled, std::string dir, int jpeg_quality, float min_move_m,
-                             float min_turn_rad)
+                             float min_turn_rad, bool dump_masks)
 {
     enabled_      = enabled;
+    dump_masks_   = dump_masks;
+    masks_pending_ = false;
     dir_          = std::move(dir);
     jpeg_quality_ = std::clamp(jpeg_quality, 50, 100);
     min_move_m_   = min_move_m;
@@ -56,6 +58,8 @@ void ZedFrameDump::configure(bool enabled, std::string dir, int jpeg_quality, fl
                 "gt_x,gt_y,gt_angle,gt_ts,gt_valid\n";
     std::println("[zed-dump] recording ZED frames to {}/ (move ≥ {:.2f} m or turn ≥ {:.1f}°)",
                  dir_, min_move_m_, min_turn_rad_ * 180.0f / std::numbers::pi_v<float>);
+    if (dump_masks_)
+        std::println("[zed-dump] + masks: <stamp>.masks.csv / .masks.pix.csv / .masks.pts.csv per kept frame");
 }
 
 bool ZedFrameDump::maybe_save(std::uint64_t stamp, const cv::Mat& bgr, const Mat::RTMat& room_T_zed,
@@ -104,9 +108,19 @@ bool ZedFrameDump::maybe_save(std::uint64_t stamp, const cv::Mat& bgr, const Mat
 
     have_last_ = true;
     last_x_ = cx; last_y_ = cy; last_yaw_ = yaw;
+    last_kept_stamp_ = stamp;
+    masks_pending_   = dump_masks_;
     if (++saved_ % 100 == 0)
         std::println("[zed-dump] {} frames saved", saved_);
     return true;
+}
+
+bool ZedFrameDump::maybe_save_masks(const MaskDumpRecord& rec)
+{
+    if (not wants_masks() or not masks_pending_ or rec.stamp_ms != last_kept_stamp_)
+        return false;
+    masks_pending_ = false;   // one attempt per kept frame, even if the write fails
+    return write_mask_dump(dir_, rec);
 }
 
 } // namespace rc::diag
