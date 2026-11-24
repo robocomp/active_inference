@@ -105,7 +105,7 @@ Not expected to move in part 1: existence and plausibility (`FeRef`, `FeScale`, 
 
 | class | graded quantity | ground truth |
 |---|---|---|
-| bed | mattress extent: w 1.571, length 1.971; centre of the mattress box | Bed.proto mattress mesh |
+| bed | (AuRo A3, 11-25) per DOF, the extent of the mesh surfaces the likelihood fits: w = outer width of frame ∪ blanket 1.766; h (depth) = frame incl. headboard 2.09–2.12; H = blanket top 0.72; centre of that box | Bed.proto visual meshes (the prior's "mattress layer" comment is recorded as inconsistent; prior unchanged) |
 | nightstand | body box | proto body mesh |
 | toilet | footprint of bowl + tank | proto mesh |
 | chair | seat centre and yaw | proto seat mesh |
@@ -214,3 +214,6 @@ All countable classes share θ = (cx, cy, H, w, h, yaw):
 The countable publisher writes `width_m = w`, `depth_m = h`, `height_m = H`. So the graded box (w, d, h) maps as width = θ.w, depth = θ.h, height = θ.H.
 
 For box-part classes (chair, table) the parts are fixed functions of θ, so the graded quantity is either θ itself (marginal = the θθ block) or g(θ) (marginal = J Σθθ Jᵀ, with J = ∂g/∂θ from parts_geometry.h).
+
+
+**AuRo A3 (11-25):** for every class and graded DOF, the reference is the extent of the mesh surfaces the likelihood fits (from the manifest and the measurement model), never chosen from the estimates. Base-world-measured priors: bed, nightstand, toilet = yes; chair = partly (template heights and leg size from the Webots SimpleChair); refrigerator, hood, table = no (nominal).
