@@ -1,5 +1,6 @@
 // spec 2026-11-15 lidar-measures §7c.8 rev 3.3.14 Pass (1), (2): birth size at the class means; the cloud's extent beyond
-// the class size widens the position covariance, σ² = σ_pos² + (E − L)²/12 per wall axis. Run: ./birth_footprint_test
+// the class size widens the position covariance, σ² = σ_pos² + (E − L)²/12 per wall axis; F1.3: along the
+// wall either sign of E − L (a clipped cloud too). Run: ./birth_footprint_test
 #include <cstdio>
 #include <cmath>
 #include <vector>
@@ -39,7 +40,8 @@ int main()
         CHECK(bf.w == cw and bf.h == cd);                        // the class means, not the 2 m cloud
         CHECK(std::abs(bf.var_n - want_n) <= 1e-6f * want_n);    // σ_n² = σ_pos² + (E_n − h̄)²/12
         CHECK(bf.extent_n > 1.5f);                                // the cloud really is long across
-        CHECK(std::abs(bf.var_t - sp * sp) <= 1e-6f);            // along: E_t ≈ 0.5 ≤ w̄ ⇒ σ_pos only
+        const float ex_t = bf.extent_t - cw;                       // along: (w̄ − E_t)²/12, either sign (F1.3)
+        CHECK(std::abs(bf.var_t - (sp * sp + ex_t * ex_t / 12.0f)) <= 1e-6f * bf.var_t);
         CHECK(std::abs(bf.centre.y() - 0.5f * cd) < 1e-5f);       // flush: h̄/2 in from the wall
         // room-frame covariance: the wall's n is +y, so the across variance sits on (y, y)
         CHECK(std::abs(bf.pos_cov(1, 1) - bf.var_n) < 1e-6f and std::abs(bf.pos_cov(0, 0) - bf.var_t) < 1e-6f);
@@ -52,7 +54,24 @@ int main()
         std::printf("  clean: w %.3f h %.3f extent along %.3f across %.3f ; sigma along %.3f across %.3f\n",
                     bf.w, bf.h, bf.extent_t, bf.extent_n, std::sqrt(bf.var_t), std::sqrt(bf.var_n));
         CHECK(bf.ok and bf.w == cw and bf.h == cd);
-        CHECK(std::abs(bf.var_t - sp * sp) <= 1e-6f and std::abs(bf.var_n - sp * sp) <= 1e-6f);
+        const float ex_t = bf.extent_t - cw;
+        CHECK(std::abs(bf.var_t - (sp * sp + ex_t * ex_t / 12.0f)) <= 1e-6f * bf.var_t);   // the seen width ≈ w̄: ~σ_pos
+        CHECK(std::abs(bf.var_n - sp * sp) <= 1e-6f);             // across: one face, shallower than h̄ ⇒ σ_pos only
+    }
+    // (3) clipped (plan rev 2 F1.3): the image border cut the front face to its left 0.20 m. The seen extent is SHORTER than
+    // the class width, so the centre along the wall lies anywhere over w̄ − E_t: (w̄ − E_t)²/12, no switch, no gain.
+    {
+        const auto xy = slab(-0.25f, -0.05f, 0.49f, 0.53f, 12, 4);
+        const auto bf = rc::birth_footprint(xy, wp, wn, cw, cd, sp);
+        const float ex_t = cw - bf.extent_t;
+        const float want_t = sp * sp + ex_t * ex_t / 12.0f;
+        std::printf("  clipped: extent along %.3f (class %.3f) ; sigma along %.3f (sigma_pos %.3f) across %.3f\n",
+                    bf.extent_t, cw, std::sqrt(bf.var_t), sp, std::sqrt(bf.var_n));
+        CHECK(bf.ok and bf.w == cw and bf.h == cd);
+        CHECK(bf.extent_t < 0.25f);                                // the cloud really is short of the class width
+        CHECK(std::abs(bf.var_t - want_t) <= 1e-6f * want_t);
+        CHECK(bf.var_t > sp * sp + 0.0045f);                      // (0.51 − ~0.2)²/12 ≈ 0.008: visibly wider than σ_pos² alone
+        CHECK(std::abs(bf.var_n - sp * sp) <= 1e-6f);
     }
     // a rotated wall: the covariance rotates with it (trace and determinant kept)
     {

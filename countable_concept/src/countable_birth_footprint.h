@@ -2,10 +2,15 @@
 // Birth on the furniture priors, for a wall-standing class (spec 2026-11-15 lidar-measures §7c.8 rev 3.3.14).
 //
 // The size is the class mean; the data sizes the box afterwards. The cloud's spread does not set the size; it sets
-// how uncertain the POSITION is. An object of length L lying anywhere inside a cloud of length E > L is uniform over
-// E − L, whose variance is (E − L)²/12. That is added, per wall axis, to the class position variance σ_pos². A mask
-// cloud that has taken in a neighbour (live14fixA: 2.46 m for a 0.51 m nightstand) therefore gives a wide position,
-// not a 2 m-deep box.
+// how uncertain the POSITION is.
+//  · ALONG the wall the centre is the cloud's middle. An object of length L and a seen extent E place that middle anywhere
+//    over |L − E|: E > L, the object lies somewhere inside a cloud that took in more (a neighbour: live14fixA, 2.46 m for a
+//    0.51 m nightstand); E < L, the cloud is the part of the object in view (a mask clipped at the image border, a partial
+//    view) and the object extends past it on either side. Uniform either way, variance (L − E)²/12 (plan rev 2 F1.3: this
+//    replaces the fitter's "skip the whole birth on a truncated mask" switch, which started GN 0.8 m away on engine1's bed).
+//  · ACROSS the wall the centre is NOT the cloud's: it is h̄/2 in from the wall (the back on the wall). A shallower cloud (one
+//    face) says nothing about it; only a cloud reaching further from the wall than the object is deep says the object may
+//    stand off it, over E − h̄. So that axis keeps max(0, E − h̄): the cloud-placed centre's spread, not a cutoff.
 #include <algorithm>
 #include <cmath>
 #include <span>
@@ -48,7 +53,7 @@ inline BirthFootprint birth_footprint(std::span<const Eigen::Vector2f> xy, const
     out.centre = wall_p + t * (0.5f * (a0 + a1)) + n * (0.5f * class_d);
     out.extent_t = (a1 - a0) / 0.9f;                      // p5–p95 holds 90 % of a uniform spread
     out.extent_n = (b1 - b0) / 0.9f;
-    const float ex_t = std::max(0.0f, out.extent_t - class_w), ex_n = std::max(0.0f, out.extent_n - class_d);
+    const float ex_t = out.extent_t - class_w, ex_n = std::max(0.0f, out.extent_n - class_d);
     const float pp = pos_std * pos_std;
     out.var_t = pp + ex_t * ex_t / 12.0f;
     out.var_n = pp + ex_n * ex_n / 12.0f;

@@ -1148,8 +1148,12 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             // is UNOBSERVED until the cloud spans it — exactly the condition the fit's depth-observability prior
             // already tests (ai2_depth_obs_band_m). Below that span h stays at the footprint prior mean and the
             // AI2DepthUnobsPrecision term holds it there; above it the view genuinely resolves depth, so use it.
-            // Skip on a TRIMMED mask (extent is only a lower bound → would birth too small); wait for a full mask.
-            if (cfg_.footprint_moment_precision > 0.0f and inst.last_trunc_frac <= 1e-3f)
+            // Legacy path: skip on a TRIMMED mask (extent is only a lower bound → would birth too small); wait for a full mask.
+            // Persistent path (plan rev 2 F1.3): no switch. The engine enters the class prior at the class mean, so the seed is
+            // only the GN start, and a clipped mask enters as what it is — a seen extent shorter than the class's — through
+            // birth_on_priors' position covariance, (class extent − seen extent)²/12 along the wall (countable_birth_footprint.h).
+            // engine1's bed: trunc 0.23 % skipped the whole seed and GN started 0.8 m short of the bed's centre.
+            if (cfg_.footprint_moment_precision > 0.0f and (cfg_.lidar_measures_on_gated or inst.last_trunc_frac <= 1e-3f))
             {
                 std::vector<Eigen::Vector3f> pts;
                 pts.reserve(static_cast<std::size_t>(npts));
