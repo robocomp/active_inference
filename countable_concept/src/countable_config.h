@@ -155,6 +155,9 @@ struct CountableConfig
     // is then ONLY the on/off switch (its value unused), and a wall with σ_wall ≤ 0 makes the term inert.
     float ai2_wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> the flush precision)
     float ai2_wall_no_cross_margin_m  = 0.0f;     // interior offset (m) inside which the constraint activates
+    // [prior.attachment] stand-off (manifest; F1.4): the back face's typical real distance off its wall, mean and std (m).
+    float wall_standoff_m     = 0.0f;
+    float wall_standoff_std_m = 0.0f;   // 0 ⇒ none declared: the flush prior keeps its old form
     float ai2_process_std_m   = 0.005f;  // predict process-noise std, length DOFs (m/frame)
     float ai2_process_std_yaw = 0.01f;   // predict process-noise std, yaw (rad/frame)
     // Stale-belief aging (measurement-age → covariance). Nominal inter-frame period (s) of the mask stream,

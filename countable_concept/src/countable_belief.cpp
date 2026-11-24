@@ -786,17 +786,95 @@ void CountableEngineModel::accumulate_camera_extra(const State& s, const Frame& 
         b->accumulate_footprint(s, f, Id, bd, /*anchor*/ false, E);
 }
 
-// θ-ONLY, unsaturated: the biases cannot absorb a wall crossing or the class's relational prior. The relational class prior
-// enters once PER ANCHOR (T6-1), each only when its context is staged on an admissible (camera, not LiDAR-only) frame.
+// θ-ONLY, unsaturated: the room axis (once per anchor, T6-1, on an admissible camera frame) and the short-height prior. The
+// wall terms (flush / stand-off, parallel, no-cross) are NOT here any more: they are the wall latent's priors, entered once
+// (accumulate_wall_prior, F1.4) — the no-cross hinge re-entered here on every update pinned a parked toilet to the millimetre.
 void CountableEngineModel::accumulate_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const
 {
     const bool admissible = not f.points.empty() and not f.lidar_only;
-    if (admissible and not b->size_prior_off_ and f.wall.ok and not b->wall_prior_added_)
-        b->accumulate_wall(s, f, Id, bd, /*base*/ true, /*boost*/ false, /*parallel*/ true, E);
     if (admissible and not b->size_prior_off_ and f.room_axis_ok and not b->axis_prior_added_)
         b->accumulate_room_axis(s, f, Id, bd, E);
     b->accumulate_short_height(s, Id, bd, /*fixed_precision*/ true, E);
-    b->accumulate_no_cross(s, f, Id, bd, /*fixed_precision*/ true, E);
+}
+
+namespace
+{
+rc::ai::engine::WallAnchor anchor_of(const WallRef& w)
+{
+    rc::ai::engine::WallAnchor a;
+    a.ok = w.ok;
+    a.keyed = w.edge >= 0;
+    a.room = w.room;
+    a.edge = w.edge;
+    a.p = w.p.cast<double>();
+    a.n = w.n.cast<double>();
+    a.sigma_m = double(w.sigma_m);
+    return a;
+}
+}   // namespace
+
+rc::ai::engine::WallAnchor CountableEngineModel::wall_anchor(const Frame& f) const { return anchor_of(f.wall); }
+
+float CountableBelief::wall_offset_mean(const WallRef& w) const { return float(engine_.wall_offset_mean(anchor_of(w))); }
+
+// The wall latent's priors (F1.4), entered ONCE at the instance's first association with a wall edge, at s = θ + B_w b (the
+// object relative to the TRUE wall, staged line + δ·n). After that entry only data move θ and δ.
+//  · flush / stand-off: the back-face gap minus δ is N(standoff_m, standoff_std_m²) — the class manifest's typical real
+//    placement — weighted by the flush posterior (adjacency earns it, as before). σ_wall is NOT in its variance any more:
+//    it is δ's marginal. standoff_std_m ≤ 0 keeps the old flush form (mean 0, precision wall_precision).
+//  · parallel: the back face parallel to the wall, λ = 1/(σ_wall/L)², flush-weighted (as accumulate_wall).
+//  · no-cross: the one-sided probit E = −log Φ((gap − margin)/σ_wall) (Fable review §2.2, the exact form of "the back is not
+//    beyond the wall, as known to σ_wall"), with its exact GN curvature (φ/Φ)(z + φ/Φ)/σ² ≥ 0. Zero force deep on the legal
+//    side, no fixed-precision hinge.
+void CountableEngineModel::accumulate_wall_prior(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const
+{
+    const CountableBeliefParams& P = b->params_;
+    if (not f.wall.ok) return;
+    const auto gap_of = [&](const State& st) { return (b->back_centre(st) - f.wall.p).dot(f.wall.n); };
+    const auto par_of = [&](const State& st) { return Eigen::Vector2f(std::cos(st.yaw), std::sin(st.yaw)).dot(f.wall.n); };
+    const float eps = P.fd_eps, g = P.jac_slope_clamp;
+    const Vec6 v = s.vec();
+    Vec6 Jg, Jp;
+    for (int k = 0; k < 6; ++k)
+    {
+        Vec6 vp = v, vm = v;
+        vp(k) += eps; vm(k) -= eps;
+        const auto sp = State::from_vec(vp), sm = State::from_vec(vm);
+        Jg(k) = std::clamp((gap_of(sp) - gap_of(sm)) / (2.0f * eps), -g, g);
+        Jp(k) = std::clamp((par_of(sp) - par_of(sm)) / (2.0f * eps), -g, g);
+    }
+    const float gap = gap_of(s);
+    if (not b->size_prior_off_ and P.wall_precision > 0.0f)
+    {
+        const float wgt = b->flush_posterior(s, f);
+        const bool standoff = P.wall_standoff_std_m > 0.0f;
+        const float lam = standoff ? wgt / (P.wall_standoff_std_m * P.wall_standoff_std_m) : wgt * P.wall_precision;
+        const float r = standoff ? gap - P.wall_standoff_m : gap;
+        Id.noalias() += lam * (Jg * Jg.transpose());
+        bd.noalias() += -lam * Jg * r;
+        if (E) *E += 0.5 * double(lam) * double(r) * double(r);
+        if (P.wall_parallel_precision > 0.0f)
+        {
+            const float sigma_theta = (f.wall.length_m > 0.1f) ? f.wall.sigma_m / f.wall.length_m : 0.0f;
+            const float lam_geom = (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta) : P.wall_parallel_precision;
+            const float lp = wgt * lam_geom, rp = par_of(s);
+            Id.noalias() += lp * (Jp * Jp.transpose());
+            bd.noalias() += -lp * Jp * rp;
+            if (E) *E += 0.5 * double(lp) * double(rp) * double(rp);
+        }
+    }
+    if (P.wall_no_cross_precision > 0.0f and f.wall.sigma_m > 0.0f)
+    {
+        const double sig = double(f.wall.sigma_m);
+        const double z = (double(gap) - double(P.wall_no_cross_margin_m)) / sig;
+        const double log_Phi = std::log(0.5 * std::erfc(-z / std::sqrt(2.0)));
+        const double ratio = std::exp(-0.5 * z * z - 0.5 * std::log(2.0 * M_PI) - log_Phi);   // φ(z)/Φ(z)
+        const double h = ratio * (z + ratio) / (sig * sig);                                     // d²E/dgap²
+        const double dE = -ratio / sig;                                                          // dE/dgap
+        Id.noalias() += float(h) * (Jg * Jg.transpose());
+        bd.noalias() += float(-dE) * Jg;
+        if (E) *E += -log_Phi;
+    }
 }
 
 // Test hook (set_first_crossing_for_test): the 7c.6 first-crossing factor of f.lidar / f.lidar_extra in place of the beam set.
@@ -981,7 +1059,9 @@ std::vector<rc::ai::beam::BeamPart> CountableBelief::beam_parts(const CountableB
 // which already discounts a correction by how wide the prior was (F1.2; before, camera cycles only, on the raw step).
 float CountableBelief::update_persistent_cycle(const CountableFrame& frame)
 {
+    // The camera mixture's wall component reads the wall shifted by the wall latent's current mean (F1.4, option A).
     point_wall_ = frame.wall;
+    point_wall_.p += wall_offset_mean(frame.wall) * point_wall_.n;
     sanitize_covariance();
     const Eigen::Matrix<float, 6, 1> before = state_.vec();
     rc::ai::engine::FrameLatents<N> fl = frame_latents(frame);

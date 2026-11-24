@@ -1070,6 +1070,7 @@ WallRef CountableFitter::nearest_wall(const Eigen::Vector2f& q) const
     nrm.normalize();
     if (nrm.dot(room_interior_ - best_foot) < 0.0f) nrm = -nrm;   // point INTO the room
     w.ok = true; w.p = best_foot; w.n = nrm; w.sigma_m = 0.02f;
+    w.room = room_id_; w.edge = static_cast<int>(best_i);   // the edge's identity as room_concept publishes the outline (F1.4)
     w.length_m = ab.norm();   // the segment's length ⇒ how well its DIRECTION is known (see WallRef)
     return w;
 }
@@ -1228,6 +1229,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.wall_reach_m            = cfg_.ai2_wall_reach_m;
         p.wall_no_cross_precision = cfg_.ai2_wall_no_cross_precision;
         p.wall_no_cross_margin_m  = cfg_.ai2_wall_no_cross_margin_m;
+        p.wall_standoff_m         = cfg_.wall_standoff_m;       // [prior.attachment] standoff (F1.4; the persistent path's flush prior)
+        p.wall_standoff_std_m     = cfg_.wall_standoff_std_m;
         // The wall may only explain away mask points to the extent the room itself is trusted: with no room
         // polygon pushed this session there is nothing to explain away with, so the component is OFF and the
         // mixture is box+clutter exactly as before. (When room_concept publishes a map-trust scalar, multiply
@@ -1690,6 +1693,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // membership on the rays (empty ⇒ today's unweighted selection, bit for bit).
         if (cfg_.lidar_measures_on_gated)
             stage_persistent(inst, frame, latent_inputs());
+        // WALL-FLUSH factor (see stage_room above). Staged BEFORE the beam: its foreign density reads the staged wall shifted by
+        // the wall latent's mean (F1.4); stage_room depends only on the belief's state, so the move changes no value.
+        stage_room(frame);
         {
             const rc::StageTimer t_feed(timing_ ? &timing_->lidar_feed : nullptr);
             if (cfg_.label_dump_enabled and membership) dump_labels(inst, frame.points, false);
@@ -1699,9 +1705,6 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             if (cfg_.lidar_measures_on_gated) lidar_channel_.feed_beam(inst, frame, frame.points, persistent_label);
         }
         inst.dbg_ray_n = ray_count(frame);
-
-        // WALL-FLUSH factor (see stage_room above).
-        stage_room(frame);
 
         // Stage 1 (PRECISION_AS_INFORMATION.md): replace the scalar per-point R with the anisotropic deprojection
         // noise projected on the SDF normal. Ego-motion variance is preserved as an isotropic floor (Stage 2 will

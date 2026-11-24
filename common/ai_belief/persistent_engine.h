@@ -39,6 +39,7 @@
 #include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <optional>
@@ -161,6 +162,8 @@ struct GnTraceFd
 //   accumulate_camera_extra(s, f, I, b, E)     the camera channel's non-point terms, same energy convention (absent: none);
 //   solver()                                   SolverConfig (absent: SolverConfig{});
 //   volatility()                               VolatilityConfig (absent: infer = false, Q = Q₀ throughout);
+//   kWallLatents = 1, wall_anchor(f) -> WallAnchor, accumulate_wall_prior(s, f, I, b, E)   the wall latent and the wall priors
+//                                              it carries (see WallAnchor; absent: no wall latent, K unchanged);
 //   accumulate_lidar_override(s, f, I*, b*, E*) -> bool   route the LiDAR channel elsewhere (a test hook; absent: never).
 // The camera channel's flag is FrameLatents::camera_measured alone: it gates both the camera's accumulation (information and
 // energy) and its channel in the joint step, so G and J cannot disagree about whether the camera measured.
@@ -221,8 +224,41 @@ concept HasOfferContext =
         { cm.offer_frame(c) } -> std::same_as<typename M::Frame>;
         cm.offer_look(g, p, r);
     };
+// ── The wall latent (plan rev 2 F1.4; Fable order review §2.2; coordinator rulings 11-24) ──────────────────────────────────────
+// A model with M::kWallLatents = 1 carries ONE more ρ = 1 latent δ: the error of the staged wall line along its inward normal n
+// (the true wall is the staged line + δ·n), marginal σ_wall² from the room, born when the instance first associates with a wall
+// edge. Moving the wall by δ·n equals moving the object by −δ·n relative to it, so the model's wall PRIORS (flush / stand-off,
+// parallel, the one-sided no-cross) read it through the selector column (−n_x, −n_y, 0, …) on (cx, cy): they are evaluated at
+// θ + B_w b. They enter ONCE, into the joint prior, at that first association (re-linearised by that update's GN, then frozen
+// in P); afterwards only data (points, rays) update θ and δ. A fixed relation re-entered as a measurement on every update is
+// what pinned the parked toilet to the millimetre (engine1 diagnosis item 2).
+// Identity: one latent per (room, polygon edge) as room_concept publishes the outline (`keyed`); a small move of the derived
+// line between frames is TRANSPORTED (δ's mean shifted by the line's move along n, no information); a different edge is a new
+// source (the old δ is marginalised out: its row and column of P are dropped). Unkeyed anchors (no edge identity, e.g. a dump
+// recorded before the identity existed) fall back to "the same wall iff the inward normals are within 45°" — a DISCRETE
+// identity rule on normals, stated as such (an L-shaped room's two parallel same-facing edges would be conflated).
+// KNOWN APPROXIMATION (option A, coordinator ruling): the camera mixture's wall component and the beam's foreign density depend
+// on δ directly, not through θ; they are evaluated at the wall shifted by δ's CURRENT posterior mean (wall_offset_mean), so
+// they ignore δ's variance. Full coupling (a ∂E/∂δ column in those channels) is deferred.
+// Models without kWallLatents: K unchanged, bit-identical.
+struct WallAnchor
+{
+    bool ok = false;                                   // a wall is staged in this frame
+    bool keyed = false;                                // (room, edge) identify it
+    std::uint64_t room = 0;
+    int edge = -1;
+    Eigen::Vector2d p = Eigen::Vector2d::Zero();       // a point on the staged line (room frame)
+    Eigen::Vector2d n = Eigen::Vector2d::UnitX();      // unit inward normal
+    double sigma_m = 0.0;                              // the room's std of the line along n (the latent's marginal)
+};
+
 namespace detail
 {
+template <class M> constexpr int wall_latents()
+{
+    if constexpr (requires { { M::kWallLatents } -> std::convertible_to<int>; }) return M::kWallLatents;
+    else return 0;
+}
 struct NoOfferContext {};
 template <class M, bool = HasOfferContext<M>> struct OfferContextOf { using type = NoOfferContext; };
 template <class M> struct OfferContextOf<M, true> { using type = typename M::OfferContext; };
@@ -233,7 +269,10 @@ class PersistentEngine
 {
 public:
     static constexpr int N = M::N;
-    static constexpr int K = 3 + 6 * N;
+    static constexpr int W = detail::wall_latents<M>();             // 0 or 1 wall latents (F1.4)
+    static_assert(W == 0 or W == 1, "one wall latent at most");
+    static constexpr int K = 3 + 6 * N + W;
+    static constexpr int kWall = 3 + 6 * N;                          // the wall latent's index inside b (when W = 1)
     static constexpr int kChain = 0, kCam = 3, kL = 3 + N, kFc = 3 + 2 * N, kFL = 3 + 3 * N, kSc = 3 + 4 * N, kSL = 3 + 5 * N;
     static constexpr int kYaw = M::kYaw;
     using State = typename M::State;
@@ -296,6 +335,7 @@ public:
         b_.setZero();
         first_update_done_ = false;                                       // the class prior re-enters once, at the class mean
         vol_init_ = false;                                                // the volatility estimate is suspect too: back to Q₀
+        wall_set_ = false;                                                // the wall priors re-enter once, at the next association
         m.set_covariance(Sigma_theta());
         return true;
     }
@@ -309,6 +349,20 @@ public:
         predict_theta(m, q_scale);
         m.set_covariance(Sigma_theta());
     }
+
+    // δ's current posterior mean for a staged wall: transported to `a`'s line when it is the same edge; 0 for a wall the instance
+    // has no latent for (a new source starts at 0). What the camera mixture and the beam's foreign density read (option A).
+    double wall_offset_mean(const WallAnchor& a) const
+    {
+        if constexpr (W == 0) return 0.0;
+        else
+        {
+            if (not (a.ok and wall_set_ and same_wall(a))) return 0.0;
+            return b_(kWall) - (a.p - wall_.p).dot(a.n);
+        }
+    }
+    bool wall_latent_set() const { return wall_set_; }
+    const WallAnchor& wall_anchor() const { return wall_; }
 
     // Q per predict step: e^ω once the volatility has learned from an update, else the model's configured Q₀.
     VecNf process_noise(const M& m) const
@@ -492,6 +546,32 @@ public:
         if (not camera and not lidar)
             return 0.0f;                                                   // predict-only
 
+        // F1.4: the wall latent — transported when the staged edge is the same one, a new source (and its priors' one entry) when
+        // the instance associates with an edge for the first time.
+        bool wall_enter = false;
+        Eigen::Matrix<double, N, K> B_w = Eigen::Matrix<double, N, K>::Zero();
+        if constexpr (W > 0)
+        {
+            const WallAnchor a = m.wall_anchor(f);
+            if (a.ok and a.sigma_m > 0.0)
+            {
+                if (wall_set_ and same_wall(a))
+                    b_(kWall) -= (a.p - wall_.p).dot(a.n);                // the same wall, its staged line moved: transport
+                else
+                {
+                    const int j = N + kWall;                               // a new source: the old δ is marginalised out
+                    P_.row(j).setZero(); P_.col(j).setZero();
+                    P_(j, j) = a.sigma_m * a.sigma_m;
+                    b_(kWall) = 0.0;
+                    sig_prev_(kWall) = a.sigma_m;
+                    wall_enter = true;
+                }
+                wall_ = a;
+                wall_set_ = true;
+            }
+            if (wall_set_) { B_w(0, kWall) = -wall_.n.x(); B_w(1, kWall) = -wall_.n.y(); }
+        }
+        last_wall_entered_ = wall_enter;
         const bool had_posterior = first_update_done_;                     // the volatility learns from a posterior's step only
         const VecNf q_used = process_noise(m);                             // the Q of this update's (and the interval's) predicts
         FrameLatents<N> fl_used = fl;
@@ -534,6 +614,13 @@ public:
             if (lidar)  { pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Id_L,   bd_L,   Sf_L);   c.B = B_L;   channels.push_back(c); }
             theta_only.I = Id_th.template cast<double>();
             theta_only.g = bd_th.template cast<double>();
+            if constexpr (W > 0)
+                if (wall_enter)
+                {   // the wall priors, ONCE: a channel measuring θ + B_w b (the object relative to the TRUE wall)
+                    MatN Iw = MatN::Zero(); VecN bw = VecN::Zero();
+                    m.accumulate_wall_prior(S(th + B_w * bb), f, Iw, bw, nullptr);
+                    pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Iw, bw, MatN::Zero()); c.B = B_w; channels.push_back(c);
+                }
         };
 
         // Step 3, damped GN (spec 7c.7 d, rev 3.3.7). Each step: (𝟙 + P̄(W + λM))δ = P̄G − (x̃_k − x̄), M = diag W over θ and b;
@@ -546,7 +633,14 @@ public:
         {
             const VecNd th = x.template head<N>();
             const VecKd bb = x.template tail<K>();
-            return data_energy(m, S(th + B_cam * bb), S(th + B_L * bb), S(th), f, camera, lidar);
+            double E = data_energy(m, S(th + B_cam * bb), S(th + B_L * bb), S(th), f, camera, lidar);
+            if constexpr (W > 0)
+                if (wall_enter)
+                {
+                    MatN Iw = MatN::Zero(); VecN bw = VecN::Zero();
+                    m.accumulate_wall_prior(S(th + B_w * bb), f, Iw, bw, &E);
+                }
+            return E;
         };
         const auto wrapped = [](VecXd d) { if constexpr (kYaw >= 0) d(kYaw) = std::remainder(d(kYaw), 2.0 * M_PI); return d; };
         const auto below_tol = [&](const VecNd& d)
@@ -1018,6 +1112,7 @@ public:
     const std::vector<GnTraceStep<N>>&  dbg_gn_steps()  const { return dbg_gn_steps_; }
     const std::vector<GnTraceFd>&       dbg_gn_fd()     const { return dbg_gn_fd_; }
     long   gn_update_serial()  const { return gn_update_serial_; }
+    bool   last_wall_entered() const { return last_wall_entered_; }   // F1.4: the last update entered the wall priors
     int    last_gn_iters()     const { return last_gn_iters_; }
     bool   last_gn_converged() const { return last_gn_converged_; }
     double last_lambda()       const { return last_lambda_; }
@@ -1057,6 +1152,14 @@ private:
             offer_cache_.valid = true;
         }
         return offer_cache_.parts;
+    }
+
+    // The same wall edge: (room, edge) when both are keyed; else the unkeyed fallback, inward normals within 45° (see WallAnchor).
+    bool same_wall(const WallAnchor& a) const
+    {
+        if (a.keyed and wall_.keyed) return a.room == wall_.room and a.edge == wall_.edge;
+        if (a.keyed != wall_.keyed) return false;
+        return a.n.dot(wall_.n) >= std::sqrt(0.5);
     }
 
     // The model's optional volatility settings: VolatilityConfig{} (infer = false) when absent.
@@ -1310,6 +1413,10 @@ private:
     double last_lambda_ = 0.0;
     VecNd  last_gn_step_ = VecNd::Zero();
     MatNf  dbg_Pbar_tt_ = MatNf::Zero();
+    // the wall latent (F1.4): the edge δ belongs to, whether it is set, and whether the last update entered its priors
+    WallAnchor wall_;
+    bool   wall_set_ = false;
+    bool   last_wall_entered_ = false;
     // the inferred volatility (learn_volatility): ω = log Q per θ component, the running statistic S and count n
     bool   vol_init_ = false;
     VecNd  vol_omega_ = VecNd::Zero();

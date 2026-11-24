@@ -191,6 +191,8 @@ static void rho0_regression_zero_pose_cov(bool camera)
     fx.set_first_update_done(true);   // the recursion (x̄ = the current mean), not the class-mean first update (Task 6c)
     CountableFrame f = camera ? camera_frame() : lidar_frame(two_face_rays());
     set_latents(f, 0.0f, 0.0f);
+    f.wall.sigma_m = 0.0f;   // F1.4: no wall latent (σ_wall 0 ⇒ none is born), so no one-time wall-prior channel, which the
+                             // flag-off engine compared here has no counterpart of; the wall stays staged for the point mixture
     // the marginal of what the channel measures: the channel's own latent only (e has zero variance)
     Vec6 sc;
     for (int i = 0; i < 6; ++i) sc(i) = camera ? f.sig2_cam[i] : f.sig2_L[i];
@@ -235,6 +237,11 @@ static void prior_added_once()
     CountableFrame fn = fc; fn.wall = WallRef{};       // same camera frame, no wall staged (room axis still staged)
     b.update(fl);
     const float n0 = b.dbg_Id_th().norm();
+    // F1.4: the wall priors are the wall latent's, entered ONCE at the instance's FIRST association with the wall — here the
+    // LiDAR-only frame, which stages it — in their own channel, never θ-only; the camera frames after it do not re-enter them.
+    const bool entered0 = b.last_wall_entered();
+    std::printf("  prior_added_once: wall priors entered on the first (LiDAR-only) association: %d\n", int(entered0));
+    CHECK(entered0);
     std::printf("  prior_added_once: after LiDAR-only wall=%d axis=%d  |Id_th| %.3e\n", int(b.wall_prior_added()), int(b.axis_prior_added()), n0);
     CHECK(not b.wall_prior_added() and not b.axis_prior_added());
     CHECK(n0 == 0.0f);
@@ -250,14 +257,19 @@ static void prior_added_once()
     }
     b.update(fc);
     const Mat6 I1 = b.dbg_Id_th();
-    std::printf("  prior_added_once: camera, wall staged: wall=%d axis=%d  Id_th(1,1) %.3e (flush)  Id_th(5,5) %.3e (parallel)\n",
-                int(b.wall_prior_added()), int(b.axis_prior_added()), I1(1, 1), I1(5, 5));
+    // F1.4: the wall priors are the wall latent's, entered ONCE in their own channel at the first association — not θ-only.
+    const bool entered1 = b.last_wall_entered();
+    std::printf("  prior_added_once: camera, wall staged: wall=%d axis=%d  wall priors entered %d  |Id_th| %.3e\n",
+                int(b.wall_prior_added()), int(b.axis_prior_added()), int(entered1), I1.norm());
     CHECK(b.wall_prior_added() and b.axis_prior_added());
-    CHECK(I1(1, 1) > 0.0f);
+    CHECK(not entered1);
+    CHECK(I1.norm() == 0.0f);
     b.update(fc);
     const float n2 = b.dbg_Id_th().norm();
-    std::printf("  prior_added_once: camera, wall staged again: |Id_th| %.3e\n", n2);
+    const bool entered2 = b.last_wall_entered();
+    std::printf("  prior_added_once: camera, wall staged again: |Id_th| %.3e  wall priors entered %d\n", n2, int(entered2));
     CHECK(n2 == 0.0f);
+    CHECK(not entered2);
 }
 
 // Under persistent, (2c) wall no-cross is a θ-only term every frame: a belief whose back face is 3 cm THROUGH the wall is
@@ -299,7 +311,7 @@ static void no_cross_pushes_back_persistent()
             g[on ? 0 : 1] = gap(b);
             if (on)
             {
-                th = b.dbg_Id_th().norm();
+                th = b.last_wall_entered() ? 1.0f : 0.0f;   // F1.4: (2c) is the wall latent's probit, entered in its own channel
                 const auto& its = b.dbg_iterates();
                 std::printf("    iterates (gap):");
                 for (const auto& v : its) std::printf(" %+.5f", 0.0f - (v(1) + 0.5f * v(4)));
@@ -328,7 +340,7 @@ static void no_cross_pushes_back_persistent()
         // this sweep's rays (left face + top, belief 3 cm off) themselves push the box deeper; (2c) must counter that push.
         if (camera) CHECK(g[0] > -0.03f + 0.005f);
         CHECK(g[0] - g[1] > 0.005f);          // the (2c)-attributable move toward the legal side
-        CHECK(th > 0.0f);
+        CHECK(th > 0.0f);                     // the wall priors (the probit with them) entered on this update
         // (spec 7c.6, bounds by rev 3.3.9) the iterates converge (no half-Hessian overshoot, no wall ray switching on and off):
         // the last step per component below 0.1σ_k; and they land at the wall: penetration ≤ ½σ_wall
         CHECK(step_small);
@@ -486,7 +498,8 @@ static void mode_rotation_leaves_e()
     CountableBelief::VecKd v;
     v << 0.011, 0.012, 0.013, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036,
          0.041, 0.042, 0.043, 0.044, 0.045, 0.046, 0.051, 0.052, 0.053, 0.054, 0.055, 0.056,    // + u_cam, u_L (rev 3.3.13)
-         0.061, 0.062, 0.063, 0.064, 0.065, 0.066, 0.071, 0.072, 0.073, 0.074, 0.075, 0.076;   // + s_cam, s_L (shared engine)
+         0.061, 0.062, 0.063, 0.064, 0.065, 0.066, 0.071, 0.072, 0.073, 0.074, 0.075, 0.076,    // + s_cam, s_L (shared engine)
+         0.081;                                                                                  // + the wall latent δ (F1.4)
     b.set_latent_mean_for_test(v);
     const CountableBelief::MatJd P0 = b.joint_covariance();
     const ChainLever L0 = b.chain_lever();
@@ -502,6 +515,7 @@ static void mode_rotation_leaves_e()
     CHECK(m(0) == v(0) and m(1) == v(1) and m(2) == v(2));        // e untouched
     CHECK(b.chain_lever().l == L0.l and b.chain_lever().set == L0.set);
     CHECK(m(c) == v(c) and m(c + 5) == v(c + 5) and m(l + 5) == v(l + 5));
+    CHECK(m(CountableBelief::K - 1) == v(CountableBelief::K - 1));  // the wall latent δ is a room-frame scalar: untouched
     constexpr int fc = CountableBelief::kFc, fl = CountableBelief::kFL;
     CHECK(m(fc + 3) == v(fc + 4) and m(fc + 4) == v(fc + 3) and m(fl + 3) == v(fl + 4) and m(fl + 4) == v(fl + 3));   // u_c relabels too
     constexpr int sc = CountableBelief::kSc, sl = CountableBelief::kSL;
@@ -649,6 +663,7 @@ static void chain_once_for_both_3x3(bool with_fresh = false)
     // Camera points on all four sides (a two-face view leaves cx + w/2 and cy + h/2 unobserved: a zero-information direction
     // makes the channels' combined covariance, and so the comparison, undefined).
     CountableFrame f = camera_frame(); set_latents(f, 1.0f); stage(f, two_face_rays());
+    f.wall.ok = false;   // F1.4: the wall latent's one-time prior entry (set_prior_added no longer bypasses it) is not this identity
     for (int i = 0; i < 12; ++i) for (int j = 0; j < 10; ++j)
         f.points.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 12.0f, ty + 0.5f * tw, tH * (j + 0.5f) / 10.0f);
     for (int i = 0; i < 8; ++i) for (int j = 0; j < 10; ++j)

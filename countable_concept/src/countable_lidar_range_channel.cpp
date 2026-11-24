@@ -170,6 +170,13 @@ void CountableLidarRangeChannel::feed_beam(CountableInstance& inst, CountableFra
     st.room.floor_z = 0.0;
     st.room.floor_sigma = cfg_.floor_sigma_m;
     st.room.walls = room_walls_;
+    // F1.4 (option A, mean-field): the staged wall is where the wall latent's current mean puts it, not the raw outline edge.
+    if (frame.wall.ok and frame.wall.edge >= 0 and static_cast<std::size_t>(frame.wall.edge) < st.room.walls.size())
+    {
+        const Eigen::Vector2d shift = double(inst.ai2_belief.wall_offset_mean(frame.wall)) * frame.wall.n.cast<double>();
+        st.room.walls[static_cast<std::size_t>(frame.wall.edge)].a += shift;
+        st.room.walls[static_cast<std::size_t>(frame.wall.edge)].b += shift;
+    }
     st.room.neighbours = frame.foreign_boxes;   // G3: the other objects' published boxes are known surfaces of p_f too
     if (not beam_st_)
     {

@@ -86,6 +86,7 @@ template <class V> void fields(V& v, CountableBeliefParams& x)
     v("wall_precision", x.wall_precision); v("wall_reach_m", x.wall_reach_m); v("wall_flush_prior", x.wall_flush_prior);
     v("room_axis_std", x.room_axis_std); v("wall_parallel_precision", x.wall_parallel_precision);
     v("wall_no_cross_precision", x.wall_no_cross_precision); v("wall_no_cross_margin_m", x.wall_no_cross_margin_m);
+    v("wall_standoff_m", x.wall_standoff_m); v("wall_standoff_std_m", x.wall_standoff_std_m);
     v("door_clearance_gain", x.door_clearance_gain);
     v("volatility_infer", x.volatility_infer); v("volatility_lr", x.volatility_lr);
     v("volatility_sigma", x.volatility_sigma); v("volatility_omega_min", x.volatility_omega_min);
@@ -108,7 +109,7 @@ template <class V> void fields(V& v, CountableBeliefParams& x)
 }
 
 template <class V> void fields(V& v, WallRef& x)
-{ v("ok", x.ok); v("p", x.p); v("n", x.n); v("sigma_m", x.sigma_m); v("length_m", x.length_m); }
+{ v("ok", x.ok); v("p", x.p); v("n", x.n); v("sigma_m", x.sigma_m); v("length_m", x.length_m); v("room", x.room); v("edge", x.edge); }
 
 template <class V> void fields(V& v, rc::ai::LidarRays& x)
 {
@@ -554,16 +555,18 @@ private:
 // whose rule changed since the dump was recorded; the live result then measures that change).
 struct NoChange { void operator()(const CountableBelief&) const {} };
 struct NoFrame  { void operator()(CountableFrame&) const {} };
-template <class OnUpdate, class OnResult, class OnChange = NoChange, class OnFrame = NoFrame>
+struct NoSeed   { void operator()(SeedEv&) const {} };
+// on_seed(SeedEv&), when given, may rewrite the recorded seed (its params) before the belief is built from it.
+template <class OnUpdate, class OnResult, class OnChange = NoChange, class OnFrame = NoFrame, class OnSeed = NoSeed>
 bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& on_result, OnChange&& on_change = {},
-          OnFrame&& on_frame = {})
+          OnFrame&& on_frame = {}, OnSeed&& on_seed = {})
 {
     bool seeded = false;
     CountableBelief pre;   // the belief before the last update (RestoreEv)
     Event e;
     while (reader.next(e))
     {
-        if (const auto* s = std::get_if<SeedEv>(&e)) { b = CountableBelief(s->state, s->params); seeded = true; continue; }
+        if (auto* s = std::get_if<SeedEv>(&e)) { on_seed(*s); b = CountableBelief(s->state, s->params); seeded = true; continue; }
         if (not seeded) return false;
         std::visit([&]<class E>(E& ev)
         {

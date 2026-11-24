@@ -13,10 +13,12 @@
 //   gn_it,gn_conv,gn_lambda   the damped GN of the replayed update
 //   omega_cx..omega_yaw the log-volatility ω (the ai2 log has omega_w and omega_yaw)
 //   fe_upd              update()'s return value (NOT the ai2 log's `energy`, which is the mean mixture energy)
+//   wall_in             1 when this update entered the wall latent's priors (a new wall edge for the instance, F1.4)
 //   pstd_cx..pstd_yaw   √ of the PREDICTED θθ diagonal this update started from (Σ̄: the class prior on the first update)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
 // Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std MANIFEST_DIR]
+//              [--standoff MANIFEST_DIR]
 //   (N = update index; rows outside are computed, not printed). --sig2-cam-measured re-stages every frame's camera latent
 //   marginal with today's rule (rc::persistent_latent_inputs: the measured ZED boundary std, F1.6) from the frame's yaw entry,
 //   so a dump recorded before that change replays with it; dth_live / dP_live then measure the change, not a stream defect.
@@ -24,6 +26,8 @@
 //   manifest in DIR). The dump does not record a neighbour's class, so the TOOL infers it from the footprint: a box longer than
 //   1.2 m is a bed, else a nightstand — true of every neighbour in objects_replay1 (room_3: one bed, its nightstands), not
 //   general; the agent reads the class from the node name.
+//   --standoff DIR sets the seed's wall stand-off (F1.4) from the manifest of the dumped node's class in DIR
+//   (rc::manifest::wall_standoff), as a dump recorded before the stand-off existed lacks it.
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
@@ -43,6 +47,7 @@
 #include "countable_belief.h"
 #include "countable_latent_inputs.h"
 #include "countable_neighbour_size.h"
+#include "../../common/concept_manifest/wall_standoff.h"
 #include "countable_replay.h"
 
 namespace
@@ -66,18 +71,19 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
-    std::string neighbour_manifests;
+    std::string neighbour_manifests, standoff_manifests;
     for (int i = 2; i < argc; ++i)
     {
         const std::string_view k = argv[i];
         if (k == "--allow-defaults") { allow_defaults = true; continue; }
         if (k == "--sig2-cam-measured") { sig2_cam_measured = true; continue; }
         if (k == "--neighbour-size-std" and i + 1 < argc) { neighbour_manifests = argv[++i]; continue; }
+        if (k == "--standoff" and i + 1 < argc) { standoff_manifests = argv[++i]; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -95,7 +101,7 @@ int main(int argc, char** argv)
     }
     std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                 "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
-                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,dth_live,dP_live\n");
+                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,dth_live,dP_live\n");
 
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
@@ -131,13 +137,13 @@ int main(int argc, char** argv)
             char row[1024];
             std::snprintf(row, sizeof row,
                           "%ld,%lld,%d,%zu,%d,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%d,%.6g,"
-                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g",
+                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d",
                           upd, static_cast<long long>(ev.cycle), ev.gated ? 1 : 0, ev.frame.points.size(),
                           ev.frame.lidar_only ? 1 : 0, ev.frame.beam.endpoints.size(),
                           s.cx, s.cy, s.H, s.w, s.h, s.yaw, sd(0), sd(1), sd(2), sd(3), sd(4),
                           std::sqrt(std::max(0.0f, b.yaw_marginal_var())), sd(5),
                           b.last_gn_iters(), b.last_gn_converged() ? 1 : 0, b.last_lambda(),
-                          om(0), om(1), om(2), om(3), om(4), om(5), fe, pd(0), pd(1), pd(2), pd(3), pd(4), pd(5));
+                          om(0), om(1), om(2), om(3), om(4), om(5), fe, pd(0), pd(1), pd(2), pd(3), pd(4), pd(5), b.last_wall_entered() ? 1 : 0);
             pending = row;
         },
         [&](const rc::replay::ResultEv& live, const rc::CountableBelief& b)
@@ -173,6 +179,17 @@ int main(int argc, char** argv)
                     if (const auto sd = rc::neighbour_size_std(neighbour_manifests + "/" + cls + ".concept.toml"))
                     { nb.std(3) = (*sd)[0]; nb.std(4) = (*sd)[1]; }
                 }
+        },
+        [&](rc::replay::SeedEv& seed)
+        {
+            if (standoff_manifests.empty()) return;
+            const std::string path = standoff_manifests + "/" + rc::node_class(seed.node) + ".concept.toml";
+            if (const auto so = rc::manifest::wall_standoff(path))
+            {
+                seed.params.wall_standoff_m = so->mean_m;
+                seed.params.wall_standoff_std_m = so->std_m;
+                std::fprintf(stderr, "replay: stand-off %.3f +- %.3f m from %s\n", so->mean_m, so->std_m, path.c_str());
+            }
         });
     flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
 

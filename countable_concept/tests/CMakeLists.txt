@@ -255,3 +255,11 @@ add_executable(neighbour_size_test neighbour_size_test.cpp)
 target_include_directories(neighbour_size_test PRIVATE ../src ../../common)
 target_compile_options(neighbour_size_test PRIVATE -O2)
 add_test(NAME neighbour_size_test COMMAND neighbour_size_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
+
+# F1.4 (plan rev 2): the wall enters once — a toilet 17 cm off its wall, parked; σ along the normal stays at the value the facts
+# entered once imply (stated in the test), it does not shrink with the number of updates. Run: ./toilet_wall_test
+add_executable(toilet_wall_test toilet_wall_test.cpp ../src/countable_belief.cpp)
+target_include_directories(toilet_wall_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(toilet_wall_test PRIVATE -O2)
+target_link_libraries(toilet_wall_test PRIVATE Eigen3::Eigen)
+add_test(NAME toilet_wall_test COMMAND toilet_wall_test)

@@ -375,7 +375,7 @@ void SpecificWorker::refresh_room_geometry()
         outline_room_ = room_node_id_;
         outline_n_    = poly.size();
     }
-    fitter_->set_room_geometry(centroid, std::move(poly));
+    fitter_->set_room_geometry(centroid, std::move(poly), room_node_id_);
 }
 
 // SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.

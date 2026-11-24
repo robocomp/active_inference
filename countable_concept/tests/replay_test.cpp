@@ -259,7 +259,7 @@ int main(int argc, char** argv)
         replay::Diag d;
         CHECK(replay::decode(bytes, wr, d));
         CHECK(wr.ok and wr.p == Eigen::Vector2f(1.5f, -2.0f) and wr.sigma_m == 0.33f);
-        CHECK(d.missing == (std::set<std::string>{"n", "sigma_m", "length_m"}));
+        CHECK(d.missing == (std::set<std::string>{"n", "sigma_m", "length_m", "room", "edge"}));   // room, edge: F1.4
         CHECK(d.unknown == (std::set<std::string>{"extra"}));
         CHECK(d.bad.empty());
     }

@@ -141,8 +141,9 @@ public:
     // belief's one-sided wall mixture component. 1.0 when no room polygon is known (nothing to say).
     float interior_support(const Eigen::Vector2f& q) const;
 
-    void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
+    void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon, std::uint64_t room_id = 0)
     { room_interior_ = interior; room_polygon_ = std::move(polygon); have_room_geometry_ = not room_polygon_.empty();
+      room_id_ = room_id;   // a staged wall's identity is (room, edge index of the outline), F1.4
       // The beam's foreign density (spec 7c.8 rev 3.3.7/3.3.8): the polygon's walls are known surfaces with the WallRef σ
       // (room_concept publishes no layout σ; the same 0.02 m the wall factors use).
       lidar_channel_.set_room_walls(room_polygon_, WallRef{}.sigma_m);
@@ -238,6 +239,7 @@ public:
 private:
     const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
     // refresh_neighbours' result: (node id, its box); and the nodes whose belief was skipped, logged once each.
+    std::uint64_t room_id_ = 0;                          // the room whose outline room_polygon_ is (wall identity, F1.4)
     std::vector<std::pair<std::uint64_t, rc::ai::beam::ForeignBox>> neighbours_;
     std::unordered_set<std::string> neighbour_skip_logged_;
     std::unordered_map<std::string, std::array<float, 2>> neighbour_size_std_;   // per neighbour class: Δ_w/√12, Δ_h/√12 (F1.7)

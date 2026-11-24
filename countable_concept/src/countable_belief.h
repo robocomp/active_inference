@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <vector>
 #include <limits>
@@ -61,6 +62,10 @@ struct WallRef
     // ★How long the wall segment is, because that is what says how well its DIRECTION is known: a wall
     // localised to sigma_m over a length L is known angularly to ~sigma_m/L. 0 ⇒ unknown, constant used.
     float           length_m = 0.0f;                     // polygon edge length (m)
+    // The edge's identity as room_concept publishes the outline (F1.4: one wall latent per (room, edge)); edge −1 = unknown
+    // (the engine then falls back to its unkeyed rule).
+    std::uint64_t   room = 0;
+    int             edge = -1;
 };
 
 // Appearance-based FRONT (door) cue: the room-frame direction the DOOR faces + a confidence in [0,1]. Emitted
@@ -211,6 +216,11 @@ struct CountableBeliefParams
     // value is unused there); a wall with σ_wall ≤ 0 makes the term inert. The flag-off path keeps λ as above.
     float wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> wall_precision). 0 = OFF
     float wall_no_cross_margin_m  = 0.0f;     // interior margin (m) inside which the no-cross term activates
+    // STAND-OFF (persistent path, F1.4): how far the back face of a real object of the class stands off its wall — the class
+    // manifest's [prior.attachment] standoff_m / standoff_std_m. With std > 0 the flush prior is gap − δ ~ N(standoff_m,
+    // standoff_std_m²) (δ = the wall latent), entered once; std ≤ 0 keeps the old flush form (mean 0, precision wall_precision).
+    float wall_standoff_m         = 0.0f;
+    float wall_standoff_std_m     = 0.0f;
     // ── WALL as a COMPETING EXPLANATION (per-point mixture component) ────────────────────────────────────
     // A room wall is a surface another concept (room_concept) has already inferred, so a mask point lying on it
     // is ALREADY EXPLAINED and must not be re-explained as bed surface. This is explaining-away, NOT an
@@ -427,6 +437,10 @@ struct CountableEngineModel
     void accumulate_camera_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
     // the θ-only channel
     void accumulate_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E = nullptr) const;
+    // the wall latent (F1.4): one per (room, edge), and the wall priors it carries, entered once at s = θ + B_w b
+    static constexpr int kWallLatents = 1;
+    rc::ai::engine::WallAnchor wall_anchor(const Frame& f) const;
+    void accumulate_wall_prior(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
     // the 7c.7 first-crossing LiDAR channel (set_first_crossing_for_test only); false = the engine's beam channel
     bool accumulate_lidar_override(const State& s, const Frame& f, Mat6* Id, Vec6* bd, double* E) const;
     // the beam channel
@@ -618,6 +632,10 @@ public:
     // re-enter once and every latent is a new source (the first look after a recall is new). sanitize_covariance clears
     // both flags (the prior re-enters once). set_prior_added is a test hook.
     bool wall_prior_added() const { return wall_prior_added_; }
+    // F1.4: the wall latent's current mean for a staged wall (0 when the instance has none for that edge): the offset the
+    // camera mixture and the beam's foreign density shift that wall by (mean-field, option A).
+    float wall_offset_mean(const WallRef& w) const;
+    bool  last_wall_entered() const { return engine_.last_wall_entered(); }
     bool axis_prior_added() const { return axis_prior_added_; }
     void set_prior_added(bool wall, bool axis) { wall_prior_added_ = wall; axis_prior_added_ = axis; }
     // The CLASS prior at the class mean, counted once (spec 7c.1 amendment 11-17): the instance's FIRST measured update (camera

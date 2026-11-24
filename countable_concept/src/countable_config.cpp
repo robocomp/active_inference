@@ -19,6 +19,7 @@
 
 #include "../../common/concept_manifest/concept_manifest.h"
 #include "../../common/concept_manifest/class_prior.h"   // rc::manifest (SHARED)
+#include "../../common/concept_manifest/wall_standoff.h"   // rc::manifest::wall_standoff (F1.4)
 #include <string>
 
 #include <genericworker.h>   // ConfigLoader
@@ -156,6 +157,21 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
     }
     std::print("[manifest] {} shape: {} part(s)\n", out.concept_class, out.shape_parts.size());
+    try
+    {   // The wall stand-off (F1.4): a CLASS fact from typical real placement, no config key.
+        if (const auto so = rc::manifest::wall_standoff(manifest_path))
+        {
+            out.wall_standoff_m = so->mean_m;
+            out.wall_standoff_std_m = so->std_m;
+            std::print("[manifest] {} wall stand-off {:.3f} ± {:.3f} m — {}\n", out.concept_class, so->mean_m, so->std_m, so->source);
+        }
+        else
+            std::print("[manifest] {} declares no [prior.attachment] stand-off — the flush prior keeps its old form\n", out.concept_class);
+    }
+    catch (const std::exception& e)
+    {
+        throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
+    }
     try
     {   // Δ, the class's layer spread (shared-engine G4): a CLASS fact, no config key.
         const auto ls = rc::manifest::layer_spread(manifest_path, 6);

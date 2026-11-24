@@ -10,7 +10,7 @@
 //   - one mode rotation (w ↔ h);
 //   - 10 parked updates at the last standpoint on the box moved 6 cm along x (the GN has somewhere to go), GnTrace = 2 on
 //     the first of them and GnTrace = 1 on the rest.
-// After each step it records θ, the whole diagonal of P (θ and the 39 latents, the shape latents s_cam / s_L included), the
+// After each step it records θ, the whole diagonal of P (θ and the 40 latents, the shape latents s_cam / s_L and the wall latent included), the
 // GN step count, the returned energy and the GnTrace rows. Compare: every double within 1e-9 relative, every count equal.
 // Re-recorded for shared-engine Task 5 (the shape latent): the fixture now carries the nightstand manifest's layer spread Δ,
 // so s_cam / s_L have non-zero variance.
@@ -18,6 +18,8 @@
 // every measured update (it was the raw camera step, in CountableBelief), so P's θ diagonal and the steps move from the second
 // update on.
 // Re-recorded for plan rev 2 F1.5: the camera channel no longer enters the wall's depth_unobs boost (the fixture stages a wall).
+// Re-recorded for plan rev 2 F1.4: the wall latent (one more latent: P is 46×46) and the wall priors entered once at the first
+// association, not per update (flush/parallel once as before, the no-cross hinge every update → a probit once).
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
@@ -39,7 +41,7 @@ namespace ts = rc::test;
 
 static constexpr float ty = -0.255f, tH = 0.62f, tw = 0.51f;
 static float tx = 0.30f;                   // the box centre x; the last stretch moves the box
-static constexpr int kDiagRecorded = 45;   // N + K: θ, e, b_cam, b_L, u_cam, u_L, s_cam, s_L
+static constexpr int kDiagRecorded = 46;   // N + K: θ, e, b_cam, b_L, u_cam, u_L, s_cam, s_L, δ_wall (F1.4)
 
 static CountableBeliefParams params()
 {

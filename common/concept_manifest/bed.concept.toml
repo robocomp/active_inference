@@ -73,6 +73,9 @@ reach_m = 0.15
 no_cross_precision = 2000.0
 class_prior = 0.90                  # P(against a wall): the concept holds it (owner 2026-11-14)
 why  = "the back rests against a room wall — a bed's headboard stands against a wall"
+standoff_m = 0.02                   # F1.4: the headboard's back off the wall
+standoff_std_m = 0.02
+standoff_source = "uncited convention: a bed pushed against a wall stands off it by the skirting board under it (commonly 10-20 mm) plus a centimetre or so of slack; not measured, no source read. Not from the Webots world."
 
 [prior.alignment]
 kind = "room_axis"
