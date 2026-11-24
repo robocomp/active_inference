@@ -222,3 +222,10 @@ target_compile_definitions(engine_golden_test PRIVATE GOLDEN_FILE="${CMAKE_CURRE
 target_compile_options(engine_golden_test PRIVATE -O2)
 target_link_libraries(engine_golden_test PRIVATE Eigen3::Eigen)
 add_test(NAME engine_golden_test COMMAND engine_golden_test)
+
+# The flag-on fitter's persistent latent inputs (rc::persistent_latent_inputs, countable_latent_inputs.h): sig2_cam = the
+# common-mode stds squared at every range / obliquity, the chain carried by e, not here (shared-engine Task 5). Run: ./latent_inputs_test
+add_executable(latent_inputs_test latent_inputs_test.cpp)
+target_include_directories(latent_inputs_test PRIVATE ../src)
+target_compile_options(latent_inputs_test PRIVATE -O2)
+add_test(NAME latent_inputs_test COMMAND latent_inputs_test)

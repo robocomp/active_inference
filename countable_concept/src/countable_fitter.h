@@ -35,6 +35,7 @@
 #include <dsr/api/dsr_camera_api.h>
 
 #include "countable_config.h"        // rc::CountableConfig
+#include "countable_latent_inputs.h" // rc::LatentInputs, persistent_latent_inputs
 #include "countable_instance.h"      // rc::CountableInstance, CountableState
 #include "countable_model.h"         // CountableModel / CountableModelParams
 #include "countable_mask_membership.h"   // rc::MembershipComponents
@@ -272,10 +273,7 @@ private:
     // the camera and LiDAR viewpoint paths and into the chain's odometry displacement.
     void integrate_odometry(CountableInstance& inst);
     // The persistent-path inputs of a frame (ρ per channel from the paths, latent marginals, fresh ego-motion variances).
-    struct LatentInputs
-    {
-        std::array<float, 6> sig2_cam{}, sig2_L{}, fresh{};
-    };
+    using LatentInputs = rc::LatentInputs;   // countable_latent_inputs.h
     void stage_persistent(CountableInstance& inst, CountableFrame& frame, const LatentInputs& li) const;
     // The robot's pose in the room at a capture stamp, from the robot→room RT edge (the robot is the RT root): the history
     // slot whose rt_timestamps entry is NEAREST the stamp (TimeQuery::Nearest; untimestamped ⇒ the single block), its pose

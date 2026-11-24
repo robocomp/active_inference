@@ -1309,16 +1309,15 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     // so no measured sensor row replaces them yet and they are dropped from the persistent path rather than kept as patch.
     // The pose-chain share is e (marginal Σ_pose, staged by stage_persistent, §7c.7), as before. The ego-motion terms
     // (MotionCm* · motion_magnitude · periphery, unchanged) are FRESH every frame (ρ = 0): u_cam / u_L (rev 3.3.13).
+    // The computation is rc::persistent_latent_inputs (countable_latent_inputs.h), tested by latent_inputs_test.
     const auto latent_inputs = [&]
     {
-        const float p2 = cfg_.ai2_common_mode_pos_std  * cfg_.ai2_common_mode_pos_std;
-        const float s2 = cfg_.ai2_common_mode_size_std * cfg_.ai2_common_mode_size_std;
-        const float y2 = cfg_.ai2_common_mode_yaw_std  * cfg_.ai2_common_mode_yaw_std;
-        LatentInputs li;
-        li.sig2_cam = {p2, p2, s2, s2, s2, y2};
-        li.sig2_L   = li.sig2_cam;
-        li.fresh    = {mot_pos_var, mot_pos_var, mot_size_var, mot_size_var, mot_size_var, mot_yaw_var};
-        return li;
+        rc::LatentView v;
+        v.range_m = range; v.obliquity_cos = inst.dbg_obliquity_cos;
+        v.chain_var_xx = inst.chain_cov_xx; v.chain_var_yy = inst.chain_cov_yy;
+        v.mot_pos_var = mot_pos_var; v.mot_size_var = mot_size_var; v.mot_yaw_var = mot_yaw_var;
+        return rc::persistent_latent_inputs({cfg_.ai2_common_mode_pos_std, cfg_.ai2_common_mode_size_std,
+                                             cfg_.ai2_common_mode_yaw_std}, v);
     };
     // "The LiDAR channel measured" (spec 7c.8 a0): the belief's rule — flag off, a ray-set with precision > 0 (unchanged); flag
     // on, the beam set staged non-empty with Σq > 0 (rev 3.3.11) (Task 20 stages frame.beam).
