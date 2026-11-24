@@ -343,3 +343,62 @@ Each port adds `Model.Engine` to the class config, defaulting to `"persistent"` 
   - Send room the build commit for the combined rerun batch, and the auro session the results paths.
   - Report a failing test as failing, never with a widened bound.
   - Commit and push.
+
+---
+
+## Revision 2 (owner decisions 11-24, after the Fable order review)
+
+Sources: `docs/superpowers/results/2026-11-24-fable-order-review.md`, `2026-11-24-engine1-diagnosis.md`, the ledger. Tasks 10–14 above are replaced by the tasks below. Owner decisions:
+- fridge and hood become countable classes;
+- chair and table become N = 6 box-part models now;
+- the cortex size-std attribute is added;
+- the amended tests (a) and (b) go to AuRo.
+
+Order: R1 → F1 → P1 → K1 → K2 → K3 → S1 → G1x. Go/no-go with the owner on 12-02. If time runs short, cut in this order: table (stays legacy), the chair's Helios channel, then p_stand sharing.
+
+### Task R1: Replay tap
+- A gated dump (`Model.ReplayDump`, default off) of each persistent update's `Frame` and `FrameLatents` at `CountableBelief::update_persistent_cycle`, written as a binary in the classic locale.
+- A `replay` tool that re-runs a dump through the engine and prints the ai2 rows.
+- Test: a short dump recorded in a unit test must replay bit-identically.
+- Used afterwards as the before/after check for every engine change.
+
+### Task F1: The engine fixes from engine1 (one commit each, each replayed on a recorded dump)
+1. **Offer cache.** Compute the offer once per `gn_update_serial()` change, and not while the cooldown is active. `nbv_gain_raw` logs the promised nats.
+2. **Volatility.** Use the EM statistic E[w²] = q + (q/Σ̄)²(δθ² − (Σ̄ − Σ⁺)), signed with no max, in the engine rather than `countable_belief.cpp`. Check it first with `rootcause/omega_replay.py`.
+3. **Birth.** Replace the `last_trunc_frac` switch with a derived birth covariance, (class extent − seen extent)²/12. No gain constant.
+4. **Wall.** One ρ = 1 wall latent that every wall term reads (flush, parallel, no-cross, mixture, beam foreign density). Add a stand-off mean and std to `[prior.attachment]`, from class knowledge (typical real placement), never from Webots. If the stand-off does not cover the toilet's 18 cm, report the failure.
+5. **Drop the `AI2DepthUnobsPrecision` / depth_obs_band boosts on the persistent path.** Free-space rays replace them (registered G2). The evidence is the fridge engine test's w bias.
+6. **sig2_cam.** Use the measured fridge value (step 0, the cleanest class) as the per-detector camera σ, and report NEES by range bin.
+7. **Neighbour size std.** Interim: the neighbour's manifest Δ/√12. Final: the new cortex attribute (task S1).
+8. **Audit of the confirm-only and truncation gates** on the persistent path (783 of 874 bed rows gated). Each gate is either replaced by a model term or listed as kept, with its reason.
+
+### Task P1: Parked test and A/B/A script
+- `parked_test.sh` and `parked_report.py` (old Task 13), plus `aba_visit.sh`, a scripted visit A → B → A per object that logs the promise at the claim.
+- Live on a nightstand, the bed and the toilet.
+- Both shape-latent predictions are registered before the run: Δ/√12 for one shared latent, Δ/√24 for per-channel latents. The test decides between them.
+
+### Task K1: Fridge and hood as countable classes
+- A half-day spike first: which graph attributes, node types and affordances do consumers read from fridge and hood nodes (controller, LTOM, language_agent, room)?
+- Then `refrigerator.concept.toml` and `hood.concept.toml` run on the countable binary (`support = "hangs"` for hood), with configs in `refrigerator_concept/etc` and `hood_concept/etc`, and bin symlinks as for bed.
+- The legacy agents stay untouched: the switch is which binary `concept_agents.sh` launches.
+- The fridge door stays in part 2.
+
+### Task K2: parts_geometry.h, with chair and table as box-part models
+- `common/ai_belief/parts_geometry.h` reads `[[shape.part]]` and gives the camera SDF, the beam parts and the existence carve from one table. It replaces today's three sources.
+- Chair is seat, back and legs; table is top and legs; both N = 6, on the countable binary.
+- Check the C3 tour dependencies on chair-specific behaviour first (affordances, approach faces, colour, LTOM naming), and keep whatever the graph consumers read.
+- Table is the first cut if time runs short.
+
+### Task K3: Shared standpoint oracle
+- One `common/` function for "can the robot stand and turn here", used by both the controller and p_stand.
+- Amend the spec's G6 wording to match.
+- Touches the controller, so coordinate with the room/controller owners.
+
+### Task S1: Cortex size-std attribute
+- Add a `REGISTER_TYPE` line for the per-axis size std. The owner reinstalls cortex.
+- Publishers in countable write it, and the neighbour reader uses it.
+
+### Task G1x: Count and grading handoff (old Task 14)
+- Closed list of allowed prior terms, fixed before K1.
+- Recount under the build-scope rule.
+- Grading report.
