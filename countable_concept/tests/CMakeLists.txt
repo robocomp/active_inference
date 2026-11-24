@@ -202,3 +202,13 @@ target_include_directories(birth_footprint_test PRIVATE ../src)
 target_compile_options(birth_footprint_test PRIVATE -O2)
 target_link_libraries(birth_footprint_test PRIVATE Eigen3::Eigen)
 add_test(NAME birth_footprint_test COMMAND birth_footprint_test)
+
+# Shared-engine extraction (Task 3, spec 2026-11-23 shared-engine): a 40-update persistent trajectory (birth with the birth
+# position covariance, camera / LiDAR / both, parked and moving, a mode rotation, GnTrace) recorded BEFORE the extraction in
+# golden/engine_golden.bin and compared after it at 1e-9 relative. Run: ./engine_golden_test [--record]
+add_executable(engine_golden_test engine_golden_test.cpp ../src/countable_belief.cpp)
+target_include_directories(engine_golden_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(engine_golden_test PRIVATE GOLDEN_FILE="${CMAKE_CURRENT_LIST_DIR}/golden/engine_golden.bin")
+target_compile_options(engine_golden_test PRIVATE -O2)
+target_link_libraries(engine_golden_test PRIVATE Eigen3::Eigen)
+add_test(NAME engine_golden_test COMMAND engine_golden_test)
