@@ -26,7 +26,6 @@ LIST(APPEND SOURCES
   ../src/countable_fitter.cpp
   ../src/countable_projection.cpp
   ../src/countable_mask_membership.cpp
-  ../src/countable_viewpoint.cpp
   ../../common/rgb_ingestor/rgb_ingestor.cpp
   ../../common/rgb_ingestor/depth_ingestor.cpp
   ../../common/contour_edge/contour_edge_check.cpp

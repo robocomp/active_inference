@@ -1,14 +1,15 @@
 // viewpoint_rho_test — rho from the odometry path relative to the object (spec 2026-11-15 lidar-measures §7c.2).
-// Run: ./viewpoint_rho_test
+// Run: ./viewpoint_rho_test  (moved from countable_concept/tests; now tests common/ai_belief/viewpoint.h)
 #include <cmath>
 #include <cstdio>
 #include <Eigen/Dense>
 #include <algorithm>
 #include <span>
-#include "countable_viewpoint.h"
+#include "ai_belief/viewpoint.h"
 #include "place_memory/place_map.h"
 
 using namespace rc;
+using namespace rc::ai::view;
 using V2 = Eigen::Vector2f;
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
