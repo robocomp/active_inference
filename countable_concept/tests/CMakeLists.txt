@@ -31,6 +31,16 @@ target_link_libraries(config_migration_test PRIVATE Eigen3::Eigen)   # countable
 add_test(NAME config_migration_test COMMAND config_migration_test)
 set_tests_properties(config_migration_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
 
+# The class manifests load through the agent's own calls (load_geometry, adopt_span, layer_spread) from the agent's cwd,
+# under es_ES, on the real ConfigLoader.cpp (genericworker.h stubbed to it). Run: LANG=es_ES.UTF-8 ./manifest_load_test
+add_executable(manifest_load_test manifest_load_test.cpp $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp)
+target_include_directories(manifest_load_test PRIVATE manifest_stub ../src ../../common ../../common/concept_manifest
+                           ../../common/config_report $ENV{ROBOCOMP}/classes)
+target_compile_definitions(manifest_load_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+target_compile_options(manifest_load_test PRIVATE -O2)
+add_test(NAME manifest_load_test COMMAND manifest_load_test)
+set_tests_properties(manifest_load_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+
 # The bed's compound SDF: box ∪ headboard panel (2026-11-14). Run: ./headboard_sdf_test
 add_executable(headboard_sdf_test headboard_sdf_test.cpp ../src/countable_belief.cpp)
 target_include_directories(headboard_sdf_test PRIVATE ../src ../../common ../../common/media_transport)
