@@ -201,3 +201,16 @@ The scorers (`countable_concept/tools/lidar_measures_score.py`, `room_concept/es
 - Numerical details: where ρ is clamped by geometry (degenerate z), the quadrature settings already set in `beam_ray.h`, and how the latent blocks are laid out in memory.
 - How each class's quotient or template chart maps onto the selector.
 - The logging format for promise/delivery, as long as `claim_windows`-style per-visit totals can be computed.
+
+## State naming and graded mapping (added 11-24 for AuRo A1)
+
+All countable classes share θ = (cx, cy, H, w, h, yaw):
+- **cx, cy:** the footprint centre in the room frame.
+- **H:** the height, the top above the base. The base is the floor for floor-standing classes; for hanging classes (hood) the box hangs below its attachment.
+- **w:** the width along the object's local x, parallel to its back face or wall.
+- **h:** the DEPTH along the local y, away from the wall. It is the footprint's second extent; it is not a height.
+- **yaw:** R(yaw)·ŷ is the direction from the front into the back.
+
+The countable publisher writes `width_m = w`, `depth_m = h`, `height_m = H`. So the graded box (w, d, h) maps as width = θ.w, depth = θ.h, height = θ.H.
+
+For box-part classes (chair, table) the parts are fixed functions of θ, so the graded quantity is either θ itself (marginal = the θθ block) or g(θ) (marginal = J Σθθ Jᵀ, with J = ∂g/∂θ from parts_geometry.h).
