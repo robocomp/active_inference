@@ -36,6 +36,11 @@ def read_tsv(path):
     with open(path) as fh: return list(csv.DictReader(fh, delimiter='\t'))
 
 
+def read_csv(path):
+    if not Path(path).exists(): return []
+    with open(path) as fh: return list(csv.DictReader(fh))
+
+
 def segments(run):
     """{DEF: {seg: dict(t_claim, t_arrive, t_dwell0, t_dwell1, goto, ...)}} from aba_segments.tsv (empty without it)."""
     out = {}

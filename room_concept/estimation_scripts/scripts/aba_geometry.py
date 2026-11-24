@@ -5,6 +5,9 @@
     aba_geometry.py truth <wbt> <DEF> [--live]            the object's graded ground truth as JSON
     aba_geometry.py to_room <x> <y> <yaw>                 a WORLD pose -> the published frame of the room the robot is in now
                                                           (live: room_concept/tmp/sdf_localizer/gt_error.csv + tmp/proto_room.csv)
+    aba_geometry.py query_pose <sx> <sy> <cx> <cy>       a WORLD standpoint and object centre -> the standpoint in the published
+                                                          room frame and the heading facing the centre (math convention, the
+                                                          engine's Standpoint yaw) — the gain query's pose
     aba_geometry.py face <x> <y>                          the turn (deg, + = left) that points the robot (Webots pose now) at the
                                                           world point (x, y)
 --live reads the object's pose from Webots (webots_object.py get) instead of the .wbt file.
@@ -314,6 +317,17 @@ def main(argv):
         fr = Frames(rows, read_gauge(LIVE_PROTO_ROOM), t1 - int(window_s * 1000), t1)
         px, py, pyaw = fr.world_to_pub(x, y, yaw, t1)
         print(f'{px:.4f} {py:.4f} {pyaw:.4f} fit_n={fr.n} fit_rms={fr.rms:.4f} phi={fr.phi:.4f}')
+        return 0
+    if cmd == 'query_pose':
+        # a standpoint (world) and the object centre (world) -> the standpoint in the published room frame and the heading
+        # that faces the centre THERE, in the engine's Standpoint convention (math heading atan2(dy, dx), 0 = +x; the
+        # convention of rc::nbv::face_viewpoint, which the offer uses)
+        sx, sy, cx, cy = map(float, argv[1:5])
+        rows = read_gt_error(LIVE_GT_ERROR); t1 = rows[-1][0]
+        window_s = float(os.environ.get('ABA_FIT_WINDOW_S', '8'))
+        fr = Frames(rows, read_gauge(LIVE_PROTO_ROOM), t1 - int(window_s * 1000), t1)
+        px, py, _ = fr.world_to_pub(sx, sy, 0.0, t1); qx, qy, _ = fr.world_to_pub(cx, cy, 0.0, t1)
+        print(f'{px:.4f} {py:.4f} {math.atan2(qy - py, qx - px):.6f}')
         return 0
     if cmd == 'face':
         tx, ty = float(argv[1]), float(argv[2])

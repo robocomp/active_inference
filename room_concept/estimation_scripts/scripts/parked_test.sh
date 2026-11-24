@@ -46,6 +46,8 @@ for a in $CONCEPT_AGENTS; do
   grep -q '^ReplayDump = true' $c || { echo "could not set Model.ReplayDump in $c"; for f in $CFGS; do mv -f $f.p1_bak $f; done; exit 1; }
 done
 trap 'for f in $CFGS; do mv -f $f.p1_bak $f; done' EXIT
+# a gain-query request file left by an earlier run would be answered again by the fresh agents: start with none
+for a in $CONCEPT_AGENTS; do rm -f $CONCEPT_WT/$a/etc/gain_query.txt; done
 STAMP=$OUT.start; mkdir -p $E/crossing; touch $STAMP   # the dumps this run writes are newer than this
 
 # 2. the tour, with the visit after the leg that enters the object's room

@@ -9,8 +9,12 @@
 #   aba_segments.tsv   claim (= the go_to is sent) / arrival / dwell start / dwell end (wall ms, the clock of gt_pose.tsv and of
 #                      the agents' t_ms), the scripted standpoint (world and the published room frame it was sent in), the
 #                      robot's Webots pose at the dwell start, the go_to and face outcomes
-#   aba_promises.tsv   AT THE CLAIM: every node's last offers.csv row of the object's class (t_ms <= claim) — the engine's
-#                      promise (predicted_gain at the offer's standpoint), read live from the agent's own etc/offers.csv
+#   THE PROMISE, AT THE CLAIM (P1 follow-up): before the robot moves, a gain query for the SCRIPTED standpoint is appended to
+#                      the agent's etc/gain_query.txt (countable_concept/src/countable_gain_query.h: "<id> * x y yaw", the
+#                      published room frame, yaw = the engine's math heading facing the object); every instance of the class
+#                      answers in etc/gain_query.csv with EpistemicPlanner::gain_at — the very computation of its offers — and the
+#                      update serial. The segment row carries the request id (query_id); the script waits (<= 5 s) for the answer.
+#   aba_promises.tsv   context only: every node's last offers.csv row at the claim (the planner's OWN standpoint's promise)
 #   aba_plan_<DEF>.json  the plan and the ground truth
 # Missions go through controller/remote_cmd.txt like the tour scripts: go_to pose:<room>(x, y, yaw) (the controller does not
 # drive the yaw), then `move turn_deg=` to face the object (computed from the Webots pose), then `wait s=`.
@@ -32,8 +36,9 @@ print(1, t['cls'], t['cx'], t['cy'], *p['A'], *p['B'])")"
 [ "$FEAS" = 1 ] || { log "NO FEASIBLE STANDPOINTS (see $PLAN)"; exit 1; }
 log "$CLS at ($CX, $CY): A ($AX, $AY)  B ($BX, $BY)  dwell ${DWELL_S}s"
 OFFERS=$CWT/${CLS}_concept/etc/offers.csv
+GQ_REQ=$CWT/${CLS}_concept/etc/gain_query.txt; GQ_ANS=$CWT/${CLS}_concept/etc/gain_query.csv
 SEG=$RUN/aba_segments.tsv; PROM=$RUN/aba_promises.tsv
-[ -f $SEG ] || printf 'def\tseg\tstand_x\tstand_y\tstand_yaw\troom\tpub_x\tpub_y\tpub_yaw\tfit\tt_claim_ms\tt_arrive_ms\tt_dwell0_ms\tt_dwell1_ms\tgoto\tturn_deg\tface\tgt_x\tgt_y\tgt_yaw\tdwell\n' > $SEG
+[ -f $SEG ] || printf 'def\tseg\tstand_x\tstand_y\tstand_yaw\troom\tpub_x\tpub_y\tpub_yaw\tfit\tt_claim_ms\tt_arrive_ms\tt_dwell0_ms\tt_dwell1_ms\tgoto\tturn_deg\tface\tgt_x\tgt_y\tgt_yaw\tdwell\tquery_id\tquery_answered\n' > $SEG
 [ -f $PROM ] || printf 'def\tseg\tt_claim_ms\tnode\tt_ms\tstandpoint_x\tstandpoint_y\tstandpoint_yaw\tpromised_nats\n' > $PROM
 
 # run_mission <name> <body> <timeout_s>: sets M (completed | failed ... | aborted ... | TIMEOUT)
@@ -69,6 +74,11 @@ EOF
 visit() {   # seg world_x world_y world_yaw
   local seg=$1 tc ta t0 t1 room pub fit go turn face gt dw
   tc=$(now_ms); record_promises $seg $tc
+  # the promise of the scripted standpoint, asked before the robot moves (ids are epoch ms: increasing across runs)
+  local qid=$tc qa=no
+  echo "$qid * $(python3 $S/aba_geometry.py query_pose $2 $3 $CX $CY)" >> $GQ_REQ
+  for i in $(seq 1 25); do grep -q "^[0-9]*,$qid," $GQ_ANS 2>/dev/null && { qa=yes; break; }; sleep 0.2; done
+  log "$seg: gain query $qid answered: $qa $(grep "^[0-9]*,$qid," $GQ_ANS 2>/dev/null | cut -d, -f3,8 | tr '\n' ' ')"
   room=$(room_now)
   read -r px py pyaw fit <<< "$(python3 $S/aba_geometry.py to_room $2 $3 $4)"
   log "$seg: claim at $tc, go_to pose:$room($px, $py, $pyaw) [$fit]"
@@ -83,8 +93,8 @@ visit() {   # seg world_x world_y world_yaw
   log "$seg: go_to $go, face $turn deg $face; dwell ${DWELL_S}s from $t0 at $(echo $gt | tr '\t' ' ')"
   run_mission "aba_${DEF}_${seg}_dwell" "  wait s=${DWELL_S}s" $((DWELL_S + 30)); dw=$M
   t1=$(now_ms)
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $DEF $seg $2 $3 $4 "$room" $px $py $pyaw \
-    "$fit" $tc $ta $t0 $t1 "$go" "$turn" "$face" "$gt" "$dw" | tr ' ' '_' >> $SEG   # spaces inside a field -> _
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $DEF $seg $2 $3 $4 "$room" $px $py $pyaw \
+    "$fit" $tc $ta $t0 $t1 "$go" "$turn" "$face" "$gt" "$dw" $qid $qa | tr ' ' '_' >> $SEG   # spaces inside a field -> _
 }
 
 visit A1 $AX $AY $AYAW

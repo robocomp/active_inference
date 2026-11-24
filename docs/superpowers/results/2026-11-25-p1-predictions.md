@@ -213,3 +213,22 @@ Each check in (i)–(iii) is evaluated under PC and under S.
 ## 6. What objects_replay1 can and cannot say
 
 `parked_report.py objects_replay1` parses the run and lists its parked stretches, which are runs of updates with every logged ρ exactly 1. The run has no scripted A/B/A, so **no pass/fail comes from it**. Its stretches are 0–9 s long (the robot drove a tour). It only shows that the parsing and the extraction run.
+
+## Addendum 2026-11-25, before any run: the promise now comes from the scripted standpoint
+
+This addendum follows a coordinator ruling on P1 concern 3. Every number in sections 1–4 above is unchanged. The bands, the floors, the planned ρ, the nominal σ's and the nominal deliveries are the same as in commit 890ff64a.
+
+**What changed.**
+- **The promise.** Section 5's first bullet is withdrawn: the promise at a claim is no longer the planner's offer for its own standpoint.
+  - The agent now answers a gain query for a GIVEN standpoint. It calls `EpistemicPlanner::gain_at`, which is the computation of its offers: the same engine `predicted_gain`, cap, ρ path, camera with detector envelope, obstacles and Helios rays.
+  - The query and `compute()` share `standpoint_gain()` and `offer_inputs()`.
+  - `gain_query_test` checks that at the planner's own standpoint the query equals the proposal's `promised_nats` bit for bit (1.04201961 against 1.04201961 nats). It also checks that a look from the parked, already-seen front standpoint promises less than one from the unseen side (0.0033 against 1.03 nats).
+  - The agent logs every answer in `gain_query.csv`, together with its update serial. When the offer cache holds a proposal of that serial, the same row also carries that proposal's `promised_nats` beside the gain recomputed at its standpoint: a live bit-for-bit check.
+- **When the promise is asked.** `aba_visit.sh` asks at each claim (A1, B, A2), before the robot moves. The request is a line appended to the agent's `etc/gain_query.txt`, in the published room frame. Its yaw is the heading that faces the object, in the engine's math convention (atan2, 0 = +x), the same convention as `rc::nbv::face_viewpoint`.
+- **New check at A1, B and A2:** |promise − net| ≤ 6 ln(1.1) = 0.572 nats. This is the stop-rule tolerance already used for the bands.
+  - The promise is ONE hypothetical update's JOINT θ entropy drop. The net change is the visit's MARGINAL sum, and it includes the updates taken while driving to the standpoint.
+  - The difference between the two (the change in the components' mutual information, and the driving views) has no derived tolerance. A failure it causes is reported as a failure.
+- **The A2 promise check is kept** (the promise must fall in band_A2), now on the query's promise. **The same check is added at B** (the promise must fall in band_B).
+- The planner's own offer is still printed at each claim, as context only, with its distance from the scripted standpoint.
+
+**What did not change.** The registered expectation for A2 still applies: the derived band is not "small", for the path-ρ reason given in section 4 (iii). Both the promise and the net change at A2 are predicted to be about half of B's.

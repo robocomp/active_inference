@@ -6,7 +6,8 @@
 #   concept_agents.sh status            which are running
 #   concept_agents.sh harvest <out_dir> copy each agent's etc/ai2_log.csv from the checkout it RAN from (agents.txt) to <out_dir>/<class>_ai2_log.csv,
 #                                       and, where the agent wrote them, its promise/delivery log (shared-engine G5: etc/offers.csv,
-#                                       etc/delivered.csv) to <out_dir>/<class>_offers.csv, <class>_delivered.csv (promise_delivery.py)
+#                                       etc/delivered.csv) to <out_dir>/<class>_offers.csv, <class>_delivered.csv (promise_delivery.py),
+#                                       and the answers to gain queries (etc/gain_query.csv, the P1 A/B/A promise) to <class>_gain_query.csv
 # THE LIST is $CONCEPT_AGENTS — a NEW concept agent (or countable class: folder + bin link, see CONCEPT_AGENT_RECIPE.md) is one word added to the default below.
 # Binary: $WT/<agent>/bin/<agent> when present (default WT = the phase0 worktree), else the main checkout's; a SYMLINK there
 # (a countable class) pins the agent to the worktree — a dangling one is reported and skipped, never replaced by main's.
@@ -82,7 +83,7 @@ case "${1:-}" in
     # of the shared engine's offers (spec shared-engine G5), written only on the persistent path, so their absence is not news.
     while IFS=$'\t' read -r a exe _; do
       [ "$a" = ltom_agent ] && continue
-      for f in ai2_log offers delivered; do
+      for f in ai2_log offers delivered gain_query; do
       log=$(dirname "$(dirname "$exe")")/etc/$f.csv
       dst=$OUT/${a%_concept}_$f.csv
       born=$([ -f "$log" ] && stat -c %W "$log")
