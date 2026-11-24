@@ -397,6 +397,41 @@ float CountableBelief::flush_posterior(const CountableBeliefState& s, const Coun
          + (1.0f - two_sided) * std::clamp(params_.wall_flush_prior, 0.0f, 1.0f);
 }
 
+// ─── The back face against a staged wall: ONE source for every wall term (F1 round 6.4, review I3) ─────────────────────────────
+// gap = (back_centre − wall.p)·n (> 0 on the room side), par = (local +X)·n (the back face's misalignment), and their central
+// finite-difference Jacobians in θ (fd_eps), slope-clamped at jac_slope_clamp when `clamp` (the GN terms; flush_weight takes the
+// raw slope). Used by flush_weight, accumulate_wall (legacy), accumulate_no_cross (legacy) and accumulate_wall_prior (the wall
+// latent's priors), which each carried their own copy.
+float CountableBelief::wall_gap(const CountableBeliefState& st, const WallRef& w) const { return (back_centre(st) - w.p).dot(w.n); }
+float CountableBelief::wall_par(const CountableBeliefState& st, const WallRef& w) const
+{ return Eigen::Vector2f(std::cos(st.yaw), std::sin(st.yaw)).dot(w.n); }
+CountableBelief::WallTerms CountableBelief::wall_terms(const CountableBeliefState& s, const WallRef& w, bool clamp) const
+{
+    WallTerms t;
+    t.gap = wall_gap(s, w);
+    t.par = wall_par(s, w);
+    const float eps = params_.fd_eps;
+    const float g   = params_.jac_slope_clamp;
+    const Eigen::Matrix<float, 6, 1> v = s.vec();
+    for (int k = 0; k < 6; ++k)
+    {
+        Eigen::Matrix<float, 6, 1> vp = v, vm = v;
+        vp(k) += eps; vm(k) -= eps;
+        const auto sp = CountableBeliefState::from_vec(vp), sm = CountableBeliefState::from_vec(vm);
+        const float jg = (wall_gap(sp, w) - wall_gap(sm, w)) / (2.0f * eps);
+        const float jp = (wall_par(sp, w) - wall_par(sm, w)) / (2.0f * eps);
+        t.Jg(k) = clamp ? std::clamp(jg, -g, g) : jg;
+        t.Jp(k) = clamp ? std::clamp(jp, -g, g) : jp;
+    }
+    return t;
+}
+// The parallel term's precision: a segment of length L localised to σ_wall is known angularly to σ_wall/L (see accumulate_wall).
+float CountableBelief::wall_parallel_lambda(const WallRef& w) const
+{
+    const float sigma_theta = (w.length_m > 0.1f) ? w.sigma_m / w.length_m : 0.0f;
+    return (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta) : params_.wall_parallel_precision;
+}
+
 float CountableBelief::flush_weight(const CountableBeliefState& s, const CountableFrame& f) const
 {
     if (not f.wall.ok) return 0.0f;
@@ -405,16 +440,9 @@ float CountableBelief::flush_weight(const CountableBeliefState& s, const Countab
     // weight ~0 and was never drawn to the wall it stands against. The flush hypothesis predicts gap = 0 up to
     // the reach; what it is compared with is the belief's gap, whose variance is J Σ Jᵀ. Adding the two is the
     // marginal likelihood of the flush component: wide while the pose is uncertain, the bare reach once settled.
-    const auto gap_of = [&](const CountableBeliefState& st) { return (back_centre(st) - f.wall.p).dot(f.wall.n); };
-    const float gap = gap_of(s);
-    Eigen::Matrix<float, 6, 1> J;
-    const Eigen::Matrix<float, 6, 1> v = s.vec();
-    for (int k = 0; k < 6; ++k)
-    {
-        Eigen::Matrix<float, 6, 1> vp = v, vm = v;
-        vp(k) += params_.fd_eps; vm(k) -= params_.fd_eps;
-        J(k) = (gap_of(CountableBeliefState::from_vec(vp)) - gap_of(CountableBeliefState::from_vec(vm))) / (2.0f * params_.fd_eps);
-    }
+    const WallTerms wt = wall_terms(s, f.wall, /*clamp*/ false);
+    const float gap = wt.gap;
+    const Eigen::Matrix<float, 6, 1>& J = wt.Jg;
     const float var_gap = std::max(0.0f, J.dot(Sigma_ * J));
     const float reach   = std::max(1e-3f, params_.wall_reach_m);
     return std::exp(-gap * gap / (reach * reach + 2.0f * var_gap));
@@ -430,12 +458,7 @@ void CountableBelief::accumulate_wall(const CountableBeliefState& s, const Count
     dbg_wall_gap_ = 0.0f; dbg_wall_lambda_ = 0.0f;
     if (not f.wall.ok or params_.wall_precision <= 0.0f) return;
 
-    const auto gap_of = [&](const CountableBeliefState& st)
-    { return (back_centre(st) - f.wall.p).dot(f.wall.n); };
-    const auto par_of = [&](const CountableBeliefState& st)   // width axis (local +X) · wall normal
-    { return Eigen::Vector2f(std::cos(st.yaw), std::sin(st.yaw)).dot(f.wall.n); };
-
-    const float gap = gap_of(s);
+    const float gap = wall_gap(s, f.wall);
     dbg_wall_gap_ = gap;
 
     // ★WHEN THE DEPTH CANNOT BE SEEN AND A WALL CAN, THE WALL DETERMINES IT. A front-only view leaves the
@@ -452,18 +475,9 @@ void CountableBelief::accumulate_wall(const CountableBeliefState& s, const Count
     dbg_wall_lambda_ = lam_flush;
     if (not(lam_flush > 1e-6f)) return;
 
-    const float eps = params_.fd_eps;
-    const float g   = params_.jac_slope_clamp;
-    const Eigen::Matrix<float, 6, 1> v = s.vec();
-    Eigen::Matrix<float, 6, 1> Jg, Jp;
-    for (int k = 0; k < 6; ++k)
-    {
-        Eigen::Matrix<float, 6, 1> vp = v, vm = v;
-        vp(k) += eps; vm(k) -= eps;
-        const auto sp = CountableBeliefState::from_vec(vp), sm = CountableBeliefState::from_vec(vm);
-        Jg(k) = std::clamp((gap_of(sp) - gap_of(sm)) / (2.0f * eps), -g, g);
-        Jp(k) = std::clamp((par_of(sp) - par_of(sm)) / (2.0f * eps), -g, g);
-    }
+    const WallTerms wt = wall_terms(s, f.wall, /*clamp*/ true);
+    const Eigen::Matrix<float, 6, 1>& Jg = wt.Jg;
+    const Eigen::Matrix<float, 6, 1>& Jp = wt.Jp;
     Id.noalias() += lam_flush * (Jg * Jg.transpose());
     bd.noalias() += -lam_flush * Jg * gap;
     if (E) *E += 0.5 * double(lam_flush) * double(gap) * double(gap);
@@ -483,11 +497,8 @@ void CountableBelief::accumulate_wall(const CountableBeliefState& s, const Count
         // by the flush posterior, which is the point: ADJACENCY is what earns the alignment, and a
         // free-standing object (a mid-room bed, a kitchen island) has wgt -> 0 and keeps its data-driven
         // yaw. Both 180-degree solutions satisfy it, so the front/back resolution is untouched.
-        const float sigma_theta = (f.wall.length_m > 0.1f) ? f.wall.sigma_m / f.wall.length_m : 0.0f;
-        const float lam_geom    = (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta)
-                                                        : params_.wall_parallel_precision;
-        const float lam_par = wgt * lam_geom;   // same mixture weight
-        const float rp = par_of(s);
+        const float lam_par = wgt * wall_parallel_lambda(f.wall);   // same mixture weight
+        const float rp = wt.par;
         Id.noalias() += lam_par * (Jp * Jp.transpose());
         bd.noalias() += -lam_par * Jp * rp;
         if (E) *E += 0.5 * double(lam_par) * double(rp) * double(rp);
@@ -666,26 +677,14 @@ void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const C
 {
     if (f.wall.ok and params_.wall_no_cross_precision > 0.0f and (not fixed_precision or f.wall.sigma_m > 0.0f))
     {
-        const auto gap_of = [&](const CountableBeliefState& st)
-        { return (back_centre(st) - f.wall.p).dot(f.wall.n); };   // >0 interior side, <0 crossed the wall
-        const float gap      = gap_of(s);
+        const float gap      = wall_gap(s, f.wall);                                     // >0 interior side, <0 crossed the wall
         const float residual = std::min(0.0f, gap - params_.wall_no_cross_margin_m);   // <0 ⇒ crossing (or within margin)
         if (residual < 0.0f)
         {
             const float how_far_past = -residual;                                       // m past the boundary (>0)
             const float lam_nc = fixed_precision ? 1.0f / (f.wall.sigma_m * f.wall.sigma_m)
                                                  : params_.wall_no_cross_precision * how_far_past;   // grows with penetration
-            const float eps = params_.fd_eps;
-            const float g   = params_.jac_slope_clamp;
-            const Eigen::Matrix<float, 6, 1> v = s.vec();
-            Eigen::Matrix<float, 6, 1> Jg;
-            for (int k = 0; k < 6; ++k)
-            {
-                Eigen::Matrix<float, 6, 1> vp = v, vm = v;
-                vp(k) += eps; vm(k) -= eps;
-                Jg(k) = std::clamp((gap_of(CountableBeliefState::from_vec(vp))
-                                  - gap_of(CountableBeliefState::from_vec(vm))) / (2.0f * eps), -g, g);
-            }
+            const Eigen::Matrix<float, 6, 1> Jg = wall_terms(s, f.wall, /*clamp*/ true).Jg;
             Id.noalias() += lam_nc * (Jg * Jg.transpose());
             bd.noalias() += -lam_nc * Jg * residual;   // residual<0 ⇒ push the gap UP (back out of the wall)
             if (E) *E += 0.5 * double(lam_nc) * double(residual) * double(residual);
@@ -867,20 +866,10 @@ void CountableEngineModel::accumulate_wall_prior(const State& s, const Frame& f,
 {
     const CountableBeliefParams& P = b->params_;
     if (not f.wall.ok) return;
-    const auto gap_of = [&](const State& st) { return (b->back_centre(st) - f.wall.p).dot(f.wall.n); };
-    const auto par_of = [&](const State& st) { return Eigen::Vector2f(std::cos(st.yaw), std::sin(st.yaw)).dot(f.wall.n); };
-    const float eps = P.fd_eps, g = P.jac_slope_clamp;
-    const Vec6 v = s.vec();
-    Vec6 Jg, Jp;
-    for (int k = 0; k < 6; ++k)
-    {
-        Vec6 vp = v, vm = v;
-        vp(k) += eps; vm(k) -= eps;
-        const auto sp = State::from_vec(vp), sm = State::from_vec(vm);
-        Jg(k) = std::clamp((gap_of(sp) - gap_of(sm)) / (2.0f * eps), -g, g);
-        Jp(k) = std::clamp((par_of(sp) - par_of(sm)) / (2.0f * eps), -g, g);
-    }
-    const float gap = gap_of(s);
+    const CountableBelief::WallTerms wt = b->wall_terms(s, f.wall, /*clamp*/ true);
+    const Vec6& Jg = wt.Jg;
+    const Vec6& Jp = wt.Jp;
+    const float gap = wt.gap;
     if (not b->size_prior_off_ and P.wall_precision > 0.0f)
     {
         const float wgt = b->flush_posterior(s, f);
@@ -892,9 +881,7 @@ void CountableEngineModel::accumulate_wall_prior(const State& s, const Frame& f,
         if (E) *E += 0.5 * double(lam) * double(r) * double(r);
         if (P.wall_parallel_precision > 0.0f)
         {
-            const float sigma_theta = (f.wall.length_m > 0.1f) ? f.wall.sigma_m / f.wall.length_m : 0.0f;
-            const float lam_geom = (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta) : P.wall_parallel_precision;
-            const float lp = wgt * lam_geom, rp = par_of(s);
+            const float lp = wgt * b->wall_parallel_lambda(f.wall), rp = wt.par;
             Id.noalias() += lp * (Jp * Jp.transpose());
             bd.noalias() += -lp * Jp * rp;
             if (E) *E += 0.5 * double(lp) * double(rp) * double(rp);

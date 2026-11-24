@@ -511,6 +511,13 @@ public:
     // Centre of the BACK face (the one against the wall): (cx,cy) + (h/2)·outward, outward = the depth axis
     // sign pointing AWAY from the room interior. Public so the fitter can query the nearest wall at it.
     Eigen::Vector2f back_centre(const CountableBeliefState& s) const;
+    // The back face against a staged wall, ONE source for every wall term (F1 round 6.4; countable_belief.cpp)
+    struct WallTerms { float gap = 0.0f, par = 0.0f; Eigen::Matrix<float, 6, 1> Jg = Eigen::Matrix<float, 6, 1>::Zero(),
+                       Jp = Eigen::Matrix<float, 6, 1>::Zero(); };
+    float     wall_gap(const CountableBeliefState& s, const WallRef& w) const;
+    float     wall_par(const CountableBeliefState& s, const WallRef& w) const;
+    WallTerms wall_terms(const CountableBeliefState& s, const WallRef& w, bool clamp) const;
+    float     wall_parallel_lambda(const WallRef& w) const;
 
     // ── Inference (delegated to the shared engine) ────────────────────────────
     // Stash this frame's wall BEFORE the engine runs: the per-point mixture's wall component (explaining away)
