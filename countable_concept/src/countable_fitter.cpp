@@ -22,6 +22,7 @@
 #include "countable_mask_membership.h"   // rc::MaskMembership, make_membership (lidar-measures G2)
 #include "countable_viewpoint.h"         // ρ from odometry (lidar-measures §7c.2)
 #include "countable_config_error.h"     // rc::CountableConfigError (beam config refusal)
+#include "countable_neighbour_size.h"   // rc::node_class, rc::neighbour_size_std (F1.7)
 #include "countable_replay.h"           // Model.ReplayDump (shared-engine plan rev 2, Task R1)
 #include "../../common/place_memory/place_map.h"   // rc::place::inv_se2 (the robot in the room from T(robot←room))
 
@@ -406,7 +407,18 @@ void CountableFitter::refresh_neighbours()
             b.z0  = t[3 * newest + 2];
             b.yaw = r[3 * newest + 2];
             b.w = w.value(); b.h = d.value(); b.H = H.value();
-            b.std << std::sqrt(vx), std::sqrt(vy), 2.0f * std::sqrt(vz), 0.0f, 0.0f, std::sqrt(vyaw);
+            // Size std (F1.7, interim until the published attribute, S1): the neighbour class's layer spread Δ/√12 on w and h,
+            // from its manifest (countable_neighbour_size.h); 0 when its class declares none (logged once per class).
+            const std::string cls = rc::node_class(n.name());
+            auto it = neighbour_size_std_.find(cls);
+            if (it == neighbour_size_std_.end())
+            {
+                const auto sd = rc::neighbour_size_std(rc::countable_manifest_path(cls));
+                if (not sd.has_value())
+                    std::print("[{}] [neighbours] class '{}' declares no layer spread: its size std stays 0\n", cfg_.concept_class, cls);
+                it = neighbour_size_std_.emplace(cls, sd.value_or(std::array<float, 2>{0.0f, 0.0f})).first;
+            }
+            b.std << std::sqrt(vx), std::sqrt(vy), 2.0f * std::sqrt(vz), it->second[0], it->second[1], std::sqrt(vyaw);
             if (not rc::ai::beam::usable(b)) { skip(n.name(), "degenerate box or std"); continue; }
             neighbours_.emplace_back(n.id(), b);
         }

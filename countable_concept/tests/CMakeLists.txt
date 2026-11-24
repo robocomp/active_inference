@@ -248,3 +248,10 @@ add_executable(replay ../tools/replay/replay.cpp ../src/countable_belief.cpp)
 target_include_directories(replay PRIVATE ../src ../../common ../../common/media_transport)
 target_compile_options(replay PRIVATE -O3)
 target_link_libraries(replay PRIVATE Eigen3::Eigen)
+
+# F1.7 (plan rev 2): a neighbour's size std until the published attribute (S1) — its class from the node name, Δ_w/√12 and
+# Δ_h/√12 from that class's manifest. Run: ./neighbour_size_test ../../../common/concept_manifest
+add_executable(neighbour_size_test neighbour_size_test.cpp)
+target_include_directories(neighbour_size_test PRIVATE ../src ../../common)
+target_compile_options(neighbour_size_test PRIVATE -O2)
+add_test(NAME neighbour_size_test COMMAND neighbour_size_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)

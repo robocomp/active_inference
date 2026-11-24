@@ -240,6 +240,7 @@ private:
     // refresh_neighbours' result: (node id, its box); and the nodes whose belief was skipped, logged once each.
     std::vector<std::pair<std::uint64_t, rc::ai::beam::ForeignBox>> neighbours_;
     std::unordered_set<std::string> neighbour_skip_logged_;
+    std::unordered_map<std::string, std::array<float, 2>> neighbour_size_std_;   // per neighbour class: Δ_w/√12, Δ_h/√12 (F1.7)
     // This cycle's neighbours of one instance (all but itself).
     std::vector<rc::ai::beam::ForeignBox> neighbours_of(std::uint64_t self_id) const;
     mutable std::size_t n_explained_away_ = 0;   // points dropped this cycle (diagnostic)

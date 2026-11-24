@@ -16,10 +16,14 @@
 //   pstd_cx..pstd_yaw   √ of the PREDICTED θθ diagonal this update started from (Σ̄: the class prior on the first update)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
-// Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured]
+// Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std MANIFEST_DIR]
 //   (N = update index; rows outside are computed, not printed). --sig2-cam-measured re-stages every frame's camera latent
 //   marginal with today's rule (rc::persistent_latent_inputs: the measured ZED boundary std, F1.6) from the frame's yaw entry,
 //   so a dump recorded before that change replays with it; dth_live / dP_live then measure the change, not a stream defect.
+//   --neighbour-size-std DIR does the same for the neighbours' size std (F1.7: Δ_w/√12, Δ_h/√12 of the neighbour class's
+//   manifest in DIR). The dump does not record a neighbour's class, so the TOOL infers it from the footprint: a box longer than
+//   1.2 m is a bed, else a nightstand — true of every neighbour in objects_replay1 (room_3: one bed, its nightstands), not
+//   general; the agent reads the class from the node name.
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
@@ -38,6 +42,7 @@
 #include <string_view>
 #include "countable_belief.h"
 #include "countable_latent_inputs.h"
+#include "countable_neighbour_size.h"
 #include "countable_replay.h"
 
 namespace
@@ -61,16 +66,18 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
+    std::string neighbour_manifests;
     for (int i = 2; i < argc; ++i)
     {
         const std::string_view k = argv[i];
         if (k == "--allow-defaults") { allow_defaults = true; continue; }
         if (k == "--sig2-cam-measured") { sig2_cam_measured = true; continue; }
+        if (k == "--neighbour-size-std" and i + 1 < argc) { neighbour_manifests = argv[++i]; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -154,9 +161,18 @@ int main(int argc, char** argv)
         track,
         [&](rc::CountableFrame& f)
         {
-            if (not sig2_cam_measured) return;
-            const float yaw_std = std::sqrt(std::max(0.0f, f.sig2_cam[5]));
-            f.sig2_cam = rc::persistent_latent_inputs({0.0f, 0.0f, yaw_std}, rc::LatentView{}).sig2_cam;
+            if (sig2_cam_measured)
+            {
+                const float yaw_std = std::sqrt(std::max(0.0f, f.sig2_cam[5]));
+                f.sig2_cam = rc::persistent_latent_inputs({0.0f, 0.0f, yaw_std}, rc::LatentView{}).sig2_cam;
+            }
+            if (not neighbour_manifests.empty())
+                for (auto& nb : f.foreign_boxes)
+                {
+                    const std::string cls = std::max(nb.w, nb.h) > 1.2f ? "bed" : "nightstand";
+                    if (const auto sd = rc::neighbour_size_std(neighbour_manifests + "/" + cls + ".concept.toml"))
+                    { nb.std(3) = (*sd)[0]; nb.std(4) = (*sd)[1]; }
+                }
         });
     flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
 
