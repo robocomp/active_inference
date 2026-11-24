@@ -1,0 +1,13 @@
+id	start_room	x	y	yaw	legs
+S01	room_1	-5.33	3.66	0.58	room_2 room_3 room_2 room_1
+S02	room_1	-0.875	6.125	3.14	room_2 room_3 room_1
+S03	room_1	-5.125	8.375	-1.57	room_3 room_2 room_1
+S04	room_1	-1.875	0.875	1.57	room_3 room_2 room_3 room_1
+S05	room_1	-3.375	5.375	0.0	room_2 room_3 room_2 room_1
+S06	room_1	-7.375	5.125	-0.79	room_2 room_3 room_1
+S07	room_1	-7.375	2.625	0.79	room_3 room_2 room_1
+S08	room_1	-3.375	2.875	2.36	room_3 room_2 room_3 room_1
+S09	room_1	-5.125	6.375	-2.36	room_2 room_3 room_2 room_1
+S10	room_1	-3.875	4.125	-1.57	room_2 room_3 room_1
+S11	room_1	-6.875	3.875	0.0	room_3 room_2 room_1
+S12	room_1	-5.125	4.875	3.14	room_3 room_2 room_3 room_1

@@ -9,12 +9,17 @@
 # Graded on GROUND TRUTH (threerooms-piso.wbt): DOOR_1's line y = 9.3796 (room_1 below), DOOR_2's line x = -1.705 (room_3 east).
 # The fixture is COPIED in (never written); its checksums are verified after the run.
 # usage: warm_start_tour.sh <run_name> <fixture_dir>      env WT / WT_AGENTS / LEG_TIMEOUT_S (600) / N_LEGS
+# START="x y yaw" / START_ROOM=room_N (2026-11-24, AuRo graded batch: starts spread over the rooms and poses): the Webots
+# start pose and the room it lies in (ltsm's WarmStart.Room, the leg bookkeeping, the ground-truth grader). Defaults: the
+# historical start, room_1 at (-5.33, 3.66, 0.58). A start outside room_1 needs an explicit LEGS plan.
 LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
 FIX=$(cd "$2" 2>/dev/null && pwd) || { echo "usage: $0 <run_name> <fixture_dir>"; rm -f $LOCK; exit 2; }
 (cd $FIX && sha256sum -c --quiet SHA256SUMS) || { echo "fixture $FIX: checksums FAIL before the run"; rm -f $LOCK; exit 1; }
 LEG_TIMEOUT_S=${LEG_TIMEOUT_S:-600}
+START=${START:-"-5.33 3.66 0.58"}; START_ROOM=${START_ROOM:-room_1}
+[ "$START_ROOM" != room_1 ] && [ -z "$LEGS" ] && { echo "START_ROOM=$START_ROOM needs an explicit LEGS plan"; rm -f $LOCK; exit 2; }
 export WT=${WT:-$B} WT_AGENTS=${WT_AGENTS:-"controller door_concept room_concept residual_concept ltsm_agent"}
 # table_concept left the tour (user 2026-11-01): the object agents run apart, scripts/run_objects.sh
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
@@ -24,11 +29,11 @@ RC_CFG=$WT/room_concept/etc/config.toml; LT_CFG=$WT/ltsm_agent/etc/config.toml
 cp $RC_CFG $RC_CFG.warm_bak; cp $LT_CFG $LT_CFG.warm_bak
 trap 'mv -f $RC_CFG.warm_bak $RC_CFG; mv -f $LT_CFG.warm_bak $LT_CFG; rm -f $LOCK; [ -n "$REC_PID" ] && kill -TERM $REC_PID 2>/dev/null' EXIT
 sed -i 's/^MapMode = "[a-z]*"/MapMode = "ltsm"/' $RC_CFG
-sed -i 's/^# Room = "room_1"/Room = "room_1"/' $LT_CFG
+sed -i -E 's/^#? ?Room = "room_[0-9]+"/Room = "'$START_ROOM'"/' $LT_CFG
 # RECOGNITION ON (user 2026-11-01, warm11: R1 entered through DOOR_0 — a door never crossed in the memory — was promoted as a
 # NEW room_4 because recognition was off; ltsm then placed it on top of the remembered room_1)
 sed -i '/^\[Recognition\]/,/^\[/ s/^enabled = false/enabled = true/' $LT_CFG
-grep -q '^MapMode = "ltsm"' $RC_CFG && grep -q '^Room = "room_1"' $LT_CFG && grep -q '^enabled = true   # RoomSwap' $LT_CFG \
+grep -q '^MapMode = "ltsm"' $RC_CFG && grep -q '^Room = "'$START_ROOM'"' $LT_CFG && grep -q '^enabled = true   # RoomSwap' $LT_CFG \
     || { echo "could not set MapMode=ltsm / WarmStart.Room / Recognition.enabled"; exit 1; }
 echo stop > $B/controller/remote_cmd.txt
 # ── archive what is there (never just delete), then install the fixture (COPIES) ──
@@ -57,7 +62,8 @@ sleep 3
 # graph recorder (passive DSR participant, agent id 40): every structural write with its writer — for trace_check.py
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
 [ -x $REC ] && { setsid $REC crossing/$1/graph_trace.csv > crossing/$1/graph_recorder.log 2>&1 < /dev/null & REC_PID=$!; }
-NORUN=1 bash $S/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
+echo "start: $START_ROOM at ($START)"
+NORUN=1 bash $S/run_crossing.sh crossing/$1 $START >/dev/null 2>&1
 # ON_FLEET_UP="<command>" (2026-11-13, LTOM recall test): run once the fleet is up, before the start-up wait — e.g. start
 # the concept agents + ltom_agent (concept_agents.sh). Off by default.
 [ -n "$ON_FLEET_UP" ] && { echo "on fleet up: $ON_FLEET_UP"; bash -c "$ON_FLEET_UP"; }
@@ -75,9 +81,9 @@ GT=crossing/$1/gt_pose.tsv; printf 't_ms\tx\ty\tyaw\troom_concept\tltsm_agent\td
 # ── READY: room_1 adopted from ltsm's start-up recall and localised, its doors restored, recall_room_2 posted ──
 ready=0
 for i in $(seq 1 120); do
-  grep -a -q "MapMode=ltsm: layout of 'room_1'" $L/room_concept.log 2>/dev/null \
-    && grep -a -q "\[restore\] 'room_1' recalled" $L/door_concept.log 2>/dev/null \
-    && grep -a -q "\[recall\] recall_room_2 posted" $L/ltsm_agent.log 2>/dev/null && { ready=1; break; }
+  grep -a -q "MapMode=ltsm: layout of '$START_ROOM'" $L/room_concept.log 2>/dev/null \
+    && grep -a -q "\[restore\] '$START_ROOM' recalled" $L/door_concept.log 2>/dev/null \
+    && grep -a -q -E "\[recall\] recall_room_[0-9]+ posted" $L/ltsm_agent.log 2>/dev/null && { ready=1; break; }
   sleep 1
 done
 echo "--- start-up ---"
@@ -85,9 +91,9 @@ grep -a -m1 "MapMode=ltsm: still waiting" $L/room_concept.log
 grep -a -m1 "\[warm\] start-up recall" $L/ltsm_agent.log
 grep -a -m1 "MapMode=ltsm: layout of" $L/room_concept.log
 grep -a -m3 "\[reloc\]" $L/room_concept.log
-grep -a -m1 "\[restore\] 'room_1' recalled" $L/door_concept.log
-grep -a "\[restore\].*room_1" $L/door_concept.log | grep -a -v "recalled" | head -3
-grep -a -m1 "\[recall\] recall_room_2 posted" $L/ltsm_agent.log
+grep -a -m1 "\[restore\] '$START_ROOM' recalled" $L/door_concept.log
+grep -a "\[restore\].*$START_ROOM" $L/door_concept.log | grep -a -v "recalled" | head -3
+grep -a -m1 -E "\[recall\] recall_room_[0-9]+ posted" $L/ltsm_agent.log
 [ $ready = 1 ] || { echo "ABORT: not ready in 120 s"; bash $S/run_crossing.sh crossing/$1 collect >/dev/null 2>&1; exit 1; }
 sleep 5
 # ── LOCALISATION GOOD ENOUGH TO ACT ON (user 2026-11-01, warm12: the pose drifted 0.2-0.4 m in room_1, the door was misplaced
@@ -122,7 +128,7 @@ run_leg() {   # label cross_arg [close_arg]   (sets r: the crossing; c: the clos
   done; }
 # `cross new` only needs a door to APPEAR: when the controller reports door_unresolved, one explore, then the leg again (bounded)
 look_round() {   # label — `explore <room the robot is in> budget_s=$LOOK_S`, waits for it to end (bounded)
-  local rn; rn=$(room_now); [ -z "$rn" ] && rn=room_1
+  local rn; rn=$(room_now); [ -z "$rn" ] && rn=$START_ROOM
   echo run > $B/controller/remote_cmd.txt; sleep 0.7
   printf 'mission "lookround%s"\n  explore %s budget_s=%ss\n' "$1" "$rn" "$LOOK_S" > $B/controller/remote_cmd.txt
   for i in $(seq 1 $(( (LOOK_S + 60) / 2 ))); do grep -a -q -E "mission 'lookround$1': (co|failed|aborted)" $L/controller.log && break; sleep 2; done
@@ -153,9 +159,9 @@ else
   ARGS=(room_2 new room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)   # close behind: the room left
 fi
 # LEGS="room_3 room_2 room_1" (user 2026-11-02: run the tour backwards, R1->R3->R2->R1): an explicit plan of rooms to
-# cross into, by relation, overriding the above. The robot starts in room_1; each leg closes the door behind it.
+# cross into, by relation, overriding the above. The robot starts in $START_ROOM; each leg closes the door behind it.
 if [ -n "$LEGS" ]; then
-  ARGS=($LEGS); WANT=($LEGS); BEHIND=(); prev=room_1
+  ARGS=($LEGS); WANT=($LEGS); BEHIND=(); prev=$START_ROOM
   for r in $LEGS; do BEHIND+=($prev); prev=$r; done
   N_LEGS=${#ARGS[@]}
 fi
@@ -200,7 +206,7 @@ for leg in $(seq 1 $n_legs); do
     echo "  settle $leg in $rn: $(grep -a -o -E "mission 'settle $leg': [a-z]+[^\"]{0,60}" $L/controller.log | tail -1)";;
   esac
   # the ground-truth track is sampled at 1 Hz: wait (<= 5 s) for it to show the crossing instead of a fixed pause
-  for i in $(seq 1 10); do side=$(python3 -I $S/true_room.py crossing/$1/gt_pose.tsv); [ "$side" = "$want" ] && break; sleep 0.5; done
+  for i in $(seq 1 10); do side=$(python3 -I $S/true_room.py crossing/$1/gt_pose.tsv $START_ROOM); [ "$side" = "$want" ] && break; sleep 0.5; done
   xy=$(true_xy)
   case "$r" in OK*) [ "$side" = "$want" ] && st=OK || st=FALSE_OK;; *) st=FAILED;; esac
   [ $st = OK ] && ok=$((ok+1))

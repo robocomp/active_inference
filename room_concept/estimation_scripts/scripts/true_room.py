@@ -3,11 +3,11 @@
 crossing DOOR_1's line (y = 9.3796, |x - -4.769| < 0.7) toggles room_1 <-> room_2; crossing DOOR_2's line (x = -1.705,
 |y - 10.77| < 0.7) toggles room_2 <-> room_3. Rooms are not convex boxes in world coordinates, so a region test misgrades
 (warm8 leg 2: the robot in room_3 at (-2.39, 8.47)); the doors are the only places the room can change.
-usage: true_room.py gt_pose.tsv"""
+usage: true_room.py gt_pose.tsv [start_room]   (start_room defaults to room_1; 2026-11-24 starts in any room)"""
 import csv, sys
 D1Y, D1X, D2X, D2Y, HALF = 9.3796, -4.769, -1.705, 10.77, 0.7
 D0Y, D0X = 7.2256, -3.593   # DOOR_0, the bathroom's second door: room_3 (north, y > D0Y) <-> room_1 (south)
-room, prev = 'room_1', None
+room, prev = (sys.argv[2] if len(sys.argv) > 2 else 'room_1'), None
 for r in csv.DictReader(open(sys.argv[1]), delimiter='\t'):
     try: x, y = float(r['x']), float(r['y'])
     except (KeyError, ValueError): continue
