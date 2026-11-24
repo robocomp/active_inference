@@ -15,7 +15,11 @@
 //   fe_upd              update()'s return value (NOT the ai2 log's `energy`, which is the mean mixture energy)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
-// Run: ./replay DUMP.bin [--from N] [--to N]     (N = update index; rows outside are computed but not printed)
+// Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults]   (N = update index; rows outside are computed, not printed)
+// Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
+// from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
+// it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
+// The last line (stderr) is always the summary: the max dth_live and dP_live over the whole dump.
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -49,19 +53,22 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
-    for (int i = 2; i + 1 < argc; i += 2)
+    bool allow_defaults = false;
+    for (int i = 2; i < argc; ++i)
     {
         const std::string_view k = argv[i];
+        if (k == "--allow-defaults") { allow_defaults = true; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
-        if (dst == nullptr or not parse_int(argv[i + 1], *dst))
+        if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
-            std::fprintf(stderr, "replay: bad argument %s %s\n", argv[i], argv[i + 1]);
+            std::fprintf(stderr, "replay: bad argument %s\n", argv[i]);
             return 2;
         }
+        ++i;
     }
 
     rc::replay::Reader reader;
@@ -128,16 +135,16 @@ int main(int argc, char** argv)
         });
     flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
 
-    std::fprintf(stderr, "replay: %ld updates; against the %ld live results: max |dtheta| %.3g, max rel dP %.3g%s\n", upd + 1,
-                 compared, worst_th, worst_P, worst_th == 0.0 and worst_P == 0.0 ? " (bit-identical)" : "");
     print_set("missing (default kept)", reader.diag().missing);
     print_set("unknown (skipped)", reader.diag().unknown);
     print_set("BAD (size mismatch, default kept)", reader.diag().bad);
     if (reader.skipped_events() > 0) std::fprintf(stderr, "replay: %d events of unknown type skipped\n", reader.skipped_events());
     if (not ok)
-    {
         std::fprintf(stderr, "replay: stream error: %s\n", reader.error().empty() ? "an event before the seed" : reader.error().c_str());
-        return 1;
-    }
-    return 0;
+    const bool defaults = not reader.diag().missing.empty() or not reader.diag().bad.empty();
+    if (defaults and not allow_defaults)
+        std::fprintf(stderr, "replay: FAIL — fields ran at their defaults (missing/bad above); pass --allow-defaults if intended\n");
+    std::fprintf(stderr, "replay: %ld updates; against the %ld live results: max dth_live %.3g, max dP_live %.3g%s\n", upd + 1,
+                 compared, worst_th, worst_P, compared > 0 and worst_th == 0.0 and worst_P == 0.0 ? " (bit-identical)" : "");
+    return (not ok or (defaults and not allow_defaults)) ? 1 : 0;
 }

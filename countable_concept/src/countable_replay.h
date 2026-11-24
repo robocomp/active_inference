@@ -20,9 +20,12 @@
 // with no line here fails replay_test, not a live run.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <locale>
@@ -45,6 +48,8 @@ static_assert(std::endian::native == std::endian::little, "the replay format is 
 static_assert(sizeof(int) == 4 and sizeof(long) == 8 and sizeof(float) == 4 and sizeof(double) == 8);
 
 inline constexpr char          kMagic[8] = {'R', 'C', 'R', 'P', 'L', 'A', 'Y', '\0'};
+// Bump kVersion when a field's MEANING or UNIT changes (or an event's semantics do). Adding or removing a field needs no
+// bump: the by-name reader handles it (missing / unknown). A reader refuses a dump newer than the kVersion it was built with.
 inline constexpr std::uint32_t kVersion  = 1;
 
 // ── The recorded structs' fields (one line per member; the tests check the count against Boost.PFR) ─────────────────────
@@ -368,9 +373,11 @@ public:
         w->f_.open(path, std::ios::binary | std::ios::trunc);
         w->f_.imbue(std::locale::classic());   // binary, but never a locale on a data file
         if (not w->f_) return nullptr;
+        w->path_ = path;
         w->f_.write(kMagic, sizeof kMagic);
         w->f_.write(reinterpret_cast<const char*>(&kVersion), sizeof kVersion);
-        w->path_ = path;
+        w->f_.flush();
+        w->check();   // a full or read-only target fails here already: the writer is inert from the start
         return w;
     }
     void seed(const std::string& node, const CountableBeliefState& s, const CountableBeliefParams& p) { put(SeedEv{node, s, p}); }
@@ -383,6 +390,7 @@ public:
     }
     void update(std::int64_t cycle, bool gated, const CountableFrame& f)
     {
+        if (dead_) return;
         // Encoded in place (a bed's frame is ~35k points): the event is written without copying the frame.
         detail::Out o;
         o.b.reserve(64 + f.points.size() * 16 + f.beam.endpoints.size() * 40);
@@ -422,6 +430,11 @@ public:
     void resolve_front(const FrontCue& cue, float weight) { put(ResolveFrontEv{cue, weight}); }
 
     const std::string& path() const { return path_; }
+    // A write failed (disk full, read-only, I/O error): the dump is TRUNCATED at the last whole event before failure(), every
+    // later call is a no-op, and the failure was logged once. The belief is never affected.
+    bool dead() const { return dead_; }
+    const std::string& failure() const { return failure_; }
+    int failure_logs() const { return failure_logs_; }
     std::uint64_t bytes_written() const { return bytes_; }
     std::uint64_t last_event_bytes() const { return last_; }
 
@@ -430,35 +443,56 @@ private:
     template <class E> void put(const E& e) { write(event_type<E>(), encode(e)); }
     void write(std::uint32_t type, const std::string& payload)
     {
+        if (dead_) return;
         const std::uint64_t len = payload.size();
         f_.write(reinterpret_cast<const char*>(&type), sizeof type);
         f_.write(reinterpret_cast<const char*>(&len), sizeof len);
         f_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
         f_.flush();   // a crashed agent leaves a dump that replays up to its last whole event
+        if (not check()) return;
         last_ = sizeof type + sizeof len + len;
         bytes_ += last_;
+    }
+    // After every write + flush: on a stream failure go inert and log ONCE (path, errno), so a truncated dump is visible in
+    // the agent's log and cannot pass for a complete one.
+    bool check()
+    {
+        if (f_) return true;
+        const int err = errno;
+        dead_ = true;
+        failure_ = "Model.ReplayDump: write to " + path_ + " FAILED (errno " + std::to_string(err) + ": " + std::strerror(err)
+                   + ") after " + std::to_string(bytes_) + " bytes; the dump is TRUNCATED there and no further events are written";
+        std::printf("%s\n", failure_.c_str());
+        std::fflush(stdout);
+        ++failure_logs_;
+        return false;
     }
     std::ofstream f_;
     std::string path_;
     std::optional<Eigen::Vector2f> room_;
     std::uint64_t bytes_ = 0, last_ = 0;
+    bool dead_ = false;
+    std::string failure_;
+    int failure_logs_ = 0;
 };
 
 // ── Reader: one event at a time (a tour's dump can be large) ─────────────────────────────────────────────────────────────
 class Reader
 {
 public:
-    // false (with error()) when the file is missing, not a replay dump, or of a newer version.
+    // false (with error()) when the file is missing, not a replay dump, or of an unknown version (only 1..kVersion).
     bool open(const std::string& path)
     {
-        f_.open(path, std::ios::binary);
+        f_.open(path, std::ios::binary | std::ios::ate);
         if (not f_) { err_ = "cannot open " + path; return false; }
+        size_ = static_cast<std::uint64_t>(f_.tellg());
+        f_.seekg(0);
         char magic[8]{};
         std::uint32_t ver = 0;
         f_.read(magic, sizeof magic);
         f_.read(reinterpret_cast<char*>(&ver), sizeof ver);
         if (not f_ or std::memcmp(magic, kMagic, sizeof kMagic) != 0) { err_ = path + " is not a replay dump"; return false; }
-        if (ver > kVersion) { err_ = path + " has format version " + std::to_string(ver) + ", this reader knows up to "
+        if (ver < 1 or ver > kVersion) { err_ = path + " has format version " + std::to_string(ver) + ", this reader knows up to "
                                      + std::to_string(kVersion); return false; }
         version_ = ver;
         return true;
@@ -467,12 +501,23 @@ public:
     bool next(Event& e)
     {
         std::uint32_t type = 0;
-        std::uint64_t len = 0;
-        if (not f_.read(reinterpret_cast<char*>(&type), sizeof type)) return false;
-        if (not f_.read(reinterpret_cast<char*>(&len), sizeof len)) { err_ = "truncated event header"; return false; }
-        buf_.resize(len);
-        if (not f_.read(buf_.data(), static_cast<std::streamsize>(len))) { err_ = "truncated last event"; return false; }
-        if (type == 0 or type > std::variant_size_v<Event>) { ++skipped_; return next(e); }   // a newer event type: skip it
+        for (;;)   // skip event types newer than this reader (iteratively)
+        {
+            std::uint64_t len = 0;
+            if (not f_.read(reinterpret_cast<char*>(&type), sizeof type)) return false;   // a clean end
+            if (not f_.read(reinterpret_cast<char*>(&len), sizeof len)) { err_ = "truncated event header"; return false; }
+            const std::uint64_t at = static_cast<std::uint64_t>(f_.tellg());
+            if (len > size_ - std::min(at, size_))
+            {
+                err_ = "truncated last event (" + std::to_string(len) + " bytes announced, "
+                       + std::to_string(size_ - std::min(at, size_)) + " left in the file)";
+                return false;
+            }
+            buf_.resize(len);
+            if (not f_.read(buf_.data(), static_cast<std::streamsize>(len))) { err_ = "truncated last event"; return false; }
+            if (type >= 1 and type <= std::variant_size_v<Event>) break;
+            ++skipped_;
+        }
         bool ok = false;
         const auto decode_as = [&]<std::size_t I>(std::integral_constant<std::size_t, I>)
         {
@@ -496,6 +541,7 @@ private:
     std::string buf_, err_;
     Diag diag_;
     std::uint32_t version_ = 0;
+    std::uint64_t size_ = 0;
     int skipped_ = 0;
 };
 

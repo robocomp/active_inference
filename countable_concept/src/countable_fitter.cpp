@@ -1988,7 +1988,8 @@ void CountableFitter::open_replay(CountableInstance& inst, const CountableBelief
     }
     inst.replay->seed(inst.node_name, s0, p);
     if (birth_pos_cov) inst.replay->birth_pos_cov(*birth_pos_cov);
-    std::print("[{}] Model.ReplayDump: writing {}\n", inst.node_name, path);
+    // A write failure is logged by the writer itself (once, with errno), which then goes inert: the dump is truncated there.
+    if (not inst.replay->dead()) std::print("[{}] Model.ReplayDump: writing {}\n", inst.node_name, path);
 }
 
 // Model.GnTrace (diagnostic): the last persistent update's GN steps and finite-difference check, beside the ai2 log.

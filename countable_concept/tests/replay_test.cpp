@@ -10,11 +10,15 @@
 // 3. By name: a record with a field the reader lacks and without fields it has decodes, keeping the defaults and
 //    reporting both.
 // 4. Size: the bytes of one update event for a bed-sized frame (35k camera points + a staged Helios sweep).
+// 5. A failing target (/dev/full): the writer goes inert, logs the failure once, and the belief is bit-identical to one
+//    updated with no writer at all.
+// 6. The reader: a truncated last event and a bad version are reported, not read.
 // Run: ./replay_test [DUMP.bin]   (with a path, the sequence's dump is written there and kept, for ./replay DUMP.bin)
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <boost/pfr.hpp>
@@ -277,6 +281,54 @@ int main(int argc, char** argv)
                                                              - std::uint64_t(per_ray * double(f.beam.endpoints.size()))));
         CHECK(w->last_event_bytes() > std::uint64_t(per_pt * double(f.points.size())));
         std::filesystem::remove(spath);
+    }
+
+    // 5. a full disk
+    if (std::filesystem::exists("/dev/full"))
+    {
+        auto w = replay::Writer::open("/dev/full");
+        CHECK(w != nullptr and w->dead());                   // the header's flush already fails
+        CHECK(w and w->failure_logs() == 1 and w->failure().find("/dev/full") != std::string::npos);
+        Lcg r1, r2;
+        const CountableBeliefState s0{tx + 0.05f, ty - 0.04f, tH + 0.03f, tw + 0.02f, tw - 0.01f, 0.03f};
+        CountableBelief with(s0, params()), without(s0, params());
+        w->seed("full", s0, params());
+        const Eigen::Vector2f park(tx, ty - 0.5f * tw - 1.5f);
+        for (int k = 0; k < 3; ++k)
+        {
+            const CountableFrame f1 = make_frame(Step{park}, r1), f2 = make_frame(Step{park}, r2);
+            w->update(k, false, f1);
+            const float fe1 = with.update(f1);
+            w->result(with, fe1);
+            w->predict();
+            const float fe2 = without.update(f2);
+            CHECK(same_bits(snap(with, fe1), snap(without, fe2)));
+        }
+        CHECK(w->failure_logs() == 1 and w->bytes_written() == 0);   // logged once; nothing counted as written
+    }
+    else std::printf("replay_test: /dev/full absent, write-failure case skipped\n");
+
+    // 6. reader: truncation and version
+    {
+        const std::string src = (std::filesystem::temp_directory_path() / "countable_replay_trunc.bin").string();
+        live_run(src);
+        const auto full = std::filesystem::file_size(src);
+        std::filesystem::resize_file(src, full - 100);       // cut inside the last event
+        replay::Reader rt;
+        CHECK(rt.open(src));
+        replay::Event e;
+        int n = 0;
+        while (rt.next(e)) ++n;
+        CHECK(n > 0 and rt.error().find("truncated") != std::string::npos);
+        {   // version 0 is refused
+            std::fstream f(src, std::ios::binary | std::ios::in | std::ios::out);
+            f.seekp(8);
+            const std::uint32_t zero = 0;
+            f.write(reinterpret_cast<const char*>(&zero), sizeof zero);
+        }
+        replay::Reader rv;
+        CHECK(not rv.open(src) and rv.error().find("version") != std::string::npos);
+        std::filesystem::remove(src);
     }
 
     if (g_fail == 0) std::printf("replay_test: PASS\n");
