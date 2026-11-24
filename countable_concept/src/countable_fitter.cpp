@@ -1258,6 +1258,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         inst.ai2_belief = CountableBelief(s0, p);
         if (birth_pos_cov) inst.ai2_belief.set_birth_position_cov(*birth_pos_cov);   // spec 7c.8 rev 3.3.14
         inst.replay.reset();                                                           // a new birth starts a new stream
+        inst.offer_cache.reset();                                                      // a new belief: its update serial restarts
         if (cfg_.replay_dump and p.persistent) open_replay(inst, s0, p, birth_pos_cov);
         inst.ai2_initialized = true;
         std::print("[{}] cold-start state: cx={:.2f} cy={:.2f} H={:.2f} w={:.2f} h={:.2f} yaw={:.2f}\n",

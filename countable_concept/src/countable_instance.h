@@ -23,6 +23,8 @@
 #include "countable_beam_staging.h" // rc::BeamLog (lidar-measures §7c.8 a0)
 #include "countable_viewpoint.h"    // rc::ViewpointPath (lidar-measures §7c.2: ρ from odometry)
 #include "countable_class_evidence.h"   // class factor + existence_product
+#include "epistemic_planner.h"          // rc::EpistemicProposal (the held offer)
+#include "../../common/epistemic_step/offer_cache.h"   // rc::epistemic::OfferCache
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/existence_belief/existence_belief.h"
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)   // per-instance existence log-odds (removal)
@@ -140,6 +142,9 @@ struct CountableInstance
     // ── Epistemic affordance state (Schmitt-trigger hysteresis, anti-oscillation) ─────────────────
     bool epistemic_pending   = false;
     int  epistemic_cooldown  = 0;   // cycles remaining before a satisfied bed may re-arm
+    // The offer, computed once per persistent update serial / standing-world version and held through a cooldown (plan rev 2
+    // F1.1; the engine1 bed paid ~25 ms per tick recomputing an unchanged offer).
+    rc::epistemic::OfferCache<rc::EpistemicProposal> offer_cache;
 
     // ── write_rt_pose dead-band (suppress tiny pose oscillations) ─────────────────────────────────
     float last_written_cx = std::numeric_limits<float>::max();

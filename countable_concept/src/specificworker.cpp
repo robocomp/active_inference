@@ -912,6 +912,29 @@ void SpecificWorker::step_convergence(rc::CountableInstance& inst,
         std::print("{}: node '{}' STABLE (F={:.4f})\n", log_name(), inst.node_name, free_energy);
 }
 
+// One instance's offer from the planner (Σ-based D-optimal NBV; the engine's predicted gain on the persistent path).
+std::optional<rc::EpistemicProposal> SpecificWorker::compute_offer(rc::CountableInstance& inst)
+{
+    rc::EpistemicProposal prop =
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                   zed_sensor_model(),
+                                   rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
+                                   // The reachable region. refresh_room_geometry() already loads this
+                                   // polygon for the fit's wall factor; the NBV never saw it, so every
+                                   // viewpoint — including the ones behind the wall the bed is pushed
+                                   // against — read as reachable. Empty until room_concept publishes, and
+                                   // is_reachable then imposes no constraint (the pre-existing behaviour).
+                                   fitter_->room_polygon(),
+                                   // G5: the Helios the offer's look stages rays with (persistent path; else none)
+                                   fitter_->offer_lidar(inst),
+                                   // G6: residual's latched occupied cells (the controller reads the same attribute)
+                                   &occupied_cells_);
+    // Degenerate fit, or no sensor model yet — retry next cycle.
+    if (not prop.valid or not prop.is_finite())
+        return std::nullopt;
+    return prop;
+}
+
 // Publish/refresh the epistemic next-best-view affordance for one bed from its belief Σ (D-optimal NBV),
 // with a post-completion cooldown that suppresses the published gain so a just-finished bed isn't re-claimed.
 void SpecificWorker::step_epistemic(rc::CountableInstance& inst, DSR::Node& node)
@@ -928,35 +951,26 @@ void SpecificWorker::step_epistemic(rc::CountableInstance& inst, DSR::Node& node
         // the broad prior and the proposal is moot).
         if (not inst.ai2_initialized)
             return std::nullopt;
-        rc::EpistemicProposal prop =
-            epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
-                                       zed_sensor_model(),
-                                       rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
-                                       // The reachable region. refresh_room_geometry() already loads this
-                                       // polygon for the fit's wall factor; the NBV never saw it, so every
-                                       // viewpoint — including the ones behind the wall the bed is pushed
-                                       // against — read as reachable. Empty until room_concept publishes, and
-                                       // is_reachable then imposes no constraint (the pre-existing behaviour).
-                                       fitter_->room_polygon(),
-                                       // G5: the Helios the offer's look stages rays with (persistent path; else none)
-                                       fitter_->offer_lidar(inst),
-                                       // G6: residual's latched occupied cells (the controller reads the same attribute)
-                                       &occupied_cells_);
-        // Degenerate fit, or no sensor model yet — retry next cycle.
-        if (not prop.valid or not prop.is_finite())
-            return std::nullopt;
-        return prop;
+        // Persistent path: once per engine update serial and standing-world version (the residual's latched cells and their
+        // field), held through a cooldown (common/epistemic_step/offer_cache.h). The legacy belief has no update serial, so
+        // it computes every tick as before.
+        if (inst.ai2_belief.params().persistent)
+            return inst.offer_cache.get(inst.ai2_belief.gn_update_serial(),
+                                        occupied_stamp_cells_ * 1000003ull ^ occupied_stamp_prob_,
+                                        inst.epistemic_cooldown > 0, [&] { return compute_offer(inst); });
+        return compute_offer(inst);
     };
 
-    hooks.record = [&](const rc::EpistemicProposal& published, float raw_gain)
+    hooks.record = [&](const rc::EpistemicProposal& published, float /*final gain: see nbv_gain_raw below*/)
     {
         // Mirror the proposal onto the instance so ai2_log records what was actually proposed. Without this
         // the only record was stdout, and the affordance node carries the FROZEN pose during an executing
         // claim — so "the target is too close" was unanswerable after the fact from either source.
-        // ⚠bed logs the RAW gain (pre-suppression) where bottle/cabinet/chair log the published one — see
-        // the divergence note in common/epistemic_step. Behaviour preserved here; resolve it deliberately.
+        // nbv_gain_raw = the PROMISED nats (the best face's raw ΔH before `useful`, the suppression, the floor and p_stand).
+        // step()'s raw_gain is the planner's FINAL gain, already × useful ≡ 0 here ("no consumer, no bid"), so it logged 0 on
+        // every row (engine1 diagnosis item 4; plan rev 2 F1.1).
         inst.dbg_nbv_standoff = published.chosen_standoff_m;
-        inst.dbg_nbv_gain_raw = raw_gain;                     // what the belief asked for
+        inst.dbg_nbv_gain_raw = published.promised_nats;      // what the belief asked for
         inst.dbg_nbv_gain_pub = published.epistemic_gain;     // what the controller will see
         inst.dbg_nbv_target_x = published.epistemic_target_x_m;
         inst.dbg_nbv_target_y = published.epistemic_target_y_m;

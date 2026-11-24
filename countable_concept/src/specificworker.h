@@ -142,6 +142,7 @@ private:
                                   const CountableObservation& observation,
                                   float free_energy);
     void step_convergence(rc::CountableInstance& inst, DSR::Node& node, float free_energy);
+    std::optional<rc::EpistemicProposal> compute_offer(rc::CountableInstance& inst);   // the planner call (F1.1: cached by the caller)
     void step_epistemic(rc::CountableInstance& inst, DSR::Node& node);
     void trigger_graph_layout_twopi();   // injected into CountableSceneGraph as the relayout callback
 
