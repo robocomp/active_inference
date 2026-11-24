@@ -106,6 +106,28 @@ int main()
         CHECK(fv.pos == r.plan.best_pos and fv.yaw == r.plan.best_yaw, "face_viewpoint is plan_faces' pose");
     }
 
+    {   // G6: an offer is scaled by P(footprint free) at its standpoint, continuously; no grid scales nothing.
+        const auto room = rect(-8.0f, 8.0f, -8.0f, 8.0f);
+        const std::vector<Eigen::Vector2f> body{{-0.2f, -0.2f}, {0.2f, -0.2f}, {0.2f, 0.2f}, {-0.2f, 0.2f}};
+        const auto prefer_plus_y = [](int face, float) { return face == 2 ? 2.0f : 1.0f; };
+        rc::nbv::CountableInputs in{camera(), 0.3f, no_obstacles, room};
+        const auto base = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
+        CHECK(base.proposal.valid and base.plan.best_face == 2, "G6: without a grid the +y face wins");
+        std::vector<float> occ(160 * 160, 0.0f);   // 0.1 m cells over the room
+        const rc::nbv::GridView clear{-8.0f, -8.0f, 0.1f, 160, 160, occ, 0.0f};
+        in.grid = clear; in.footprint_poly = body;
+        const auto free = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
+        CHECK(free.proposal.epistemic_gain == base.proposal.epistemic_gain, "G6: an all-free grid changes nothing");
+        const Eigen::Vector2f p2 = base.plan.best_pos;   // block the +y standpoint's footprint
+        for (int iy = 0; iy < 160; ++iy) for (int ix = 0; ix < 160; ++ix)
+            if (std::abs(-8.0f + (ix + 0.5f) * 0.1f - p2.x()) < 0.25f and std::abs(-8.0f + (iy + 0.5f) * 0.1f - p2.y()) < 0.25f)
+                occ[static_cast<std::size_t>(iy) * 160 + ix] = 1.0f;
+        const auto blocked = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
+        CHECK(blocked.proposal.valid and blocked.plan.best_face != 2, "G6: a blocked standpoint loses to a free one");
+        CHECK(blocked.plan.face_raw_gains[2] == 2.0f, "G6: face_raw_gains stays the belief's UNSCALED gain");
+        CHECK(blocked.plan.face_gains[2] == 0.0f, "G6: the blocked offer's expected gain is 0");
+    }
+
     std::printf(fails == 0 ? "countable_planner_test: PASS\n" : "countable_planner_test: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

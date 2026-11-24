@@ -460,8 +460,9 @@ void SpecificWorker::compute()
     ev_g_.mask_stale = not fresh_masks;
 
     // Snapshot the residual (surprise) field ONCE per cycle before the tracker, so fused birth (run_instance_
-    // tracker) and the logging probe (compute() tail) share one read. No-op unless a probe/fusion flag is on.
-    if (cfg_.birth_fusion or cfg_.birth_surprise_probe) read_residual_field();
+    // tracker) and the logging probe (compute() tail) share one read. G6: also the occupancy belief the epistemic offers
+    // are scaled by (P(footprint free)), so it is read every cycle now — main thread, ~2 Hz publisher, one dense copy.
+    read_residual_field();
 
     {
         const rc::StageTimer t(&timing_.tracker);   // [timing] tracker (birth/associate/merge)
@@ -909,7 +910,15 @@ void SpecificWorker::step_epistemic(rc::CountableInstance& inst, DSR::Node& node
                                        // is_reachable then imposes no constraint (the pre-existing behaviour).
                                        fitter_->room_polygon(),
                                        // G5: the Helios the offer's look stages rays with (persistent path; else none)
-                                       fitter_->offer_lidar(inst));
+                                       fitter_->offer_lidar(inst),
+                                       // G6: the residual occupancy belief (P(occupied ∧ ¬explained); an invalid field
+                                       // is an empty view and scales nothing). Unobserved cells carry no evidence: prior 0,
+                                       // the field's own value for "nothing here" (GridField::at_world).
+                                       rc::nbv::GridView{residual_field_.xmin, residual_field_.ymin, residual_field_.cell,
+                                                         residual_field_.width, residual_field_.height,
+                                                         residual_field_.valid() ? std::span<const float>(residual_field_.prob)
+                                                                                 : std::span<const float>{},
+                                                         0.0f});
         // Degenerate fit, or no sensor model yet — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;

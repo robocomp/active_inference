@@ -23,6 +23,7 @@
 #include "epistemic_planner.h"
 #include "countable_dof.h"   // kCountableDofs: names/units/σ* — shared with the dashboard
 #include "../../common/nbv/viewpoint_score.h"   // rc::nbv — the shared detection-weighted NBV core
+#include "../../common/robot_footprint/robot_footprint.h"   // rc::RobotFootprint — G6: the body the offer must fit
 
 #include <algorithm>
 #include <array>
@@ -74,7 +75,8 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<EpistemicPlanner::Obstacle>& obstacles,
                                             const std::vector<Eigen::Vector2f>& room_polygon,
-                                            const std::optional<rc::ai::offer::OfferLidar>& offer_lidar) const
+                                            const std::optional<rc::ai::offer::OfferLidar>& offer_lidar,
+                                            const rc::nbv::GridView& occupancy) const
 {
     constexpr float kRobotRadiusM = 0.30f;   // Shadow's footprint radius — a physical dimension, not a knob
 
@@ -165,7 +167,9 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
     // stand in the wall and the controller would repair it to the floor at the object), scale the winner by the
     // useful fraction of its raw information (adequacy gap to Σ*), refuse a non-finite result.
-    const rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon};
+    // G6: the robot's own silhouette (a robot property, not a constant here) against the residual occupancy belief.
+    static const rc::RobotFootprint body = rc::RobotFootprint::shadow();   // SHADOW's; another robot needs its own polygon
+    const rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon, occupancy, body.polygon()};
     // ★NO CONSUMER ⇒ NO EPISTEMIC BID (owner ruling for hood, 2026-11-13, applied to this clone 2026-11-14):
     // countable_dof.h declares no σ*, so useful = 0. The pose and the per-face ranking are still planned and
     // published; only the scalar gain is 0, so this agent never out-bids one whose gain is gap-bounded.

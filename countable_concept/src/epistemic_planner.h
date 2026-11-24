@@ -92,6 +92,8 @@ public:
     /// EXPECT TO GET, so `rc::nbv` weights it by P(detect | framing) and places each face at its own stand-off.
     /// A low but finite gain is NOT withdrawn here; the controller's EFE selection simply won't pick it.
     ///
+    /// @param occupancy  G6: the residual occupancy belief; each offer is scaled by P(the robot footprint is free at its
+    ///                   standpoint). Default (empty) ⇒ no scaling.
     /// @param sensor     the camera's REAL FoVs (h = 2·atan(W/2fx), v = 2·atan(H/2fy)) and mount height above
     ///                   the floor datum. The VERTICAL channel is not optional for a bed: a 1.7 m box
     ///                   overflows the frame vertically at 1.2 m, where it still fills only a quarter of it
@@ -114,7 +116,8 @@ public:
                               const rc::nbv::Sensor& sensor = {},
                               const std::vector<Obstacle>& obstacles = {},
                               const std::vector<Eigen::Vector2f>& room_polygon = {},
-                              const std::optional<rc::ai::offer::OfferLidar>& offer_lidar = std::nullopt) const;
+                              const std::optional<rc::ai::offer::OfferLidar>& offer_lidar = std::nullopt,
+                              const rc::nbv::GridView& occupancy = {}) const;
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
     // the one where the detector is most likely to fire — the same model the removal channel weights absence by.
