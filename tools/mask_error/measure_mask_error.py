@@ -266,27 +266,69 @@ def summarise(rows):
     return out
 
 
+# Graded-layer extents taken from meshes that are not in the world folder (lx, ly, z0, z1, ox, oy; object frame, m).
+# One source for every script. Toilet: all IndexedFaceSet points of Toilet.proto x 0.2 (Transform scale 0.2).
+KNOWN_EXTENTS = {
+    'toilet': (0.738, 0.589, 0.002, 1.013, -0.066, -0.009),
+    'bed': (1.971, 1.571, 0.361, 0.609, 0.0, 0.0),     # Bed.proto mattress.obj (Webots asset cache), object 'mattress'
+}
+
+
+def block_length(x):
+    """Length of the blocks for a moving-block bootstrap of the series x: the first lag at which the autocorrelation
+    falls inside the white-noise band +-2/sqrt(n) (beyond it, two frames that far apart are not distinguishable from
+    independent), at least 1. Returns (block length, acf at lag 1)."""
+    x = np.asarray(x, float) - np.mean(x)
+    n = len(x); den = float(x @ x)
+    if den == 0 or n < 8: return 1, float('nan')
+    acf = [float(x[:n - k] @ x[k:]) / den for k in range(1, n // 2)]
+    band = 2.0 / math.sqrt(n)
+    for k, r in enumerate(acf, 1):
+        if abs(r) < band: return k, acf[0]
+    return n // 2, acf[0]
+
+
+def ols_slope(z, y):
+    z = np.asarray(z, float); y = np.asarray(y, float)
+    zc = z - z.mean()
+    return float(zc @ (y - y.mean()) / (zc @ zc))
+
+
+def block_bootstrap_slope(z, y, L, n_boot=2000, seed=0):
+    """Slope of y on z and its 95% interval from a moving-block bootstrap over the time-ordered frames (blocks of L)."""
+    n = len(z); rg = np.random.default_rng(seed)
+    nb = int(math.ceil(n / L)); out = []
+    for _ in range(n_boot):
+        ix = np.concatenate([np.arange(st, st + L) for st in rg.integers(0, n - L + 1, nb)])[:n]
+        if np.ptp(z[ix]) == 0: continue
+        out.append(ols_slope(z[ix], y[ix]))
+    return ols_slope(z, y), float(np.percentile(out, 2.5)), float(np.percentile(out, 97.5))
+
+
 def range_bins(rows, f, n_bins=4, n_boot=2000, seed=0):
-    """Is the per-frame mean offset constant in PIXELS or in METRES?  Frames (one value per stamp and class) are binned by
-    range z in n_bins equal-COUNT bins (no cut-points chosen). Per bin: mean |offset| in px, and mean |offset| * z / f in m
-    (the same offset expressed at the object). Also the log-log slope b of |offset| against z over frames: b = 0 means
-    constant in pixels, b = -1 means constant in metres; a bootstrap over frames gives its 95% interval."""
+    """Is the per-frame mean offset constant in PIXELS or in METRES?  One value per frame (stamp) and class, frames in
+    time order. Bins by range z: n_bins equal-COUNT bins (no cut-points chosen), each with mean |offset| in px and the
+    same in metres, |offset| z / f. Slopes need no floor and no log: y on z by least squares, for y = |offset| (px) and
+    y = |offset| z / f (m). Constant in pixels <=> the px slope is 0; constant in metres <=> the m slope is 0. Intervals:
+    moving-block bootstrap over the frames in time order, block length from the autocorrelation of the |offset| series
+    (block_length). Frames within a block stay together, so the interval is not tightened by the strong correlation of
+    consecutive frames."""
     out = {}
     for c in sorted({r['cls'] for r in rows}):
         by = {}
         for r in rows:
             if r['cls'] == c: by.setdefault(r['stamp_ms'], []).append(r)
-        z = np.array([np.mean([r['range_m'] for r in v]) for v in by.values()])
-        o = np.array([abs(np.mean([r['mean_offset_px'] for r in v])) for v in by.values()])
+        stamps = sorted(by)
+        z = np.array([np.mean([r['range_m'] for r in by[t]]) for t in stamps])
+        o = np.array([abs(np.mean([r['mean_offset_px'] for r in by[t]])) for t in stamps])
         if len(z) < 2 * n_bins: out[c] = None; continue
+        m = o * z / f
         order = np.argsort(z); bins = []
         for q in np.array_split(order, n_bins):
-            bins.append((z[q].min(), z[q].max(), len(q), o[q].mean(), (o[q] * z[q] / f).mean()))
-        def slope(ix):
-            return np.polyfit(np.log(z[ix]), np.log(np.maximum(o[ix], 1e-3)), 1)[0]
-        rg = np.random.default_rng(seed)
-        bs = [slope(rg.integers(0, len(z), len(z))) for _ in range(n_boot)]
-        out[c] = dict(bins=bins, slope=float(slope(np.arange(len(z)))), lo=float(np.percentile(bs, 2.5)), hi=float(np.percentile(bs, 97.5)))
+            bins.append((z[q].min(), z[q].max(), len(q), o[q].mean(), m[q].mean()))
+        L, r1 = block_length(o)
+        out[c] = dict(bins=bins, block=L, acf1=r1, n=len(z), px=block_bootstrap_slope(z, o, L, n_boot, seed),
+                      m=block_bootstrap_slope(z, m, L, n_boot, seed))
     return out
 
 
@@ -299,7 +341,8 @@ def main(argv):
     ap.add_argument('--out')
     a = ap.parse_args(argv)
     classes = a.classes.split(',')
-    extents = {k: tuple(map(float, v.split(','))) for k, v in (e.split('=') for e in a.extents)}
+    extents = dict(KNOWN_EXTENTS)
+    extents.update({k: tuple(map(float, v.split(','))) for k, v in (e.split('=') for e in a.extents)})
     rows = measure(a.dump_dir, a.wbt, classes, extents, a.hfov)
     if a.out:
         with open(a.out, 'w', newline='') as f:
@@ -312,7 +355,10 @@ def main(argv):
         print(f'range bins, {c}: z range (m) | n frames | mean |offset| px | mean |offset|*z/f m')
         if rb is None: print('  too few frames'); continue
         for lo, hi, n, px, m in rb['bins']: print(f'  {lo:.2f}-{hi:.2f} | {n} | {px:.2f} | {m:.4f}')
-        print(f"  log-log slope of |offset| on z: {rb['slope']:.2f}  95% bootstrap [{rb['lo']:.2f}, {rb['hi']:.2f}]  (0 = flat in px, -1 = flat in m)")
+        print(f"  n {rb['n']}, block length {rb['block']} frames (acf at lag 1 = {rb['acf1']:.2f}); OLS slope of y on z, 95% block bootstrap:")
+        for k, unit in (('px', 'px per m'), ('m', 'm per m')):
+            b0, lo, hi = rb[k]
+            print(f"    y = |offset| {'(px)' if k == 'px' else 'z/f (m)'}: {b0:+.4f} {unit} [{lo:+.4f}, {hi:+.4f}]  contains 0: {lo <= 0 <= hi}")
     if not rows: print('no mask matched a graded box (no frame with gt_valid=1, or no overlap)')
 
 

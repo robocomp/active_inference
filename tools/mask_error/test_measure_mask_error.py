@@ -92,6 +92,44 @@ def test_box_centre_offset_rotates_with_yaw():
     assert np.allclose(c[:, :2].mean(0), [5.0, 7.1], atol=1e-9), c[:, :2].mean(0)
 
 
+def _series(kind, rng, n=400, f=448.1, k=0.08):
+    """Frames in time order, range z a slow random walk (strongly autocorrelated, as consecutive frames are), offset
+    |o| = k f / z (constant k metres at the object) or constant 10 px, plus 5% noise."""
+    z = np.clip(2.5 + np.cumsum(rng.normal(0, 0.05, n)), 1.0, 5.0)
+    o = (k * f / z if kind == 'metres' else np.full(n, 10.0)) * (1 + 0.05 * rng.normal(size=n))
+    return z, o, f
+
+
+def _rows_for(z, o):
+    return [dict(cls='x', stamp_ms=i, range_m=float(zi), mean_offset_px=float(oi)) for i, (zi, oi) in enumerate(zip(z, o))]
+
+
+def test_range_slopes_metre_constant_offset():
+    """A known 8 cm offset at the object (|o| = k f / z), 20 independent series. A 95% interval for a true slope of 0 must
+    contain 0 in about 95% of series, so one series is not a test (a single series fails 1 time in 20 by construction).
+    Requirement: the px slope interval lies below 0 in all 20 (the true px slope is negative: d|o|/dz = -k f / z^2), and the metre slope interval contains 0 in at least 16 of 20. 16 is the 0.5% lower tail of
+    Binomial(20, 0.95)'s expected 19: P(X <= 15) = 0.0026."""
+    cover = 0
+    for seed in range(20):
+        z, o, f = _series('metres', np.random.default_rng(seed))
+        rb = M.range_bins(_rows_for(z, o), f, n_boot=300)['x']
+        assert rb['px'][2] < 0, (seed, rb['px'])
+        cover += rb['m'][1] <= 0 <= rb['m'][2]
+        assert rb['block'] > 1
+    assert cover >= 16, cover
+
+
+def test_range_slopes_pixel_constant_offset():
+    """A constant 10 px offset: the px slope interval contains 0 in at least 16 of 20 series; the metre slope (|o| z / f = 10 z / f grows with z) lies above 0 in all 20."""
+    cover = 0
+    for seed in range(20):
+        z, o, f = _series('pixels', np.random.default_rng(100 + seed))
+        rb = M.range_bins(_rows_for(z, o), f, n_boot=300)['x']
+        assert rb['m'][1] > 0, (seed, rb['m'])
+        cover += rb['px'][1] <= 0 <= rb['px'][2]
+    assert cover >= 16, cover
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_'):
