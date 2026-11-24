@@ -20,6 +20,20 @@
 namespace toy
 {
 
+// ── How far the reported posterior σ can be from the converged one: ONE derivation, used by every toy test ───────────
+// The engine stops (SolverConfig, spec 7c.8 rev 3.3.8) when the UNDAMPED Gauss–Newton step from the current θ is below
+// tol_sigma·σ_k on every component. That step is the Newton step to the fixed point θ* of the local quadratic, so the
+// returned θ sits within δ_k < tol_sigma·σ_k of θ*, and the posterior covariance is P(θ) = H(θ)⁻¹ evaluated THERE.
+// How far H(θ) is from H(θ*) depends on how fast the information changes with θ. The Laplace posterior is only a valid
+// description if the information is near-constant over the posterior's own width, i.e. its relative change across one σ
+// is at most 1; under that condition a shift of tol_sigma·σ changes H, hence the variance, by at most a relative tol_sigma,
+// and σ = √variance by at most tol_sigma/2 (first order). So:
+//   - one reported σ against an analytic value:           relative error ≤ tol_sigma/2   (5 % at tol_sigma = 0.1);
+//   - a ratio of two reported σ's (two separate stops):   the two errors add, ≤ tol_sigma  (10 %).
+// (When the GN starts at its fixed point, as in a seeded-on-truth run, the offset is 0 and the bound is slack, not used.)
+inline double sigma_tol_single() { return 0.5 * rc::ai::engine::SolverConfig{}.tol_sigma; }
+inline double sigma_tol_ratio()  { return 2.0 * sigma_tol_single(); }
+
 struct ToyState
 {
     float cx = 0.f, cy = 0.f, H = 1.f, w = 1.f, h = 1.f, yaw = 0.f;

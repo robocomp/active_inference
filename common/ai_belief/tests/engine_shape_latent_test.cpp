@@ -15,9 +15,9 @@
 // "Answers to the builder check" 3), so the two channels do average each other's shape error, once, to Δ/√24; what no
 // repetition can do is go below that.
 //
-// Tolerance: the solver stops when the undamped step is below tol_sigma·σ_k on every θ component (SolverConfig::tol_sigma,
-// the stop rule of spec 7c.8 rev 3.3.8). The returned θ, where the posterior covariance is evaluated, may therefore sit up
-// to tol_sigma·σ from the GN fixed point; we grant σ_w the same relative slack, (1 − tol_sigma) = 0.9. Not fitted.
+// Tolerance: the reported σ_w is one σ against an analytic floor, so its slack is toy::sigma_tol_single() = tol_sigma/2
+// (the stop-rule derivation in toy_model.h): σ_w ≥ (1 − 0.05)·floor. (Earlier versions granted 1 − tol_sigma = 0.9; the
+// one derivation gives the tighter 0.95.) Not fitted.
 //
 // Runs on the minimal toy model (toy_model.h) with a LiDAR channel that measures w directly (the engine's
 // accumulate_lidar_override hook). Run: ./engine_shape_latent_test
@@ -139,7 +139,7 @@ Run run(float delta_w)
 
 int main()
 {
-    const double tol = rc::ai::engine::SolverConfig{}.tol_sigma;
+    const double tol = toy::sigma_tol_single();
 
     // (1) Birth at Δ²/12, carried with ρ = 1.
     {
