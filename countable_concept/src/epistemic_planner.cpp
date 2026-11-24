@@ -171,12 +171,11 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     // stand in the wall and the controller would repair it to the floor at the object), scale the winner by the
     // useful fraction of its raw information (adequacy gap to Σ*), refuse a non-finite result.
     // G6: the controller's own feasibility test at each offered standpoint, on the same data (standpoint_free.h).
-    static rc::nbv::StandBody stand_body;
     rc::nbv::StandWorld stand_world;
     if (occupied != nullptr and occupied->cell_m > 0.0f)
     {
-        if (stand_body.cell_m != occupied->cell_m) stand_body = rc::nbv::StandBody::of(body, occupied->cell_m);
-        stand_world = {&stand_body, occupied, room_polygon, obstacles};
+        if (stand_body_.cell_m != occupied->cell_m) stand_body_ = rc::nbv::StandBody::of(body, occupied->cell_m);
+        stand_world = {&stand_body_, occupied, room_polygon, obstacles};
     }
     rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon};
     if (stand_world.valid()) in.stand = &stand_world;

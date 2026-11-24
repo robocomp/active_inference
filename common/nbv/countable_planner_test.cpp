@@ -122,7 +122,7 @@ int main()
                 const auto v = rc::nbv::face_viewpoint(unit_box(), face, face == 2 ? base.plan.best_standoff_m : base.plan.face_standoff_m[face]);
                 f.insert(f.end(), {v.pos.x(), v.pos.y(), 0.02f});
             }
-            return rc::nbv::OccupiedCells::from_xyz(f, 0.05f);
+            return rc::nbv::OccupiedCells::from_xyz(f, 0.05f, rc::residual_risk::BeliefField{});   // no field: cells hard
         };
         const rc::nbv::OccupiedCells none;
         rc::nbv::StandWorld clear{&body, &none, room, {}};
@@ -142,6 +142,10 @@ int main()
         in.stand = &wa;
         const auto none_free = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
         CHECK(none_free.proposal.valid and not none_free.refused_no_usable_face, "G6: every standpoint blocked: the best face is still proposed");
+        // the proposed face is the BELIEF's best (argmax of its raw gain), not the first usable one
+        const auto best_raw = std::max_element(none_free.plan.face_raw_gains.begin(), none_free.plan.face_raw_gains.end());
+        CHECK(none_free.plan.best_face == static_cast<int>(best_raw - none_free.plan.face_raw_gains.begin()) and none_free.plan.best_face == 2,
+              "G6: ... and it is the belief's raw-best face (+y here)");
         CHECK(none_free.p_stand == 0.0f and none_free.proposal.epistemic_gain == 0.0f, "G6: ... at gain 0 with p_stand 0 (no offer value, not a skip)");
     }
 

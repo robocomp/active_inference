@@ -626,21 +626,33 @@ void SpecificWorker::compute()
 // Log, per cycle, the regions NOT already covered by a believed bed alongside the tracker's actual birth count,
 // so we can see whether surprise flags a real new bed cleanly (and stays quiet on phantoms) BEFORE letting it
 // drive the lifecycle. Never writes the graph; never births. See [[bed-birth-surprise-probe]].
-// G6: residual_concept's latched occupied cells (grid_occupied_cells + grid_cell_size, both type-attributed), the same pair the
-// controller's obstacle tracker reads. Keyed on the attribute's publish stamp like the tracker: the publisher writes ~2 Hz and an
-// unchanged stamp means the cells are the truth already held. A vanished node empties them (no belief, no veto). Main thread.
+// G6: residual_concept's latched occupied cells (grid_occupied_cells + grid_cell_size) split into HARD and soft exactly as the
+// controller splits them: through the published belief field (grid_occupancy_prob / _var / _meta, via rc::read_residual_field) and
+// the controller's own residual_risk::risks_from_field. Keyed on the publish stamps of the cells and the field, like the
+// controller's obstacle tracker: the publisher writes ~2 Hz and unchanged stamps mean what we hold is still the truth. A vanished
+// node empties it (no belief, no veto); a missing field makes every cell hard, as there. Main thread.
 void SpecificWorker::read_occupied_cells()
 {
     const auto g = G->get_node("residual");
-    if (not g.has_value()) { occupied_cells_ = {}; occupied_stamp_ = 0; return; }
-    const auto stamp = G->get_attrib_timestamp<grid_occupied_cells_att>(g.value()).value_or(0);
-    if (stamp != 0 and stamp == occupied_stamp_) return;
-    occupied_stamp_ = stamp;
+    if (not g.has_value()) { occupied_cells_ = {}; occupied_stamp_cells_ = occupied_stamp_prob_ = 0; return; }
+    const auto stamp_cells = G->get_attrib_timestamp<grid_occupied_cells_att>(g.value()).value_or(0);
+    const auto stamp_prob  = G->get_attrib_timestamp<grid_occupancy_prob_att>(g.value()).value_or(0);
+    if (stamp_cells != 0 and stamp_cells == occupied_stamp_cells_ and stamp_prob == occupied_stamp_prob_) return;
+    occupied_stamp_cells_ = stamp_cells;
+    occupied_stamp_prob_  = stamp_prob;
     occupied_cells_ = {};
     const auto cs = G->get_attrib_by_name<grid_cell_size_att>(g.value());
     const auto cells = G->get_attrib_by_name<grid_occupied_cells_att>(g.value());
-    if (cs.has_value() and cells.has_value())
-        occupied_cells_ = rc::nbv::OccupiedCells::from_xyz(cells.value().get(), cs.value());
+    if (not (cs.has_value() and cells.has_value())) return;
+    rc::GridField field;
+    rc::residual_risk::BeliefField bf;   // stays invalid (every cell hard) when the field cannot be read
+    if (rc::read_residual_field(*G, room_node_id_, field))
+    {
+        bf.prob = field.prob; bf.var = field.var;
+        bf.xmin = field.xmin; bf.ymin = field.ymin; bf.cell = field.cell;
+        bf.width = field.width; bf.height = field.height;
+    }
+    occupied_cells_ = rc::nbv::OccupiedCells::from_xyz(cells.value().get(), cs.value(), bf);
 }
 
 // Snapshot residual_concept's `grid` node (published under room ~2 Hz) into residual_field_ — the dense

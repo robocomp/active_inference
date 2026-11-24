@@ -7,7 +7,7 @@
  * robot can stand, so this reproduces the controller's own test on the same published data and is a deterministic check:
  *
  *     the footprint, at each heading it will occupy, covers no cell that is off the room, inside an obstacle polygon, or
- *     one of residual's latched occupied cells.
+ *     a HARD latched cell of residual's (one the published belief field does not cover).
  *
  * It mirrors GridPlanner: the body is RobotFootprint (placed by its own cell_offsets_yaw, the quarter turn applied once there),
  * the heading is bucketed to kHeadings = 8 as GridPlanner::heading_bucket does, and a pose that ends in a turn in place
@@ -17,9 +17,11 @@
  * cell, so a product over it is 0.33 at best and ~1e-27 over unexplored ground — that was the rejected first draft. The
  * controller's own verdict is hard/not-hard, so this is too. (2) No safety margin: the controller adds
  * footprint_safety_margin_m, which is another agent's config and is not readable here, so the object side uses margin 0 and is
- * therefore SLIGHTLY MORE PERMISSIVE than the controller (exposing the margin is an owner decision). (3) Every latched cell is
- * treated as hard, whereas the controller prices a cell backed by belief ("a toll, not a wall") and hands back only a hard one:
- * on that point the object side is stricter. (4) Cells are rasterised on residual's lattice, the controller's on its own.
+ * therefore SLIGHTLY MORE PERMISSIVE than the controller (exposing the margin is an owner decision). (3) Latched cells are
+ * split exactly as the controller splits them (OccupiedCells): only a cell the published field does not cover is hard. (4) Cells are
+ * rasterised on residual's lattice, the controller's on its own. (5) The controller also accepts a door-passage polygon as room
+ * (GridPlanner::inside_room_or_passage); passages come from its active crossing state, which the object does not hold, so a
+ * standpoint inside a passage but outside the room polygon is refused here.
  *
  * Pure Eigen/std + robot_footprint (ai_common::geometry). Pinned by tests/standpoint_free_test.cpp.
  */
@@ -38,6 +40,7 @@
 
 #include "viewpoint_score.h"                          // Obstacle, stands_inside, detail::point_in_polygon
 #include "../robot_footprint/robot_footprint.h"        // rc::RobotFootprint
+#include "../../controller/src/residual_risk.h"      // rc::residual_risk — the controller's own cell_risk_nats / risks_from_field (pure std+Eigen)
 
 namespace rc::nbv
 {
@@ -65,7 +68,11 @@ struct StandBody
     bool valid() const { return cell_m > 0.0f; }
 };
 
-// residual's latched occupied cells (grid_occupied_cells centres) on their own lattice.
+// residual's latched occupied cells (grid_occupied_cells centres) on their own lattice — ONLY the HARD ones.
+// The controller prices a latched cell the published field covers (residual_risk.h cell_risk_nats: a toll, not a wall) and hands a
+// standpoint back only for a cell the field does NOT cover (outside it, or no usable moments) or whose risk is not finite. The same
+// partition is made here by calling the controller's own risks_from_field, so a soft cell is simply not stored. A collapsed cell
+// (P <= 0: explained by a modelled object, or speckle) has risk 0 there and is soft here too.
 struct OccupiedCells
 {
     float cell_m = 0.0f;
@@ -75,15 +82,21 @@ struct OccupiedCells
     static std::int64_t key(std::int64_t i, std::int64_t j) { return (i << 32) ^ (j & 0xffffffffLL); }
     int index(float v, float o) const { return static_cast<int>(std::lround((v - o) / cell_m)); }
 
-    // `xyz` = the attribute's flat [x,y,z] triples.
-    static OccupiedCells from_xyz(std::span<const float> xyz, float cell_m)
+    // `xyz` = the attribute's flat [x,y,z] triples; `field` = residual's belief field (an invalid one makes every cell hard, as in the
+    // controller). The lattice origin is the first latched cell, hard or not.
+    static OccupiedCells from_xyz(std::span<const float> xyz, float cell_m, const residual_risk::BeliefField& field)
     {
         OccupiedCells c;
         if (not (cell_m > 0.0f)) return c;
         c.cell_m = cell_m;
         if (xyz.size() >= 3) c.origin = {xyz[0], xyz[1]};
-        for (std::size_t i = 0; i + 2 < xyz.size(); i += 3)
-            c.keys.insert(key(c.index(xyz[i], c.origin.x()), c.index(xyz[i + 1], c.origin.y())));
+        std::vector<Eigen::Vector2f> centres;
+        centres.reserve(xyz.size() / 3);
+        for (std::size_t i = 0; i + 2 < xyz.size(); i += 3) centres.emplace_back(xyz[i], xyz[i + 1]);
+        const auto risk = residual_risk::risks_from_field(centres, field);
+        for (std::size_t k = 0; k < centres.size(); ++k)
+            if (not std::isfinite(risk[k]))
+                c.keys.insert(key(c.index(centres[k].x(), c.origin.x()), c.index(centres[k].y(), c.origin.y())));
         return c;
     }
     bool has(int i, int j) const { return keys.contains(key(i, j)); }

@@ -98,8 +98,9 @@ struct StepHooks
  *
  * `Inst` must expose: epistemic_cooldown, epistemic_pending, node_name, affordance.
  */
-template <class Inst, class Proposal>
-void step(Inst& inst, DSR::DSRGraph& G, const StepInputs& in, const StepHooks<Proposal>& hooks)
+// `Graph` is DSR::DSRGraph in every agent; a template parameter so the step can be run against a stand-in graph in a test.
+template <class Inst, class Proposal, class Graph>
+void step(Inst& inst, Graph& G, const StepInputs& in, const StepHooks<Proposal>& hooks)
 {
     if (inst.epistemic_cooldown > 0)
         --inst.epistemic_cooldown;
@@ -110,8 +111,8 @@ void step(Inst& inst, DSR::DSRGraph& G, const StepInputs& in, const StepHooks<Pr
     if (const auto aid = inst.affordance.node_id(); aid != 0)
         if (auto an = G.get_node(aid); an.has_value())
         {
-            const bool active  = G.get_attrib_by_name<active_att>(an.value()).value_or(false);
-            const bool pending = G.get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
+            const bool active  = G.template get_attrib_by_name<active_att>(an.value()).value_or(false);
+            const bool pending = G.template get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
             if (not active and not pending and inst.epistemic_cooldown == 0)
             {
                 inst.epistemic_cooldown = in.cooldown_cycles;

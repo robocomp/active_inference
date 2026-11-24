@@ -126,6 +126,18 @@ CountableResult plan_countable(const Target& t, const CountableInputs& in, RawGa
         return raw * p;
     };
     r.plan = plan_faces(t, in.sensor, in.robot_radius_m, in.obstacles, reachable_gain, in.room_polygon);
+    // ★EVERY STANDPOINT BLOCKED ⇒ propose the BELIEF's best face (at gain 0), not whichever usable face the zero-gain tie happened to pick:
+    // plan_faces ranks the p-scaled gains, which are all 0, so re-plan once on the unscaled gains. The step then publishes gain 0.
+    if (r.plan.valid and r.plan.any_usable and p_face[static_cast<std::size_t>(r.plan.best_face)] == 0.0f)
+    {
+        const auto belief_gain = [&](int face, float standoff_m) -> float
+        {
+            const float raw = raw_gain_of(face, standoff_m);
+            unscaled[static_cast<std::size_t>(face)] = raw;
+            return raw;
+        };
+        r.plan = plan_faces(t, in.sensor, in.robot_radius_m, in.obstacles, belief_gain, in.room_polygon);
+    }
     // "as supplied by the belief": the promise/delivery log compares THIS with what a look delivered. When no face is usable the
     // plan's hint (best_face/pos/standoff) was derived from the scaled gains and the caller refuses; leave it self-consistent.
     if (r.plan.any_usable)
@@ -140,8 +152,8 @@ CountableResult plan_countable(const Target& t, const CountableInputs& in, RawGa
         return r;
     }
     const int   best = r.plan.best_face;
-    const float gain = r.plan.face_gains[best] * useful(unscaled[static_cast<std::size_t>(best)]);
     r.p_stand = p_face[static_cast<std::size_t>(best)];
+    const float gain = r.plan.face_gains[best] * useful(unscaled[static_cast<std::size_t>(best)]) * r.p_stand;
     const CountableProposal p{r.plan.best_pos.x(), r.plan.best_pos.y(), r.plan.best_yaw, gain, true};
     if (p.is_finite())
         r.proposal = p;

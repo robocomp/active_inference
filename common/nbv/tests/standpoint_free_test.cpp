@@ -18,7 +18,7 @@ int main()
     const std::vector<Eigen::Vector2f> room{{-3, -3}, {3, -3}, {3, 3}, {-3, 3}};
     const auto cells_at = [&](std::vector<float> xy) {   // xy pairs -> [x,y,z] triples
         std::vector<float> f; for (std::size_t i = 0; i + 1 < xy.size(); i += 2) { f.push_back(xy[i]); f.push_back(xy[i + 1]); f.push_back(0.02f); }
-        return OccupiedCells::from_xyz(f, cell); };
+        return OccupiedCells::from_xyz(f, cell, rc::residual_risk::BeliefField{}); };   // no field: every cell hard
     std::printf("standpoint_free_test\n");
 
     {   // an empty world stands anywhere inside the room, in every mode
@@ -53,6 +53,30 @@ int main()
         const StandWorld w{&body, &none, room, box};
         CHECK(p_stand(w, {0, 0}, 0.0f, false) == 1.0, "obstacle 0.40 m away: the body (0.23 reach) clears it");
         CHECK(p_stand(w, {0.3f, 0}, 0.0f, false) == 0.0, "obstacle under the body: 0");
+    }
+    {   // the controller's hard/soft partition: only a latched cell the belief field does NOT cover blocks
+        const std::vector<float> xyz{2.5f, 2.5f, 0.02f, 0.0f, 0.0f, 0.02f};   // lattice origin cell + a cell under the body
+        rc::residual_risk::BeliefField f;   // 120 x 120 cells of 0.05 m from (-3,-3): covers both cells
+        f.xmin = -3.0f; f.ymin = -3.0f; f.cell = cell; f.width = 120; f.height = 120;
+        f.prob.assign(120 * 120, 0.0f); f.var.assign(120 * 120, 0.0f);
+        const auto at = [&](float x, float y) { return static_cast<std::size_t>(std::floor((y + 3.0f) / cell)) * 120 + static_cast<std::size_t>(std::floor((x + 3.0f) / cell)); };
+        const auto world = [&](float p_under) {
+            f.prob[at(0.0f, 0.0f)] = p_under; f.var[at(0.0f, 0.0f)] = 0.02f; f.prob[at(2.5f, 2.5f)] = 0.0f;
+            return OccupiedCells::from_xyz(xyz, cell, f); };
+        const auto soft = world(0.6f);   // belief-backed, finite risk: a toll, not a wall
+        const StandWorld ws{&body, &soft, room, {}};
+        CHECK(p_stand(ws, {0, 0}, 0.0f, true) == 1.0, "a latched cell the field covers (finite risk) is soft: the standpoint is served");
+        const auto collapsed = world(0.0f);   // P <= 0: explained / speckle, risk 0
+        const StandWorld wc{&body, &collapsed, room, {}};
+        CHECK(p_stand(wc, {0, 0}, 0.0f, true) == 1.0, "a collapsed cell (P <= 0) is risk 0: no block");
+        rc::residual_risk::BeliefField none;   // no field at all
+        const auto hard = OccupiedCells::from_xyz(xyz, cell, none);
+        const StandWorld wh{&body, &hard, room, {}};
+        CHECK(p_stand(wh, {0, 0}, 0.0f, false) == 0.0, "no field: every latched cell is hard (the controller's conservative default)");
+        f.xmin = 1.0f;   // the same field now frames the area elsewhere: the cell under the body falls outside it
+        const auto outside = OccupiedCells::from_xyz(xyz, cell, f);
+        const StandWorld wo{&body, &outside, room, {}};
+        CHECK(p_stand(wo, {0, 0}, 0.0f, false) == 0.0, "a cell outside the field's extent is hard");
     }
     {   // no body / no cell size: no belief, no veto
         const StandWorld w{};

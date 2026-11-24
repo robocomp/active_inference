@@ -1,7 +1,7 @@
 // epistemic_step_test.cpp — G6 through rc::epistemic::step: a blocked standpoint (p_stand = 0) is published at gain 0 even under a
 // verification floor, an unblocked one is published at the floored gain, and a proposal with no p_stand is untouched.
-// The step is a template over the instance, so a stand-in instance with a recording affordance runs the REAL step() — the affordance
-// node id stays 0, so the graph is never touched (a null-referenced G would be UB only if dereferenced; it is not).
+// The step is a template over the instance and the graph, so a stand-in instance with a recording affordance and a stand-in graph run
+// the REAL step(); the affordance node id stays 0, so the graph is never asked anything.
 #include <cstdio>
 #include <cstdint>
 
@@ -19,6 +19,11 @@ struct FakeAffordance
     void hold_offered() { ++holds; }
     void update(const rc::AffordanceTarget& t, bool) { last = t; ++updates; }
 };
+struct FakeGraph
+{
+    std::optional<int> get_node(std::uint64_t) { return std::nullopt; }
+    template <class Att> std::optional<bool> get_attrib_by_name(const int&) { return std::nullopt; }
+};
 struct FakeInst { int epistemic_cooldown = 0; bool epistemic_pending = false; std::string node_name = "fake"; FakeAffordance affordance; };
 struct ProposalWith { float epistemic_target_x_m = 1, epistemic_target_y_m = 2, epistemic_target_yaw_rad = 0.5f, epistemic_gain = 0.0f;
                       bool valid = true; float p_stand = 1.0f; };
@@ -32,8 +37,8 @@ float run(float gain, float floor_gain, float p, FakeInst& inst)
     if constexpr (requires { prop.p_stand; }) prop.p_stand = p;
     rc::epistemic::StepInputs in; in.verify_gain_floor = floor_gain;
     rc::epistemic::StepHooks<P> hooks; hooks.compute = [&]() -> std::optional<P> { return prop; };
-    DSR::DSRGraph* none = nullptr;
-    rc::epistemic::step(inst, *none, in, hooks);
+    FakeGraph graph;
+    rc::epistemic::step(inst, graph, in, hooks);
     return inst.affordance.last.gain;
 }
 }

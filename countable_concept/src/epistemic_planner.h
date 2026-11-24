@@ -131,6 +131,7 @@ public:
 
 private:
     rc::detect::DetectorEnvelope det_env_{};
+    mutable rc::nbv::StandBody   stand_body_{};   // G6: the body's covered cells per heading, rebuilt when residual's cell size changes
     std::string                  agent_name_ = "countable_concept";
 };
 
