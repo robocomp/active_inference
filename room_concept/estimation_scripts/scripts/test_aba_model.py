@@ -83,6 +83,10 @@ def visits():
     rows = [seg_row('OK', 'A1', 1000), seg_row('OK', 'B', 2000), seg_row('OK', 'A2', 3000),
             seg_row('NOB', 'A1', 1000), seg_row('NOB', 'A2', 3000),
             seg_row('TIMEOUT', 'A1', 1000), seg_row('TIMEOUT', 'B', 2000, goto='TIMEOUT'), seg_row('TIMEOUT', 'A2', 3000),
+            seg_row('RETRY', 'A1', 1000), seg_row('RETRY', 'A2', 3000),
+            seg_row('RETRY', 'B', 2000, face='completed[a1:165.5deg:failed_timeout;a2:132.0deg:completed;a3:1.2deg:within]'),
+            seg_row('NOFACE', 'A1', 1000), seg_row('NOFACE', 'A2', 3000),
+            seg_row('NOFACE', 'B', 2000, face='failed[a1:165.5deg:failed;a2:150deg:failed;a3:140deg:failed;a4:139deg:out_of_attempts]'),
             seg_row('OFF', 'A1', 1000), seg_row('OFF', 'B', 2000, gt_x=str(1.0 + tol + 0.01)), seg_row('OFF', 'A2', 3000),
             seg_row('FRAME', 'A1', 1000), seg_row('FRAME', 'B', 2000, goto='frame_failed', gt_x='nan', gt_y='nan',
                                                   arr_query_answered='no', dwell='none'),
@@ -98,13 +102,15 @@ def visits():
         assert any('B: segment missing' in w for w in R.visit_validity(S['NOB'], tol))
         assert any('B: goto TIMEOUT' in w for w in R.visit_validity(S['TIMEOUT'], tol))
         assert any('B: arrival' in w for w in R.visit_validity(S['OFF'], tol))
+        assert R.visit_validity(S['RETRY'], tol) == []                       # a face that needed retries but got there
+        assert any('B: face failed[' in w for w in R.visit_validity(S['NOFACE'], tol))
         assert any('B: goto frame_failed' in w for w in R.visit_validity(S['FRAME'], tol))
         assert 'BAD' not in S
         # both reports refuse every broken visit (NO VERDICT) and never PASS overall
         for rep in ('parked_report.py', 'aba_report.py'):
             out = subprocess.run([sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), rep), str(run)],
                                  capture_output=True, text=True).stdout
-            for bad in ('NOB', 'TIMEOUT', 'OFF', 'FRAME'):
+            for bad in ('NOB', 'TIMEOUT', 'OFF', 'FRAME', 'NOFACE'):
                 assert f'== {bad}: NO VERDICT -> FAIL' in out, (rep, bad, out)
             assert 'PASS' not in out.split('== summary')[-1], (rep, out)
 

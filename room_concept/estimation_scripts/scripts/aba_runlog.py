@@ -86,7 +86,9 @@ def visit_validity(S, tol_m):
         if s not in S: why.append(f'{s}: segment missing'); continue
         r = S[s]
         if r.get('goto') != 'completed': why.append(f'{s}: goto {r.get("goto")}')
-        if r.get('face') not in ('completed', 'none'): why.append(f'{s}: face {r.get("face")}')
+        # face = completed[attempts...] (aba_visit.sh face_step), or the plain 'completed' / 'none' of earlier runs
+        f = r.get('face') or ''
+        if not (f in ('completed', 'none') or f.startswith('completed[')): why.append(f'{s}: face {f}')
         if r.get('dwell') != 'completed': why.append(f'{s}: dwell {r.get("dwell")}')
         if r.get('query_answered') != 'yes': why.append(f'{s}: claim gain query {r.get("query_answered")}')
         if r.get('arr_query_answered') != 'yes': why.append(f'{s}: arrival gain query {r.get("arr_query_answered")}')

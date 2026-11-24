@@ -82,6 +82,27 @@ gain_query() {   # id world_x world_y: a gain query for that standpoint, facing 
   for i in $(seq 1 25); do grep -q "^[0-9]*,$1," "$GQ_ANS" 2>/dev/null && { QA=yes; break; }; sleep 0.2; done
   log "gain query $1 at ($2, $3): $QA $(grep "^[0-9]*,$1," "$GQ_ANS" 2>/dev/null | cut -d, -f3,8 | tr '\n' ' ')"; }
 
+# face_step seg: turn to face the object, re-computing the turn from the CURRENT Webots pose after every move, until the residual
+# heading is within the controller's own heading goal tolerance (align_yaw_tol_rad) — a long pivot can stop short (live run
+# p1_nightstand, B: 165.5 deg asked, the move skill's own budget ran out after 33 deg near the bed's foot corner).
+# At most FACE_ATTEMPTS moves (3). Sets FACE = completed|failed followed by every attempt in [...], TURN0 = the first turn asked.
+FACE_ATTEMPTS=${FACE_ATTEMPTS:-3}
+HEADING_TOL_DEG=$(python3 $S/aba_geometry.py heading_tol) || { log "controller heading tolerance not found"; exit 1; }
+face_step() {
+  local k turn trace="" ok=0
+  TURN0=nan
+  for k in $(seq 1 $((FACE_ATTEMPTS + 1))); do
+    turn=$(python3 $S/aba_geometry.py face "$CX" "$CY") || { trace+="a$k:pose_failed;"; break; }
+    [ "$TURN0" = nan ] && TURN0=$turn
+    if awk -v t="$turn" -v tol="$HEADING_TOL_DEG" 'BEGIN{ exit !((t < 0 ? -t : t) <= tol) }'; then
+      trace+="a$k:${turn}deg:within;"; ok=1; break; fi
+    [ $k -gt $FACE_ATTEMPTS ] && { trace+="a$k:${turn}deg:out_of_attempts;"; break; }   # the last check after the last move
+    run_mission "aba_${DEF}_${1}_face$k" "  move turn_deg=${turn}deg" 60
+    trace+="a$k:${turn}deg:${M// /_};"
+  done
+  if [ $ok = 1 ]; then FACE="completed[${trace%;}]"; else FACE="failed[${trace%;}]"; fi
+  log "$1: face $FACE (tolerance ${HEADING_TOL_DEG} deg)"; }
+
 visit() {   # seg world_x world_y world_yaw
   local seg=$1 tc ta=0 t0=0 t1=0 room px=nan py=nan pyaw=nan fit=none go turn=nan face=none gx=nan gy=nan gyaw=nan dw=none
   local qid qa aqid=0 aqa=no out gt
@@ -89,15 +110,13 @@ visit() {   # seg world_x world_y world_yaw
   # context: the promise of the scripted standpoint at the claim, before the robot moves (ids are epoch ms: increasing)
   qid=$tc; gain_query "$qid" "$2" "$3"; qa=$QA
   room=$(room_now)
-  if out=$(python3 $S/aba_geometry.py to_room "$2" "$3" "$4") && [ -n "$out" ]; then
+  # a frame that cannot be converted for the query cannot be trusted for the drive either
+  if [ "$qa" != frame_failed ] && out=$(python3 $S/aba_geometry.py to_room "$2" "$3" "$4") && [ -n "$out" ]; then
     read -r px py pyaw fit <<< "$out"
     log "$seg: claim at $tc, go_to pose:$room($px, $py, $pyaw) [$fit]"
     run_mission "aba_${DEF}_${seg}_go" "  go_to pose:${room}(${px}, ${py}, ${pyaw})" "$MOVE_TIMEOUT_S"; go=$M
     ta=$(now_ms)
-    turn=$(python3 $S/aba_geometry.py face "$CX" "$CY")
-    # a zero turn is refused by the controller ("nothing to do"): the degenerate case, not a tolerance
-    if [ "$turn" = "0.0" ] || [ "$turn" = "-0.0" ]; then face=none
-    else run_mission "aba_${DEF}_${seg}_face" "  move turn_deg=${turn}deg" 60; face=$M; fi
+    face_step "$seg"; face=$FACE; turn=$TURN0
     gt=$(python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1, $2, $5}')
     [ -n "$gt" ] && read -r gx gy gyaw <<< "$gt"
     # THE TESTED PROMISE: asked on arrival, from the arrival Sigma, for where the robot now stands, before the dwell

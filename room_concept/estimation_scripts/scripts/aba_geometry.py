@@ -8,6 +8,7 @@
     aba_geometry.py query_pose <sx> <sy> <cx> <cy>       a WORLD standpoint and object centre -> the standpoint in the published
                                                           room frame and the heading facing the centre (math convention, the
                                                           engine's Standpoint yaw) — the gain query's pose
+    aba_geometry.py heading_tol                          the controller's heading goal tolerance (deg, align_yaw_tol_rad)
     aba_geometry.py face <x> <y>                          the turn (deg, + = left) that points the robot (Webots pose now) at the
                                                           world point (x, y)
 --live reads the object's pose from Webots (webots_object.py get) instead of the .wbt file.
@@ -331,6 +332,14 @@ def main(argv):
         px, py, _ = fr.world_to_pub(sx, sy, 0.0, t1); qx, qy, _ = fr.world_to_pub(cx, cy, 0.0, t1)
         print(f'{px:.4f} {py:.4f} {math.atan2(qy - py, qx - px):.6f}')
         return 0
+    if cmd == 'heading_tol':
+        # the controller's own heading goal tolerance: |yaw error| under which its goal alignment is done
+        # (controller/src/controller_types.h align_yaw_tol_rad; the config sets no key for it), in degrees
+        hdr = f'{B}/controller/src/controller_types.h'
+        for line in open(hdr):
+            m = re.match(r'\s*float\s+align_yaw_tol_rad\s*=\s*([-+0-9.eE]+)f?\s*;', line)
+            if m: print(f'{math.degrees(float(m.group(1))):.3f}'); return 0
+        print(f'align_yaw_tol_rad not found in {hdr}', file=sys.stderr); return 1
     if cmd == 'face':
         tx, ty = float(argv[1]), float(argv[2])
         x, y, yaw = robot_pose()
