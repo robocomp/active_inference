@@ -341,7 +341,16 @@ void RoomSceneGraph::change_room_step(rc::EpistemicPlanner& planner)
     }
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    if (now_ms - change_memory_saved_ms_ > 30000) { change_memory_save(planner); change_memory_saved_ms_ = now_ms; }
+    if (now_ms - change_memory_saved_ms_ > 30000)
+    {
+        change_memory_save(planner); change_memory_saved_ms_ = now_ms;
+        long with_matter = 0;
+        for (int k = 0; k < cb.size(); ++k) with_matter += cb.cell(k).matter == 1 ? 1 : 0;
+        rc::status::print("[room][change] matter stream: {} batches stamped ({} too old), {} points in the grid; "
+                          "{} sweeps, {} with a scan; {} of {} cells hold matter\n",
+                          low_batches_stamped_, low_batches_too_old_, planner.matter_points_in_grid_,
+                          planner.change_sweeps_, planner.change_sweeps_scanned_, with_matter, cb.size());
+    }
 }
 
 // Format (text, one record per line, '.' decimals): "posterior <n> <logw...>" then "cell <room> <cx> <cy> <t_obs> <matter>".

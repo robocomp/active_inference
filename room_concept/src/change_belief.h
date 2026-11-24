@@ -137,9 +137,12 @@ public:
         return n * mutual_info(p_changed(std::max(0.0, now_s - c.t_obs), ell), d_mean_, f_mean_);
     }
 
-    /// One sweep: `visible` = the cells observed now, `matter(k)` = furniture returns landed in cell k.
+    /// One sweep: `visible` = the cells in view now, `matter(k)` = furniture returns landed in cell k.
+    /// `scanned` = a furniture scan arrived since the previous sweep. Sweeps run at the localiser's rate, scans at
+    /// ~2 Hz: a sweep with no scan is no evidence about matter, so it keeps the episode open but does not vote
+    /// (live 2026-11-24 roi_live2: every sweep voted, the unscanned ones "empty", and no cell ever held matter).
     template <class MatterFn>
-    void sweep(const std::vector<int>& visible, MatterFn&& matter, double now_s)
+    void sweep(const std::vector<int>& visible, MatterFn&& matter, double now_s, bool scanned = true)
     {
         mark_.assign(cells_.size(), 0);
         for (const int k : visible)
@@ -148,6 +151,7 @@ public:
             mark_[k] = 1;
             auto& c = cells_[k];
             if (not c.in_view) { c.in_view = true; c.sweeps = 0; c.hits = 0; }
+            if (not scanned) continue;
             ++c.sweeps;
             c.hits += matter(k) ? 1 : 0;
         }
@@ -159,6 +163,7 @@ public:
         auto& c = cells_[k];
         if (not c.in_view) return;
         c.in_view = false;
+        if (c.sweeps == 0) return;   // in view, but no scan landed while it was: not an observation
         observe(k, now_s, 2 * c.hits > c.sweeps);
     }
     /// Close every open episode (leaving the room, or shutting down): the record then holds this run's observations.

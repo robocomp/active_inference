@@ -146,6 +146,19 @@ int main()
         check(e.tests() == 1 and e.hazard() > h, "a re-observation after leaving view is one test (cell 1's first episode is none); its flip raises λ");
     }
 
+    std::printf("sweeps without a scan\n");
+    {
+        // localiser-rate sweeps, a furniture scan on one in five: the cell holds matter in every scan
+        ChangeBelief e; e.init({0.f, 0.f}, 1, 1, 0.5f);
+        for (int i = 0; i < 20; ++i) e.sweep({0}, [](int) { return true; }, 10.0 + i, i % 5 == 0);
+        e.sweep({}, [](int) { return false; }, 31.0, false);
+        check(e.cell(0).matter == 1, "unscanned sweeps do not vote: a cell with matter in every scan holds matter");
+        ChangeBelief u; u.init({0.f, 0.f}, 1, 1, 0.5f);
+        for (int i = 0; i < 5; ++i) u.sweep({0}, [](int) { return false; }, 10.0 + i, false);
+        u.sweep({}, [](int) { return false; }, 16.0, false);
+        check(u.cell(0).t_obs < 0.0, "an episode with no scan is not an observation");
+    }
+
     std::printf("%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

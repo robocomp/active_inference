@@ -412,6 +412,11 @@ private:
     bool change_made_ = false;                         ///< λ's posterior is built once and kept across rooms
     float change_ell_ = 0.3f;
     std::vector<std::uint8_t> matter_hits_;            ///< cells with furniture returns since the last sweep
+    bool matter_scanned_ = false;                      ///< a furniture scan arrived since the last sweep
+public:
+    // diagnostics of the change test's matter stream (logged by the scene graph)
+    long matter_batches_ = 0, matter_points_in_grid_ = 0, change_sweeps_ = 0, change_sweeps_scanned_ = 0;
+private:
     mutable std::vector<Eigen::Vector2f> cached_grid_;
     mutable bool grid_dirty_ = true;
     mutable bool mask_dirty_ = true;   // observability mask needs a rebuild (bounds/polygon changed)

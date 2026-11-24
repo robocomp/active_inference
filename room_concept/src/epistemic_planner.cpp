@@ -431,6 +431,8 @@ float EpistemicPlanner::change_info(const Eigen::Vector2f& v) const
 void EpistemicPlanner::observe_matter(const std::vector<Eigen::Vector2f>& xy_internal)
 {
     if (not change_.ready() or matter_hits_.size() != static_cast<std::size_t>(change_.size())) return;
+    matter_scanned_ = true;
+    ++matter_batches_;
     // the grid's own geometry, via its first cell's centre and cell size (published frame)
     const float cs = params.ior_cell_size;
     const Eigen::Vector2f o = change_.centre(0) - Eigen::Vector2f(0.5f * cs, 0.5f * cs);
@@ -441,7 +443,7 @@ void EpistemicPlanner::observe_matter(const std::vector<Eigen::Vector2f>& xy_int
         const float fx = (q.x() - o.x()) / cs, fy = (q.y() - o.y()) / cs;
         if (fx < 0.f or fy < 0.f or fx >= cols) continue;   // outside the grid: not this room's
         const std::size_t k = static_cast<std::size_t>(fy) * cols + static_cast<std::size_t>(fx);
-        if (k < matter_hits_.size()) matter_hits_[k] = 1;
+        if (k < matter_hits_.size()) { matter_hits_[k] = 1; ++matter_points_in_grid_; }
     }
 }
 
@@ -449,7 +451,10 @@ void EpistemicPlanner::change_sweep()
 {
     if (not params.use_change_belief or not change_.ready() or not robot_state_set_) return;
     const auto vis = visible_cells(robot_pos());
-    change_.sweep(vis, [this](int k) { return k < static_cast<int>(matter_hits_.size()) and matter_hits_[k] != 0; }, wall_s());
+    change_.sweep(vis, [this](int k) { return k < static_cast<int>(matter_hits_.size()) and matter_hits_[k] != 0; }, wall_s(),
+                  matter_scanned_);
+    ++change_sweeps_; if (matter_scanned_) ++change_sweeps_scanned_;
+    matter_scanned_ = false;
     std::ranges::fill(matter_hits_, 0);
 }
 
