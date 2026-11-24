@@ -16,7 +16,10 @@
 //   pstd_cx..pstd_yaw   √ of the PREDICTED θθ diagonal this update started from (Σ̄: the class prior on the first update)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
-// Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults]   (N = update index; rows outside are computed, not printed)
+// Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured]
+//   (N = update index; rows outside are computed, not printed). --sig2-cam-measured re-stages every frame's camera latent
+//   marginal with today's rule (rc::persistent_latent_inputs: the measured ZED boundary std, F1.6) from the frame's yaw entry,
+//   so a dump recorded before that change replays with it; dth_live / dP_live then measure the change, not a stream defect.
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
@@ -34,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include "countable_belief.h"
+#include "countable_latent_inputs.h"
 #include "countable_replay.h"
 
 namespace
@@ -57,15 +61,16 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
-    bool allow_defaults = false;
+    bool allow_defaults = false, sig2_cam_measured = false;
     for (int i = 2; i < argc; ++i)
     {
         const std::string_view k = argv[i];
         if (k == "--allow-defaults") { allow_defaults = true; continue; }
+        if (k == "--sig2-cam-measured") { sig2_cam_measured = true; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -146,7 +151,13 @@ int main(int argc, char** argv)
             ++compared;
             flush(dth, dP);
         },
-        track);
+        track,
+        [&](rc::CountableFrame& f)
+        {
+            if (not sig2_cam_measured) return;
+            const float yaw_std = std::sqrt(std::max(0.0f, f.sig2_cam[5]));
+            f.sig2_cam = rc::persistent_latent_inputs({0.0f, 0.0f, yaw_std}, rc::LatentView{}).sig2_cam;
+        });
     flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
 
     print_set("missing (default kept)", reader.diag().missing);

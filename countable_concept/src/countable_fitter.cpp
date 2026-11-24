@@ -1396,8 +1396,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         const rc::StageTimer t_mem(timing_ ? &timing_->membership : nullptr);
         membership = build_membership(inst, observation.slice_index, zed_T_room, have_cam, mot_pos_var, &persistent_label);
     }
-    // The latents' marginals (§7c.2; shared-engine G1, controller ruling for Task 5): b_cam and b_L = the constant metric
-    // common-mode stds squared (AI2CommonMode{Pos,Size,Yaw}Std). The range growth (AI2RangeNoise{Yaw,Size}PerM, and the lat
+    // The latents' marginals (§7c.2; shared-engine G1, controller ruling for Task 5): b_L = the constant metric common-mode stds
+    // squared (AI2CommonMode{Pos,Size,Yaw}Std); b_cam = the measured ZED YOLO-seg boundary std on position and size (plan rev 2
+    // F1.6, rc::kZedYoloBoundaryStdM) and the configured yaw std. The range growth (AI2RangeNoise{Yaw,Size}PerM, and the lat
     // term on b_cam) and the obliquity yaw term (kObliquityYawGain with its cos clamp) are NOT in them: the mask boundary
     // error is shape-dominated and neither pixel- nor metre-constant (step 0, docs/superpowers/results/2026-11-24-step0.md),
     // so no measured sensor row replaces them yet and they are dropped from the persistent path rather than kept as patch.

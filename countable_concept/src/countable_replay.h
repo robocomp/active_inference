@@ -550,9 +550,13 @@ private:
 // ResultEv& live, const CountableBelief& replayed) after each recorded live result (the same update's). Returns false on
 // a stream error (reader.error()) or an event before the seed. on_change(const CountableBelief&), when given, runs after
 // EVERY event that changes the belief (predicts, ageing and restores included), e.g. to track σ between updates.
+// on_frame(CountableFrame&), when given, may rewrite each recorded frame BEFORE it is replayed (a tool re-staging an input
+// whose rule changed since the dump was recorded; the live result then measures that change).
 struct NoChange { void operator()(const CountableBelief&) const {} };
-template <class OnUpdate, class OnResult, class OnChange = NoChange>
-bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& on_result, OnChange&& on_change = {})
+struct NoFrame  { void operator()(CountableFrame&) const {} };
+template <class OnUpdate, class OnResult, class OnChange = NoChange, class OnFrame = NoFrame>
+bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& on_result, OnChange&& on_change = {},
+          OnFrame&& on_frame = {})
 {
     bool seeded = false;
     CountableBelief pre;   // the belief before the last update (RestoreEv)
@@ -561,13 +565,14 @@ bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& o
     {
         if (const auto* s = std::get_if<SeedEv>(&e)) { b = CountableBelief(s->state, s->params); seeded = true; continue; }
         if (not seeded) return false;
-        std::visit([&]<class E>(const E& ev)
+        std::visit([&]<class E>(E& ev)
         {
             if constexpr (std::is_same_v<E, BirthPosCovEv>) b.set_birth_position_cov(ev.excess);
             else if constexpr (std::is_same_v<E, RoomInteriorEv>) b.set_room_interior(ev.c);
             else if constexpr (std::is_same_v<E, UpdateEv>)
             {
                 pre = b;
+                on_frame(ev.frame);
                 const float fe = b.update(ev.frame);
                 on_update(ev, std::as_const(b), fe);
             }

@@ -1,8 +1,9 @@
 // latent_inputs_test — the flag-on fitter's persistent latent inputs (rc::persistent_latent_inputs, the computation
 // CountableFitter's latent_inputs() calls; shared-engine Task 5 ruling). At two ranges × two obliquities, with a pose-chain
 // variance and ego-motion present:
-//   - sig2_cam = sig2_L = the common-mode stds squared (cx, cy: pos²; H, w, h: size²; yaw: yaw²), exactly, at every view:
-//     no range growth, no obliquity term;
+//   - sig2_cam = the measured ZED YOLO-seg boundary std² on cx, cy, H, w, h and the configured yaw² (F1.6); sig2_L = the
+//     common-mode stds squared (cx, cy: pos²; H, w, h: size²; yaw: yaw²); both exactly, at every view: no range growth, no
+//     obliquity term;
 //   - the chain variance does NOT enter them: its share is the latent e (Σ_pose, staged by stage_persistent), and adding it
 //     here too would count the robot's pose error twice;
 //   - fresh = the ego-motion variances, per DOF.
@@ -25,9 +26,10 @@ int main()
             v.chain_var_xx = 4e-4f; v.chain_var_yy = 9e-4f;
             v.mot_pos_var = 1e-4f; v.mot_size_var = 2e-4f; v.mot_yaw_var = 3e-4f;
             const rc::LatentInputs li = rc::persistent_latent_inputs(cm, v);
-            const std::array<float, 6> want = {p2, p2, s2, s2, s2, y2};
-            CHECK(li.sig2_cam == want);
-            CHECK(li.sig2_L == want);
+            const float b2 = rc::kZedYoloBoundaryStdM * rc::kZedYoloBoundaryStdM;
+            const std::array<float, 6> want_cam = {b2, b2, b2, b2, b2, y2}, want_L = {p2, p2, s2, s2, s2, y2};
+            CHECK(li.sig2_cam == want_cam);
+            CHECK(li.sig2_L == want_L);
             const std::array<float, 6> fresh = {1e-4f, 1e-4f, 2e-4f, 2e-4f, 2e-4f, 3e-4f};
             CHECK(li.fresh == fresh);
             std::printf("range %.0f m, |cos| %.1f: sig2_cam = (%.6g, %.6g, %.6g, %.6g, %.6g, %.6g)\n", range, oblq,
