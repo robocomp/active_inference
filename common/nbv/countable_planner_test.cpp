@@ -106,26 +106,43 @@ int main()
         CHECK(fv.pos == r.plan.best_pos and fv.yaw == r.plan.best_yaw, "face_viewpoint is plan_faces' pose");
     }
 
-    {   // G6: an offer is scaled by P(footprint free) at its standpoint, continuously; no grid scales nothing.
+    {   // G6: an offer's standpoint the body cannot stand at loses the ranking; all blocked ⇒ the best face, p_stand 0; no world ⇒ nothing.
         const auto room = rect(-8.0f, 8.0f, -8.0f, 8.0f);
-        const std::vector<Eigen::Vector2f> body{{-0.2f, -0.2f}, {0.2f, -0.2f}, {0.2f, 0.2f}, {-0.2f, 0.2f}};
         const auto prefer_plus_y = [](int face, float) { return face == 2 ? 2.0f : 1.0f; };
+        const rc::RobotFootprint shadow = rc::RobotFootprint::shadow();
+        const rc::nbv::StandBody body = rc::nbv::StandBody::of(shadow, 0.05f);
         rc::nbv::CountableInputs in{camera(), 0.3f, no_obstacles, room};
         const auto base = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
-        CHECK(base.proposal.valid and base.plan.best_face == 2, "G6: without a grid the +y face wins");
-        std::vector<float> occ(160 * 160, 0.0f);   // 0.1 m cells over the room
-        const rc::nbv::GridView clear{-8.0f, -8.0f, 0.1f, 160, 160, occ, 0.0f};
-        in.grid = clear; in.footprint_poly = body;
+        CHECK(base.proposal.valid and base.plan.best_face == 2 and base.p_stand == 1.0f, "G6: without a world the +y face wins, p_stand 1");
+
+        const auto block = [&](const std::vector<int>& faces) {   // latch a cell under each listed face's standpoint
+            std::vector<float> f;
+            for (const int face : faces)
+            {
+                const auto v = rc::nbv::face_viewpoint(unit_box(), face, face == 2 ? base.plan.best_standoff_m : base.plan.face_standoff_m[face]);
+                f.insert(f.end(), {v.pos.x(), v.pos.y(), 0.02f});
+            }
+            return rc::nbv::OccupiedCells::from_xyz(f, 0.05f);
+        };
+        const rc::nbv::OccupiedCells none;
+        rc::nbv::StandWorld clear{&body, &none, room, {}};
+        in.stand = &clear;
         const auto free = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
-        CHECK(free.proposal.epistemic_gain == base.proposal.epistemic_gain, "G6: an all-free grid changes nothing");
-        const Eigen::Vector2f p2 = base.plan.best_pos;   // block the +y standpoint's footprint
-        for (int iy = 0; iy < 160; ++iy) for (int ix = 0; ix < 160; ++ix)
-            if (std::abs(-8.0f + (ix + 0.5f) * 0.1f - p2.x()) < 0.25f and std::abs(-8.0f + (iy + 0.5f) * 0.1f - p2.y()) < 0.25f)
-                occ[static_cast<std::size_t>(iy) * 160 + ix] = 1.0f;
+        CHECK(free.proposal.epistemic_gain == base.proposal.epistemic_gain and free.p_stand == 1.0f, "G6: an empty world changes nothing");
+
+        const auto cells = block({2});
+        rc::nbv::StandWorld w{&body, &cells, room, {}};
+        in.stand = &w;
         const auto blocked = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
-        CHECK(blocked.proposal.valid and blocked.plan.best_face != 2, "G6: a blocked standpoint loses to a free one");
+        CHECK(blocked.proposal.valid and blocked.plan.best_face != 2 and blocked.p_stand == 1.0f, "G6: a blocked standpoint loses to a free one");
         CHECK(blocked.plan.face_raw_gains[2] == 2.0f, "G6: face_raw_gains stays the belief's UNSCALED gain");
-        CHECK(blocked.plan.face_gains[2] == 0.0f, "G6: the blocked offer's expected gain is 0");
+
+        const auto all = block({0, 1, 2, 3});
+        rc::nbv::StandWorld wa{&body, &all, room, {}};
+        in.stand = &wa;
+        const auto none_free = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
+        CHECK(none_free.proposal.valid and not none_free.refused_no_usable_face, "G6: every standpoint blocked: the best face is still proposed");
+        CHECK(none_free.p_stand == 0.0f and none_free.proposal.epistemic_gain == 0.0f, "G6: ... at gain 0 with p_stand 0 (no offer value, not a skip)");
     }
 
     std::printf(fails == 0 ? "countable_planner_test: PASS\n" : "countable_planner_test: %d FAIL\n", fails);

@@ -76,9 +76,12 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
                                             const std::vector<EpistemicPlanner::Obstacle>& obstacles,
                                             const std::vector<Eigen::Vector2f>& room_polygon,
                                             const std::optional<rc::ai::offer::OfferLidar>& offer_lidar,
-                                            const rc::nbv::GridView& occupancy) const
+                                            const rc::nbv::OccupiedCells* occupied) const
 {
-    constexpr float kRobotRadiusM = 0.30f;   // Shadow's footprint radius — a physical dimension, not a knob
+    // The robot's own silhouette (a robot property; SHADOW's — another robot needs its own polygon). Its circumscribed radius is the
+    // wall/object clearance, replacing the 0.30 m constant this path carried (the other agents' planners keep theirs until their ports).
+    static const rc::RobotFootprint body = rc::RobotFootprint::shadow();
+    const float kRobotRadiusM = body.circumscribed_radius();
 
     // The sensor arrives from the caller with the camera's real FoVs + mount height; the detector envelope is
     // ours (the same one the removal channel weights absence by, so create and remove agree on "could we have
@@ -167,9 +170,16 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
     // stand in the wall and the controller would repair it to the floor at the object), scale the winner by the
     // useful fraction of its raw information (adequacy gap to Σ*), refuse a non-finite result.
-    // G6: the robot's own silhouette (a robot property, not a constant here) against the residual occupancy belief.
-    static const rc::RobotFootprint body = rc::RobotFootprint::shadow();   // SHADOW's; another robot needs its own polygon
-    const rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon, occupancy, body.polygon()};
+    // G6: the controller's own feasibility test at each offered standpoint, on the same data (standpoint_free.h).
+    static rc::nbv::StandBody stand_body;
+    rc::nbv::StandWorld stand_world;
+    if (occupied != nullptr and occupied->cell_m > 0.0f)
+    {
+        if (stand_body.cell_m != occupied->cell_m) stand_body = rc::nbv::StandBody::of(body, occupied->cell_m);
+        stand_world = {&stand_body, occupied, room_polygon, obstacles};
+    }
+    rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon};
+    if (stand_world.valid()) in.stand = &stand_world;
     // ★NO CONSUMER ⇒ NO EPISTEMIC BID (owner ruling for hood, 2026-11-13, applied to this clone 2026-11-14):
     // countable_dof.h declares no σ*, so useful = 0. The pose and the per-face ranking are still planned and
     // published; only the scalar gain is 0, so this agent never out-bids one whose gain is gap-bounded.
@@ -239,6 +249,7 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     proposal.chosen_standoff_m = plan.best_standoff_m;
     proposal.chosen_p_detect   = plan.face_p_detect[bi];
     proposal.promised_nats     = best_raw;
+    proposal.p_stand           = res.p_stand;
     proposal.sensor_vfov_rad   = sensor.vfov_rad;
     if (not proposal.is_finite())
         return {};

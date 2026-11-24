@@ -40,6 +40,7 @@
  * MAIN-THREAD ONLY: reads and writes the graph.
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -135,6 +136,11 @@ void step(Inst& inst, DSR::DSRGraph& G, const StepInputs& in, const StepHooks<Pr
         prop.epistemic_gain = 0.0f;
     if (in.verify_gain_floor > 0.0f)
         prop.epistemic_gain = std::max(prop.epistemic_gain, in.verify_gain_floor);
+    // G6: a standpoint the body cannot stand at is no offer, however much a verification floor wants the look. Applied AFTER the
+    // floor (a floor under a blocked standpoint would re-offer it at full value) and to the PUBLISHED gain: the best face is still
+    // published, at gain 0 — no offer value, not a skip.
+    if constexpr (requires { prop.p_stand; })
+        prop.epistemic_gain *= prop.p_stand;
 
     if (hooks.record)
         hooks.record(prop, raw_gain);

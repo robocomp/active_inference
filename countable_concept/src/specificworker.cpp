@@ -460,9 +460,9 @@ void SpecificWorker::compute()
     ev_g_.mask_stale = not fresh_masks;
 
     // Snapshot the residual (surprise) field ONCE per cycle before the tracker, so fused birth (run_instance_
-    // tracker) and the logging probe (compute() tail) share one read. G6: also the occupancy belief the epistemic offers
-    // are scaled by (P(footprint free)), so it is read every cycle now — main thread, ~2 Hz publisher, one dense copy.
-    read_residual_field();
+    // tracker) and the logging probe (compute() tail) share one read. No-op unless a probe/fusion flag is on.
+    if (cfg_.birth_fusion or cfg_.birth_surprise_probe) read_residual_field();
+    read_occupied_cells();   // G6: residual's latched cells, for the standpoint check (re-read only when the publisher wrote)
 
     {
         const rc::StageTimer t(&timing_.tracker);   // [timing] tracker (birth/associate/merge)
@@ -626,6 +626,23 @@ void SpecificWorker::compute()
 // Log, per cycle, the regions NOT already covered by a believed bed alongside the tracker's actual birth count,
 // so we can see whether surprise flags a real new bed cleanly (and stays quiet on phantoms) BEFORE letting it
 // drive the lifecycle. Never writes the graph; never births. See [[bed-birth-surprise-probe]].
+// G6: residual_concept's latched occupied cells (grid_occupied_cells + grid_cell_size, both type-attributed), the same pair the
+// controller's obstacle tracker reads. Keyed on the attribute's publish stamp like the tracker: the publisher writes ~2 Hz and an
+// unchanged stamp means the cells are the truth already held. A vanished node empties them (no belief, no veto). Main thread.
+void SpecificWorker::read_occupied_cells()
+{
+    const auto g = G->get_node("residual");
+    if (not g.has_value()) { occupied_cells_ = {}; occupied_stamp_ = 0; return; }
+    const auto stamp = G->get_attrib_timestamp<grid_occupied_cells_att>(g.value()).value_or(0);
+    if (stamp != 0 and stamp == occupied_stamp_) return;
+    occupied_stamp_ = stamp;
+    occupied_cells_ = {};
+    const auto cs = G->get_attrib_by_name<grid_cell_size_att>(g.value());
+    const auto cells = G->get_attrib_by_name<grid_occupied_cells_att>(g.value());
+    if (cs.has_value() and cells.has_value())
+        occupied_cells_ = rc::nbv::OccupiedCells::from_xyz(cells.value().get(), cs.value());
+}
+
 // Snapshot residual_concept's `grid` node (published under room ~2 Hz) into residual_field_ — the dense
 // P(occupied ∧ ¬explained) surprise field. Read-only; never mutates the graph. Called once at the compute() head
 // so BOTH the fused-birth path (run_instance_tracker) and the logging probe (log_birth_surprise) share one read.
@@ -911,14 +928,8 @@ void SpecificWorker::step_epistemic(rc::CountableInstance& inst, DSR::Node& node
                                        fitter_->room_polygon(),
                                        // G5: the Helios the offer's look stages rays with (persistent path; else none)
                                        fitter_->offer_lidar(inst),
-                                       // G6: the residual occupancy belief (P(occupied ∧ ¬explained); an invalid field
-                                       // is an empty view and scales nothing). Unobserved cells carry no evidence: prior 0,
-                                       // the field's own value for "nothing here" (GridField::at_world).
-                                       rc::nbv::GridView{residual_field_.xmin, residual_field_.ymin, residual_field_.cell,
-                                                         residual_field_.width, residual_field_.height,
-                                                         residual_field_.valid() ? std::span<const float>(residual_field_.prob)
-                                                                                 : std::span<const float>{},
-                                                         0.0f});
+                                       // G6: residual's latched occupied cells (the controller reads the same attribute)
+                                       &occupied_cells_);
         // Degenerate fit, or no sensor model yet — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;

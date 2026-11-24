@@ -55,10 +55,9 @@ struct CountableInputs
     float                             robot_radius_m = 0.0f;
     std::span<const Obstacle>         obstacles;
     std::span<const Eigen::Vector2f>  room_polygon;
-    // G6: the occupancy belief + the robot's own silhouette (robot frame, RobotFootprint::polygon()). Absent (invalid grid or
-    // empty polygon) ⇒ the offer is not scaled: no belief cannot veto.
-    GridView                          grid;
-    std::span<const Eigen::Vector2f>  footprint_poly;
+    // G6: can the body stand at an offered standpoint (standpoint_free.h)? Absent ⇒ no scaling. A countable offer ends in a turn
+    // in place (every non-Reach contract), so it is judged through all headings.
+    const StandWorld*                 stand = nullptr;
 };
 
 // `plan` is returned so each agent keeps its own diagnostic log line.
@@ -66,6 +65,7 @@ struct CountableResult
 {
     CountableProposal proposal;
     Plan              plan;
+    float             p_stand = 1.0f;    // the winning face's standpoint verdict (0 or 1); 1 when no world was given
     bool              refused_no_usable_face = false;
 };
 
@@ -110,21 +110,26 @@ template <class RawGainFn, class UsefulFn>
 CountableResult plan_countable(const Target& t, const CountableInputs& in, RawGainFn&& raw_gain_of, UsefulFn&& useful)
 {
     CountableResult r;
-    // ★G6: an offer is worth what it is worth IF the robot can stand there. Scale the raw gain by P(footprint free) at the
-    // face's standpoint — the pose plan_faces scores and publishes — so the ranking, the published gain and both engines
-    // (legacy d_optimal_gain, persistent predicted_gain) see the same reachability. Continuous: no gate. `useful` still gets
-    // the UNSCALED raw gain, because the adequacy gap bounds information, not reachability.
+    // ★G6: an offer is worth what it is worth IF the robot can stand there. p_stand ∈ {0,1} is the controller's own feasibility
+    // verdict at the face's standpoint — the pose plan_faces scores and publishes — so the RANKING sees it (a blocked face loses to a
+    // free one). The PUBLISHED gain is scaled again after the verification floor (epistemic_step), because a floor placed under a
+    // blocked standpoint would otherwise re-offer it at full value. `useful` and face_raw_gains keep the unscaled belief gain.
     std::array<float, 4> unscaled{};
+    std::array<float, 4> p_face{1.0f, 1.0f, 1.0f, 1.0f};
     const auto reachable_gain = [&](int face, float standoff_m) -> float
     {
         const float raw = raw_gain_of(face, standoff_m);
         const FaceViewpoint v = face_viewpoint(t, face, standoff_m);
-        const float p_free = static_cast<float>(p_footprint_free(in.grid, v.pos, v.yaw, in.footprint_poly));
+        const float p = in.stand != nullptr ? static_cast<float>(p_stand(*in.stand, v.pos, v.yaw, /*turn=*/true)) : 1.0f;
         unscaled[static_cast<std::size_t>(face)] = raw;
-        return raw * p_free;
+        p_face[static_cast<std::size_t>(face)] = p;
+        return raw * p;
     };
     r.plan = plan_faces(t, in.sensor, in.robot_radius_m, in.obstacles, reachable_gain, in.room_polygon);
-    r.plan.face_raw_gains = unscaled;   // "as supplied by the belief": the promise/delivery log compares THIS with what a look delivered
+    // "as supplied by the belief": the promise/delivery log compares THIS with what a look delivered. When no face is usable the
+    // plan's hint (best_face/pos/standoff) was derived from the scaled gains and the caller refuses; leave it self-consistent.
+    if (r.plan.any_usable)
+        r.plan.face_raw_gains = unscaled;
     if (not r.plan.valid)
         return r;
     // ★NO USABLE FACE ⇒ REFUSE, never publish the hint. plan.best_pos is then the raw argmax, which for a
@@ -136,6 +141,7 @@ CountableResult plan_countable(const Target& t, const CountableInputs& in, RawGa
     }
     const int   best = r.plan.best_face;
     const float gain = r.plan.face_gains[best] * useful(unscaled[static_cast<std::size_t>(best)]);
+    r.p_stand = p_face[static_cast<std::size_t>(best)];
     const CountableProposal p{r.plan.best_pos.x(), r.plan.best_pos.y(), r.plan.best_yaw, gain, true};
     if (p.is_finite())
         r.proposal = p;

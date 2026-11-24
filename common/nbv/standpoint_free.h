@@ -1,93 +1,142 @@
 /*
- * common/nbv/standpoint_free.h — P(the robot's footprint is free of obstacles) at an offered standpoint (G6).
+ * common/nbv/standpoint_free.h — can the robot's BODY stand at an offered standpoint? (G6)  p_stand ∈ {0, 1}.
  *
- * WHY. The controller refuses an epistemic claim when a wall, object or unbelieved residual cell lies under the
- * body in the turn the claim ends with (Step 0 census: 44 of 55 refusals). The object agent used to offer such a
- * standpoint at full value. This is the occupancy belief the controller will test, read BEFORE the offer is made:
+ * WHY. The controller hands back an epistemic standpoint when "a wall, object or unbelieved residual cell lies under the
+ * body in the turn it ends with" (controller_session.cpp, decide_standpoint; Step 0 census: 44 of 55 refusals). The object
+ * agent used to offer such a standpoint at full value. The goal here is that the object and the controller AGREE on where the
+ * robot can stand, so this reproduces the controller's own test on the same published data and is a deterministic check:
  *
- *     p_free = Π over lattice cells whose centre lies under the footprint of (1 − p_occ(cell))
+ *     the footprint, at each heading it will occupy, covers no cell that is off the room, inside an obstacle polygon, or
+ *     one of residual's latched occupied cells.
  *
- * A cell outside the grid has no evidence and uses the grid's prior. The factor is continuous (1 on free ground,
- * 0 with a certainly-occupied cell under the body), so the offer's value is simply multiplied by it: no gate.
+ * It mirrors GridPlanner: the body is RobotFootprint (placed by its own cell_offsets_yaw, the quarter turn applied once there),
+ * the heading is bucketed to kHeadings = 8 as GridPlanner::heading_bucket does, and a pose that ends in a turn in place
+ * (every non-Reach contract: Servo's facing turn, the lock-on search, Orient) is judged over ALL 8 headings, like can_turn_here.
  *
- * Pure Eigen/std, DSR-free. Pinned by tests/standpoint_free_test.cpp.
+ * WHAT IT IS NOT. (1) No probability: residual's grid_occupancy_prob is P(occupied ∧ ¬explained) with a Beta-mean floor per
+ * cell, so a product over it is 0.33 at best and ~1e-27 over unexplored ground — that was the rejected first draft. The
+ * controller's own verdict is hard/not-hard, so this is too. (2) No safety margin: the controller adds
+ * footprint_safety_margin_m, which is another agent's config and is not readable here, so the object side uses margin 0 and is
+ * therefore SLIGHTLY MORE PERMISSIVE than the controller (exposing the margin is an owner decision). (3) Every latched cell is
+ * treated as hard, whereas the controller prices a cell backed by belief ("a toll, not a wall") and hands back only a hard one:
+ * on that point the object side is stricter. (4) Cells are rasterised on residual's lattice, the controller's on its own.
+ *
+ * Pure Eigen/std + robot_footprint (ai_common::geometry). Pinned by tests/standpoint_free_test.cpp.
  */
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Core>
 
+#include "viewpoint_score.h"                          // Obstacle, stands_inside, detail::point_in_polygon
+#include "../robot_footprint/robot_footprint.h"        // rc::RobotFootprint
+
 namespace rc::nbv
 {
 
-// A row-major occupancy-probability grid: cell (ix, iy) is p_occ[iy*nx + ix], centred at
-// (origin_x + (ix+½)·res_m, origin_y + (iy+½)·res_m). Cells beyond [0,nx)×[0,ny) are unobserved: p_prior.
-struct GridView
-{
-    float origin_x = 0.0f, origin_y = 0.0f, res_m = 0.0f;
-    int   nx = 0, ny = 0;
-    std::span<const float> p_occ;
-    float p_prior = 0.0f;
+inline constexpr int kStandHeadings = 8;   // GridPlanner::kHeadings
 
-    bool valid() const
-    { return res_m > 0.0f and nx > 0 and ny > 0 and p_occ.size() >= static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny); }
+// The body's covered-cell offsets at each of the 8 headings, for one cell size.
+struct StandBody
+{
+    float cell_m = 0.0f;
+    std::array<std::vector<Eigen::Vector2i>, kStandHeadings> offsets;
+
+    static StandBody of(const RobotFootprint& body, float cell_m)
+    {
+        StandBody b;
+        if (not (cell_m > 0.0f)) return b;
+        b.cell_m = cell_m;
+        RobotFootprint bare = body;
+        bare.set_safety_margin(0.0f);   // see the header: the controller's margin is not ours to read
+        for (int h = 0; h < kStandHeadings; ++h)
+            b.offsets[static_cast<std::size_t>(h)] =
+                bare.cell_offsets_yaw(cell_m, 2.0f * static_cast<float>(M_PI) * static_cast<float>(h) / kStandHeadings);
+        return b;
+    }
+    bool valid() const { return cell_m > 0.0f; }
+};
+
+// residual's latched occupied cells (grid_occupied_cells centres) on their own lattice.
+struct OccupiedCells
+{
+    float cell_m = 0.0f;
+    Eigen::Vector2f origin{0.0f, 0.0f};          // a cell centre: the lattice is origin + k·cell_m
+    std::unordered_set<std::int64_t> keys;
+
+    static std::int64_t key(std::int64_t i, std::int64_t j) { return (i << 32) ^ (j & 0xffffffffLL); }
+    int index(float v, float o) const { return static_cast<int>(std::lround((v - o) / cell_m)); }
+
+    // `xyz` = the attribute's flat [x,y,z] triples.
+    static OccupiedCells from_xyz(std::span<const float> xyz, float cell_m)
+    {
+        OccupiedCells c;
+        if (not (cell_m > 0.0f)) return c;
+        c.cell_m = cell_m;
+        if (xyz.size() >= 3) c.origin = {xyz[0], xyz[1]};
+        for (std::size_t i = 0; i + 2 < xyz.size(); i += 3)
+            c.keys.insert(key(c.index(xyz[i], c.origin.x()), c.index(xyz[i + 1], c.origin.y())));
+        return c;
+    }
+    bool has(int i, int j) const { return keys.contains(key(i, j)); }
+};
+
+// Everything the check reads. Empty room / obstacles / cells each mean "no constraint of that kind" (the planner's convention).
+struct StandWorld
+{
+    const StandBody*                 body = nullptr;
+    const OccupiedCells*             occupied = nullptr;
+    std::span<const Eigen::Vector2f> room;
+    std::span<const Obstacle>        obstacles;
+    bool valid() const { return body != nullptr and body->valid(); }
 };
 
 namespace detail
 {
-inline bool inside_polygon(const std::vector<Eigen::Vector2f>& poly, float x, float y)
+inline int stand_heading(float yaw)
 {
-    bool in = false;
-    for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
-        if ((poly[i].y() > y) != (poly[j].y() > y) and
-            x < (poly[j].x() - poly[i].x()) * (y - poly[i].y()) / (poly[j].y() - poly[i].y()) + poly[i].x())
-            in = not in;
-    return in;
+    const float two_pi = 2.0f * static_cast<float>(M_PI);
+    float t = std::fmod(yaw, two_pi);
+    if (t < 0.0f) t += two_pi;
+    return static_cast<int>(std::lround(t / two_pi * kStandHeadings)) % kStandHeadings;
 }
 }   // namespace detail
 
-// `footprint_poly` is the robot-frame silhouette (RobotFootprint::polygon(): x right, y FORWARD). It is placed at `xy`
-// with FORWARD heading `yaw` (forward = (cos yaw, sin yaw)), the same quarter turn RobotFootprint::at_pose_yaw applies.
-// An unusable grid (res 0 / short buffer) carries no belief, so it cannot veto anything: 1.
-inline double p_footprint_free(const GridView& g, const Eigen::Vector2f& xy, float yaw,
-                               std::span<const Eigen::Vector2f> footprint_poly)
+// GridPlanner::pose_free (one heading) / can_turn_here (all headings): no covered cell is off the room, inside an obstacle, or latched.
+inline bool pose_free(const StandWorld& w, const Eigen::Vector2f& pos, int heading)
 {
-    if (footprint_poly.size() < 3 or not g.valid())
-        return 1.0;
-    const float th = yaw - 1.57079633f, c = std::cos(th), s = std::sin(th);
-    std::vector<Eigen::Vector2f> w;
-    w.reserve(footprint_poly.size());
-    float xmn = 1e30f, xmx = -1e30f, ymn = 1e30f, ymx = -1e30f;
-    for (const auto& p : footprint_poly)
+    const auto& offs = w.body->offsets[static_cast<std::size_t>(heading)];
+    const float c = w.body->cell_m;
+    const Eigen::Vector2f o = w.occupied != nullptr ? w.occupied->origin : Eigen::Vector2f(0.0f, 0.0f);
+    const int ix = static_cast<int>(std::lround((pos.x() - o.x()) / c)), iy = static_cast<int>(std::lround((pos.y() - o.y()) / c));
+    for (const auto& d : offs)
     {
-        const Eigen::Vector2f q{xy.x() + c * p.x() - s * p.y(), xy.y() + s * p.x() + c * p.y()};
-        w.push_back(q);
-        xmn = std::min(xmn, q.x()); xmx = std::max(xmx, q.x());
-        ymn = std::min(ymn, q.y()); ymx = std::max(ymx, q.y());
+        const int i = ix + d.x(), j = iy + d.y();
+        const Eigen::Vector2f centre{o.x() + static_cast<float>(i) * c, o.y() + static_cast<float>(j) * c};
+        if (not w.room.empty() and not detail::point_in_polygon(centre, w.room)) return false;
+        if (stands_inside(centre, w.obstacles)) return false;
+        if (w.occupied != nullptr and w.occupied->has(i, j)) return false;
     }
-    const int ix0 = static_cast<int>(std::floor((xmn - g.origin_x) / g.res_m - 0.5f));
-    const int ix1 = static_cast<int>(std::ceil ((xmx - g.origin_x) / g.res_m - 0.5f));
-    const int iy0 = static_cast<int>(std::floor((ymn - g.origin_y) / g.res_m - 0.5f));
-    const int iy1 = static_cast<int>(std::ceil ((ymx - g.origin_y) / g.res_m - 0.5f));
-    double p_free = 1.0;
-    for (int iy = iy0; iy <= iy1; ++iy)
-        for (int ix = ix0; ix <= ix1; ++ix)
-        {
-            const float cx = g.origin_x + (static_cast<float>(ix) + 0.5f) * g.res_m;
-            const float cy = g.origin_y + (static_cast<float>(iy) + 0.5f) * g.res_m;
-            if (not detail::inside_polygon(w, cx, cy))
-                continue;
-            const bool in_grid = ix >= 0 and iy >= 0 and ix < g.nx and iy < g.ny;
-            const double p = in_grid ? static_cast<double>(g.p_occ[static_cast<std::size_t>(iy) * static_cast<std::size_t>(g.nx) +
-                                                                   static_cast<std::size_t>(ix)])
-                                     : static_cast<double>(g.p_prior);
-            p_free *= 1.0 - p;
-        }
-    return p_free;
+    return true;
+}
+
+// 1 if the body can stand at `pos` facing `yaw` (forward = (cos yaw, sin yaw)) — through a turn in place when `turn` — else 0.
+// An unusable world carries no belief and cannot veto: 1 (the controller's "no belief yet: no verdict").
+inline double p_stand(const StandWorld& w, const Eigen::Vector2f& pos, float yaw, bool turn)
+{
+    if (not w.valid()) return 1.0;
+    if (not turn) return pose_free(w, pos, detail::stand_heading(yaw)) ? 1.0 : 0.0;
+    for (int h = 0; h < kStandHeadings; ++h)
+        if (not pose_free(w, pos, h)) return 0.0;
+    return 1.0;
 }
 
 }   // namespace rc::nbv
