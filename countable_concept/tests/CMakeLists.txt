@@ -275,3 +275,10 @@ add_test(NAME birth_seed_headboard_test COMMAND birth_seed_headboard_test)
 # F1 round 6.2: the bed_1 replay pin (gated on the objects_replay1 dump; SKIP without it). Bounds derived in the script.
 add_test(NAME bed_replay_pin COMMAND python3 -I ${CMAKE_CURRENT_LIST_DIR}/bed_replay_pin.py $<TARGET_FILE:replay>
          ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
+
+# F1 round 6.3: the wall priors enter once per PHYSICAL wall (geometric identity; renumbering; A → B → A). Run: ./wall_identity_test
+add_executable(wall_identity_test wall_identity_test.cpp ../src/countable_belief.cpp)
+target_include_directories(wall_identity_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(wall_identity_test PRIVATE -O2)
+target_link_libraries(wall_identity_test PRIVATE Eigen3::Eigen)
+add_test(NAME wall_identity_test COMMAND wall_identity_test)

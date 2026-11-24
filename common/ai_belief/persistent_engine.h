@@ -245,11 +245,13 @@ concept HasOfferContext =
 // (cx, cy): they are evaluated at θ + B_w b. They enter ONCE, into the joint prior, at that first association (re-linearised by that update's GN, then frozen
 // in P); afterwards only data (points, rays) update θ and δ. A fixed relation re-entered as a measurement on every update is
 // what pinned the parked toilet to the millimetre (engine1 diagnosis item 2).
-// Identity: one latent per (room, polygon edge) as room_concept publishes the outline (`keyed`); a small move of the derived
-// line between frames is TRANSPORTED (δ's mean shifted by the line's move along n, no information); a different edge is a new
-// source (the old δ is marginalised out: its row and column of P are dropped). Unkeyed anchors (no edge identity, e.g. a dump
-// recorded before the identity existed) fall back to "the same wall iff the inward normals are within 45°" — a DISCRETE
-// identity rule on normals, stated as such (an L-shaped room's two parallel same-facing edges would be conflated).
+// Identity (F1 round 6.3): GEOMETRIC, not the outline's edge index (room_concept may renumber its outline, and the nearest edge
+// may flip between two walls): two staged lines are the same physical wall when they are in the same room, face the same way and
+// agree within 3σ in (offset along n, angle): Δo²/(σ_a² + σ_b²) + Δφ²/((σ_a/L_a)² + (σ_b/L_b)²) ≤ 9 — the "a few σ_wall" gate
+// of the ruling, on the lines' own published σ. The same wall as δ's: its line move is TRANSPORTED (δ's mean shifted by the move
+// along n, no information). Another wall: a new δ source (the old one marginalised out), and the wall priors enter only if that
+// wall is not already in the instance's set of walls entered (matched the same way; its stored line is transported too) — so
+// the priors enter ONCE per physical wall, through renumbering and through A → B → A alternation.
 // KNOWN APPROXIMATION (option A, coordinator ruling): the camera mixture's wall component and the beam's foreign density depend
 // on δ directly, not through θ; they are evaluated at the wall shifted by δ's CURRENT posterior mean (wall_offset_mean), so
 // they ignore δ's variance. Full coupling (a ∂E/∂δ column in those channels) is deferred.
@@ -263,7 +265,26 @@ struct WallAnchor
     Eigen::Vector2d p = Eigen::Vector2d::Zero();       // a point on the staged line (room frame)
     Eigen::Vector2d n = Eigen::Vector2d::UnitX();      // unit inward normal
     double sigma_m = 0.0;                              // the room's std of the line along n (the latent's marginal)
+    double length_m = 0.0;                             // the edge's length (its direction is known to σ/L; 0 ⇒ direction unknown)
 };
+
+// The same physical wall (see above): same room (when both are known), facing the same way, within 3σ in offset and angle.
+inline bool same_physical_wall(const WallAnchor& a, const WallAnchor& b)
+{
+    if (a.room != 0 and b.room != 0 and a.room != b.room) return false;
+    const double c = a.n.dot(b.n);
+    if (not (c > 0.0)) return false;
+    const double dphi = std::atan2(a.n.x() * b.n.y() - a.n.y() * b.n.x(), c);
+    const double doff = (a.p - b.p).dot(b.n);
+    const double so2 = a.sigma_m * a.sigma_m + b.sigma_m * b.sigma_m;
+    double d2 = so2 > 0.0 ? doff * doff / so2 : (doff == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
+    if (a.length_m > 0.0 and b.length_m > 0.0)
+    {
+        const double sp2 = std::pow(a.sigma_m / a.length_m, 2) + std::pow(b.sigma_m / b.length_m, 2);
+        d2 += sp2 > 0.0 ? dphi * dphi / sp2 : (dphi == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
+    }
+    return d2 <= 9.0;
+}
 
 namespace detail
 {
@@ -349,6 +370,7 @@ public:
         first_update_done_ = false;                                       // the class prior re-enters once, at the class mean
         vol_init_ = false;                                                // the volatility estimate is suspect too: back to Q₀
         wall_set_ = false;                                                // the wall priors re-enter once, at the next association
+        walls_entered_.clear();
         m.set_covariance(Sigma_theta());
         return true;
     }
@@ -578,7 +600,10 @@ public:
                     P_(j, j) = a.sigma_m * a.sigma_m;
                     b_(kWall) = 0.0;
                     sig_prev_(kWall) = a.sigma_m;
-                    wall_enter = true;
+                    // the priors enter once per PHYSICAL wall: not again for a wall already entered (its stored line transported)
+                    const auto it = std::ranges::find_if(walls_entered_, [&](const WallAnchor& e) { return same_physical_wall(a, e); });
+                    if (it == walls_entered_.end()) { walls_entered_.push_back(a); wall_enter = true; }
+                    else *it = a;
                 }
                 wall_ = a;
                 wall_set_ = true;
@@ -1190,13 +1215,8 @@ private:
         return offer_cache_.parts;
     }
 
-    // The same wall edge: (room, edge) when both are keyed; else the unkeyed fallback, inward normals within 45° (see WallAnchor).
-    bool same_wall(const WallAnchor& a) const
-    {
-        if (a.keyed and wall_.keyed) return a.room == wall_.room and a.edge == wall_.edge;
-        if (a.keyed != wall_.keyed) return false;
-        return a.n.dot(wall_.n) >= std::sqrt(0.5);
-    }
+    // The same physical wall as δ's (same_physical_wall, F1 round 6.3).
+    bool same_wall(const WallAnchor& a) const { return same_physical_wall(a, wall_); }
 
     // The model's optional volatility settings: VolatilityConfig{} (infer = false) when absent.
     static VolatilityConfig volatility_of(const M& m)
@@ -1504,6 +1524,7 @@ private:
     // the wall latent (F1.4): the edge δ belongs to, whether it is set, and whether the last update entered its priors
     WallAnchor wall_;
     bool   wall_set_ = false;
+    std::vector<WallAnchor> walls_entered_;          // the physical walls whose priors have entered (once each)
     bool   last_wall_entered_ = false;
     // the inferred volatility (learn_volatility): ω = log Q per θ component, the running statistic S and count n
     bool   vol_init_ = false;

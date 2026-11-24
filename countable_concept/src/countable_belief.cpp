@@ -810,6 +810,7 @@ rc::ai::engine::WallAnchor anchor_of(const WallRef& w)
     a.p = w.p.cast<double>();
     a.n = w.n.cast<double>();
     a.sigma_m = double(w.sigma_m);
+    a.length_m = double(w.length_m);
     return a;
 }
 }   // namespace
