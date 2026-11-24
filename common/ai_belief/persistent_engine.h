@@ -45,11 +45,14 @@
 #include <Eigen/Dense>
 
 #include "beam_channel.h"
+#include "foreign_box.h"
 #include "persistent_update.h"
 #include "viewpoint.h"
 
 namespace rc::ai::engine
 {
+
+using rc::ai::beam::ForeignBox;   // a neighbour's published belief (foreign_box.h; spec shared-engine G3)
 
 // The per-frame inputs of the latents (spec 7c.7 a, b; rev 3.3.13), in θ's component order. Read by the engine's latent
 // predict; the model fills them from its own frame.
@@ -68,6 +71,13 @@ struct FrameLatents
     Eigen::Vector2f robot_xy   = Eigen::Vector2f::Zero();   // the robot's room position at the capture stamp
     bool camera_measured = false;        // the camera channel measures this update
     bool lidar_measured  = false;        // the LiDAR channel measures this update
+    // G3 (spec shared-engine, "Answers to the builder check" 5): the neighbours' boxes, a FIXED foreign density for this update
+    // built from their previous-cycle published beliefs. Each camera point's membership compares this object's mixture with
+    // them: an ordinary mixture, (1 − ε)·L_model(p) + ε·Σ_k g_k(p) (foreign_box.h), ε = mask_error_rate, the camera's
+    // probability that a mask pixel is not this object's (Model.MaskPixelErrorRate). No usable neighbour, or ε outside
+    // (0, 1) ⇒ the model's own mixture, bit for bit. (The LiDAR rays read neighbours through their staged p_f, beam_room.h.)
+    std::vector<ForeignBox> foreign_boxes;
+    double mask_error_rate = 0.0;
 };
 
 // Solver constants (spec 7c.7 d, 7c.8 rev 3.3.7/3.3.8), not modelling thresholds.
@@ -384,7 +394,10 @@ public:
         {
             const float sig2 = m.sigma2();
             for (std::size_t i = 0; i < f.points.size(); ++i)
-                E += m.point_energy(f.points[i], s_cam, R_of(f, i, sig2));
+            {
+                const float R = R_of(f, i, sig2);
+                E += neighbour_mix(m.point_energy(f.points[i], s_cam, R), f.points[i], R, nullptr);
+            }
             camera_extra(m, s_cam, f, Id, bd, &E);
         }
         if (not lidar_override(m, s_L, f, nullptr, nullptr, &E) and lidar)
@@ -403,6 +416,7 @@ public:
         using VecN = VecNf;
         namespace pu = rc::ai::persistent;
         const SolverConfig cfg = solver_of(m);
+        const NeighbourScope nb_scope(*this, fl);                          // G3: the neighbours, fixed for this update
 
         predict(m, 1.0f);                                                  // step 1, θ
         dbg_iterates_.clear();
@@ -711,10 +725,11 @@ public:
         {
             const float R = R_of(f, i, sig2);
             const auto  r = m.responsibilities(f.points[i], s_cam, R);
+            const float omega = model_share(m, f.points[i], s_cam, R);
             for (int prim = 0; prim < n_prims; ++prim)
             {
                 const float d = m.sdf_prim(f.points[i], s_cam, prim);
-                energy += 0.5 * r[prim] * d * d / R;
+                energy += 0.5 * (omega * r[prim]) * d * d / R;
             }
         }
         return static_cast<float>(energy / static_cast<double>(f.points.size()));
@@ -748,8 +763,9 @@ private:
         return k;
     }
 
-    // The camera points' GN information (the recursive-Laplace accumulate loop, unsaturated).
-    static void accumulate_points(const M& m, const State& s, const Frame& f, MatNf& Id, VecNf& bd)
+    // The camera points' GN information (the recursive-Laplace accumulate loop, unsaturated). With neighbours each point's
+    // responsibilities are scaled by the model's share ω of the neighbour mixture: the EM identity of neighbour_mix's energy.
+    void accumulate_points(const M& m, const State& s, const Frame& f, MatNf& Id, VecNf& bd) const
     {
         const float sig2 = m.sigma2();
         const int   n_prims = m.n_prims();
@@ -757,9 +773,10 @@ private:
         {
             const float R = R_of(f, i, sig2);
             const auto  r = m.responsibilities(f.points[i], s, R);
+            const float omega = model_share(m, f.points[i], s, R);      // 1 exactly without neighbours
             for (int prim = 0; prim < n_prims; ++prim)
             {
-                const float w = r[prim] / R;
+                const float w = omega * r[prim] / R;
                 if (w < 1e-6f) continue;
                 const float d = m.sdf_prim(f.points[i], s, prim);
                 const VecNf J = m.sdf_jacobian(f.points[i], s, prim);
@@ -768,6 +785,50 @@ private:
             }
         }
     }
+
+    // ── G3: the neighbours' foreign density on the camera points (foreign_box.h) ──
+    // One point's energy under the neighbour mixture, E = −log((1 − ε)·e^{−E_m} + ε·Σ_k g_k(p)), from the model's own
+    // E_m = point_energy; *omega (when given) = the model's share (1 − ε)e^{−E_m} / ((1 − ε)e^{−E_m} + ε Σ g_k), by which
+    // every model responsibility is scaled. No neighbour this update ⇒ (E_m, 1): the model's mixture, bit for bit.
+    double neighbour_mix(double E_m, const Eigen::Vector3f& p, float R, double* omega) const
+    {
+        if (omega) *omega = 1.0;
+        if (nb_.empty()) return E_m;
+        const Eigen::Vector3d pd = p.template cast<double>();
+        double G = 0.0;
+        for (const auto& b : nb_) G += rc::ai::beam::foreign_point_density(b, pd, double(R));
+        const double a = std::log1p(-nb_eps_) - E_m;                  // log of the model's term
+        if (not (G > 0.0)) return -a;                                  // every neighbour's density underflowed: ω = 1
+        const double c = std::log(nb_eps_ * G);                        // log of the neighbours' term
+        const double mx = std::max(a, c);
+        const double lse = mx + std::log(std::exp(a - mx) + std::exp(c - mx));
+        if (omega) *omega = std::exp(a - lse);
+        return -lse;
+    }
+    float model_share(const M& m, const Eigen::Vector3f& p, const State& s, float R) const
+    {
+        if (nb_.empty()) return 1.0f;
+        double omega = 1.0;
+        neighbour_mix(m.point_energy(p, s, R), p, R, &omega);
+        return float(omega);
+    }
+    // The neighbours of the running update: set from FrameLatents at its start (the usable ones, Review Focus 5), cleared
+    // on every exit, so the public channel/energy calls outside an update see none.
+    struct NeighbourScope
+    {
+        const PersistentEngine& e;
+        NeighbourScope(const PersistentEngine& eng, const FrameLatents<N>& fl) : e(eng)
+        {
+            e.nb_.clear();
+            e.nb_eps_ = fl.mask_error_rate;
+            if (not (fl.mask_error_rate > 0.0 and fl.mask_error_rate < 1.0)) return;   // ε ∉ (0, 1): no foreign mass to give
+            for (const auto& b : fl.foreign_boxes)
+                if (rc::ai::beam::usable(b)) e.nb_.push_back(b);
+        }
+        ~NeighbourScope() { e.nb_.clear(); e.nb_eps_ = 0.0; }
+        NeighbourScope(const NeighbourScope&) = delete;
+        NeighbourScope& operator=(const NeighbourScope&) = delete;
+    };
 
     // The model's optional camera extra terms: none when absent.
     static void camera_extra(const M& m, const State& s, const Frame& f, MatNf& Id, VecNf& bd, double* E)
@@ -844,6 +905,8 @@ private:
     rc::ai::beam::BeamChannel<N> beam_;
     mutable bool beam_unready_logged_ = false;       // "beam not ready" printed (once per engine)
     mutable bool beam_inconsistent_logged_ = false;  // "beam ray-set refused" printed (once per engine)
+    mutable std::vector<ForeignBox> nb_;              // G3: this update's usable neighbours (NeighbourScope)
+    mutable double nb_eps_ = 0.0;                      // and ε, the prior weight of their foreign mass
     std::vector<VecNf> dbg_iterates_;
     std::vector<double> dbg_gn_energy_;
     std::vector<GnTraceStep<N>> dbg_gn_steps_;

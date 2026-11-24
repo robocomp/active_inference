@@ -10,6 +10,9 @@
  * — unmodelled clutter stays uniform at 1/ρ_max in front of the room surface, and the mass that went beyond it lands on it,
  * smeared by the same Student-t, its scale widened by the surface's own σ projected on the ray (rev 3.3.8). p_f,i does not depend on θ (the surfaces are fixed during an update), so it
  * is staged once per ray into BeamRays::p_f and the beam terms read it as a constant.
+ *
+ * Neighbours (spec 2026-11-23 shared-engine G3): the other objects' published beliefs are known surfaces too
+ * (RoomSurfaces::neighbours, foreign_box.h), each with its own σ along the ray. Empty ⇒ room only, bit for bit.
  */
 #pragma once
 
@@ -21,6 +24,7 @@
 #include <Eigen/Core>
 
 #include "beam_ray.h"
+#include "foreign_box.h"
 
 namespace rc::ai::beam
 {
@@ -36,10 +40,11 @@ struct RoomSurfaces
     double floor_z     = 0.0;
     double floor_sigma = 0.0;     // Model.FloorSigmaM (spec 7c.8 rev 3.3.8)
     std::vector<RoomWall> walls;
+    std::vector<ForeignBox> neighbours;   // the other objects' boxes (callers pass only `usable` ones; others are skipped here too)
 };
 
-// The first crossing of o + t·u, t ∈ (0, ρ_max], with the room surfaces (t = +inf: none), and that surface's σ projected
-// along the ray, σ_r = σ_surface/|n̂·u| (spec 7c.8 rev 3.3.8).
+// The first crossing of o + t·u, t ∈ (0, ρ_max], with the room surfaces and the neighbours (t = +inf: none), and that
+// surface's σ projected along the ray, σ_r = σ_surface/|n̂·u| (spec 7c.8 rev 3.3.8).
 struct RoomCrossing { double t = std::numeric_limits<double>::infinity(), sigma_r = 0.0; };
 inline RoomCrossing first_room_crossing(const Eigen::Vector3d& o, const Eigen::Vector3d& u, double rho_max, const RoomSurfaces& room)
 {
@@ -62,6 +67,12 @@ inline RoomCrossing first_room_crossing(const Eigen::Vector3d& o, const Eigen::V
             const double nu = std::abs(den) / e.norm();             // |n̂·u|, n̂ the wall's horizontal normal
             c.t = t; c.sigma_r = w.sigma / nu;
         }
+    }
+    for (const auto& b : room.neighbours)
+    {
+        if (not usable(b)) continue;                               // Review Focus 5: never a zero-width surface
+        const BoxCrossing x = first_box_crossing(b, o, u, rho_max);
+        if (x.t < c.t) { c.t = x.t; c.sigma_r = x.sigma_r; }
     }
     return c;
 }

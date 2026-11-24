@@ -26,7 +26,8 @@ add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)
 # nothing leaves θ bit-identical and moves P only by the latents' prediction. Run: ./engine_no_beam_test, ./engine_predict_only_test
 # Task 5: the shape latent (G4) cannot be averaged away; the parked test (G1) — σ stops shrinking at one standpoint, and a
 # new one adds the analytic two-view drop. Run: ./engine_shape_latent_test, ./parked_synthetic_test
-foreach(t engine_no_beam_test engine_predict_only_test engine_shape_latent_test parked_synthetic_test)
+# Task 6: a neighbour's published belief as a foreign density (G3, Review Focus 5). Run: ./engine_neighbour_test
+foreach(t engine_no_beam_test engine_predict_only_test engine_shape_latent_test parked_synthetic_test engine_neighbour_test)
     add_executable(${t} ${t}.cpp)
     target_include_directories(${t} PRIVATE ../..)
     target_compile_options(${t} PRIVATE -O2)
