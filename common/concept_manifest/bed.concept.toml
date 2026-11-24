@@ -120,6 +120,21 @@ peripheral = "ricoh.bearing"
 [display]
 mesh = "meshes/bed.obj"
 
+# ── Layer spread (spec 2026-11-23 shared-engine G4): which layer of a REAL bed the box means ──
+# A box cannot say whether it is the mattress, the frame or the bedding; a sensor sees whichever layer it hits. Δ is the
+# range over which that layer lies on a typical real bed (class knowledge, NOT the Webots mesh), in [model].state order.
+[shape]
+from = "nominal"
+layer_spread_m = [
+    0.05,   # cx: the frame's extra length sits mostly at the head (a 5-10 cm headboard/head rail, 0-5 cm at the foot), so the frame's centre lies ~5 cm toward the head of the mattress's; room-frame cx/cy, so the full shift on each (the bed's yaw is not class knowledge)
+    0.05,   # cy: as cx
+    0.10,   # H: mattress top vs the bedding on it: a duvet adds 3-8 cm, pillows at the head 10-15 cm
+    0.20,   # w: a bed frame is typically 10-20 cm wider than its mattress (and a duvet hangs over the sides)
+    0.15,   # h: a frame is typically 10-20 cm longer than its mattress, minus the headboard the model carries as its own panel
+    0.0,    # yaw: every layer shares the bed's axes
+]
+layer_spread_source = "furniture dimension conventions for a real bed: a bed frame is 10-20 cm wider and longer than the mattress it holds (e.g. IKEA MALM 160x200 mattress in a 176x209 frame; HEMNES 160x200 in 174x211), most of the extra length at the headboard end; bedding adds 3-8 cm (duvet) to 10-15 cm (pillows) above the mattress top. Not from the Webots Bed.proto."
+
 # ── Solid parts; the headboard comes from [prior.headboard], not from here ──
 
 [[shape.part]]

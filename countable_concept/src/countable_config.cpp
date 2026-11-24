@@ -156,6 +156,24 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
     }
     std::print("[manifest] {} shape: {} part(s)\n", out.concept_class, out.shape_parts.size());
+    try
+    {   // Δ, the class's layer spread (shared-engine G4): a CLASS fact, no config key.
+        const auto ls = rc::manifest::layer_spread(manifest_path, 6);
+        if (ls.delta_m.empty())
+            std::print("[manifest] {} declares no [shape].layer_spread_m — the shape latent is ZERO (no layering)\n", out.concept_class);
+        else
+        {
+            std::ranges::copy(ls.delta_m, out.layer_spread_m.begin());
+            out.layer_spread_source = ls.source;
+            std::print("[manifest] {} layer spread Δ (cx, cy, H, w, h, yaw) = ({:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}) — {}\n",
+                       out.concept_class, ls.delta_m[0], ls.delta_m[1], ls.delta_m[2], ls.delta_m[3], ls.delta_m[4],
+                       ls.delta_m[5], ls.source);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
+    }
     {   // π_cls: a CLASS fact too. Absent ⇒ 0.8 (said so); present but outside the open (0,1) ⇒ refuse (logit is ±inf).
         const auto pl = rc::manifest::load_class_prior(manifest_path);
         if (pl)

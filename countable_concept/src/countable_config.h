@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include "../../common/concept_manifest/shape_parts.h"
+#include "../../common/concept_manifest/layer_spread.h"
 
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
@@ -94,6 +95,10 @@ struct CountableConfig
     float birth_height_noise_m      = 0.05f;   // birth height noise σ_z (m)
     float birth_height_outlier_frac = 0.05f;   // birth mask-bleed outlier fraction ε
     std::vector<rc::manifest::ShapePart> shape_parts;   // [[shape.part]] of the class manifest (empty = whole box)
+    // Δ per DOF (cx, cy, H, w, h, yaw), the manifest's [shape].layer_spread_m (spec shared-engine G4): the class's layer
+    // spread, the persistent path's shape latent (marginal Δ²/12, ρ = 1). Absent ⇒ zeros (no layering declared, said so).
+    std::array<float, 6> layer_spread_m{};
+    std::string          layer_spread_source;           // [shape].layer_spread_source (mandatory with the array)
     float ai2_headboard_t_m       = 0.10f;   // headboard panel thickness (m)
     float ai2_wall_flush_prior    = 0.0f;    // class P(stands against a wall) — furniture prior
     float ai2_room_axis_std_deg   = 0.0f;    // room-axis alignment std (deg); <=0 = off

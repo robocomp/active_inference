@@ -1167,6 +1167,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.plaus_height_prior_gain = cfg_.countable_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
         p.persistent = cfg_.lidar_measures_on_gated;   // persistent shared errors + class prior once (spec §7c.1–7c.2)
         if (p.persistent) p.beam = beam_config_;       // the beam model of the persistent rays (spec 7c.8; built in the constructor)
+        p.layer_spread_m = cfg_.layer_spread_m;        // the class's layer spread Δ (manifest; the persistent path's shape latent)
         p.gn_trace = cfg_.gn_trace;                    // diagnostic only (Model.GnTrace)
         inst.ai2_belief = CountableBelief(s0, p);
         if (birth_pos_cov) inst.ai2_belief.set_birth_position_cov(*birth_pos_cov);   // spec 7c.8 rev 3.3.14

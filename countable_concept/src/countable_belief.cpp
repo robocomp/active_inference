@@ -774,6 +774,8 @@ std::vector<rc::ai::beam::BeamPart> CountableEngineModel::beam_parts(const State
 const rc::ai::beam::BeamConfig& CountableEngineModel::beam_config() const { return b->params_.beam; }
 void CountableEngineModel::apply_constraints(State& s) const { b->apply_constraints(s); }
 void CountableEngineModel::canonicalize(State& s) const { b->canonicalize(s); }
+CountableEngineModel::Vec6 CountableEngineModel::shape_spread() const
+{ return Eigen::Map<const Vec6>(b->params_.layer_spread_m.data()); }
 CountableEngineModel::Vec6 CountableEngineModel::prior_cov_diag() const { return b->prior_cov_diag(); }
 CountableEngineModel::Vec6 CountableEngineModel::process_noise_diag() const { return b->process_noise_diag(); }
 

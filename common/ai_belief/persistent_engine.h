@@ -12,7 +12,7 @@
  *       b_L    (kL,     N)  the LiDAR rays' sensor-specific shared error;
  *       u_cam  (kFc,    N)  the camera's per-frame ego-motion share, a new source every update ("fix A", rev 3.3.13);
  *       u_L    (kFL,    N)  the same for the LiDAR;
- *       s_cam  (kSc,    N)  the camera's shape misfit (ρ = 1, σ = the model's shape_spread(); zero until Task 5);
+ *       s_cam  (kSc,    N)  the camera's shape misfit (ρ = 1, marginal Δ²/12 with Δ = the model's shape_spread());
  *       s_L    (kSL,    N)  the LiDAR's shape misfit (likewise).
  *     The camera measures θ + B_chain e + b_cam + u_cam + s_cam, the rays θ + B_chain e + b_L + u_L + s_L;
  *   - the damped Gauss-Newton / Levenberg–Marquardt loop with Nielsen's λ rule and the posterior-σ stop rule (7c.8 rev
@@ -124,7 +124,9 @@ struct GnTraceFd
 //   state(), set_state(s), covariance(), set_covariance(Σ)   the model's θ and its float N×N mirror of P_θθ (the model's
 //                                              own terms may read the mirror: the engine sets it to the predicted P̄_θθ
 //                                              before the first linearisation, and to the posterior after);
-//   shape_spread()                             σ of the shape misfit per θ component (zeros until Task 5).
+//   shape_spread()                             Δ, the class's layer spread per θ component (spec shared-engine G4): the
+//                                              range over which the layer a sensor sees may lie; the shape misfit is
+//                                              uniform over it, so its marginal is Δ²/12 (0 ⇒ no layering on that DOF).
 // Optional (detected by requires-expressions; absent ⇒ the stated default):
 //   accumulate_camera_extra(s, f, I, b, E)     the camera channel's non-point terms, same energy convention (absent: none);
 //   solver()                                   SolverConfig (absent: SolverConfig{});
@@ -267,7 +269,7 @@ public:
     // otherwise the lever moves with the robot, ℓ ← ρ(ℓ − Δr) + (1 − ρ)(c − r), BEFORE the predict, and e is carried by
     // F = chain_transport(Δr) with correlation ρ_chain and fresh variance (1 − ρ²) Σ_pose. b_cam / b_L: F = I, per-DOF ρ,
     // Σ_now = diag(σ_now²), new source where σ_prev = 0, predicted only when their channel measures. u_cam / u_L: re-drawn
-    // every update (rev 3.3.13). s_cam / s_L: ρ = 1, Σ_now = diag(shape_spread²), when their channel measures.
+    // every update (rev 3.3.13). s_cam / s_L: ρ = 1, born at diag(Δ²/12) with Δ = shape_spread(), when their channel measures.
     void predict_latents(const M& m, const FrameLatents<N>& fl)
     {
         namespace pu = rc::ai::persistent;
@@ -312,13 +314,24 @@ public:
         };
         fresh_block(kFc, fl.fresh_c, camera);
         fresh_block(kFL, fl.fresh_L, lidar);
-        // s_cam, s_L (shape misfit, spec shared-engine "Shape latent"): ρ = 1 with the past, σ = shape_spread(); a new source
-        // while σ_prev = 0. With shape_spread() = 0 (until Task 5) the block stays exactly zero.
+        // s_cam, s_L (shape misfit, spec shared-engine G4): the layer a sensor sees lies anywhere in the class's layer range
+        // Δ = shape_spread(), uniformly, so the latent is born at Δ²/12 (a new source while σ_prev = 0) and carried with ρ = 1:
+        // the view never changes which layer the object has. Once born its marginal is the one carried (σ_prev), so a
+        // permute_theta relabelling (w ↔ h) keeps each DOF's spread with the DOF it moved to. Δ = 0 keeps the block exactly 0.
         const VecNf spread = m.shape_spread();
-        std::array<float, N> s2{}, ones{};
-        for (int j = 0; j < N; ++j) { s2[j] = spread(j) * spread(j); ones[j] = 1.0f; }
-        if (camera) block(kSc, ones.data(), s2.data());
-        if (lidar)  block(kSL, ones.data(), s2.data());
+        const auto shape_block = [&](int off)
+        {
+            std::array<float, N> s2{}, ones{};
+            for (int j = 0; j < N; ++j)
+            {
+                const double carried = sig_prev_(off + j);
+                s2[j] = carried > 0.0 ? float(carried * carried) : spread(j) * spread(j) / 12.0f;
+                ones[j] = 1.0f;
+            }
+            block(off, ones.data(), s2.data());
+        };
+        if (camera) shape_block(kSc);
+        if (lidar)  shape_block(kSL);
         b_ = x.template tail<K>();
     }
 

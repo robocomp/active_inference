@@ -257,6 +257,9 @@ struct CountableBeliefParams
     // at the first admissible camera update; the footprint (2) and height (2a) anchors never (Σ₀ = the class P carries them);
     // predict clamps Σθθ to the class P (the engine's clamp_to_prior congruence). Set from Model.LidarMeasuresOnGated (Task 9).
     bool  persistent = false;
+    // Δ per DOF (cx, cy, H, w, h, yaw): the class's layer spread (manifest [shape].layer_spread_m, spec shared-engine G4). The
+    // persistent path's shape latents s_cam / s_L are born at Δ²/12 and carried with ρ = 1. Zeros ⇒ no shape latent.
+    std::array<float, 6> layer_spread_m{};
     // The smooth beam model of the persistent path's rays (spec 7c.8 a, b): the Student-t at the sensor's precision and the
     // composite rule. Set by the fitter through rc::make_beam_config (countable_beam_config.h), never default-constructed: a
     // BeamConfig{} has no quantile levels and would integrate on the geometric breakpoints only, so the belief does not use
@@ -405,7 +408,7 @@ struct CountableEngineModel
     Eigen::Matrix<double, 6, 3> chain_jacobian(const State&, const Eigen::Vector2f& lever) const { return rc::ai::view::chain_B(lever); }
     void apply_constraints(State& s) const;
     void canonicalize(State& s) const;
-    Vec6 shape_spread() const { return Vec6::Zero(); }   // shared-engine Task 5 reads the manifest; zero until then
+    Vec6 shape_spread() const;   // Δ, the class's layer spread (params.layer_spread_m)
     Vec6 prior_cov_diag() const;
     Vec6 process_noise_diag() const;
     // the class prior at the class mean (spec 7c.1 amendment 11-17): seed cx, cy; class H, w, depth; the room axis' multiple

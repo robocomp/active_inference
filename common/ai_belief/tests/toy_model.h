@@ -49,6 +49,7 @@ struct ToyBox
     VecN  prior_mean = VecN::Zero();                // class mean of (H, w, h) in components 2..4; position at the seed
     VecN  prior_diag = VecN::Constant(0.09f);       // Σ₀
     VecN  q_diag     = VecN::Zero();                // Q
+    VecN  layer_spread = VecN::Zero();              // Δ per DOF, the class's layer spread (shape_spread(); 0 = no layering)
     rc::ai::beam::BeamConfig beam_cfg{};            // BeamConfig{}: NOT built by make (the "beam not ready" case)
 
     // ── the box SDF in its local frame: local = R(−yaw)(p − c), c = (cx, cy, H/2), half = (w/2, h/2, H/2) ──
@@ -125,7 +126,7 @@ struct ToyBox
     Eigen::Matrix<double, N, 3> chain_jacobian(const State&, const Eigen::Vector2f& lever) const { return rc::ai::view::chain_B(lever); }
     void apply_constraints(State&) const {}
     void canonicalize(State& st) const { st.yaw = std::remainder(st.yaw, float(2.0 * M_PI)); }
-    VecN shape_spread() const { return VecN::Zero(); }
+    VecN shape_spread() const { return layer_spread; }
     VecN prior_cov_diag() const { return prior_diag; }
     VecN process_noise_diag() const { return q_diag; }
     Eigen::Matrix<double, N, 1> class_prior_mean(const State& seed, const Frame&) const

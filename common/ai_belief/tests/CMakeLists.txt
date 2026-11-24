@@ -24,7 +24,9 @@ add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)
 # The shared persistent engine (common/ai_belief/persistent_engine.h) on the minimal toy model (toy_model.h; shared-engine
 # Task 4, Review Focus 1, 2): an unready BeamConfig is refused once and the camera still converges; an update that measures
 # nothing leaves θ bit-identical and moves P only by the latents' prediction. Run: ./engine_no_beam_test, ./engine_predict_only_test
-foreach(t engine_no_beam_test engine_predict_only_test)
+# Task 5: the shape latent (G4) cannot be averaged away; the parked test (G1) — σ stops shrinking at one standpoint, and a
+# new one adds the analytic two-view drop. Run: ./engine_shape_latent_test, ./parked_synthetic_test
+foreach(t engine_no_beam_test engine_predict_only_test engine_shape_latent_test parked_synthetic_test)
     add_executable(${t} ${t}.cpp)
     target_include_directories(${t} PRIVATE ../..)
     target_compile_options(${t} PRIVATE -O2)

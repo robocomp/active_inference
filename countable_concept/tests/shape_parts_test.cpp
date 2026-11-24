@@ -1,4 +1,5 @@
-// shape_parts_test — [[shape.part]] manifest parsing and the countable layout on a fitted box.
+// shape_parts_test — [[shape.part]] manifest parsing and the countable layout on a fitted box; the [shape] layer spread
+// (shared-engine G4: layer_spread_m with its mandatory layer_spread_source).
 // Run: LANG=es_ES.UTF-8 ./shape_parts_test
 #include <clocale>
 #include <cmath>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <unistd.h>
 #include "countable_shape_parts.h"
+#include "layer_spread.h"
 
 #ifndef MANIFEST_DIR
 #error "MANIFEST_DIR must name common/concept_manifest"
@@ -29,6 +31,11 @@ static std::string tmp_manifest(const std::string& body)
 static bool throws(const std::string& body)
 {
     try { rc::manifest::load_shape_parts(tmp_manifest(body)); } catch (const std::runtime_error&) { return true; }
+    return false;
+}
+static bool spread_throws(const std::string& body, int n = 6)
+{
+    try { rc::manifest::layer_spread(tmp_manifest(body), n); } catch (const std::runtime_error&) { return true; }
     return false;
 }
 
@@ -98,6 +105,36 @@ int main()
     CHECK(throws("[[shape.part]]\nname = \"p\"\nx_f = 0\ny_f = 0\nw_f = 1\nh_f = 1\nz0_f = 0.5\nz1_f = 0.5\n"));
     CHECK(throws("[[shape.part]]\nname = \"p\"\nx_f = 0\ny_f = 0\nw_f = 1\nh_f = 1\nz1_f = 1\n"));
     CHECK(throws("[[shape.part]]\nname = \"p\"\nx_f = 0\ny_f = 0\nw_f = 0,5\nh_f = 1\nz0_f = 0\nz1_f = 1\n"));
+    // ── [shape] layer spread ──
+    {
+        CHECK(layer_spread(tmp_manifest("[concept]\nname = \"x\"\n"), 6).delta_m.empty());   // absent: no layering declared
+        // the real manifests: six values each, every one with its source, and the parts still read beside them
+        const float want[3][6] = {{0.05f, 0.05f, 0.10f, 0.20f, 0.15f, 0.0f},      // bed
+                                  {0.025f, 0.025f, 0.0f, 0.04f, 0.05f, 0.0f},     // nightstand
+                                  {0.06f, 0.06f, 0.30f, 0.25f, 0.12f, 0.0f}};     // toilet
+        const char* cls[3] = {"bed", "nightstand", "toilet"};
+        for (int c = 0; c < 3; ++c)
+        {
+            const auto ls = layer_spread(mf(cls[c]), 6);
+            CHECK(ls.delta_m.size() == 6 and not ls.source.empty());
+            for (std::size_t k = 0; k < ls.delta_m.size() and k < 6; ++k) CHECK(ls.delta_m[k] == want[c][k]);
+        }
+        // one line, a trailing comma, a comment after each element over several lines; the block ends at the next table
+        const auto one = layer_spread(tmp_manifest("[shape]\nlayer_spread_m = [0.1, 0.2]\nlayer_spread_source = \"a # b\"\n"), 2);
+        CHECK(one.delta_m.size() == 2 and one.delta_m[1] == 0.2f and one.source == "a # b");
+        const auto multi = layer_spread(tmp_manifest("[shape]\nlayer_spread_m = [\n  0.5,  # x, y\n  0.25, # z\n]\n"
+                                                     "layer_spread_source = \"s\"\n[other]\nlayer_spread_m = [9.0]\n"), 2);
+        CHECK(multi.delta_m.size() == 2 and multi.delta_m[0] == 0.5f and multi.delta_m[1] == 0.25f);
+        // refusals: no source, empty source, source alone, wrong length, negative, comma decimal, not finite, outside [shape]
+        CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, 0.2]\n", 2));
+        CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, 0.2]\nlayer_spread_source = \" \"\n", 2));
+        CHECK(spread_throws("[shape]\nlayer_spread_source = \"s\"\n", 2));
+        CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, 0.2]\nlayer_spread_source = \"s\"\n", 3));
+        CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, -0.2]\nlayer_spread_source = \"s\"\n", 2));
+        CHECK(spread_throws("[shape]\nlayer_spread_m = [0,1, 0.2]\nlayer_spread_source = \"s\"\n", 2));
+        CHECK(spread_throws("[shape]\nlayer_spread_m = [inf, 0.2]\nlayer_spread_source = \"s\"\n", 2));
+        CHECK(layer_spread(tmp_manifest("[other]\nlayer_spread_m = [0.1, 0.2]\n"), 2).delta_m.empty());
+    }
     std::printf(bad ? "FAILED (%d)\n" : "shape_parts_test OK\n", bad);
     return bad ? 1 : 0;
 }
