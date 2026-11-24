@@ -29,3 +29,11 @@ target_compile_definitions(legacy_golden_test PRIVATE GOLDEN_FILE="${CMAKE_CURRE
 target_compile_options(legacy_golden_test PRIVATE -O2)
 target_link_libraries(legacy_golden_test PRIVATE Eigen3::Eigen)
 add_test(NAME legacy_golden_test COMMAND legacy_golden_test)
+
+# shared-engine Task 10: the hood belief on the shared persistent engine — 60 updates on a synthetic hanging hood (toy_model.h's
+# scene builder, lifted) end within 3σ of the truth; the hanging beam part's Jacobian; the legacy switch. Run: ./hood_engine_test
+add_executable(hood_engine_test hood_engine_test.cpp ../src/hood_belief.cpp)
+target_include_directories(hood_engine_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(hood_engine_test PRIVATE -O2)
+target_link_libraries(hood_engine_test PRIVATE Eigen3::Eigen)
+add_test(NAME hood_engine_test COMMAND hood_engine_test)

@@ -131,3 +131,14 @@ near-horizontal rings. Assuming 0.85 over-charged every pass-through by 4.8x and
 fitted hood to p(exists) = 0.018 whenever the robot turned away.
 ★Re-measure if the LiDAR mounting or the hood changes: this is a rate for THIS object on THIS sensor.
 """
+
+# ── Shape misfit (spec 2026-11-23 shared-engine G4): the LAYER SPREAD Δ per state DOF ──
+# Δ = 0 on every DOF: a box canopy offers the sensors no second layer to report. Its front is one face (the visor lip and the
+# control buttons stand within about a centimetre of it, below the surface σ), and the top the state's H names is the canopy top
+# where it meets the wall or the chimney, which no layer stands over. The taper of a pyramid chimney hood is a different SHAPE
+# of the class (as the toilet's tank/tankless split, ledger ruling for Task 5), not a layer of this one: it belongs to the size
+# prior, not to Δ. Revisit if the graded canopy box disagrees with the fit by more than the posterior σ on h.
+[shape]
+from = "nominal"
+layer_spread_m = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+layer_spread_source = "no layering on a box canopy: the visor lip and controls lie within about 1 cm of the canopy face, and the taper of pyramid chimney hoods is within-class shape variation (the size prior's), not a layer; Webots hood mesh not used."
