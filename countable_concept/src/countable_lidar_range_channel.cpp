@@ -170,6 +170,7 @@ void CountableLidarRangeChannel::feed_beam(CountableInstance& inst, CountableFra
     st.room.floor_z = 0.0;
     st.room.floor_sigma = cfg_.floor_sigma_m;
     st.room.walls = room_walls_;
+    st.room.neighbours = frame.foreign_boxes;   // G3: the other objects' published boxes are known surfaces of p_f too
     if (not beam_st_)
     {
         frame.beam = rc::ai::beam::BeamRays{};   // no beam density: the fitter did not build a BeamConfig (flag off)

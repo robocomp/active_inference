@@ -337,6 +337,85 @@ void CountableFitter::consume_paths(CountableInstance& inst, const CountableFram
     }
 }
 
+// ─── G3: the neighbours' published beliefs (spec 2026-11-23 shared-engine; controller ruling T6-4) ───────────────
+// Pure graph reads (get_nodes_by_type / get_edge / typed attributes; the graph's mutex serialises them) — no transform API, so
+// no ts==0 cache and nothing to pin: the RT edge's own newest slot IS the neighbour's last publish. Per node:
+//   box  = width_m (local x) × depth_m (local y) × height_m, the RT translation (x, y; z = the base, fleet convention) and
+//          the RT yaw (rt_rotation_euler_xyz z), at the edge's newest slot (rt_timestamps; the last block without them);
+//   std  = from the edge's rt_covariance (rc::rtcov layout, 6×6 over x y z roll pitch yaw): σ_cx = √C[0][0], σ_cy = √C[1][1],
+//          σ_yaw = √C[5][5], σ_H = 2√C[2][2] (the fleet publishes z = H/2 ⇒ var_z = var_H/4: countable, table, refrigerator,
+//          hood; chair publishes its floor std there and cabinet (z0 + z1)/2, so for those σ_H is that quantity, not var_H).
+//          σ_w = σ_h = 0: NO agent publishes a size std (cortex has no such attribute; adding one is the owner's call), so a
+//          neighbour's faces spread by its position and yaw std only.
+// Skipped (logged once per node): no RT edge from the current room, no size attributes, no rt_covariance, or a position /
+// yaw variance that is missing, zero or not finite (Review Focus 5: an unseeded belief is not a zero-width surface).
+void CountableFitter::refresh_neighbours()
+{
+    neighbours_.clear();
+    if (not G_ or not cfg_.lidar_measures_on_gated) return;
+    const auto room_id = rc::room::current_room(*G_);
+    if (not room_id.has_value()) return;
+    const auto skip = [&](const std::string& name, const char* why)
+    {
+        if (neighbour_skip_logged_.insert(name).second)
+            std::print("[{}] [neighbours] {} skipped as a foreign density: {}\n", cfg_.concept_class, name, why);
+    };
+    for (const char* type : {"object", "box"})
+        for (const auto& n : G_->get_nodes_by_type(type))
+        {
+            if (rc::interaction::is_anchor(*G_, n)) continue;           // a robot-relative copy of an object, not an object
+            const auto e = G_->get_edge(*room_id, n.id(), "RT");
+            if (not e.has_value()) continue;                             // not in this room (or hung from another parent)
+            const auto w = G_->get_attrib_by_name<width_m_att>(n);
+            const auto d = G_->get_attrib_by_name<depth_m_att>(n);
+            const auto H = G_->get_attrib_by_name<height_m_att>(n);
+            if (not (w.has_value() and d.has_value() and H.has_value())) { skip(n.name(), "no width_m/depth_m/height_m"); continue; }
+            const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
+            const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+            const auto cv  = G_->get_attrib_by_name<rt_covariance_att>(e.value());
+            if (not (tr.has_value() and rot.has_value())) { skip(n.name(), "no RT pose"); continue; }
+            if (not cv.has_value()) { skip(n.name(), "no rt_covariance (std missing)"); continue; }
+            const std::vector<float>& t = tr->get();
+            const std::vector<float>& r = rot->get();
+            const std::vector<float>& c = cv->get();
+            if (t.empty() or t.size() % 3 != 0 or r.size() != t.size() or c.empty() or c.size() % 36 != 0)
+            { skip(n.name(), "malformed RT / rt_covariance"); continue; }
+            const std::size_t nb = t.size() / 3;
+            std::size_t newest = nb - 1;
+            if (const auto st = G_->get_attrib_by_name<rt_timestamps_att>(e.value()); st.has_value() and st->get().size() == nb)
+            {
+                std::uint64_t best = 0;
+                for (std::size_t b = 0; b < nb; ++b)
+                    if (st->get()[b] >= best) { best = st->get()[b]; newest = b; }
+            }
+            std::span<const float> C;
+            if (c.size() == 36 * nb) C = std::span<const float>(c).subspan(36 * newest, 36);
+            else if (c.size() == 36) C = std::span<const float>(c).first(36);
+            else { skip(n.name(), "rt_covariance does not match the RT slots"); continue; }
+            const float vx = C[0], vy = C[7], vz = C[14], vyaw = C[35];
+            const auto pos = [](float v) { return std::isfinite(v) and v > 0.0f; };
+            if (not (pos(vx) and pos(vy) and pos(vyaw) and std::isfinite(vz) and vz >= 0.0f))
+            { skip(n.name(), "zero / missing / non-finite position or yaw std"); continue; }
+            rc::ai::beam::ForeignBox b;
+            b.c   = {t[3 * newest], t[3 * newest + 1]};
+            b.z0  = t[3 * newest + 2];
+            b.yaw = r[3 * newest + 2];
+            b.w = w.value(); b.h = d.value(); b.H = H.value();
+            b.std << std::sqrt(vx), std::sqrt(vy), 2.0f * std::sqrt(vz), 0.0f, 0.0f, std::sqrt(vyaw);
+            if (not rc::ai::beam::usable(b)) { skip(n.name(), "degenerate box or std"); continue; }
+            neighbours_.emplace_back(n.id(), b);
+        }
+}
+
+std::vector<rc::ai::beam::ForeignBox> CountableFitter::neighbours_of(std::uint64_t self_id) const
+{
+    std::vector<rc::ai::beam::ForeignBox> out;
+    out.reserve(neighbours_.size());
+    for (const auto& [id, b] : neighbours_)
+        if (id != self_id) out.push_back(b);
+    return out;
+}
+
 // The robot's pose in the room at a capture stamp (spec 7c.7 b, R4-C3), from the robot→room RT edge's history ring: the slot
 // whose stamp is nearest ts (an untimestamped edge has one block), T(robot←room) at that slot inverted for the robot's room
 // position, and that slot's rt_covariance block carried into the room frame (pose_cov_in_room, double). The covariance is
@@ -1423,6 +1502,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         {
             CountableFrame frame;
             frame.lidar_only = true;
+            frame.foreign_boxes   = neighbours_of(inst.node_id);   // G3: before feed_beam stages p_f
+            frame.mask_error_rate = cfg_.mask_pixel_error_rate;
             // §7b: the LiDAR-only frame's common mode = pose chain + ego-motion (no camera deprojection terms). Read only
             // by the per-frame Woodbury path; the persistent path takes the latents' inputs staged below.
             frame.chain_cov_xx   = inst.chain_cov_xx + mot_pos_var;
@@ -1457,6 +1538,11 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
+        if (cfg_.lidar_measures_on_gated)
+        {   // G3: the neighbours' previous-cycle beliefs, a fixed foreign density (before feed_beam stages p_f)
+            frame.foreign_boxes   = neighbours_of(inst.node_id);
+            frame.mask_error_rate = cfg_.mask_pixel_error_rate;
+        }
         // Robust observed cloud TOP (z-p97): the top-no-float factor caps the box top here so a floor-anchored H
         // cannot ratchet ABOVE the mask. p97 (not max) ignores a handful of stray high points.
         if (not frame.points.empty())

@@ -368,6 +368,11 @@ struct CountableFrame
     // LiDAR channel measured ⇔ the set is not empty and Σq > 0 (CountableBelief::lidar_measured; spec 7c.8 rev 3.3.11: the
     // energy carries no sweep weight, beam.kappa is an instrument).
     rc::ai::beam::BeamRays beam;
+    // G3 (spec shared-engine; READ ONLY WHEN params.persistent): the other objects' previous-cycle published beliefs, a fixed
+    // foreign density for this update — the camera points' neighbour mixture (FrameLatents::foreign_boxes) and, staged by
+    // feed_beam, the rays' p_f. mask_error_rate = ε, their prior weight (Model.MaskPixelErrorRate). Empty ⇒ the old path.
+    std::vector<rc::ai::beam::ForeignBox> foreign_boxes;
+    double mask_error_rate = 0.0;
 };
 
 class CountableBelief;

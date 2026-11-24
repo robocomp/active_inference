@@ -482,6 +482,11 @@ void SpecificWorker::compute()
     }
     if (existence_) existence_->set_foreign_claims(&foreign_claims_);
     if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);   // the FIT judges the same geometry
+    if (fitter_)
+    {   // G3: the other objects' published beliefs, the persistent fit's foreign density (inert with the flag off)
+        const rc::StageTimer t(&timing_.foreign_claims);
+        fitter_->refresh_neighbours();
+    }
 
     if (lidar_ingestor_)
     {

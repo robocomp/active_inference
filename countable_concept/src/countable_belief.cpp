@@ -847,6 +847,8 @@ rc::ai::engine::FrameLatents<CountableBelief::N> CountableBelief::frame_latents(
     fl.robot_xy   = f.robot_xy;
     fl.camera_measured = not f.points.empty();
     fl.lidar_measured  = lidar_measured(f);
+    fl.foreign_boxes   = f.foreign_boxes;
+    fl.mask_error_rate = f.mask_error_rate;
     return fl;
 }
 

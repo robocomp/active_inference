@@ -25,6 +25,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -56,6 +57,12 @@ public:
     // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
     // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.
     void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { foreign_claims_ = c; }
+
+    // G3 (spec 2026-11-23 shared-engine, mask error): read the other objects' published beliefs — every object/box node with
+    // an RT edge from the current room (any class, any agent), its box from width_m / depth_m / height_m and the RT pose, its
+    // std from the RT edge's rt_covariance — once per cycle, before the instance loop. Each instance's persistent update then
+    // takes every neighbour but itself as a fixed foreign density. Nothing is read with the flag off (no persistent path).
+    void refresh_neighbours();
 
     /// Borrowed per-tick timing record (worker-owned, same thread). Null ⇒ no timing. Diagnostic only.
     void set_timing(TickTiming* t) { timing_ = t; }
@@ -217,6 +224,11 @@ public:
 
 private:
     const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
+    // refresh_neighbours' result: (node id, its box); and the nodes whose belief was skipped, logged once each.
+    std::vector<std::pair<std::uint64_t, rc::ai::beam::ForeignBox>> neighbours_;
+    std::unordered_set<std::string> neighbour_skip_logged_;
+    // This cycle's neighbours of one instance (all but itself).
+    std::vector<rc::ai::beam::ForeignBox> neighbours_of(std::uint64_t self_id) const;
     mutable std::size_t n_explained_away_ = 0;   // points dropped this cycle (diagnostic)
     int ricoh_attention_ = 0;
     int ricoh_dets_ = 0;
