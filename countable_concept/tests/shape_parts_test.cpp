@@ -109,9 +109,9 @@ int main()
     {
         CHECK(layer_spread(tmp_manifest("[concept]\nname = \"x\"\n"), 6).delta_m.empty());   // absent: no layering declared
         // the real manifests: six values each, every one with its source, and the parts still read beside them
-        const float want[3][6] = {{0.05f, 0.05f, 0.10f, 0.20f, 0.15f, 0.0f},      // bed
+        const float want[3][6] = {{0.015f, 0.015f, 0.10f, 0.20f, 0.03f, 0.0f},    // bed
                                   {0.025f, 0.025f, 0.0f, 0.04f, 0.05f, 0.0f},     // nightstand
-                                  {0.06f, 0.06f, 0.30f, 0.25f, 0.12f, 0.0f}};     // toilet
+                                  {0.06f, 0.06f, 0.0f, 0.25f, 0.12f, 0.0f}};      // toilet
         const char* cls[3] = {"bed", "nightstand", "toilet"};
         for (int c = 0; c < 3; ++c)
         {
@@ -125,13 +125,15 @@ int main()
         const auto multi = layer_spread(tmp_manifest("[shape]\nlayer_spread_m = [\n  0.5,  # x, y\n  0.25, # z\n]\n"
                                                      "layer_spread_source = \"s\"\n[other]\nlayer_spread_m = [9.0]\n"), 2);
         CHECK(multi.delta_m.size() == 2 and multi.delta_m[0] == 0.5f and multi.delta_m[1] == 0.25f);
-        // refusals: no source, empty source, source alone, wrong length, negative, comma decimal, not finite, outside [shape]
+        // refusals: no source, blank source, source alone, wrong length, negative, comma decimal, not an array, not finite;
+        // and a layer_spread_m outside [shape] is not read
         CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, 0.2]\n", 2));
         CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, 0.2]\nlayer_spread_source = \" \"\n", 2));
         CHECK(spread_throws("[shape]\nlayer_spread_source = \"s\"\n", 2));
         CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, 0.2]\nlayer_spread_source = \"s\"\n", 3));
         CHECK(spread_throws("[shape]\nlayer_spread_m = [0.1, -0.2]\nlayer_spread_source = \"s\"\n", 2));
-        CHECK(spread_throws("[shape]\nlayer_spread_m = [0,1, 0.2]\nlayer_spread_source = \"s\"\n", 2));
+        CHECK(spread_throws("[shape]\nlayer_spread_m = [0,05, 0.2]\nlayer_spread_source = \"s\"\n", 2));   // "0,05": not a TOML number
+        CHECK(spread_throws("[shape]\nlayer_spread_m = 0.1\nlayer_spread_source = \"s\"\n", 1));          // not an array
         CHECK(spread_throws("[shape]\nlayer_spread_m = [inf, 0.2]\nlayer_spread_source = \"s\"\n", 2));
         CHECK(layer_spread(tmp_manifest("[other]\nlayer_spread_m = [0.1, 0.2]\n"), 2).delta_m.empty());
     }

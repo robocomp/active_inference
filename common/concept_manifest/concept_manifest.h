@@ -40,7 +40,7 @@
 #include <string_view>
 
 #include <genericworker.h>   // ConfigLoader (resolve(), for the agents' etc/config)
-#include <toml++/toml.h>     // parse_manifest: a manifest is TOML, read whole by toml++
+#include "manifest_toml.h"   // rc::manifest::parse_manifest (toml++; Qt-free)
 
 #include "back_panel.h"   // rc::manifest::load_back_panel (textual, Qt-free)
 #include "../config_report/config_read.h"   // rc::cfg::Reader / registry (SHARED)
@@ -140,24 +140,7 @@ struct Geometry
     }
 };
 
-// ─── PARSING A MANIFEST: toml++ directly, never ConfigLoader ──────────────────────────────────────
-//
-// ★A manifest is TOML, and ConfigLoader is not a TOML reader. ConfigLoader (RoboComp's agent-config loader) flattens a
-// file into scalars and homogeneous scalar arrays and THROWS on anything else: an array of tables ("Unsupported array
-// type encountered." — [[shape.part]], on bed / nightstand / toilet since 2026-11-15) or an empty array ("Empty arrays
-// are not supported." — hood). A whole-file load then fails for a valid manifest, and every live countable run printed
-// MANIFEST NOT LOADED while the textual readers (back panel, shape parts, class prior) read the same file fine. So the
-// whole-file reads parse with toml++ (the parser ConfigLoader itself wraps) and look keys up by dotted path. Throws
-// with the parser's reason (file, line) on an unreadable or malformed file — callers print it, never swallow it.
-inline toml::table parse_manifest(const std::string& path)
-{
-    try { return toml::parse_file(path); }
-    catch (const toml::parse_error& e)
-    {
-        const auto& b = e.source().begin;
-        throw std::runtime_error(std::format("{}:{}:{}: {}", path, b.line, b.column, e.description()));
-    }
-}
+// Whole-manifest reads go through rc::manifest::parse_manifest (manifest_toml.h): toml++, never ConfigLoader.
 
 // Load the [model.geometry] block. Missing file or missing block ⇒ valid = false, never a guess: an agent
 // that cannot read its manifest must fall back to its own defaults LOUDLY, not silently adopt zeros.
