@@ -27,6 +27,13 @@ int main()
         CHECK(std::isfinite(r));
         CHECK(r >= 0.f and r <= 1.f);
     }
+    // w_perp = 0: zero path = no decorrelation exactly; dz-only path = pure radial term.
+    view::ViewpointPath z0;
+    CHECK(view::rho_camera(z0, 2.f, 0.f) == 1.f);
+    view::ViewpointPath dz;
+    dz.dz_m = 0.2f;
+    CHECK(std::abs(view::rho_camera(dz, 2.f, 0.f) - std::exp(-0.2f / 2.f)) < 1e-6f);
+
     view::ViewpointPath q;
     view::accumulate_path(q, Eigen::Vector2f(1.0005f, 2.f), Eigen::Vector2f(0.1f, 0.1f), Eigen::Vector2f(1.f, 2.f));
     CHECK(q.dphi_rad == 0.f and q.dz_m == 0.f);

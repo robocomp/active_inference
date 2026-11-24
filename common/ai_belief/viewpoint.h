@@ -53,11 +53,21 @@ inline Eigen::Vector2f odometry_step_room(float v_adv, float v_side, float yaw_r
     return {c * robot.x() - s * robot.y(), s * robot.x() + c * robot.y()};
 }
 
+namespace detail {
+// |Δφ| / half_angle, with the 0/0 limit defined as 0: no bearing change decorrelates nothing, whatever the object's
+// width (degenerate geometry w⊥ = 0, not a tuning guard). Δφ > 0 with half_angle = 0 stays +inf ⇒ ρ = 0.
+inline float bearing_term(float dphi, float half_angle)
+{
+    if (dphi == 0.f) return 0.f;
+    return std::abs(dphi) / half_angle;
+}
+}  // namespace detail
+
 // exp(−|Δφ|/atan(w⊥/2z) − |Δz|/z): e-fold when the camera has moved by the object's angular half-width.
 inline float rho_camera(const ViewpointPath& p, float z_m, float w_perp_m)
 {
     const float half_angle = std::atan(w_perp_m / (2.f * z_m));
-    return std::exp(-std::abs(p.dphi_rad) / half_angle - std::abs(p.dz_m) / z_m);
+    return std::exp(-detail::bearing_term(p.dphi_rad, half_angle) - std::abs(p.dz_m) / z_m);
 }
 // exp(−|Δφ|/g), g = ring gap (rad). g ≤ 0 (SensorModel absent) ⇒ 1.
 inline float rho_lidar_lateral(const ViewpointPath& p, float g)
