@@ -107,6 +107,8 @@ struct SolverConfig
 // updates θ takes random-walk steps w ~ N(0, Q), Q = diag(e^ω) unknown and per object. Q's conjugate running estimate is the
 // mean of the EM statistic of the steps (see update()), with the configured Q₀ (the model's process_noise_diag) as a prior
 // worth n₀ = 1/σ_ω² pseudo-observations and a memory λ per measured update. infer = false: Q = Q₀ throughout.
+// Q₀ = 0 (the countable persistent model, owner ruling 11-24: no constant process noise for a passive object) is an absorbing
+// fixed point of the statistic (E[w²] = 0 at q = 0), so Q stays 0 and ω = log Q = −inf: priors entered once are never forgotten.
 struct VolatilityConfig
 {
     bool   infer = false;

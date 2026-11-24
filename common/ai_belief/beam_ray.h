@@ -413,6 +413,16 @@ inline void quantile_nodes_z(double sigma_s, std::span<const double> z, const Ga
 // A zero-width subinterval keeps its motion term dL·h(b); a breakpoint at an exact tangency (∂_ts = 0) adds none.
 // Breakpoints that appear, clip or reorder are the stated kink (iv).
 //
+// ⚠ KNOWN MODELLING APPROXIMATION (F1 round 4, 2026-11-24; fix deferred). δ ~ N(0, σ_s²) above is a level shift of the WHOLE
+// part's SDF, not a local displacement of the face a ray hits. So a return on one face depends, through δ's tail, on where the
+// OTHER faces are: a ray descending onto the top 3.6 cm above a box's back edge passes over the box shrunk by ≈ 2.9σ_s, so a
+// deeper box keeps the hit for more of the tail. Measured on creep_set_test's flush nightstand (front LiDAR, wall behind), at
+// the TRUE state, the energy's slope along "back moves, front stays" (the direction a front view does not observe) summed over
+// 978 rays is −0.0198 m⁻¹ at σ_s = 0.01 (FD and analytic agree); its sign depends on σ_s (+1.8e-5 at 0.005, +4.4 at 0.02,
+// then from wall returns beside the box). With zero curvature along that direction the slope is an unbounded force: with a
+// constant process noise forgetting the priors that hold it, the back crept ~5 µm per sweep. Deferred fix: model δ as a
+// LOCAL displacement of the face each ray hits (the summed gradient at the truth along every unobserved direction ≈ 0).
+//
 // Curvature (spec (b)), PSD (no κ factor since rev 3.3.11): r·J̄J̄ᵀ/V + (1 − o)·I_d·∇d∇dᵀ, r = m·A/p, o = (1 − m)p_pass·B/(m·A + (1 − m)p_pass·π),
 // I_d = (φ(z_d)/σ_s)²·[1/π + 1/(1 − π)] — the Fisher information of the fully observed hit/miss outcome (spec 7c.8 rev 3.3.9).
 // J̄, t̄ and Var t are moments on the δ-quantile nodes (K_m) at fixed δ; Var t is scaled by

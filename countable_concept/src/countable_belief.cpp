@@ -891,7 +891,19 @@ void CountableEngineModel::canonicalize(State& s) const { b->canonicalize(s); }
 CountableEngineModel::Vec6 CountableEngineModel::shape_spread() const
 { return Eigen::Map<const Vec6>(b->params_.layer_spread_m.data()); }
 CountableEngineModel::Vec6 CountableEngineModel::prior_cov_diag() const { return b->prior_cov_diag(); }
-CountableEngineModel::Vec6 CountableEngineModel::process_noise_diag() const { return b->configured_process_noise(); }
+// NO constant process noise on the persistent path (owner ruling 11-24; CONCEPT_AGENT_LIFECYCLE.md §4.1: a passive object's
+// state changes only when something acts on it). Q comes only from the volatility estimate, whose prior mean (this hook's
+// value, the engine's Q₀) is ZERO: the EM starts at q = 0 with its own hyperprior (n₀ pseudo-observations of 0). That fixed
+// point is absorbing — E[w²] = q + (q/Σ̄)²(…) is 0 at q = 0 — so a passive object's Q stays 0: the once-entered class and wall
+// priors are never forgotten, and a MOVED object is the lifecycle's case (absence removes, the tracker re-births), not
+// diffusion. The constant AI2ProcessStd* Q₀ was what let them decay: a constant force along a direction the view does not
+// observe (the beam's level-shift slope, beam_ray.h) then won linearly in the number of sweeps (the creep set, F1 round 4).
+// Q₀'s other uses on this path, each replaced: the EM's initial value (now 0, above); the predict before the EM has learned
+// (process_noise() returns this 0); inflate_for_age on a stale frame (q_scale · 0: a passive object does not age; its
+// uncertainty grows only by the latents' ρ when it is next measured); the size summary's forgetting (Q in force, 0).
+// No variance floor rests on it (sanitize re-seeds from the class prior, not from Q). The legacy path keeps Q₀ bit for bit
+// (CountableBelief::process_noise_diag's flag-off branch).
+CountableEngineModel::Vec6 CountableEngineModel::process_noise_diag() const { return Vec6::Zero(); }
 rc::ai::engine::VolatilityConfig CountableEngineModel::volatility() const
 {
     const CountableBeliefParams& P = b->params_;

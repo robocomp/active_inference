@@ -22,6 +22,8 @@
 // association, not per update (flush/parallel once as before, the no-cross hinge every update → a probit once).
 // Re-recorded again for F1.4 after the ruling of 11-24 (option 1): no no-cross term on the persistent path (the stand-off prior
 // carries it; this fixture declares none, so it gets the old flush form once and no no-cross).
+// Re-recorded for F1 round 5 (owner ruling 11-24): no constant process noise on the persistent path (Q from the volatility
+// estimate only, whose prior mean is 0), so no predict adds variance.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
