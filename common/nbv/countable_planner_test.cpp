@@ -91,6 +91,21 @@ int main()
         CHECK(ok.proposal.valid and ok.proposal.epistemic_gain > 0.0f, "control: finite gain in an open room is valid");
     }
 
+    {   // standpoint_gain_is_scored_at_the_published_pose (shared-engine G5): raw_gain_from_standpoints evaluates the
+        // agent's gain AT the pose plan_faces publishes for that face. A gain that rewards one spot (+y side, 3 m out)
+        // must make that face win, and the winner's raw gain must be gain_at(best_pos, best_yaw) exactly.
+        const auto room = rect(-8.0f, 8.0f, -8.0f, 8.0f);
+        const rc::nbv::CountableInputs in{camera(), 0.3f, no_obstacles, room};
+        const auto gain_at = [](const Eigen::Vector2f& p, float yaw)
+        { return std::exp(-(p - Eigen::Vector2f(0.0f, 3.0f)).squaredNorm()) + 0.0f * yaw; };
+        const auto r = rc::nbv::plan_countable(unit_box(), in, rc::nbv::raw_gain_from_standpoints(unit_box(), gain_at), kOne);
+        CHECK(r.proposal.valid and r.plan.best_face == 2, "standpoint gain: the rewarded (+y) face wins");
+        CHECK(r.plan.face_raw_gains[2] == static_cast<float>(gain_at(r.plan.best_pos, r.plan.best_yaw)),
+              "standpoint gain: scored at the published pose");
+        const auto fv = rc::nbv::face_viewpoint(unit_box(), 2, r.plan.best_standoff_m);
+        CHECK(fv.pos == r.plan.best_pos and fv.yaw == r.plan.best_yaw, "face_viewpoint is plan_faces' pose");
+    }
+
     std::printf(fails == 0 ? "countable_planner_test: PASS\n" : "countable_planner_test: %d FAIL\n", fails);
     return fails == 0 ? 0 : 1;
 }

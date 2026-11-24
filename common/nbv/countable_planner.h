@@ -7,7 +7,10 @@
  *
  * What stays the AGENT's, because it is a statement about that object and not about planning:
  *   - the Target (the object as its belief holds it: pose, extent, vertical span, σ);
- *   - raw_gain_of(face, standoff) — its own D-optimal ΔH given a detection (chair adds its discrete mode term);
+ *   - raw_gain_of(face, standoff) — its own ΔH given a detection: the legacy belief's D-optimal gain (d_optimal_gain;
+ *     chair adds its discrete mode term), or, on the shared persistent engine (spec shared-engine G5), the engine's offer
+ *     gain at the face's standpoint (raw_gain_from_standpoints + PersistentEngine::predicted_gain), capped by the same
+ *     shared errors the update is capped by;
  *   - useful(best_raw) — the fraction of the winner's raw gain that is still worth having (see useful_fraction).
  *
  * Header-only, Eigen only (plus viewpoint_score.h / dof_spec.h). Pinned by countable_planner_test.cpp.
@@ -68,6 +71,19 @@ float d_optimal_gain(const Eigen::Matrix<float, D, D>& S, const Eigen::Matrix<fl
 {
     const Eigen::Matrix<float, D, D> I = Eigen::Matrix<float, D, D>::Identity();
     return 0.5f * std::log(std::max(1e-9f, (I + S * dI).determinant()));
+}
+
+// The engine's offer gain as plan_countable's raw_gain_of (spec shared-engine G5): face i at stand-off d IS the standpoint
+// face_viewpoint(t, i, d) — the pose plan_faces scores and publishes — and gain_at(pos, yaw) is the agent's predicted
+// θ-marginal entropy drop of a look from there (PersistentEngine::predicted_gain). The legacy engine keeps d_optimal_gain.
+template <class GainAtFn>
+auto raw_gain_from_standpoints(const Target& t, GainAtFn gain_at)
+{
+    return [t, gain_at](int face, float standoff_m) -> float
+    {
+        const FaceViewpoint v = face_viewpoint(t, face, standoff_m);
+        return static_cast<float>(gain_at(v.pos, v.yaw));
+    };
 }
 
 // ★BOUND THE GAIN BY THE ADEQUACY GAP — but only if a consumer has actually stated one (chair's guard, verbatim).

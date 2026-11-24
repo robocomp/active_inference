@@ -20,7 +20,9 @@
  *   - the class prior at the class mean counted once, with the birth cloud's excess position covariance ("fix B",
  *     rev 3.3.14);
  *   - the smooth beam model of the LiDAR rays (beam_channel.h);
- *   - the GnTrace diagnostic (one row per GN step, and a finite-difference check of every channel's gradient).
+ *   - the GnTrace diagnostic (one row per GN step, and a finite-difference check of every channel's gradient);
+ *   - the offer gain (spec shared-engine G5): predicted_gain, the θ-marginal entropy drop of a hypothetical camera look from
+ *     a standpoint under this same joint covariance update, and last_delivered_nats, the same quantity for the last update.
  *
  * The MODEL (concept PersistentModel) supplies the shape: the camera-point hooks of recursive_laplace.h, its camera-only and
  * θ-only extra terms (each with its energy, the GN acceptance objective), its beam parts, how a robot pose error moves θ,
@@ -39,6 +41,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -46,6 +49,7 @@
 
 #include "beam_channel.h"
 #include "foreign_box.h"
+#include "offer_view.h"
 #include "persistent_update.h"
 #include "viewpoint.h"
 
@@ -53,6 +57,8 @@ namespace rc::ai::engine
 {
 
 using rc::ai::beam::ForeignBox;   // a neighbour's published belief (foreign_box.h; spec shared-engine G3)
+using rc::ai::offer::Standpoint;  // an offered standpoint and the camera it puts to work (offer_view.h; G5)
+using rc::ai::offer::OfferCamera;
 
 // The per-frame inputs of the latents (spec 7c.7 a, b; rev 3.3.13), in θ's component order. Read by the engine's latent
 // predict; the model fills them from its own frame.
@@ -69,6 +75,8 @@ struct FrameLatents
     Eigen::Matrix3d sigma_pose = Eigen::Matrix3d::Zero();   // the robot's pose covariance in the room (x, y, ψ)
     Eigen::Vector2f chain_dr   = Eigen::Vector2f::Zero();   // the robot's room displacement since the last update
     Eigen::Vector2f robot_xy   = Eigen::Vector2f::Zero();   // the robot's room position at the capture stamp
+    // The camera's room position (floor plane) at this update (G5): where the offer gain's ρ path starts. Absent ⇒ robot_xy.
+    std::optional<Eigen::Vector2f> camera_xy;
     bool camera_measured = false;        // the camera channel measures this update
     bool lidar_measured  = false;        // the LiDAR channel measures this update
     // G3 (spec shared-engine, "Answers to the builder check" 5): the neighbours' boxes, a FIXED foreign density for this update
@@ -261,16 +269,7 @@ public:
     void predict(M& m, float q_scale)
     {
         ensure_joint(m.covariance());
-        const VecNf q  = m.process_noise_diag();
-        const VecNf p0 = m.prior_cov_diag();
-        for (int i = 0; i < N; ++i) P_(i, i) += double(std::max(0.0f, q_scale)) * double(q(i));
-        for (int i = 0; i < N; ++i)
-            if (p0(i) > 0.0f and P_(i, i) > double(p0(i)))
-            {
-                const double sc = std::sqrt(double(p0(i)) / P_(i, i));   // symmetric rescale keeps P PSD
-                P_.row(i) *= sc;
-                P_.col(i) *= sc;
-            }
+        predict_theta(m, q_scale);
         m.set_covariance(Sigma_theta());
     }
 
@@ -417,6 +416,9 @@ public:
         namespace pu = rc::ai::persistent;
         const SolverConfig cfg = solver_of(m);
         const NeighbourScope nb_scope(*this, fl);                          // G3: the neighbours, fixed for this update
+        ensure_joint(m.covariance());
+        const double H_before = half_logdet_theta(P_);                     // G5: the published Σθ this update starts from
+        last_delivered_nats_ = std::numeric_limits<double>::quiet_NaN();   // NaN until an update measures
 
         predict(m, 1.0f);                                                  // step 1, θ
         dbg_iterates_.clear();
@@ -705,6 +707,21 @@ public:
         b_ = b_post;
         m.set_covariance(Sigma_theta());
         dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
+        // G5: what this update delivered (the θ-marginal entropy drop of the published Σ), and what the next offer's
+        // hypothetical look starts from: the camera's position, how many points it gave and their mean variance, b_cam's
+        // marginal, and the robot's position (e's transport).
+        last_delivered_nats_ = H_before - half_logdet_theta(P_);
+        last_robot_xy_ = fl.robot_xy;
+        if (camera)
+        {
+            last_cam_xy_ = fl.camera_xy.value_or(fl.robot_xy);
+            last_cam_n_ = f.points.size();
+            const float sig2 = m.sigma2();
+            double Rsum = 0.0;
+            for (std::size_t i = 0; i < f.points.size(); ++i) Rsum += double(R_of(f, i, sig2));
+            last_cam_R_ = f.points.empty() ? 0.0 : Rsum / double(f.points.size());
+            last_sig2_cam_ = fl.sig2_cam;
+        }
         if (lidar)
         {   // the beam log (spec 7c.8 a0 + stated limit 1), at the returned θ and what the rays measure there (θ + B_L b)
             last_beam_staged_ = static_cast<int>(m.beam_rays(f).endpoints.size());
@@ -735,6 +752,93 @@ public:
         return static_cast<float>(energy / static_cast<double>(f.points.size()));
     }
 
+    // ── The offer gain (spec shared-engine G5) ──────────────────────────────────────────────────────────────────────────
+    // The θ-marginal entropy drop ½ log det Σθ_now − ½ log det Σθ_after of a hypothetical camera look from standpoint `s`,
+    // under this engine's own update — so it is capped by the same shared errors the update is capped by:
+    //   - θ is predicted as update() predicts it (Q, the clamp to the class P; the class prior at the class mean if no update
+    //     has happened yet);
+    //   - the latents are predicted for that look: ρ_cam = rho_camera of the straight path from the last camera update's
+    //     position to the standpoint's camera, in 10 equal chords (accumulate_path), z and w⊥ (offer_view.h extent_across)
+    //     at the standpoint; ρ_chain = 1 (no localiser correction is predicted) with e transported by the straight robot
+    //     displacement; b_cam's marginal as at the last camera update; no fresh ego-motion share (the look is taken standing
+    //     at the standpoint);
+    //   - the camera points are those offer_view.h's visible_surface gives from the standpoint (the planner's Sensor, its
+    //     obstacles), as many as the last camera update gave scaled by the visible solid angle against what the same
+    //     camera model sees from the last update's position, each at that update's mean variance (before any camera update:
+    //     one point per sample at the model's σ²);
+    //   - their information enters joint_cov through the camera's selector, exactly as a measured frame's does.
+    // Only the camera channel is hypothesised: no LiDAR rays and none of the model's extra terms (they need a Frame). A
+    // standpoint that sees nothing promises 0.
+    double predicted_gain(const M& m, const Standpoint& s, const OfferCamera& cam) const
+    {
+        namespace vw = rc::ai::view;
+        namespace pu = rc::ai::persistent;
+        namespace of = rc::ai::offer;
+        PersistentEngine e = *this;                                        // the hypothetical runs on a copy
+        e.ensure_joint(m.covariance());
+        const double H_before = half_logdet_theta(e.P_);
+        e.predict_theta(m, 1.0f);
+
+        const VecNf th = m.state().vec();
+        const Eigen::Vector2f c(th(0), th(1));
+        const std::vector<rc::ai::beam::BeamPart> parts = m.beam_parts(m.state());
+        const Eigen::Vector3f cam3 = of::camera_at(s, cam);
+        FrameLatents<N> fl;
+        float rho = 1.0f;
+        if (last_cam_xy_.has_value())
+        {
+            vw::ViewpointPath path;
+            const Eigen::Vector2f step = (cam3.head<2>() - *last_cam_xy_) / float(kOfferPathSteps);
+            for (int k = 0; k < kOfferPathSteps; ++k) vw::accumulate_path(path, *last_cam_xy_ + float(k) * step, step, c);
+            const float z = (cam3.head<2>() - c).norm(), w_perp = of::extent_across(parts, cam3.head<2>(), c);
+            if (z > 0.0f and w_perp > 0.0f) rho = vw::rho_camera(path, z, w_perp);   // degenerate geometry ⇒ parked
+        }
+        fl.rho_cam.fill(rho);
+        fl.sig2_cam = last_sig2_cam_;
+        fl.rho_chain = 1.0f;
+        fl.sigma_pose = last_sigma_pose_;
+        fl.chain_dr = s.xy - last_robot_xy_.value_or(s.xy);
+        fl.robot_xy = s.xy;
+        fl.camera_xy = cam3.head<2>();
+        fl.camera_measured = true;
+        e.predict_latents(m, fl);
+
+        MatJd P_bar = e.P_;
+        if (not first_update_done_)
+        {   // as update(): the class prior at the class mean, counted once, plus the birth spread
+            P_bar.template topRows<N>().setZero();
+            P_bar.template leftCols<N>().setZero();
+            P_bar.diagonal().template head<N>() = m.prior_cov_diag().template cast<double>();
+            P_bar.template topLeftCorner<2, 2>() += birth_pos_excess_.template cast<double>();
+        }
+
+        const of::View v = of::visible_surface(parts, cam3, s.yaw, cam);
+        if (v.points.empty()) return 0.0;
+        double n_points = double(v.points.size());
+        float R = m.sigma2();
+        if (last_cam_xy_.has_value() and last_cam_n_ > 0 and last_cam_R_ > 0.0)
+        {
+            const Eigen::Vector3f last3(last_cam_xy_->x(), last_cam_xy_->y(), cam3.z());
+            const Eigen::Vector2f to_c = c - last_cam_xy_.value();
+            const double omega_last = of::visible_surface(parts, last3, std::atan2(to_c.y(), to_c.x()), cam).solid_angle;
+            if (omega_last > 0.0) n_points = double(last_cam_n_) * v.solid_angle / omega_last;
+            R = float(last_cam_R_);
+        }
+        const Eigen::Matrix<double, N, K> B_cam = e.selector(m, true);
+        const State s_cam = State::from_vec((th.template cast<double>() + B_cam * e.b_).template cast<float>());
+        MatNf Id = MatNf::Zero();
+        accumulate_offer_points(m, s_cam, v.points, float(n_points / double(v.points.size())), R, Id);
+        pu::Channel<N, K> ch;
+        ch.info = pu::marginalise_fresh<N>(Id, VecNf::Zero(), MatNf::Zero());
+        ch.B = B_cam;
+        const std::array<pu::Channel<N, K>, 1> chans{ch};
+        const MatJd P_after = pu::joint_cov<N, K>(P_bar, std::span<const pu::Channel<N, K>>(chans), pu::FreshInfo<N>{});
+        return H_before - half_logdet_theta(P_after);
+    }
+    // The θ-marginal entropy drop ½ log det Σθ_before − ½ log det Σθ_after of the last update(): what it delivered, the same
+    // quantity predicted_gain promises. NaN when the last update measured nothing (predict-only).
+    double last_delivered_nats() const { return last_delivered_nats_; }
+
     // ── Diagnostics of the last update ───────────────────────────────────────────────────────────────────────────────
     const std::vector<VecNf>&           dbg_iterates()  const { return dbg_iterates_; }   // ACCEPTED θ iterates
     const std::vector<double>&          dbg_gn_energy() const { return dbg_gn_energy_; }  // J at θ₀ and after every accepted step
@@ -755,6 +859,50 @@ public:
 
 private:
     static float R_of(const Frame& f, std::size_t i, float sig2) { return (i < f.R.size() and f.R[i] > 0.0f) ? f.R[i] : sig2; }
+    static constexpr int kOfferPathSteps = 10;                       // G5: chords of the straight path to a standpoint
+
+    // ½ log det of P's θθ block (LDLT; a non-positive pivot ⇒ NaN, so a degenerate Σ cannot pass as a number).
+    static double half_logdet_theta(const MatJd& P)
+    {
+        const Eigen::LDLT<Eigen::Matrix<double, N, N>> ldlt(Eigen::Matrix<double, N, N>(P.template topLeftCorner<N, N>()));
+        double h = 0.0;
+        for (int i = 0; i < N; ++i) h += 0.5 * std::log(ldlt.vectorD()(i));
+        return h;
+    }
+
+    // θ's predict on P (Σ += q_scale·Q, then the clamp_to_prior congruence; see predict()).
+    void predict_theta(const M& m, float q_scale)
+    {
+        const VecNf q  = m.process_noise_diag();
+        const VecNf p0 = m.prior_cov_diag();
+        for (int i = 0; i < N; ++i) P_(i, i) += double(std::max(0.0f, q_scale)) * double(q(i));
+        for (int i = 0; i < N; ++i)
+            if (p0(i) > 0.0f and P_(i, i) > double(p0(i)))
+            {
+                const double sc = std::sqrt(double(p0(i)) / P_(i, i));   // symmetric rescale keeps P PSD
+                P_.row(i) *= sc;
+                P_.col(i) *= sc;
+            }
+    }
+
+    // The hypothetical look's camera information (G5): accumulate_points over synthesised points, each standing for
+    // `weight` mask points of variance R (the per-point skip of accumulate_points is on one point's r/R, as there).
+    void accumulate_offer_points(const M& m, const State& s, std::span<const Eigen::Vector3f> pts, float weight, float R,
+                                 MatNf& Id) const
+    {
+        const int n_prims = m.n_prims();
+        for (const auto& p : pts)
+        {
+            const auto r = m.responsibilities(p, s, R);
+            for (int prim = 0; prim < n_prims; ++prim)
+            {
+                const float w = r[prim] / R;
+                if (w < 1e-6f) continue;
+                const VecNf J = m.sdf_jacobian(p, s, prim);
+                Id.noalias() += (weight * w) * (J * J.transpose());
+            }
+        }
+    }
     static typename rc::ai::beam::BeamChannel<N>::Key key_of(const State& s)
     {
         const VecNf v = s.vec();
@@ -922,6 +1070,13 @@ private:
     MatNf  dbg_Id_L_ = MatNf::Zero();
     int    last_beam_staged_ = 0;
     int    last_gap_rays_ = 0;
+    // G5: the last update's delivery, and where the next hypothetical look starts from
+    double last_delivered_nats_ = std::numeric_limits<double>::quiet_NaN();
+    std::optional<Eigen::Vector2f> last_cam_xy_;      // the camera's position at the last camera update
+    std::optional<Eigen::Vector2f> last_robot_xy_;    // the robot's position at the last measured update
+    std::size_t last_cam_n_ = 0;                      // that camera update's point count
+    double last_cam_R_ = 0.0;                         // ... and their mean variance
+    std::array<float, N> last_sig2_cam_{};            // ... and b_cam's marginal
 };
 
 }  // namespace rc::ai::engine

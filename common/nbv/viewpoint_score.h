@@ -740,6 +740,23 @@ struct Plan
     }
 };
 
+// The viewpoint of face i ([+x,-x,+y,-y]) at a FACE-relative stand-off: face_centre + normal·d, looking back at the
+// object centre. ONE definition: plan_faces places its candidates with it, and an agent whose raw gain is a function of
+// the standpoint itself (the shared engine's offer gain, countable_planner.h) recovers the same pose from (face, stand-off).
+struct FaceViewpoint { Eigen::Vector2f pos{0.0f, 0.0f}; float yaw = 0.0f; };
+inline FaceViewpoint face_viewpoint(const Target& t, int i, float standoff_m)
+{
+    const Eigen::Vector2f ex = t.axis_x(), ey = t.axis_y();
+    const float hw = 0.5f * t.w, hh = 0.5f * t.h;
+    const std::array<Eigen::Vector2f, 4> normals{ ex, -ex, ey, -ey };
+    const std::array<Eigen::Vector2f, 4> centres{ t.centre() + ex * hw, t.centre() - ex * hw,
+                                                  t.centre() + ey * hh, t.centre() - ey * hh };
+    FaceViewpoint v;
+    v.pos = centres[i] + normals[i] * standoff_m;
+    v.yaw = std::atan2(t.cy - v.pos.y(), t.cx - v.pos.x());   // look back at the object centre
+    return v;
+}
+
 // Enumerate the four vertical faces, place each at the model's stand-off, and rank them by DETECTION-WEIGHTED
 // information. `raw_gain(face_idx, standoff_m)` is the agent's own D-optimal ΔH given a detection.
 //
@@ -783,8 +800,9 @@ Plan plan_faces(const Target& t, const Sensor& sensor, float robot_radius_m,
 
         Candidate c;
         c.face     = i;
-        c.pos      = centres[i] + normals[i] * bands[i].best;
-        c.yaw      = std::atan2(t.cy - c.pos.y(), t.cx - c.pos.x());   // look back at the object centre
+        const FaceViewpoint fv = face_viewpoint(t, i, bands[i].best);
+        c.pos      = fv.pos;
+        c.yaw      = fv.yaw;
         c.raw_gain = static_cast<float>(raw_gain(i, bands[i].best));
 
         const Score s = score(c, t, sensor, obstacles, robot_radius_m);
@@ -817,8 +835,9 @@ Plan plan_faces(const Target& t, const Sensor& sensor, float robot_radius_m,
     {
         const auto it = std::max_element(plan.face_raw_gains.begin(), plan.face_raw_gains.end());
         plan.best_face = static_cast<int>(std::distance(plan.face_raw_gains.begin(), it));
-        plan.best_pos  = centres[plan.best_face] + normals[plan.best_face] * bands[plan.best_face].best;
-        plan.best_yaw  = std::atan2(t.cy - plan.best_pos.y(), t.cx - plan.best_pos.x());
+        const FaceViewpoint fv = face_viewpoint(t, plan.best_face, bands[plan.best_face].best);
+        plan.best_pos  = fv.pos;
+        plan.best_yaw  = fv.yaw;
     }
     plan.best_standoff_m = bands[plan.best_face].best;
     plan.standoff_min_m  = bands[plan.best_face].near_m;
