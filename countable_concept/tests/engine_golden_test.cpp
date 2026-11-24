@@ -17,6 +17,7 @@
 // Re-recorded for plan rev 2 F1.2 (the volatility): the fixture infers Q, which the engine now learns from the EM statistic of
 // every measured update (it was the raw camera step, in CountableBelief), so P's θ diagonal and the steps move from the second
 // update on.
+// Re-recorded for plan rev 2 F1.5: the camera channel no longer enters the wall's depth_unobs boost (the fixture stages a wall).
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)

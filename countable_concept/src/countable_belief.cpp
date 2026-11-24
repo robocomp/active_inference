@@ -768,16 +768,22 @@ double CountableEngineModel::point_energy(const Eigen::Vector3f& p, const State&
     return -std::log(std::max(1e-300, sum));
 }
 
-// CAMERA, beside the points: (2d) top and the depth_unobs_precision shares (§7c.1: the one class-mean term still counted per
+// CAMERA, beside the points: (2d) top and the footprint's depth_unobs_precision share (§7c.1: a class-mean pull counted per
 // frame, counted once while parked through b_cam).
+// Plan rev 2 F1.5 asked for BOTH depth_unobs boosts to go on the persistent path (free-space rays to replace them, G2). Replayed
+// on objects_replay1 they split:
+//   - the WALL boost (wgt·depth_unobs_precision·depth_unobs on the back-face gap) is dropped: without it the bed's cy moves
+//     3.018 → 3.041 (truth 3.074) and the nightstands move ≤ 2.8 cm;
+//   - the FOOTPRINT share is KEPT: without it nothing holds an unobserved extent on this data — nightstand_2 w/h 0.50/0.51 →
+//     0.71/0.26 (truth 0.505/0.509), nightstand_3 w 1.01 → 1.49, and the bed's joint P goes non-positive at update 117
+//     (sanitize, then a divergence the live step bound would have to catch). The rays do not replace it here; dropping it needs
+//     the free-space term to carry that information first (and the joint-covariance degeneracy understood).
+// The legacy path keeps both.
 void CountableEngineModel::accumulate_camera_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const
 {
     b->accumulate_top(s, f, Id, bd, E);
     if (not b->size_prior_off_)
-    {
-        b->accumulate_wall(s, f, Id, bd, /*base*/ false, /*boost*/ true, /*parallel*/ false, E);
         b->accumulate_footprint(s, f, Id, bd, /*anchor*/ false, E);
-    }
 }
 
 // θ-ONLY, unsaturated: the biases cannot absorb a wall crossing or the class's relational prior. The relational class prior
