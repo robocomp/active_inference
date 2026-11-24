@@ -485,7 +485,8 @@ static void mode_rotation_leaves_e()
     b.update(f);
     CountableBelief::VecKd v;
     v << 0.011, 0.012, 0.013, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036,
-         0.041, 0.042, 0.043, 0.044, 0.045, 0.046, 0.051, 0.052, 0.053, 0.054, 0.055, 0.056;   // + u_cam, u_L (rev 3.3.13)
+         0.041, 0.042, 0.043, 0.044, 0.045, 0.046, 0.051, 0.052, 0.053, 0.054, 0.055, 0.056,    // + u_cam, u_L (rev 3.3.13)
+         0.061, 0.062, 0.063, 0.064, 0.065, 0.066, 0.071, 0.072, 0.073, 0.074, 0.075, 0.076;   // + s_cam, s_L (shared engine)
     b.set_latent_mean_for_test(v);
     const CountableBelief::MatJd P0 = b.joint_covariance();
     const ChainLever L0 = b.chain_lever();
@@ -503,6 +504,8 @@ static void mode_rotation_leaves_e()
     CHECK(m(c) == v(c) and m(c + 5) == v(c + 5) and m(l + 5) == v(l + 5));
     constexpr int fc = CountableBelief::kFc, fl = CountableBelief::kFL;
     CHECK(m(fc + 3) == v(fc + 4) and m(fc + 4) == v(fc + 3) and m(fl + 3) == v(fl + 4) and m(fl + 4) == v(fl + 3));   // u_c relabels too
+    constexpr int sc = CountableBelief::kSc, sl = CountableBelief::kSL;
+    CHECK(m(sc + 3) == v(sc + 4) and m(sc + 4) == v(sc + 3) and m(sl + 3) == v(sl + 4) and m(sl + 4) == v(sl + 3));   // s_c relabels too
     CHECK(P(3, 3) == P0(4, 4) and P(4, 4) == P0(3, 3));
     CHECK(P(N + c + 3, N + c + 3) == P0(N + c + 4, N + c + 4) and P(N + l + 3, N + l + 3) == P0(N + l + 4, N + l + 4));
     CHECK(P(3, N + c + 3) == P0(4, N + c + 4));                   // θ_w–b_cam,w cross term follows both relabels

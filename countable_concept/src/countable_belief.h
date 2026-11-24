@@ -29,6 +29,7 @@
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
 #include "../../common/ai_belief/persistent_update.h"    // persistent shared-error latents (lidar-measures §7c.2)
 #include "../../common/ai_belief/beam_ray.h"             // the smooth beam model of the persistent rays (lidar-measures §7c.8)
+#include "../../common/ai_belief/persistent_engine.h"    // the shared persistent engine (shared-engine Task 3): this belief is its first model
 #include "countable_viewpoint.h"                          // ChainLever, chain_B, chain_transport (lidar-measures §7c.7 b)
 
 namespace rc
@@ -366,6 +367,57 @@ struct CountableFrame
     rc::ai::beam::BeamRays beam;
 };
 
+class CountableBelief;
+
+// The countable belief as a model of the shared persistent engine (rc::ai::engine::PersistentModel; shared-engine Task 3). A
+// view on one CountableBelief: the engine calls these hooks, which read (and, for the state and its covariance mirror, write)
+// that belief. Its accumulate_extra is the PERSISTENT θ-only channel ((1) flush/parallel and the room axis while not yet in,
+// (2b), (2c)), not CountableBelief::accumulate_extra (the flag-off path's, which the recursive-Laplace engine calls).
+struct CountableEngineModel
+{
+    static constexpr int N = 6;
+    static constexpr int kYaw = 5;                 // θ = [cx, cy, H, w, h, yaw]
+    using State = CountableBeliefState;
+    using Frame = CountableFrame;
+    using Mat6 = Eigen::Matrix<float, 6, 6>;
+    using Vec6 = Eigen::Matrix<float, 6, 1>;
+
+    CountableBelief* b = nullptr;
+
+    // camera points (recursive_laplace.h hooks) and their energy
+    float sdf_prim(const Eigen::Vector3f& p, const State& s, int prim) const;
+    Vec6  sdf_jacobian(const Eigen::Vector3f& p, const State& s, int prim) const;
+    std::array<float, 3> responsibilities(const Eigen::Vector3f& p, const State& s, float R) const;
+    int   n_prims() const;
+    float sigma2() const;
+    double point_energy(const Eigen::Vector3f& p, const State& s, float R) const;
+    // the camera channel's non-point terms: (2d) top and the depth_unobs_precision shares (flush boost, footprint boost)
+    void accumulate_camera_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
+    // the θ-only channel
+    void accumulate_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E = nullptr) const;
+    // the 7c.7 first-crossing LiDAR channel (set_first_crossing_for_test only); false = the engine's beam channel
+    bool accumulate_lidar_override(const State& s, const Frame& f, Mat6* Id, Vec6* bd, double* E) const;
+    // the beam channel
+    std::vector<rc::ai::beam::BeamPart> beam_parts(const State& s) const;
+    const rc::ai::beam::BeamRays&       beam_rays(const Frame& f) const { return f.beam; }
+    const rc::ai::beam::BeamConfig&     beam_config() const;
+    // e measured through B_chain = chain_B(ℓ) (spec 7c.7 b); θ does not enter it
+    Eigen::Matrix<double, 6, 3> chain_jacobian(const State&, const Eigen::Vector2f& lever) const { return rc::ai::view::chain_B(lever); }
+    void apply_constraints(State& s) const;
+    void canonicalize(State& s) const;
+    Vec6 shape_spread() const { return Vec6::Zero(); }   // shared-engine Task 5 reads the manifest; zero until then
+    Vec6 prior_cov_diag() const;
+    Vec6 process_noise_diag() const;
+    // the class prior at the class mean (spec 7c.1 amendment 11-17): seed cx, cy; class H, w, depth; the room axis' multiple
+    // of 90° nearest the seed yaw when f.room_axis_ok, else the seed yaw
+    Eigen::Matrix<double, 6, 1> class_prior_mean(const State& seed, const Frame& f) const;
+    const State& state() const;
+    void  set_state(const State& s);
+    Mat6  covariance() const;
+    void  set_covariance(const Mat6& S);
+    rc::ai::engine::SolverConfig solver() const;
+};
+
 // The bed generative model wired onto the shared rc::ai recursive-Laplace engine. Supplies only the
 // model hooks the engine calls (box SDF, responsibilities, Jacobian, constraints, and the Q/F/prior/common-
 // mode diagonals) + the optional LiDAR range factor. N = 6, static (transition = I), one primitive.
@@ -454,7 +506,7 @@ public:
     }
     // "The LiDAR channel measured" (spec 7c.8 a0, R6-I4). Flag off: today's rule, a ray-set with endpoints and precision > 0
     // (f.lidar or an extra set). Flag on: the beam set staged non-empty with Σq > 0 (rev 3.3.11; f.lidar is not read), AND a BeamConfig
-    // built by make (beam_ready; else logged once and not a measurement). frame_has_lidar, the b_L predict and the fitter's
+    // built by make (beam_ready; else logged once and not a measurement). frame_latents (the engine's LiDAR flag: the b_L predict, the channel) and the fitter's
     // rays_usable / record_channels read this; a sweep with Σq = 0 (the camera attributes nothing) is not a measurement (the belief stays at the prediction).
     bool lidar_measured(const CountableFrame& f) const;
     // The beam config was built by BeamConfig::make (it carries the quantile levels of the composite rule).
@@ -468,9 +520,9 @@ public:
     // The last persistent update's beam log (spec 7c.8 stated limit 1): the staged ray count of the frame (0 when the LiDAR
     // channel did not measure), and the count of rays with π_i > 0.99 and e_i < −5c at the returned θ (e at the model's
     // nominal surface; a LOG counter, nothing reads it). last_beam_ms: wall time spent in the beam terms of that update.
-    int    last_beam_staged() const { return last_beam_staged_; }
-    int    last_gap_rays()    const { return last_gap_rays_; }
-    double last_beam_ms()     const { return last_beam_ms_; }
+    int    last_beam_staged() const { return engine_.last_beam_staged(); }
+    int    last_gap_rays()    const { return engine_.last_gap_rays(); }
+    double last_beam_ms()     const { return engine_.last_beam_ms(); }
     // What the DATA alone says about the size (H, w, h): the posterior already contains the class size prior (blocks 2 and
     // 2a of accumulate_extra) every frame, so scoring it against the class would count that prior twice. Zero info until
     // the first frame with points. Spec 2026-11-14 countable class existence §9.
@@ -497,26 +549,28 @@ public:
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 
     // ── Persistent shared errors (params.persistent; spec lidar-measures §7c.1–7c.2) ─────────────────────────────────
-    // Joint state x = (θ, b) ∈ ℝ²¹, b = (e (δx, δy, δψ), b_cam (6), b_L (6)); covariance() is P's θθ block in float (§7c.7).
-    static constexpr int K = 27;                          // latent DOFs
-    static constexpr int kChain = 0, kCam = 3, kL = 9;    // offsets of each latent inside b (e = kChain..kChain+2)
-    // spec 7c.8 rev 3.3.13: u_cam, u_L — the channel's ego-motion share, a NEW source every persistent update (mean 0,
-    // diag(fresh_c), cross terms 0). In the state so the GN's G is ∇J (it was marginalised out of G/W but not of J).
-    static constexpr int kFc = 15, kFL = 21;
-    using MatJd = Eigen::Matrix<double, N + K, N + K>;
-    using VecKd = Eigen::Matrix<double, K, 1>;
-    const VecKd&  latent_mean() const { return b_; }
-    VecKd         latent_std()  const { return P_.diagonal().tail<K>().cwiseMax(0.0).cwiseSqrt(); }
-    const MatJd&  joint_covariance() const { return P_; }
+    // The update runs on the shared engine (rc::ai::engine::PersistentEngine, common/ai_belief/persistent_engine.h; shared-engine
+    // Task 3), this belief its model (CountableEngineModel). Joint state x = (θ, b), b = (e (δx, δy, δψ), b_cam, b_L, u_cam, u_L,
+    // s_cam, s_L) (6 each but e); covariance() is P's θθ block in float (§7c.7). u_c (spec 7c.8 rev 3.3.13): the channel's
+    // ego-motion share, a NEW source every persistent update. s_c: the shape misfit, zero variance until shared-engine Task 5.
+    using Engine = rc::ai::engine::PersistentEngine<CountableEngineModel>;
+    static constexpr int K = Engine::K;                   // latent DOFs (39)
+    static constexpr int kChain = Engine::kChain, kCam = Engine::kCam, kL = Engine::kL;   // offsets inside b (e = kChain..+2)
+    static constexpr int kFc = Engine::kFc, kFL = Engine::kFL, kSc = Engine::kSc, kSL = Engine::kSL;
+    using MatJd = Engine::MatJd;
+    using VecKd = Engine::VecKd;
+    const VecKd&  latent_mean() const { return engine_.latent_mean(); }
+    VecKd         latent_std()  const { return engine_.latent_std(); }
+    const MatJd&  joint_covariance() const { return engine_.P(); }
     // e's lever ℓ (object − robot, room frame): set when e is a new source, then moved only by the odometry (spec 7c.7 b).
-    const ChainLever&      chain_lever()      const { return lever_; }
+    const ChainLever&      chain_lever()      const { return engine_.chain_lever(); }
     // The localisation share a publisher adds to covariance()'s (cx, cy) variances, given the fitter's per-frame chain cov
     // (compute_chain_cov). Flag off: that chain cov (the Woodbury path draws it afresh every frame and does not carry it).
     // Flag on: nothing — Σ_θθ is the joint's θθ marginal, which already integrates e through B_chain (spec 7c.7 b; adding
     // the chain cov again would count the robot's pose error twice, ruling T13-5).
     Eigen::Vector2f published_chain_var(float chain_xx, float chain_yy) const
     { return params_.persistent ? Eigen::Vector2f::Zero() : Eigen::Vector2f(chain_xx, chain_yy); }
-    const Eigen::Matrix3d& last_sigma_pose()  const { return last_sigma_pose_; }
+    const Eigen::Matrix3d& last_sigma_pose()  const { return engine_.last_sigma_pose(); }
     // The relational class anchors, ONE FLAG PER ANCHOR (ruling T6-1): wall flush/parallel and room axis each enter once, on
     // the first admissible camera update whose frame stages their context (f.wall.ok / f.room_axis_ok); the flag is set only
     // then, so an object first seen without a wall still gets the wall prior when the wall becomes known. No recall path
@@ -539,17 +593,16 @@ public:
     // `inst.ai2_belief = CountableBelief(s0, p)`), from THIS frame's cloud seed (or the tracker's birth defaults) — a data
     // seed, so the first-update class prior is correct there. A future path that restores a remembered state must call
     // set_first_update_done(true) behind params.persistent.
-    bool first_update_done() const { return first_update_done_; }
-    void set_first_update_done(bool v) { first_update_done_ = v; }
+    bool first_update_done() const { return engine_.first_update_done(); }
+    void set_first_update_done(bool v) { engine_.set_first_update_done(v); }
     // spec 7c.8 rev 3.3.14: the birth cloud's EXCESS position covariance (room frame), added to σ_pos² on the (cx, cy) block of
     // the first update's class prior and of the birth Σ. Zero ⇒ today's diagonal σ_pos².
     void set_birth_position_cov(const Eigen::Matrix2f& excess)
     {
-        birth_pos_excess_ = excess;
         Sigma_.topLeftCorner<2, 2>() += excess;
-        if (joint_init_) P_.topLeftCorner<2, 2>() += excess.cast<double>();
+        engine_.set_birth_position_cov(excess);
     }
-    const Eigen::Matrix2f& birth_position_excess() const { return birth_pos_excess_; }
+    const Eigen::Matrix2f& birth_position_excess() const { return engine_.birth_position_excess(); }
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
     // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the beam set f.beam (spec 7c.8; f.lidar is
     // the flag-off path's and is not read here); θ-only = (2b), (2c) and,
@@ -559,47 +612,27 @@ public:
                              const CountableBeliefState& s_L, const CountableFrame& f,
                              Eigen::Matrix<float, 6, 6>& Id_cam, Eigen::Matrix<float, 6, 1>& bd_cam,
                              Eigen::Matrix<float, 6, 6>& Id_L,   Eigen::Matrix<float, 6, 1>& bd_L,
-                             Eigen::Matrix<float, 6, 6>& Id_th,  Eigen::Matrix<float, 6, 1>& bd_th) const;
+                             Eigen::Matrix<float, 6, 6>& Id_th,  Eigen::Matrix<float, 6, 1>& bd_th) const
+    { engine_.accumulate_channels(model(), s_th, s_cam, s_L, f, lidar_measured(f), Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th); }
     // Test/diagnostic record of the last persistent update: θ after each GN iterate, the predicted θθ block, and the
     // channel information at the converged state.
-    const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return dbg_iterates_; }   // ACCEPTED θ iterates
+    const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return engine_.dbg_iterates(); }   // ACCEPTED θ iterates
     // J = persistent_data_energy + prior_energy at θ₀ and after every accepted step of the last persistent update (spec 7c.7 d).
-    const std::vector<double>& dbg_gn_energy() const { return dbg_gn_energy_; }
+    const std::vector<double>& dbg_gn_energy() const { return engine_.dbg_gn_energy(); }
     // Model.GnTrace (diagnostic): one row per GN step of the last persistent update, and the finite-difference check.
-    struct GnTraceStep
-    {
-        int    step = 0;             // 1-based step count (accepted + rejected, as gn_it)
-        double lambda = 0.0;         // λ the step was solved at (0 = the undamped stop-rule proposal)
-        double rho = 0.0;            // Nielsen gain ratio (−1 when the predicted decrease is ≤ 0; NaN for the λ = 0 proposal)
-        double pred = 0.0;           // the quadratic model's predicted decrease
-        double J_before = 0.0, J_after = 0.0;
-        int    accepted = 0;
-        Eigen::Matrix<double, 6, 1> d = Eigen::Matrix<double, 6, 1>::Zero();             // θ step after constraints
-        Eigen::Matrix<double, 6, 1> d0_sigma = Eigen::Matrix<double, 6, 1>::Constant(std::numeric_limits<double>::quiet_NaN());   // undamped step / σ_k at this linearisation (NaN: not computed)
-    };
-    struct GnTraceFd
-    {
-        int at = 0;                  // 0 = θ₀ (b̄), 1 = the returned θ (b_post)
-        int channel = 0;             // 0 camera, 1 LiDAR, 2 θ-only, 3 all channels along θ (b fixed)
-        int k = 0;                   // θ component (cx, cy, H, w, h, yaw)
-        double grad_an = 0.0;        // ∂E/∂θ_k the solver uses, from the raw (unmarginalised) information: −bd_k (channel 3: −G_k)
-        double grad_marg = 0.0;      // −g_k after the fresh marginalisation (channels 0, 1; = grad_an otherwise)
-        double grad_fd3 = 0.0;       // central difference at h = 1e-3
-        double grad_fd4 = 0.0;       // central difference at h = 1e-4
-        double curv_an = 0.0;        // the information's diagonal I_kk (Gauss-Newton curvature)
-        double curv_fd = 0.0;        // second difference at h = 1e-3
-    };
-    const std::vector<GnTraceStep>& dbg_gn_steps() const { return dbg_gn_steps_; }
-    const std::vector<GnTraceFd>&   dbg_gn_fd()    const { return dbg_gn_fd_; }
-    long gn_update_serial() const { return gn_update_serial_; }   // bumped by every persistent update (trace de-duplication)
+    using GnTraceStep = rc::ai::engine::GnTraceStep<N>;
+    using GnTraceFd   = rc::ai::engine::GnTraceFd;
+    const std::vector<GnTraceStep>& dbg_gn_steps() const { return engine_.dbg_gn_steps(); }
+    const std::vector<GnTraceFd>&   dbg_gn_fd()    const { return engine_.dbg_gn_fd(); }
+    long gn_update_serial() const { return engine_.gn_update_serial(); }   // bumped by every persistent update (trace de-duplication)
     // The last persistent update's damped GN (spec 7c.7 d): steps taken (accepted + rejected), whether it converged (
     // the undamped (λ = 0) proposal from the current θ is below the tolerance, Task 19 fix round 2), and the final λ.
     // Logged (gn_it, gn_conv, gn_lambda); no gate reads them.
-    int    last_gn_iters()     const { return last_gn_iters_; }
-    bool   last_gn_converged() const { return last_gn_converged_; }
-    double last_lambda()       const { return last_lambda_; }
+    int    last_gn_iters()     const { return engine_.last_gn_iters(); }
+    bool   last_gn_converged() const { return engine_.last_gn_converged(); }
+    double last_lambda()       const { return engine_.last_lambda(); }
     // δ_last, the last ACCEPTED θ step (zero if none; ruling T14-1, kept by T14-4): P_θθ carries δ_last δ_lastᵀ on top of the joint posterior.
-    const Eigen::Matrix<double, 6, 1>& last_gn_step() const { return last_gn_step_; }
+    const Eigen::Matrix<double, 6, 1>& last_gn_step() const { return engine_.last_gn_step(); }
     // The data energy whose gradients accumulate_channels builds: camera (the points' mixture −log likelihood, (2d) top, the
     // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the smooth beam model of f.beam, spec 7c.8: Σ E_i, κ ≡ 1 since rev 3.3.11,
     // whose gradient accumulate_channels uses exactly) at s_L, θ-only ((1) flush/parallel and the room axis when they enter, (2b),
@@ -608,16 +641,18 @@ public:
     // the rays' n̂·u), which the GN information also holds fixed. The ego-motion share is the latent u_c (rev 3.3.13), so it
     // enters J through the prior term, as the step's G does (the old "zero while parked, step only" was wrong: live13trace).
     double persistent_data_energy(const CountableBeliefState& s_cam, const CountableBeliefState& s_L,
-                                  const CountableBeliefState& s_th, const CountableFrame& f) const;
-    const Eigen::Matrix<float, 6, 6>& dbg_Pbar_tt() const { return dbg_Pbar_tt_; }
-    const Eigen::Matrix<float, 6, 6>& dbg_Id_th()   const { return dbg_Id_th_; }
-    const Eigen::Matrix<float, 6, 6>& dbg_Id_cam()  const { return dbg_Id_cam_; }
-    const Eigen::Matrix<float, 6, 6>& dbg_Id_L()    const { return dbg_Id_L_; }
+                                  const CountableBeliefState& s_th, const CountableFrame& f) const
+    { return engine_.data_energy(model(), s_cam, s_L, s_th, f, lidar_measured(f)); }
+    const Eigen::Matrix<float, 6, 6>& dbg_Pbar_tt() const { return engine_.dbg_Pbar_tt(); }
+    const Eigen::Matrix<float, 6, 6>& dbg_Id_th()   const { return engine_.dbg_Id_th(); }
+    const Eigen::Matrix<float, 6, 6>& dbg_Id_cam()  const { return engine_.dbg_Id_cam(); }
+    const Eigen::Matrix<float, 6, 6>& dbg_Id_L()    const { return engine_.dbg_Id_L(); }
     // Test hooks.
-    MatJd&  joint_covariance_for_test() { ensure_joint(); return P_; }
-    void    set_latent_mean_for_test(const VecKd& b) { ensure_joint(); b_ = b; }
+    MatJd&  joint_covariance_for_test() { engine_.ensure_joint(Sigma_); return engine_.P_for_test(); }
+    void    set_latent_mean_for_test(const VecKd& b) { engine_.ensure_joint(Sigma_); engine_.set_latent_mean(b); }
     // The latent predict of one persistent update alone (e with its lever, and the latents of the channels f measures).
-    void    predict_latents_for_test(const CountableFrame& f) { ensure_joint(); predict_latents_persistent(f, frame_has_camera(f), lidar_measured(f)); }
+    void    predict_latents_for_test(const CountableFrame& f)
+    { engine_.ensure_joint(Sigma_); engine_.predict_latents(model(), frame_latents(f)); }
     void    apply_mode_rotation_for_test(int k) { apply_mode_rotation(k); }
     // TEST HOOK only (spec 7c.8 Pass, "Reduction"; not in the params a fitter fills): the persistent LiDAR channel reads f.lidar
     // through the 7c.6 first-crossing factor with the 7c.7 (d) solver (b̄ restart, θ-only damping, ×4/÷4 λ) — "7c.7's update" —
@@ -764,27 +799,17 @@ private:
     // LidarRays::first_crossing = true and surface_sigma_m = model_sigma_m; false: the ray-sets as staged (the historic sphere-trace).
     void accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool first_crossing = false) const;
-    // The camera points' GN information, exactly as ai::update's accumulate lambda.
-    void accumulate_points(const CountableBeliefState& s, const CountableFrame& f,
-                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
 
-    // Persistent path (params.persistent).
-    void  ensure_joint();                                 // P_ from Sigma_ the first time (params may be set after construction)
+    // Persistent path (params.persistent): the update runs on engine_ (shared-engine Task 3); these are the model-side
+    // pieces around it.
+    friend struct CountableEngineModel;
+    CountableEngineModel model() const { return CountableEngineModel{const_cast<CountableBelief*>(this)}; }   // the engine's view; the const
+                                                                                                   // engine paths take it const
     void  sanitize_joint();                               // sanitize_covariance under persistent
-    void  predict_theta_joint(float q_scale);             // θθ: +Q, then the clamp_to_prior congruence on θ's rows/cols of P_
-    float update_persistent(const CountableFrame& frame); // predict + GN with the latent restart + joint covariance
-    // Step 1 on the latents: e (lever first, then F = chain_transport(chain_dr), ρ_chain, Σ_pose) whenever a channel measures;
-    // b_cam / b_L when their channel measures (F = I, diagonal Σ_now, σ_prev = 0 ⇒ new source).
-    void  predict_latents_persistent(const CountableFrame& f, bool camera, bool lidar);
-    static bool frame_has_camera(const CountableFrame& f) { return not f.points.empty(); }
-    bool frame_has_lidar(const CountableFrame& f) const { return lidar_measured(f); }
-    // The persistent LiDAR channel (spec 7c.8): Σ E_i of f.beam (κ ≡ 1, rev 3.3.11) on the model's parts at s, its exact gradient (bd −= ∇E) and
-    // the PSD curvature (Id += W), or with Id == nullptr its energy only. Nothing unless lidar_measured(f).
-    double accumulate_beam(const CountableBeliefState& s, const CountableFrame& f, Eigen::Matrix<float, 6, 6>* Id,
-                           Eigen::Matrix<float, 6, 1>* bd) const;
+    void  predict_theta_joint(float q_scale);             // the engine's θ predict; prior_mean_ follows θ as on the flag-off path
+    // This frame's latent inputs for the engine (the channels' "measured" flags as the frame stages them).
+    rc::ai::engine::FrameLatents<N> frame_latents(const CountableFrame& f) const;
     std::vector<rc::ai::beam::BeamPart> beam_parts(const CountableBeliefState& s) const;
-    int  count_gap_rays(const CountableBeliefState& s, const CountableFrame& f) const;   // the stated-limit-1 log counter
-    Eigen::Matrix<double, N, K> chain_selector(bool camera) const;   // [B_chain(ℓ) | 𝟙 on the channel's own latent]
     float update_persistent_cycle(const CountableFrame& frame);   // update() under persistent (size summary, ω as today)
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
     float two_sided_along(const CountableBeliefState& s, const CountableFrame& f, bool along_x) const;
@@ -853,58 +878,14 @@ private:
     mutable float   dbg_wall_lambda_ = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
 
-    // Persistent joint state (params.persistent): P_ over x = (θ, b), b_ the latent mean (u_c re-drawn every update, rev 3.3.13), sig_prev_ the σ b_cam / b_L were
-    // last predicted at (0 ⇒ never measured: the next predict draws it as a new source; its e entries are unused),
-    // lever_ / last_sigma_pose_ = e's lever and the Σ_pose e was last predicted at (zero ⇒ e is a new source next time),
-    // wall_/axis_prior_added_ = the relational anchors have entered. Sigma_ mirrors P_'s θθ block in float for every reader of
-    // covariance(). Neither e nor ℓ is stored by any recall (a pose error is not an object property).
-    MatJd  P_ = MatJd::Zero();
-    VecKd  b_ = VecKd::Zero();
-    VecKd  sig_prev_ = VecKd::Zero();
-    ChainLever      lever_;
-    Eigen::Matrix3d last_sigma_pose_ = Eigen::Matrix3d::Zero();
-    bool   joint_init_  = false;
+    // Persistent joint state (params.persistent): the engine holds P over x = (θ, b), b, the latents' last σ, e's lever, the
+    // class-prior and birth-spread flags and the GN diagnostics; wall_/axis_prior_added_ = the relational anchors have entered
+    // (model-side: the θ-only channel reads them). Sigma_ mirrors P's θθ block in float for every reader of covariance().
+    // Neither e nor ℓ is stored by any recall (a pose error is not an object property).
+    Engine engine_;
     bool   wall_prior_added_ = false;   // flush + parallel have entered (T6-1)
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
-    Eigen::Matrix2f birth_pos_excess_ = Eigen::Matrix2f::Zero();   // spec 7c.8 rev 3.3.14
-    bool   first_update_done_ = false;  // the class prior at the class mean has entered (spec 7c.1 amendment 11-17)
-    std::vector<Eigen::Matrix<float, 6, 1>> dbg_iterates_;
-    std::vector<double> dbg_gn_energy_;
-    std::vector<GnTraceStep> dbg_gn_steps_;
-    std::vector<GnTraceFd>   dbg_gn_fd_;
-    long gn_update_serial_ = 0;
-    int    last_gn_iters_     = 0;
-    bool   last_gn_converged_ = false;
-    double last_lambda_       = 0.0;
-    Eigen::Matrix<double, 6, 1> last_gn_step_ = Eigen::Matrix<double, 6, 1>::Zero();
-    Eigen::Matrix<float, 6, 6> dbg_Pbar_tt_ = Eigen::Matrix<float, 6, 6>::Zero();
-    Eigen::Matrix<float, 6, 6> dbg_Id_th_   = Eigen::Matrix<float, 6, 6>::Zero();
-    Eigen::Matrix<float, 6, 6> dbg_Id_cam_  = Eigen::Matrix<float, 6, 6>::Zero();
-    Eigen::Matrix<float, 6, 6> dbg_Id_L_    = Eigen::Matrix<float, 6, 6>::Zero();
     bool   first_crossing_for_test_ = false;   // see set_first_crossing_for_test
-    int    last_beam_staged_ = 0;
-    int    last_gap_rays_    = 0;
-    mutable double last_beam_ms_ = 0.0;                 // accumulated by accumulate_beam over one update
-    // One persistent update's beam evaluations (on only inside update_persistent, where the frame is fixed): every beam call
-    // there builds the energy WITH its gradient and curvature and keeps the last one, keyed by the exact float state. The GN
-    // evaluates J at a candidate and, if it is accepted, linearises at that same point next: one build instead of an energy
-    // plus a build (and J₀ / the final P reuse theirs). Off (outside an update) every call computes afresh.
-    struct BeamCache
-    {
-        struct Slot
-        {
-            bool valid = false;
-            std::array<float, 6> s{};
-            double E = 0.0;
-            Eigen::Matrix<double, 6, 6> W = Eigen::Matrix<double, 6, 6>::Zero();
-            Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Zero();
-        };
-        bool on = false;
-        std::array<Slot, 2> slot{};   // two states: the accepted iterate survives the rejected trials after it
-        int last = 0;                 // the slot used last (the other one is overwritten next)
-        void clear() { slot[0].valid = slot[1].valid = false; }
-    };
-    mutable BeamCache beam_cache_;
     mutable bool   beam_unready_logged_ = false;        // "BeamConfig not built by make" printed once per belief
     mutable bool   beam_inconsistent_logged_ = false;   // "ray-set refused (per-ray vectors misaligned)" printed once (N3)
 };
