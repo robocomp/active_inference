@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Step 0, NEES of the countables on the persistent path, for runs that nees_agents.py cannot score.
-   nees_persistent.py <run_dir> [<run_dir> ...]   (WBT_PATH selects the world)
+   nees_persistent.py [--gt mesh|boundingobject] <run_dir> [<run_dir> ...]   (WBT_PATH selects the world; --gt as in nees_agents.py, default mesh)
 
 Why a second script: nees_agents.py needs c3a_instances.csv (ltom_repertory_end.json) and a dwell of >= 10 samples after
 the 3 s trim in each room window (legs.tsv). The objects_live* runs have neither: the legs run straight into the next
@@ -67,12 +67,12 @@ def run_rows(run, polys, gt):
     fits = room_windows(run, polys)
     G = N.gauges(run); Gts = [g[0] for g in G]
     out = []
-    if USE_CENTRE:
-        sys.path.insert(0, os.path.join(HERE, '..', 'mask_error'))
-        import measure_mask_error as MM
-        yaw = {b[0]: b[4] for b in MM.graded_boxes(W.WBT, ['toilet'], {'toilet': MM.KNOWN_EXTENTS['toilet']})}
-        gt = [(o[0], o[1], o[2] + math.cos(yaw[o[0]]) * MM.KNOWN_EXTENTS[o[1]][4] - math.sin(yaw[o[0]]) * MM.KNOWN_EXTENTS[o[1]][5],
-               o[3] + math.sin(yaw[o[0]]) * MM.KNOWN_EXTENTS[o[1]][4] + math.cos(yaw[o[0]]) * MM.KNOWN_EXTENTS[o[1]][5])
+    if USE_CENTRE and N.GT == 'boundingobject':   # (--gt mesh already carries the footprint centre)
+        sys.path.insert(0, os.path.join(HERE, '..', 'gt_mesh'))
+        from mesh_extents import KNOWN_EXTENTS
+        import mesh_extents as ME
+        yaw = {n: v['yaw'] for n, v in ME.world_layers(W.WBT).items() if v['cls'] == 'toilet'}
+        gt = [(o[0], o[1], *ME.to_world(o[2], o[3], yaw[o[0]], KNOWN_EXTENTS['toilet'][4], KNOWN_EXTENTS['toilet'][5]))
               if o[1] == 'toilet' and o[0] in yaw else o for o in gt]
     for cls in CLASSES:
         p = f'{run}/{cls}_ai2_log.csv'
@@ -107,10 +107,16 @@ def run_rows(run, polys, gt):
 if __name__ == '__main__':
     rooms, _, _ = W.rooms()
     polys = {k: v['poly'] for k, v in rooms.items()}
-    gt = C.gt_objects(W.WBT)
-    print('world:', W.WBT)
+    args, it = [], iter(sys.argv[1:])
+    for a in it:
+        if a == '--gt': N.GT = next(it)
+        elif a.startswith('--gt='): N.GT = a[5:]
+        else: args.append(a)
+    if N.GT not in ('mesh', 'boundingobject'): sys.exit('--gt must be mesh (default) or boundingobject')
+    gt = N.gt_objects(W.WBT)
+    print('world:', W.WBT, '| ground truth:', N.GT)
     allr = defaultdict(list)
-    for run in sys.argv[1:]:
+    for run in args:
         run = os.path.abspath(run.rstrip('/'))
         rows = run_rows(run, polys, gt)
         with open(f'{run}/nees_persistent_rows.csv', 'w', newline='') as fh:

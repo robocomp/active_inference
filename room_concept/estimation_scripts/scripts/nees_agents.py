@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Per-agent NEES calibration from existing run logs (AuRo, 2026-11-22). No new runs.
-   nees_agents.py <run_dir> [<run_dir> ...]      prints a table; writes <run>/nees_rows.csv
+   nees_agents.py [--gt mesh|boundingobject] <run_dir> [<run_dir> ...]      prints a table; writes <run>/nees_rows.csv
+   --gt mesh (default): object truth = centre of the graded visual-mesh layer; boundingobject: the earlier numbers (see GT below)
 
 NEES = e^T P^-1 e with the agent's own published sigma; NEES/DOF has median ~0.69 (chi2 median / DOF: 0.455 for 1 DOF,
 0.693 for 2, 0.789 for 3) and P(NEES/DOF <= 1) = 0.68 / 0.63 / 0.61 when the sigma is calibrated (Gaussian, DOF 1/2/3).
@@ -33,6 +34,26 @@ DOOR_W, DOOR_H = 1.0, 2.1
 OBJ = ['chair', 'table', 'refrigerator', 'hood', 'nightstand', 'bed', 'toilet']
 COUNTABLE = {'nightstand', 'bed', 'toilet'}
 FIXTURE_FRAMES = os.environ.get('NEES_FIXTURE_FRAMES') == '1'
+# Ground truth of an object centre: 'mesh' = the centre of the class's graded layer read from the VISUAL mesh (tools/gt_mesh/mesh_extents.py:
+# bed mattress, nightstand body, toilet footprint, chair seat, table top, fridge body, hood canopy); 'boundingobject' = the numbers of
+# the earlier runs (Webots origin, plus the 11-22 fridge offset). A class with no mesh layer (Desk, WoodenTable, RoundTable) keeps the old number.
+GT = 'mesh'
+sys.path.insert(0, os.path.join(HERE, '..', '..', '..', 'tools', 'gt_mesh'))
+
+
+def gt_objects(wbt, mode=None):
+    """[(name, class, x, y)] as C.gt_objects, with the centre of the graded mesh layer when mode (default GT) is 'mesh'."""
+    base = C.gt_objects(wbt)
+    if (mode or GT) != 'mesh': return base
+    import mesh_extents as ME
+    lay = ME.world_layers(wbt)
+    out = []
+    for nm, c, x, y in base:
+        L = lay.get(nm)
+        if L is None or L['cls'] != c: out.append((nm, c, x, y)); continue
+        ox, oy = C.POSE_OVERRIDE.get(nm, (L['x'], L['y']))      # the run's live origin, when a script moved the object
+        out.append((nm, c, *ME.to_world(ox, oy, L['yaw'], L['box'][4], L['box'][5])))
+    return out
 
 
 def visit_fits(run):
@@ -146,7 +167,7 @@ def run_nees(run):
     if not os.path.exists(ip): return rows
     rp = room_poses(run)
     G = gauges(run); Gts = [g[0] for g in G]
-    gtobj = {o[0]: o for o in C.gt_objects(C.W.WBT)}
+    gtobj = {o[0]: o for o in gt_objects(C.W.WBT)}
     match = {r['name']: (r['room'], gtobj[r['gt_object']]) for r in csv.DictReader(open(ip))
              if r['verdict'] == 'match' and r['gt_object'] in gtobj}
     for cls in OBJ:
@@ -177,8 +198,16 @@ def run_nees(run):
 
 
 if __name__ == '__main__':
+    args = []
+    it = iter(sys.argv[1:])
+    for a in it:
+        if a == '--gt': GT = next(it)
+        elif a.startswith('--gt='): GT = a[5:]
+        else: args.append(a)
+    if GT not in ('mesh', 'boundingobject'): sys.exit('--gt must be mesh or boundingobject')
+    print(f'ground truth: {GT}')
     allrows = defaultdict(list); units = defaultdict(set); runs_of = defaultdict(set); extra = defaultdict(list)
-    for run in sys.argv[1:]:
+    for run in args:
         run = os.path.abspath(run.rstrip('/'))
         rows = run_nees(run)
         with open(f'{run}/nees_rows.csv', 'w', newline='') as fh:

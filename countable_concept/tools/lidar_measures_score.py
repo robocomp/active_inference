@@ -181,6 +181,27 @@ def load_scene(path):
     return gt, walls
 
 
+def mesh_gt(gtobjs, wbt):
+    """The scene's bed / nightstands / toilet re-read from the VISUAL meshes of the world (tools/gt_mesh/mesh_extents.py): the bed's
+    mattress, the nightstand body, the footprint of the toilet's bowl + tank. cx, cy = the graded box's centre in the world, dx, dy =
+    its axis-aligned world extents. `top` keeps its value: height is not a graded quantity. Objects the world does not have are kept."""
+    sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'gt_mesh'))
+    import mesh_extents as ME
+    lay = ME.world_layers(wbt)
+    by = {'bed': [], 'nightstand': [], 'toilet': []}
+    for L in lay.values():
+        if L['cls'] in by: by[L['cls']].append(L)
+    for c in by: by[c].sort(key=lambda L: L['cx'])           # nightstand_%d of load_scene is numbered by x
+    idx = {'bed': 0, 'nightstand': 0, 'toilet': 0}
+    out = []
+    for g in gtobjs:
+        k = idx[g['cls']]; idx[g['cls']] += 1
+        if k >= len(by[g['cls']]): out.append(g); continue
+        L = by[g['cls']][k]; c, sn = abs(math.cos(L['yaw'])), abs(math.sin(L['yaw'])); lx, ly = L['box'][0], L['box'][1]
+        out.append(dict(g, cx=L['cx'], cy=L['cy'], dx=c * lx + sn * ly, dy=sn * lx + c * ly))
+    return out
+
+
 def room_tf(room, rooms):
     ox, oy, rot = rooms[room]
     c, s = math.cos(rot), math.sin(rot)
@@ -609,12 +630,19 @@ def main():
     ap.add_argument('--pin', action='store_true', help="fit each room's translation to the class's own GT (placement NOT independent)")
     ap.add_argument('--room', action='append', default=[], metavar='NAME=x,y,rot', help='override a room origin')
     ap.add_argument('--scene', default=SCENE)
+    ap.add_argument('--gt', choices=('mesh', 'boundingobject'), default='mesh',
+                    help='ground truth of the objects: mesh = the graded layer of the visual mesh read from --wbt (bed mattress, nightstand body, toilet '
+                         'footprint); boundingobject = the earlier numbers (--scene csv, built from the collision boxes)')
+    ap.add_argument('--wbt', default=os.environ.get('WBT_PATH', '/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt'),
+                    help='world the run was made in (default: the live world; WBT_PATH overrides)')
     a = ap.parse_args()
     rooms = {}
     for s in a.room:
         k, v = s.split('=')
         rooms[k] = tuple(float(x) for x in v.split(','))
     gtobjs, walls = load_scene(a.scene)
+    if a.gt == 'mesh': gtobjs = mesh_gt(gtobjs, a.wbt)
+    print('ground truth: ' + ('mesh layers of ' + a.wbt if a.gt == 'mesh' else 'boundingobject numbers of ' + a.scene))
     print('lidar_measures_score  (spec 2026-11-15 §8)')
     print('look = fresh-mask run, gap <= %d ms; settled = from the first fresh row with range <= %.1f m' % (GAP_MS, NEAR_M))
     print('Sigma PASS = max std <= %.2f m AND >= %.0f %% of settled rows with rms/3 <= std <= 3*rms (per DOF, rms of the true error)' % (STD_MAX, 100 * FRAC_OK))

@@ -36,6 +36,8 @@ import numpy as np
 import cv2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, '..', 'gt_mesh'))
+from mesh_extents import KNOWN_EXTENTS, obj_extents   # THE source of the graded-layer extents (tools/gt_mesh)
 SC = os.path.join(HERE, '..', '..', 'room_concept', 'estimation_scripts', 'scripts')
 CAM_BACK_M = 0.075        # ZED sits 0.075 m behind the body origin (ROBOT_GEOMETRY.md)
 HALF_PX = 0.5             # see the pixel-centre convention above
@@ -119,20 +121,6 @@ def fraction_outside(mask, hull):
 
 
 # ---------------------------------------------------------------- world: graded boxes
-def obj_extents(path):
-    """Bounding box (lo, hi) of the vertices of a .obj or Collada .dae mesh, in the mesh's own frame."""
-    if path.endswith('.dae'):
-        import xml.etree.ElementTree as ET
-        v = []
-        for fa in ET.parse(path).getroot().iter():
-            if fa.tag.endswith('float_array') and fa.get('id', '').endswith('positions-array'):
-                v.append(np.array(fa.text.split(), float).reshape(-1, 3))
-        v = np.vstack(v)
-    else:
-        v = np.array([[float(t) for t in l.split()[1:4]] for l in open(path) if l.startswith('v ')])
-    return v.min(0), v.max(0)
-
-
 def graded_boxes(wbt, classes, extents):
     """[(name, class, x, y, yaw, lx, ly, z0, z1)]; extents: class -> (lx, ly, z0, z1) from --extents, else from the
     object's own .obj mesh (bounding box in the object frame, centred in x, y)."""
@@ -264,14 +252,6 @@ def summarise(rows):
                       mean_of_frame_means_px=float(np.mean(fm)), eps_px=float(np.mean(fo)),
                       median_resid_std_px=float(np.median([r['resid_std_px'] for r in R])))
     return out
-
-
-# Graded-layer extents taken from meshes that are not in the world folder (lx, ly, z0, z1, ox, oy; object frame, m).
-# One source for every script. Toilet: all IndexedFaceSet points of Toilet.proto x 0.2 (Transform scale 0.2).
-KNOWN_EXTENTS = {
-    'toilet': (0.738, 0.589, 0.002, 1.013, -0.066, -0.009),
-    'bed': (1.971, 1.571, 0.361, 0.609, 0.0, 0.0),     # Bed.proto mattress.obj (Webots asset cache), object 'mattress'
-}
 
 
 def block_length(x):
