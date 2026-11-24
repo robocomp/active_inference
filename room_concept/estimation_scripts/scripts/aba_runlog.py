@@ -41,14 +41,61 @@ def read_csv(path):
     with open(path) as fh: return list(csv.DictReader(fh))
 
 
-def segments(run):
-    """{DEF: {seg: dict(t_claim, t_arrive, t_dwell0, t_dwell1, goto, ...)}} from aba_segments.tsv (empty without it)."""
+SEGS = ('A1', 'B', 'A2')
+TIMES = ('t_claim_ms', 't_arrive_ms', 't_dwell0_ms', 't_dwell1_ms')
+
+
+def segments(run, report=print):
+    """{DEF: {seg: dict}} from aba_segments.tsv (empty without it). A malformed row (a missing column, a time that is not an
+    integer) is SKIPPED and said so: its segment is then missing, and visit_validity gives the object NO VERDICT."""
     out = {}
-    for r in read_tsv(run / 'aba_segments.tsv'):
-        d = dict(r)
-        for k in ('t_claim_ms', 't_arrive_ms', 't_dwell0_ms', 't_dwell1_ms'): d[k] = int(r[k])
-        out.setdefault(r['def'], {})[r['seg']] = d
+    for i, r in enumerate(read_tsv(run / 'aba_segments.tsv'), 2):
+        try:
+            d = dict(r)
+            if any(v is None for v in d.values()) or None in d: raise ValueError('wrong number of columns')
+            for k in TIMES: d[k] = int(r[k])
+            out.setdefault(r['def'], {})[r['seg']] = d
+        except (KeyError, ValueError, TypeError) as e:
+            report(f'aba_segments.tsv line {i}: malformed ({e}) — skipped')
     return out
+
+
+def controller_goal_tolerance(root='/home/pbustos/robocomp/components/active_inference'):
+    """The controller's arrival radius (m) and where it was read: a Controller.GoalThreshold key in controller/etc/config.toml
+    if the config sets one, else the compiled default `goal_threshold` in controller/src/controller_types.h — the value the
+    controller judges arrival with (the config sets none today; mood scaling of it is off by design)."""
+    import re
+    cfg = os.path.join(root, 'controller', 'etc', 'config.toml')
+    if os.path.exists(cfg):
+        for line in open(cfg):
+            m = re.match(r'\s*GoalThreshold\s*=\s*([-+0-9.eE]+)', line)
+            if m: return float(m.group(1)), f'{cfg} GoalThreshold'
+    hdr = os.path.join(root, 'controller', 'src', 'controller_types.h')
+    for line in open(hdr):
+        m = re.match(r'\s*float\s+goal_threshold\s*=\s*([-+0-9.eE]+)f?\s*;', line)
+        if m: return float(m.group(1)), f'{hdr} goal_threshold (no config key)'
+    raise KeyError('controller goal tolerance not found')
+
+
+def visit_validity(S, tol_m):
+    """[] when the visit happened as scripted, else the reasons it did not: all three segments present, goto / dwell completed,
+    face completed or none, both gain queries answered, and the Webots arrival within the controller's goal tolerance of the
+    scripted standpoint."""
+    why = []
+    for s in SEGS:
+        if s not in S: why.append(f'{s}: segment missing'); continue
+        r = S[s]
+        if r.get('goto') != 'completed': why.append(f'{s}: goto {r.get("goto")}')
+        if r.get('face') not in ('completed', 'none'): why.append(f'{s}: face {r.get("face")}')
+        if r.get('dwell') != 'completed': why.append(f'{s}: dwell {r.get("dwell")}')
+        if r.get('query_answered') != 'yes': why.append(f'{s}: claim gain query {r.get("query_answered")}')
+        if r.get('arr_query_answered') != 'yes': why.append(f'{s}: arrival gain query {r.get("arr_query_answered")}')
+        try:
+            d = math.hypot(float(r['gt_x']) - float(r['stand_x']), float(r['gt_y']) - float(r['stand_y']))
+        except (KeyError, ValueError, TypeError):
+            d = math.nan
+        if not d <= tol_m: why.append(f'{s}: arrival {d:.3f} m from the standpoint (tolerance {tol_m:.3f} m)')
+    return why
 
 
 def checkout_root(run):

@@ -131,15 +131,19 @@ def theta_var(views, k, prm, hyp):
     previous one), chain (list of 6 chain variances))]."""
     idx = [(j, c) for j, v in enumerate(views) for c in ('cam', 'L') if v[c]]
     if not idx: return prm['P0'][k]
+    # cumulative log rho per channel: corr(view j, view j') = exp(L[max] - L[min])
     lr = {c: np.cumsum([0.0] + [math.log(max(v['rho_' + c], 1e-300)) for v in views[1:]]) for c in ('cam', 'L', 'chain')}
-    d = prm['d'][k]; n = len(idx); C = np.zeros((n, n))
-    for a, (j, c) in enumerate(idx):
-        for b, (j2, c2) in enumerate(idx):
-            lo, hi = min(j, j2), max(j, j2)
-            val = math.sqrt(views[j]['chain'][k] * views[j2]['chain'][k]) * math.exp(lr['chain'][hi] - lr['chain'][lo])
-            if c == c2: val += prm['v'][c][k] * math.exp(lr[c][hi] - lr[c][lo])
-            if hyp == 'S' or c == c2: val += d
-            C[a, b] = val
+    J = np.array([j for j, _ in idx]); ch = np.array([c for _, c in idx])
+    lo, hi = np.minimum.outer(J, J), np.maximum.outer(J, J)
+    sd = np.sqrt(np.array([views[j]['chain'][k] for j in J]))
+    C = np.outer(sd, sd) * np.exp(lr['chain'][hi] - lr['chain'][lo])
+    same = ch[:, None] == ch[None, :]
+    for c in ('cam', 'L'):
+        m = same & (ch[:, None] == c)
+        C[m] += (prm['v'][c][k] * np.exp(lr[c][hi] - lr[c][lo]))[m]
+    d = prm['d'][k]
+    C += d if hyp == 'S' else d * same
+    n = len(idx)
     one = np.ones(n)
     # lstsq: near-duplicate views (rho within roundoff of 1) make C numerically singular; the minimum-norm solve is the
     # pseudo-inverse's answer (numerical rank, not a modelling cut-off).

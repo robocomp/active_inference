@@ -232,3 +232,26 @@ This addendum follows a coordinator ruling on P1 concern 3. Every number in sect
 - The planner's own offer is still printed at each claim, as context only, with its distance from the scripted standpoint.
 
 **What did not change.** The registered expectation for A2 still applies: the derived band is not "small", for the path-ρ reason given in section 4 (iii). Both the promise and the net change at A2 are predicted to be about half of B's.
+
+## Addendum 2 (2026-11-25), before any run: the promise is tested against the dwell it predicts
+
+This addendum follows the task review (item I2). It supersedes the promise checks of the first addendum. The registered bands and numbers are still unchanged.
+
+**Why the first addendum's check was wrong.** It compared the claim-time promise with the net change from the claim to the end of the dwell. That window includes the drive to the standpoint, where every update is a different look, so the promise of ONE hypothetical update does not predict it.
+
+**Why the new check is the right one.** Parked at the standpoint, every logged ρ is 1. The shared camera, LiDAR and chain errors are then the same on every frame of the dwell, so the whole dwell is ONE look: its information on θ is that of one update, and later parked frames add nothing beyond saturation (section 3). That one look is exactly what the engine's `predicted_gain` evaluates.
+
+**What changed.**
+- **A second gain query.** `aba_visit.sh` sends it on ARRIVAL, after the facing turn and before the dwell starts. It is evaluated on the arrival Σ, for the pose the robot reached (Webots ground truth, facing the object).
+- **The check, at A1, B and A2:** |arrival promise − dwell net| ≤ 6 ln(1.1) = 0.572 nats.
+  - The dwell net is ½ Σ_k ln(σ_k²(t_dwell0) / σ_k²(t_dwell1)) from the logged σ.
+  - The joint-against-marginal difference is still not covered (first addendum).
+- **Kept:** at B and A2, the visit's net change (claim → end of the dwell) must lie in the registered band, as registered in section 4 (iii).
+- **No longer a check.** The claim-time promise is printed as context only. It is no longer tested against a band, and neither is the arrival promise. The band predicts a visit, not one look.
+- **Visit validity (review I1).** A segment counts only if it happened as scripted:
+  - all of A1, B and A2 are present;
+  - goto, face and dwell completed (face may also be none);
+  - both gain queries were answered;
+  - the Webots arrival lies within the controller's goal tolerance of the scripted standpoint. That tolerance is the controller's `goal_threshold`, 0.25 m: the compiled default in `controller/src/controller_types.h`, because `controller/etc/config.toml` sets no key for it.
+
+  Otherwise the object gets NO VERDICT and FAILS.

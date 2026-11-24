@@ -243,6 +243,7 @@ def plan(wbt, defn, live=False):
 # ------------------------------------------------------------------------------------------------ frames
 def read_gt_error(path):
     rows = []
+    if not os.path.exists(path): return rows
     with open(path) as fh:
         for r in csv.DictReader(fh):
             try:
@@ -255,6 +256,7 @@ def read_gt_error(path):
 
 def read_gauge(path):
     G = []
+    if not os.path.exists(path): return G
     with open(path) as fh:
         for r in csv.DictReader(fh):
             try: G.append((int(r['ts_ms']), float(r['gauge_x']), float(r['gauge_y']), float(r['gauge_theta'])))

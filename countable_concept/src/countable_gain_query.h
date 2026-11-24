@@ -11,6 +11,7 @@
 #pragma once
 
 #include <charconv>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -59,23 +60,24 @@ inline std::optional<GainQuery> parse_gain_query(std::string_view line)
     if (not gain_query_detail::parse_whole(f[0], q.id) or q.id <= 0) return std::nullopt;
     if (not gain_query_detail::parse_whole(f[2], q.x) or not gain_query_detail::parse_whole(f[3], q.y) or not gain_query_detail::parse_whole(f[4], q.yaw))
         return std::nullopt;
+    // from_chars accepts "inf" / "nan": a pose that is not a pose is malformed, not a query
+    if (not std::isfinite(q.x) or not std::isfinite(q.y) or not std::isfinite(q.yaw)) return std::nullopt;
     return q;
 }
 
-// Every well-formed request of a file's text whose id is above `last_id`, in file order.
+// Every well-formed request of a file's text whose id is above `last_id`, in file order. Only '\n'-TERMINATED lines count: a
+// final line without its newline may be a request still being written (the script appends it), so it waits for the next
+// read — the caller must not cache the file's mtime while the text does not end in '\n' (gain_query_text_complete).
+// A '\r' before the newline is whitespace (CRLF lines parse). Ids need not be increasing in the file: any id above last_id is
+// answered; the caller keeps the max as its new last_id.
 inline std::vector<GainQuery> new_gain_queries(std::string_view text, long last_id)
 {
     std::vector<GainQuery> out;
     std::size_t i = 0;
-    while (i <= text.size())
-    {
-        const std::size_t j = text.find('\n', i);
-        const std::string_view line = text.substr(i, j == std::string_view::npos ? std::string_view::npos : j - i);
-        if (const auto q = parse_gain_query(line); q and q->id > last_id) out.push_back(*q);
-        if (j == std::string_view::npos) break;
-        i = j + 1;
-    }
+    for (std::size_t j = text.find('\n', i); j != std::string_view::npos; i = j + 1, j = text.find('\n', i))
+        if (const auto q = parse_gain_query(text.substr(i, j - i)); q and q->id > last_id) out.push_back(*q);
     return out;
 }
+inline bool gain_query_text_complete(std::string_view text) { return text.empty() or text.back() == '\n'; }
 
 }  // namespace rc

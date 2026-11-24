@@ -949,9 +949,10 @@ void SpecificWorker::serve_gain_queries()
     std::error_code ec;
     const auto mt = std::filesystem::last_write_time(req, ec);
     if (ec or mt == gain_query_mtime_) return;          // no file, or nothing new since the last read
-    gain_query_mtime_ = mt;
     std::ifstream f(req);
     const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // a half-written last line is re-read next tick: remember the mtime only once the text is whole
+    if (rc::gain_query_text_complete(text)) gain_query_mtime_ = mt;
     for (const rc::GainQuery& q : rc::new_gain_queries(text, gain_query_last_id_))
     {
         gain_query_last_id_ = std::max(gain_query_last_id_, q.id);

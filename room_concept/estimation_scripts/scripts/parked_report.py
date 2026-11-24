@@ -78,6 +78,8 @@ def no_aba(run, cls_list):
 def main(arg):
     run = R.run_path(arg)
     segs = R.segments(run)
+    if not segs and (run / 'aba_segments.tsv').exists():
+        print(f'{run.name}: aba_segments.tsv has no well-formed row: NO VERDICT -> FAIL'); return 1
     if not segs:
         no_aba(run, ('nightstand', 'bed', 'toilet')); return 0
     root = R.checkout_root(run)
@@ -86,17 +88,31 @@ def main(arg):
           f'manifest/config from {root}')
     score = {h: [0, 0] for h in Mdl.HYPS}   # passes, checks
     llr, llr_n = 0.0, 0
+    tol_m, tol_src = R.controller_goal_tolerance()
+    print(f'visit validity: arrival within {tol_m:.3f} m of the scripted standpoint ({tol_src})')
     for defn, S in segs.items():
+        why = R.visit_validity(S, tol_m)
+        if why:
+            # the visit did not happen as scripted: nothing it logged may pass a check
+            print(f'== {defn}: NO VERDICT -> FAIL (' + '; '.join(why) + ')')
+            for h in Mdl.HYPS: score[h][1] += 1
+            continue
         plan = R.plan_of(run, defn)
-        if plan is None or 'A1' not in S: print(f'== {defn}: no plan or no A1 segment'); continue
+        if plan is None:
+            print(f'== {defn}: no aba_plan_{defn}.json: NO VERDICT -> FAIL')
+            for h in Mdl.HYPS: score[h][1] += 1
+            continue
         T = plan['truth']; cls = T['cls']; prm = Mdl.class_params(cls, root)
         rows = R.ai2_rows(run, cls)
         a1 = S['A1']
         node, n = R.match_node(rows, a1['t_dwell0_ms'], a1['t_dwell1_ms'])
         print(f'== {defn} ({cls}): node {node} ({n} updates in the A1 dwell)')
-        if node is None: print('   no update of any node in the A1 dwell: every check FAILS'); continue
+        if node is None:
+            print('   no update of any node in the A1 dwell: NO VERDICT -> FAIL')
+            for h in Mdl.HYPS: score[h][1] += 1
+            continue
         ups = R.updates(rows, node)
-        order = [s for s in ('A1', 'B', 'A2') if s in S]
+        order = list(R.SEGS)   # all three present (visit_validity)
         dwells = [(S[s]['t_dwell0_ms'], S[s]['t_dwell1_ms']) for s in order]
         logged, pred, nch = {}, {}, {}
         for i, s in enumerate(order):

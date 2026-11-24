@@ -13,7 +13,8 @@
 #                      the agent's etc/gain_query.txt (countable_concept/src/countable_gain_query.h: "<id> * x y yaw", the
 #                      published room frame, yaw = the engine's math heading facing the object); every instance of the class
 #                      answers in etc/gain_query.csv with EpistemicPlanner::gain_at — the very computation of its offers — and the
-#                      update serial. The segment row carries the request id (query_id); the script waits (<= 5 s) for the answer.
+#                      update serial. The script waits (<= 5 s) for each answer. Two queries per segment: at the CLAIM (query_id,
+#                      context) and on ARRIVAL, before the dwell, for the pose the robot reached (arr_query_id: the tested promise).
 #   aba_promises.tsv   context only: every node's last offers.csv row at the claim (the planner's OWN standpoint's promise)
 #   aba_plan_<DEF>.json  the plan and the ground truth
 # Missions go through controller/remote_cmd.txt like the tour scripts: go_to pose:<room>(x, y, yaw) (the controller does not
@@ -38,7 +39,7 @@ log "$CLS at ($CX, $CY): A ($AX, $AY)  B ($BX, $BY)  dwell ${DWELL_S}s"
 OFFERS=$CWT/${CLS}_concept/etc/offers.csv
 GQ_REQ=$CWT/${CLS}_concept/etc/gain_query.txt; GQ_ANS=$CWT/${CLS}_concept/etc/gain_query.csv
 SEG=$RUN/aba_segments.tsv; PROM=$RUN/aba_promises.tsv
-[ -f $SEG ] || printf 'def\tseg\tstand_x\tstand_y\tstand_yaw\troom\tpub_x\tpub_y\tpub_yaw\tfit\tt_claim_ms\tt_arrive_ms\tt_dwell0_ms\tt_dwell1_ms\tgoto\tturn_deg\tface\tgt_x\tgt_y\tgt_yaw\tdwell\tquery_id\tquery_answered\n' > $SEG
+[ -f $SEG ] || printf 'def\tseg\tstand_x\tstand_y\tstand_yaw\troom\tpub_x\tpub_y\tpub_yaw\tfit\tt_claim_ms\tt_arrive_ms\tt_dwell0_ms\tt_dwell1_ms\tgoto\tturn_deg\tface\tgt_x\tgt_y\tgt_yaw\tdwell\tquery_id\tquery_answered\tarr_query_id\tarr_query_answered\n' > $SEG
 [ -f $PROM ] || printf 'def\tseg\tt_claim_ms\tnode\tt_ms\tstandpoint_x\tstandpoint_y\tstandpoint_yaw\tpromised_nats\n' > $PROM
 
 # run_mission <name> <body> <timeout_s>: sets M (completed | failed ... | aborted ... | TIMEOUT)
@@ -47,8 +48,9 @@ run_mission() {
   printf 'mission "%s"\n%s\n' "$1" "$2" > $B/controller/remote_cmd.txt
   M=TIMEOUT
   for i in $(seq 1 $(($3 * 2))); do
-    m=$(grep -a -o -E "mission '$1': (completed|failed|aborted)[^\"]{0,80}" $L/controller.log | tail -1)
-    [ -n "$m" ] && { M=${m#*: }; break; }
+    # co(mpleted)? as warm_start_tour.sh (3640149d): the line can be cut after "co"
+    m=$(grep -a -o -E "mission '$1': (co(mpleted)?|failed|aborted)[^\"]{0,80}" $L/controller.log | tail -1)
+    [ -n "$m" ] && { M=${m#*: }; case "$M" in co|co[^m]*) M=completed;; esac; break; }
     sleep 0.5
   done
   [ "$M" = TIMEOUT ] && echo stop > $B/controller/remote_cmd.txt
@@ -71,30 +73,48 @@ for n, r in sorted(last.items()):
 EOF
 }
 
+gain_query() {   # id world_x world_y: a gain query for that standpoint, facing the object; sets QA = yes | no | frame_failed
+  local pose
+  if ! pose=$(python3 $S/aba_geometry.py query_pose "$2" "$3" "$CX" "$CY") || [ -z "$pose" ]; then
+    QA=frame_failed; log "gain query $1: frame conversion FAILED (not asked)"; return; fi
+  echo "$1 * $pose" >> "$GQ_REQ"
+  QA=no
+  for i in $(seq 1 25); do grep -q "^[0-9]*,$1," "$GQ_ANS" 2>/dev/null && { QA=yes; break; }; sleep 0.2; done
+  log "gain query $1 at ($2, $3): $QA $(grep "^[0-9]*,$1," "$GQ_ANS" 2>/dev/null | cut -d, -f3,8 | tr '\n' ' ')"; }
+
 visit() {   # seg world_x world_y world_yaw
-  local seg=$1 tc ta t0 t1 room pub fit go turn face gt dw
-  tc=$(now_ms); record_promises $seg $tc
-  # the promise of the scripted standpoint, asked before the robot moves (ids are epoch ms: increasing across runs)
-  local qid=$tc qa=no
-  echo "$qid * $(python3 $S/aba_geometry.py query_pose $2 $3 $CX $CY)" >> $GQ_REQ
-  for i in $(seq 1 25); do grep -q "^[0-9]*,$qid," $GQ_ANS 2>/dev/null && { qa=yes; break; }; sleep 0.2; done
-  log "$seg: gain query $qid answered: $qa $(grep "^[0-9]*,$qid," $GQ_ANS 2>/dev/null | cut -d, -f3,8 | tr '\n' ' ')"
+  local seg=$1 tc ta=0 t0=0 t1=0 room px=nan py=nan pyaw=nan fit=none go turn=nan face=none gx=nan gy=nan gyaw=nan dw=none
+  local qid qa aqid=0 aqa=no out gt
+  tc=$(now_ms); record_promises "$seg" "$tc"
+  # context: the promise of the scripted standpoint at the claim, before the robot moves (ids are epoch ms: increasing)
+  qid=$tc; gain_query "$qid" "$2" "$3"; qa=$QA
   room=$(room_now)
-  read -r px py pyaw fit <<< "$(python3 $S/aba_geometry.py to_room $2 $3 $4)"
-  log "$seg: claim at $tc, go_to pose:$room($px, $py, $pyaw) [$fit]"
-  run_mission "aba_${DEF}_${seg}_go" "  go_to pose:${room}(${px}, ${py}, ${pyaw})" $MOVE_TIMEOUT_S; go=$M
-  ta=$(now_ms)
-  turn=$(python3 $S/aba_geometry.py face $CX $CY)
-  # a zero turn is refused by the controller ("nothing to do"): the degenerate case, not a tolerance
-  if [ "$turn" = "0.0" ] || [ "$turn" = "-0.0" ]; then face=none
-  else run_mission "aba_${DEF}_${seg}_face" "  move turn_deg=${turn}deg" 60; face=$M; fi
-  t0=$(now_ms); gt=$(python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1"\t"$2"\t"$5}')
-  [ -n "$gt" ] || gt=$(printf 'nan\tnan\tnan')   # keep the row's columns when Webots does not answer
-  log "$seg: go_to $go, face $turn deg $face; dwell ${DWELL_S}s from $t0 at $(echo $gt | tr '\t' ' ')"
-  run_mission "aba_${DEF}_${seg}_dwell" "  wait s=${DWELL_S}s" $((DWELL_S + 30)); dw=$M
-  t1=$(now_ms)
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $DEF $seg $2 $3 $4 "$room" $px $py $pyaw \
-    "$fit" $tc $ta $t0 $t1 "$go" "$turn" "$face" "$gt" "$dw" $qid $qa | tr ' ' '_' >> $SEG   # spaces inside a field -> _
+  if out=$(python3 $S/aba_geometry.py to_room "$2" "$3" "$4") && [ -n "$out" ]; then
+    read -r px py pyaw fit <<< "$out"
+    log "$seg: claim at $tc, go_to pose:$room($px, $py, $pyaw) [$fit]"
+    run_mission "aba_${DEF}_${seg}_go" "  go_to pose:${room}(${px}, ${py}, ${pyaw})" "$MOVE_TIMEOUT_S"; go=$M
+    ta=$(now_ms)
+    turn=$(python3 $S/aba_geometry.py face "$CX" "$CY")
+    # a zero turn is refused by the controller ("nothing to do"): the degenerate case, not a tolerance
+    if [ "$turn" = "0.0" ] || [ "$turn" = "-0.0" ]; then face=none
+    else run_mission "aba_${DEF}_${seg}_face" "  move turn_deg=${turn}deg" 60; face=$M; fi
+    gt=$(python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1, $2, $5}')
+    [ -n "$gt" ] && read -r gx gy gyaw <<< "$gt"
+    # THE TESTED PROMISE: asked on arrival, from the arrival Sigma, for where the robot now stands, before the dwell
+    # (parked at rho = 1 the dwell is one look: its net change is what this one hypothetical update predicts)
+    if [ "$gx" != nan ]; then aqid=$(now_ms); gain_query "$aqid" "$gx" "$gy"; aqa=$QA; fi
+    t0=$(now_ms)
+    log "$seg: go_to $go, face $turn deg $face; dwell ${DWELL_S}s from $t0 at ($gx, $gy, $gyaw)"
+    run_mission "aba_${DEF}_${seg}_dwell" "  wait s=${DWELL_S}s" "$((DWELL_S + 30))"; dw=$M
+    t1=$(now_ms)
+  else
+    go=frame_failed
+    log "$seg: frame conversion FAILED — not driving, no dwell (this segment gets NO VERDICT)"
+  fi
+  # one quoted argument per column; spaces inside a field -> _
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$DEF" "$seg" "$2" "$3" "$4" "${room:-none}" "$px" "$py" "$pyaw" "${fit// /_}" "$tc" "$ta" "$t0" "$t1" "${go// /_}" "$turn" \
+    "${face// /_}" "$gx" "$gy" "$gyaw" "${dw// /_}" "$qid" "$qa" "$aqid" "$aqa" >> "$SEG"
 }
 
 visit A1 $AX $AY $AYAW

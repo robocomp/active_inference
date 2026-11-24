@@ -3,9 +3,11 @@
 //   1. At the planner's own winning standpoint, gain_at == the proposal's promised_nats, bit for bit: one computation, not two.
 //   2. After parked camera updates from the front, a look from that same front standpoint promises less than a look from the
 //      side (ρ = 1 along a zero path: the shared camera error is already known; the side view decorrelates it).
-//   3. Request lines parse with std::from_chars under the agents' es_ES locale (comma decimal separator), malformed ones drop.
+//   3. Request lines parse with std::from_chars under the agents' es_ES locale (comma decimal separator); malformed or
+//      non-finite ones drop; a final line without its newline waits for the next read.
 // Fixture: the golden nightstand belief of persistent_belief_test (persistent path). Run: ./gain_query_test
 #include <bit>
+#include <string>
 #include <clocale>
 #include <cmath>
 #include <cstdio>
@@ -95,9 +97,23 @@ int main()
     CHECK(not parse_gain_query("0 * 1 2 3").has_value());              // ids are positive
     CHECK(not parse_gain_query("8 * 1 2").has_value());                // a field missing
     CHECK(not parse_gain_query("9 * 1 2 3 4").has_value());            // one too many
+    // ids above last_id are answered in file order whatever their order (4 after 5 is answered; the caller keeps the max);
+    // a CRLF line parses (the '\r' is whitespace); a malformed line drops
     const auto all = new_gain_queries("3 * 0 0 0\nbad line\n5 bed_1 1 2 3\r\n4 * 1 1 1\n", 3);
     CHECK(all.size() == 2);
     if (all.size() == 2) { CHECK(all[0].id == 5 and all[0].yaw == 3.0f); CHECK(all[1].id == 4); }
+    // non-finite poses are not queries (from_chars would accept them)
+    CHECK(not parse_gain_query("10 * inf 0 0").has_value());
+    CHECK(not parse_gain_query("11 * 0 nan 0").has_value());
+    CHECK(not parse_gain_query("12 * 0 0 -inf").has_value());
+    // a final line without its newline is not read yet, and the text is not complete (the caller keeps re-reading)
+    const std::string partial = "20 * 1 2 3\n21 * 4 5";
+    const auto p1 = new_gain_queries(partial, 0);
+    CHECK(p1.size() == 1 and p1[0].id == 20);
+    CHECK(not gain_query_text_complete(partial));
+    const auto p2 = new_gain_queries(partial + " 6\n", 20);
+    CHECK(p2.size() == 1 and p2[0].id == 21 and p2[0].yaw == 6.0f);
+    CHECK(gain_query_text_complete(partial + " 6\n") and gain_query_text_complete(""));
 
     std::printf(bad ? "FAILED\n" : "OK\n");
     return bad ? 1 : 0;

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The scalar model behind the parked test's registered predictions (aba_model.py), against closed forms, and the run-log view
 building (aba_runlog.py).   python3 -I test_aba_model.py"""
-import math, os, sys
+import math, os, subprocess, sys, tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import aba_model as M
@@ -58,7 +59,54 @@ def main():
     vh = R.views_hi(ups, [(0, 1), (3, 4)])
     assert len(vh) == 2 and close(vh[1]['rho_cam'], 0.2)   # the product since the first dwell ended (t = 1): 1 * 0.2 * 1
     assert [len(r) for r in R.parked_runs(ups)] == [3, 2]
+    visits()
     print('test_aba_model: OK')
+
+
+HEADER = ('def seg stand_x stand_y stand_yaw room pub_x pub_y pub_yaw fit t_claim_ms t_arrive_ms t_dwell0_ms t_dwell1_ms goto '
+          'turn_deg face gt_x gt_y gt_yaw dwell query_id query_answered arr_query_id arr_query_answered').split()
+
+
+def seg_row(defn, seg, t, **kw):
+    r = dict(zip(HEADER, [defn, seg, '1.0', '2.0', '0', 'room_2', '0', '0', '0', 'fit', str(t), str(t + 10), str(t + 20),
+                           str(t + 80), 'completed', '5.0', 'completed', '1.05', '2.0', '0', 'completed', str(t), 'yes',
+                           str(t + 15), 'yes']))
+    r.update(kw)
+    return '\t'.join(r[h] for h in HEADER)
+
+
+def visits():
+    # 6. a visit counts only if it happened as scripted (review I1): every segment, every step completed, both queries
+    #    answered, the arrival within the controller's goal tolerance; a malformed row is skipped and leaves its segment missing
+    tol, src = R.controller_goal_tolerance()
+    assert tol > 0 and 'goal' in src.lower(), (tol, src)
+    rows = [seg_row('OK', 'A1', 1000), seg_row('OK', 'B', 2000), seg_row('OK', 'A2', 3000),
+            seg_row('NOB', 'A1', 1000), seg_row('NOB', 'A2', 3000),
+            seg_row('TIMEOUT', 'A1', 1000), seg_row('TIMEOUT', 'B', 2000, goto='TIMEOUT'), seg_row('TIMEOUT', 'A2', 3000),
+            seg_row('OFF', 'A1', 1000), seg_row('OFF', 'B', 2000, gt_x=str(1.0 + tol + 0.01)), seg_row('OFF', 'A2', 3000),
+            seg_row('FRAME', 'A1', 1000), seg_row('FRAME', 'B', 2000, goto='frame_failed', gt_x='nan', gt_y='nan',
+                                                  arr_query_answered='no', dwell='none'),
+            seg_row('FRAME', 'A2', 3000),
+            'BAD\tB\t1.0']                                                     # malformed: too few columns
+    with tempfile.TemporaryDirectory() as d:
+        run = Path(d)
+        (run / 'aba_segments.tsv').write_text('\t'.join(HEADER) + '\n' + '\n'.join(rows) + '\n')
+        said = []
+        S = R.segments(run, report=said.append)
+        assert len(said) == 1 and 'malformed' in said[0], said
+        assert R.visit_validity(S['OK'], tol) == []
+        assert any('B: segment missing' in w for w in R.visit_validity(S['NOB'], tol))
+        assert any('B: goto TIMEOUT' in w for w in R.visit_validity(S['TIMEOUT'], tol))
+        assert any('B: arrival' in w for w in R.visit_validity(S['OFF'], tol))
+        assert any('B: goto frame_failed' in w for w in R.visit_validity(S['FRAME'], tol))
+        assert 'BAD' not in S
+        # both reports refuse every broken visit (NO VERDICT) and never PASS overall
+        for rep in ('parked_report.py', 'aba_report.py'):
+            out = subprocess.run([sys.executable, '-I', os.path.join(os.path.dirname(os.path.abspath(__file__)), rep), str(run)],
+                                 capture_output=True, text=True).stdout
+            for bad in ('NOB', 'TIMEOUT', 'OFF', 'FRAME'):
+                assert f'== {bad}: NO VERDICT -> FAIL' in out, (rep, bad, out)
+            assert 'PASS' not in out.split('== summary')[-1], (rep, out)
 
 
 if __name__ == '__main__': main()
