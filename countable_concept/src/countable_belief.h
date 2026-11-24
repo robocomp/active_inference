@@ -660,6 +660,7 @@ public:
     // Without a headboard every share is 1. The p95 of the WHOLE cloud took the bed's headboard (1.02 against a box top 0.65).
     float seed_height(const std::vector<Eigen::Vector3f>& pts, float sigma_top) const;
     bool  last_wall_entered() const { return engine_.last_wall_entered(); }
+    double last_jump_p() const { return engine_.last_jump_p(); }   // P(moved | data) of the last update (NaN: none)
     bool axis_prior_added() const { return axis_prior_added_; }
     void set_axis_prior_added(bool axis) { axis_prior_added_ = axis; }
     // The CLASS prior at the class mean, counted once (spec 7c.1 amendment 11-17): the instance's FIRST measured update (camera

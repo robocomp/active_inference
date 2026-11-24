@@ -30,8 +30,9 @@ add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)
 # Task 7: offers under the same cap (G5, Review Focus 4) — a return view promises little, a new one a lot; promised vs delivered;
 # the face ranking. Run: ./offer_return_view_test
 # F1.2: the inferred process noise is the EM statistic (a wide prior corrected is not motion; a shove is). Run: ./engine_volatility_test
+# F1 round 6c: the move evidence is continuous in an uninformed direction (a biased gradient there is not a move). Run: ./jump_evidence_test
 foreach(t engine_no_beam_test engine_predict_only_test engine_shape_latent_test parked_synthetic_test engine_neighbour_test
-          offer_return_view_test engine_volatility_test)
+          offer_return_view_test engine_volatility_test jump_evidence_test)
     add_executable(${t} ${t}.cpp)
     target_include_directories(${t} PRIVATE ../..)
     target_compile_options(${t} PRIVATE -O2)

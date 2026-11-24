@@ -288,6 +288,48 @@ inline bool same_physical_wall(const WallAnchor& a, const WallAnchor& b)
 
 namespace detail
 {
+// The move evidence of one update (F1 round 6c; PersistentEngine::learn_volatility): g = the data's θ-gradient at the predicted
+// state, Ss its "stayed" covariance A P̄ Aᵀ + W, W the data's information, m_var = diag M (the move's variance per θ component),
+// pi = the prior probability of a move in the interval. A move v ~ N(0, M) enters g as W v, so with F = W S_s⁻¹ W, h = W S_s⁻¹ g,
+// K = 𝟙 + M^½ F M^½ (⪰ 𝟙, so LLT is always defined):
+//   log BF = ½ (M^½h)ᵀ K⁻¹ (M^½h) − ½ log det K,   p = π BF / (π BF + 1 − π),
+//   E[v | moved, g] = M^½ K⁻¹ M^½ h,   Cov[v | moved, g] = M^½ K⁻¹ M^½.
+// A direction with W → 0 has F, h → 0 and contributes exactly 0, continuously — whatever the gradient there (a biased channel's
+// slope on a direction it does not inform is not evidence of a move): no rank, no tolerance. S_s ⪰ W keeps S_s⁻¹W bounded.
+template <int N>
+struct JumpEvidence
+{
+    double log_bf = 0.0, p = 0.0;
+    Eigen::Matrix<double, N, 1> v_mean = Eigen::Matrix<double, N, 1>::Zero();
+    Eigen::Matrix<double, N, N> v_cov = Eigen::Matrix<double, N, N>::Zero();
+};
+template <int N>
+inline JumpEvidence<N> jump_evidence(const Eigen::Matrix<double, N, N>& Ss, const Eigen::Matrix<double, N, N>& W,
+                                     const Eigen::Matrix<double, N, 1>& g, const Eigen::Matrix<double, N, 1>& m_var, double pi)
+{
+    using MatN = Eigen::Matrix<double, N, N>;
+    using VecN = Eigen::Matrix<double, N, 1>;
+    JumpEvidence<N> out;
+    const Eigen::LDLT<MatN> Ss_ldlt(MatN(0.5 * (Ss + Ss.transpose())));
+    const MatN X = Ss_ldlt.solve(W);                                // S_s⁻¹ W
+    const MatN F = 0.5 * (W * X + (W * X).transpose());            // W S_s⁻¹ W
+    const VecN h = X.transpose() * g;                               // W S_s⁻¹ g
+    const VecN msq = m_var.cwiseSqrt();
+    MatN K = msq.asDiagonal() * F * msq.asDiagonal();
+    K.diagonal().array() += 1.0;
+    const Eigen::LLT<MatN> K_llt(K);
+    const VecN ht = msq.cwiseProduct(h);
+    const VecN Kinv_ht = K_llt.solve(ht);
+    double logdetK = 0.0;
+    for (int i = 0; i < N; ++i) logdetK += 2.0 * std::log(K_llt.matrixL()(i, i));
+    out.log_bf = 0.5 * ht.dot(Kinv_ht) - 0.5 * logdetK;
+    const double lo = std::log(pi) + out.log_bf, ls = std::log1p(-pi), mx = std::max(lo, ls);
+    out.p = std::exp(lo - mx) / (std::exp(lo - mx) + std::exp(ls - mx));
+    out.v_mean = msq.cwiseProduct(Kinv_ht);
+    out.v_cov = msq.asDiagonal() * K_llt.solve(MatN(msq.asDiagonal()));
+    return out;
+}
+
 template <class M> constexpr int wall_latents()
 {
     if constexpr (requires { { M::kWallLatents } -> std::convertible_to<int>; }) return M::kWallLatents;
@@ -1173,7 +1215,9 @@ public:
     const std::vector<GnTraceStep<N>>&  dbg_gn_steps()  const { return dbg_gn_steps_; }
     const std::vector<GnTraceFd>&       dbg_gn_fd()     const { return dbg_gn_fd_; }
     long   gn_update_serial()  const { return gn_update_serial_; }
-    bool   last_wall_entered() const { return last_wall_entered_; }   // F1.4: the last update entered the wall priors
+    bool   last_wall_entered() const { return last_wall_entered_; }
+    double last_jump_log_bf() const { return last_jump_log_bf_; }   // log BF(moved : stayed) of the last update (NaN: none)
+    double last_jump_p() const { return last_jump_p_; }             // P(moved | data) of the last update   // F1.4: the last update entered the wall priors
     int    last_gn_iters()     const { return last_gn_iters_; }
     bool   last_gn_converged() const { return last_gn_converged_; }
     double last_lambda()       const { return last_lambda_; }
@@ -1260,42 +1304,27 @@ private:
         // data's gradient on θ is g = A (x_true − x̄) + noise of covariance W (A, W: every channel, see update()), so under "stayed"
         // g ~ N(0, S_s = A P̄ Aᵀ + W) — P̄ the predicted JOINT covariance, latents included — and under "moved by v ~ N(0, M)" on θ
         // g ~ N(0, S_m = S_s + W M W) (A's θ columns are W), M = diag(jump_var). p = P(moved | g) by Bayes with prior π_int;
-        // E[v | moved, g] = M W S_m⁺ g, Cov = M − M W S_m⁺ W M; per component E[w_i²] = p·E[v_i² | moved, g], ÷ k per predict step. Pseudo-inverses / pseudo-determinants on S's range: a direction the data do not inform (W's null
-        // space) carries no evidence either way, so coupled DOFs (a front view's cy and h) are read together, not one by one.
+        // E[v | moved, g], Cov[v | moved, g] below; per component E[w_i²] = p·E[v_i² | moved, g], ÷ k per predict step. The Bayes
+        // factor is computed in v's coordinates (no pseudo-inverse): a direction the data do not inform carries no evidence either
+        // way, continuously, and coupled DOFs (a front view's cy and h) are read together, not one by one.
         VecNd ew2_jump = VecNd::Zero();
         if (jumps)
         {
             Eigen::Matrix<double, N, N> Mj = Eigen::Matrix<double, N, N>::Zero();
             for (int i = 0; i < N; ++i) Mj(i, i) = vc.jump_var[std::size_t(i)];
             const Eigen::Matrix<double, N, N> W = 0.5 * (W_data + W_data.transpose());
-            const Eigen::Matrix<double, N, N> Ss = A_data * P_bar * A_data.transpose() + W, Sm = Ss + W * Mj * W;
-            // log N(g; 0, S) on S's range (eigen-decomposition; eigenvalues ≤ 1e-12·max are its null space: a numerical rank, not
-            // a modelling threshold)
-            const auto logN = [&](const Eigen::Matrix<double, N, N>& S, Eigen::Matrix<double, N, N>* pinv)
-            {
-                const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, N, N>> es(0.5 * (S + S.transpose()));
-                const double tol = 1e-12 * std::max(1e-300, es.eigenvalues().cwiseAbs().maxCoeff());
-                double l = 0.0;
-                Eigen::Matrix<double, N, N> Pi = Eigen::Matrix<double, N, N>::Zero();
-                for (int j = 0; j < N; ++j)
-                {
-                    const double ev = es.eigenvalues()(j);
-                    if (not (ev > tol)) continue;
-                    const Eigen::Matrix<double, N, 1> u = es.eigenvectors().col(j);
-                    const double c = u.dot(g_data);
-                    l += -0.5 * std::log(2.0 * M_PI * ev) - 0.5 * c * c / ev;
-                    Pi += (u * u.transpose()) / ev;
-                }
-                if (pinv) *pinv = Pi;
-                return l;
-            };
-            Eigen::Matrix<double, N, N> Sm_pinv;
-            const double ls = logN(Ss, nullptr), lm = logN(Sm, &Sm_pinv);
-            const double lo = std::log(pi_int) + lm, lst = std::log1p(-pi_int) + ls, mx = std::max(lo, lst);
-            const double p = std::exp(lo - mx) / (std::exp(lo - mx) + std::exp(lst - mx));
-            const VecNd ev_mean = Mj * W * Sm_pinv * g_data;
-            const Eigen::Matrix<double, N, N> ev_cov = Mj - Mj * W * Sm_pinv * W * Mj;
-            for (int i = 0; i < N; ++i) ew2_jump(i) = p * (ev_mean(i) * ev_mean(i) + ev_cov(i, i)) / k_steps;
+            const Eigen::Matrix<double, N, N> Ss = A_data * P_bar * A_data.transpose() + W;
+            // The Bayes factor of "moved" over "stayed" in the move's OWN coordinates (F1 round 6c): v enters g as W v, so with
+            // F = W S_s⁻¹ W (the data's information on v) and h = W S_s⁻¹ g,
+            //   log BF = ½ h̃ᵀ K⁻¹ h̃ − ½ log det K,   K = 𝟙 + M^½ F M^½ ⪰ 𝟙,   h̃ = M^½ h,
+            //   E[v | moved, g] = M^½ K⁻¹ h̃,   Cov[v | moved, g] = M^½ K⁻¹ M^½.
+            // A direction the data do not inform (W → 0) has F and h → 0 there and contributes EXACTLY 0, continuously as its
+            // eigenvalue goes to 0: no rank, no tolerance. (Round 6b's 6.1b form took each Gaussian's pseudo-determinant on its own
+            // numerical rank, 1e-12·its own largest eigenvalue; S_m's larger maximum dropped an H direction S_s kept, the −½g²/s
+            // term of a near-null direction landed in log N(g; S_s) only, and p(moved) = 1 on static nightstands.)
+            const auto je = detail::jump_evidence<N>(Ss, W, g_data, Mj.diagonal(), pi_int);
+            for (int i = 0; i < N; ++i) ew2_jump(i) = je.p * (je.v_mean(i) * je.v_mean(i) + je.v_cov(i, i)) / k_steps;
+            last_jump_log_bf_ = je.log_bf; last_jump_p_ = je.p;
         }
         vol_n_ = vc.memory * vol_n_ + 1.0;
         for (int i = 0; i < N; ++i)
@@ -1524,6 +1553,8 @@ private:
     // the wall latent (F1.4): the edge δ belongs to, whether it is set, and whether the last update entered its priors
     WallAnchor wall_;
     bool   wall_set_ = false;
+    double last_jump_log_bf_ = std::numeric_limits<double>::quiet_NaN();   // the last update's move statistic (diagnostic)
+    double last_jump_p_ = std::numeric_limits<double>::quiet_NaN();
     std::vector<WallAnchor> walls_entered_;          // the physical walls whose priors have entered (once each)
     bool   last_wall_entered_ = false;
     // the inferred volatility (learn_volatility): ω = log Q per θ component, the running statistic S and count n
