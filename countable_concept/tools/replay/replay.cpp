@@ -1,0 +1,143 @@
+// replay — re-run a countable agent's replay dump through the CURRENT engine (shared-engine plan revision 2, Task R1).
+//
+// The agent writes the dump with Model.ReplayDump = true (etc/replay/<node>_<run>_<serial>.bin, one per instance birth;
+// format in src/countable_replay.h). This tool rebuilds the belief from the recorded seed (state + params), re-applies every
+// recorded call (birth position covariance, room interior, updates, predicts, inflate_for_age, step-bound restores, front
+// cues) and prints one CSV row per update. Columns use the ai2 log's names where the quantity is the same:
+//   upd                 the update's index in the dump (0-based)
+//   cycle,gated,npts    the ai2 log's cycle (processed_cycles), gated flag and camera point count of that update
+//   lidar_only          the frame was LiDAR-only (a gated cycle's mask-attributed rays)
+//   beam_staged         rays in the frame's beam set (the ai2 log's beam_staged)
+//   cx..yaw             θ after the replayed update
+//   std_cx..std_h       √ of the θθ diagonal; std_yaw = the marginal (door-mode) yaw std, std_yaw_within = √Σ(5,5)
+//   gn_it,gn_conv,gn_lambda   the damped GN of the replayed update
+//   omega_cx..omega_yaw the log-volatility ω (the ai2 log has omega_w and omega_yaw)
+//   fe_upd              update()'s return value (NOT the ai2 log's `energy`, which is the mean mixture energy)
+//   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
+//   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
+// Run: ./replay DUMP.bin [--from N] [--to N]     (N = update index; rows outside are computed but not printed)
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <set>
+#include <string>
+#include <string_view>
+#include "countable_belief.h"
+#include "countable_replay.h"
+
+namespace
+{
+bool parse_int(std::string_view s, long& out)
+{
+    const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
+    return ec == std::errc{} and p == s.data() + s.size();
+}
+
+void print_set(const char* what, const std::set<std::string>& s)
+{
+    if (s.empty()) return;
+    std::fprintf(stderr, "replay: %s fields (%zu):", what, s.size());
+    for (const auto& n : s) std::fprintf(stderr, " %s", n.c_str());
+    std::fprintf(stderr, "\n");
+}
+}   // namespace
+
+int main(int argc, char** argv)
+{
+    if (argc < 2)
+    {
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N]\n", argv[0]);
+        return 2;
+    }
+    long from = 0, to = std::numeric_limits<long>::max();
+    for (int i = 2; i + 1 < argc; i += 2)
+    {
+        const std::string_view k = argv[i];
+        long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
+        if (dst == nullptr or not parse_int(argv[i + 1], *dst))
+        {
+            std::fprintf(stderr, "replay: bad argument %s %s\n", argv[i], argv[i + 1]);
+            return 2;
+        }
+    }
+
+    rc::replay::Reader reader;
+    if (not reader.open(argv[1]))
+    {
+        std::fprintf(stderr, "replay: %s\n", reader.error().c_str());
+        return 1;
+    }
+    std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
+                "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
+                "dth_live,dP_live\n");
+
+    long upd = -1;
+    std::string pending;   // the row of the last update, printed once its live result (if any) is known
+    const auto flush = [&](double dth, double dP)
+    {
+        if (pending.empty()) return;
+        std::printf("%s,%.9g,%.9g\n", pending.c_str(), dth, dP);
+        pending.clear();
+    };
+    rc::CountableBelief belief;
+    double worst_th = 0.0, worst_P = 0.0;
+    long compared = 0;
+    const bool ok = rc::replay::play(reader, belief,
+        [&](const rc::replay::UpdateEv& ev, const rc::CountableBelief& b, float fe)
+        {
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            flush(nan, nan);   // the previous update had no live result recorded
+            ++upd;
+            if (upd < from or upd > to) return;
+            const auto& s = b.state();
+            const auto& S = b.covariance();
+            const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
+            const auto& om = b.log_volatility();
+            char row[1024];
+            std::snprintf(row, sizeof row,
+                          "%ld,%lld,%d,%zu,%d,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%d,%.6g,"
+                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g",
+                          upd, static_cast<long long>(ev.cycle), ev.gated ? 1 : 0, ev.frame.points.size(),
+                          ev.frame.lidar_only ? 1 : 0, ev.frame.beam.endpoints.size(),
+                          s.cx, s.cy, s.H, s.w, s.h, s.yaw, sd(0), sd(1), sd(2), sd(3), sd(4),
+                          std::sqrt(std::max(0.0f, b.yaw_marginal_var())), sd(5),
+                          b.last_gn_iters(), b.last_gn_converged() ? 1 : 0, b.last_lambda(),
+                          om(0), om(1), om(2), om(3), om(4), om(5), fe);
+            pending = row;
+        },
+        [&](const rc::replay::ResultEv& live, const rc::CountableBelief& b)
+        {
+            const auto& s = b.state();
+            const double dth = std::max({std::abs(double(s.cx) - live.theta.cx), std::abs(double(s.cy) - live.theta.cy),
+                                         std::abs(double(s.H) - live.theta.H), std::abs(double(s.w) - live.theta.w),
+                                         std::abs(double(s.h) - live.theta.h), std::abs(double(s.yaw) - live.theta.yaw)});
+            const auto& P = b.joint_covariance();
+            double dP = live.p_diag.size() == std::size_t(P.rows()) ? 0.0 : std::numeric_limits<double>::infinity();
+            for (int i = 0; std::isfinite(dP) and i < P.rows(); ++i)
+            {
+                const double a = P(i, i), l = live.p_diag[std::size_t(i)], m = std::max(std::abs(a), std::abs(l));
+                if (m > 0.0) dP = std::max(dP, std::abs(a - l) / m);
+            }
+            worst_th = std::max(worst_th, dth);
+            worst_P  = std::max(worst_P, dP);
+            ++compared;
+            flush(dth, dP);
+        });
+    flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
+
+    std::fprintf(stderr, "replay: %ld updates; against the %ld live results: max |dtheta| %.3g, max rel dP %.3g%s\n", upd + 1,
+                 compared, worst_th, worst_P, worst_th == 0.0 and worst_P == 0.0 ? " (bit-identical)" : "");
+    print_set("missing (default kept)", reader.diag().missing);
+    print_set("unknown (skipped)", reader.diag().unknown);
+    print_set("BAD (size mismatch, default kept)", reader.diag().bad);
+    if (reader.skipped_events() > 0) std::fprintf(stderr, "replay: %d events of unknown type skipped\n", reader.skipped_events());
+    if (not ok)
+    {
+        std::fprintf(stderr, "replay: stream error: %s\n", reader.error().empty() ? "an event before the seed" : reader.error().c_str());
+        return 1;
+    }
+    return 0;
+}

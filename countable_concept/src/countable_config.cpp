@@ -464,6 +464,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "camera attributes, LiDAR measures (spec 2026-11-15 lidar-measures §7c): persistent shared errors + class prior once, mask-attributed LiDAR-only updates on gated cycles");
     out.gn_trace                  = geti("Model.GnTrace", 0,
             "DIAGNOSTIC only, no model effect: 1 = write every persistent GN step to <AI2CsvPath stem>_gn_steps.csv and, on updates that end unconverged, a finite-difference check of each channel's gradient/curvature to <stem>_gn_fd.csv; 2 = the check on every update (slow)");
+    out.replay_dump               = getb("Model.ReplayDump", false,
+            "DIAGNOSTIC only, no model effect: with LidarMeasuresOnGated write each persistent belief's seed and every call that changes it (each update's complete frame, ~0.6 MB for a bed) to etc/replay/<node>_<run>_<serial>.bin; replay it offline with countable_concept/tests/build/replay");
     out.label_dump_enabled        = getb("Model.LabelDumpEnabled", false,
             "measurement only (spec 7c.8 a0): with LidarMeasuresOnGated write label_dump.csv, the camera label inputs of every Helios return in the select box");
     out.label_dump_margin_m       = getf("Model.LabelDumpMarginM", 0.0f,

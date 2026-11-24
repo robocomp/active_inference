@@ -229,3 +229,22 @@ add_executable(latent_inputs_test latent_inputs_test.cpp)
 target_include_directories(latent_inputs_test PRIVATE ../src)
 target_compile_options(latent_inputs_test PRIVATE -O2)
 add_test(NAME latent_inputs_test COMMAND latent_inputs_test)
+
+# The replay tap (shared-engine plan revision 2, Task R1; src/countable_replay.h): a short persistent sequence dumped with the
+# tap on replays bit-identically (θ and the joint P), every recorded struct member has a fields() line (Boost.PFR), the
+# by-name reader keeps defaults for missing fields, and the bytes of one bed-sized update. Run: ./replay_test
+find_package(Boost REQUIRED)   # header-only Boost.PFR, test only (the agent does not use it)
+add_executable(replay_test replay_test.cpp ../src/countable_belief.cpp)
+target_include_directories(replay_test PRIVATE ../src ../../common ../../common/media_transport ${Boost_INCLUDE_DIRS})
+target_compile_options(replay_test PRIVATE -O2)
+target_link_libraries(replay_test PRIVATE Eigen3::Eigen)
+add_test(NAME replay_test COMMAND replay_test)
+
+# Offline replay of a Model.ReplayDump dump through the current engine, one ai2-style row per update.
+# Run: ./replay ../../../bed_concept/etc/replay/<node>_<run>_<serial>.bin > rows.csv
+add_executable(replay ../tools/replay/replay.cpp ../src/countable_belief.cpp)
+# -O3 as the agent builds countable_belief.cpp (build/generated flags.make): the same code at the same optimisation, so on an
+# unchanged engine the tool's dth_live / dP_live against the agent's recorded results read 0.
+target_include_directories(replay PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(replay PRIVATE -O3)
+target_link_libraries(replay PRIVATE Eigen3::Eigen)

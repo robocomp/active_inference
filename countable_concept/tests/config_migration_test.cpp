@@ -136,6 +136,7 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
                                       "Model.ExistenceCarveParts",         // carve-parts (2026-11-15), no old key
                                       "Model.LabelDumpEnabled",            // eps_px measurement (plan Task 15b), temporary
                                       "Model.LabelDumpMarginM",            // eps_px far-tail margin (plan Task 15), temporary
+                                      "Model.ReplayDump",                  // replay tap (shared-engine plan rev 2, Task R1)
                                       "Model.MaskPixelErrorRate",          // eps_px itself (spec 7c.8 a0), measured per class
                                       "Model.FloorSigmaM",                 // the floor's known-surface sigma (spec 7c.8 rev 3.3.8)
                                       "Model.LidarMeasuresOnGated"};       // lidar-measures (spec 2026-11-15 §7c), no old key

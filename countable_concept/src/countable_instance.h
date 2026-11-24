@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -25,6 +26,8 @@
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/existence_belief/existence_belief.h"
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)   // per-instance existence log-odds (removal)
+
+namespace rc::replay { class Writer; }   // countable_replay.h (Model.ReplayDump)
 
 namespace rc {
 
@@ -44,6 +47,8 @@ struct CountableInstance
     // the first cycle; its result is written back into `model` so downstream publish/viewer code is unchanged.
     CountableBelief ai2_belief;
     bool        ai2_initialized = false;
+    // Model.ReplayDump (countable_replay.h): this belief's replay stream since its birth; null when the dump is off.
+    std::shared_ptr<rc::replay::Writer> replay;
 
     // ── Per-frame mask corruption / range (from the selected mask slice) ──────────────────────────
     // motion_var inflates the observation precision R (downweight); trunc_frac gates the update (truncated →

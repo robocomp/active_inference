@@ -349,6 +349,11 @@ private:
     void log_delivered(const CountableInstance& inst);
     bool open_g5_csv(std::ofstream& out, std::string_view name, std::string_view header);
     std::unordered_map<std::string, long> gn_trace_serial_;   // last update written per node
+    // Model.ReplayDump (countable_replay.h): open inst.replay at a persistent belief's birth and write its seed.
+    void open_replay(CountableInstance& inst, const CountableBeliefState& s0, const CountableBeliefParams& p,
+                     const std::optional<Eigen::Matrix2f>& birth_pos_cov);
+    long long replay_run_    = 0;   // the run's start (unix seconds), in every dump name of this run
+    int       replay_serial_ = 0;   // births dumped so far this run
 
     // YOLO-independent LiDAR range channel: owns the staged per-cycle sweep + return selection (feed).
     CountableLidarRangeChannel         lidar_channel_{cfg_};

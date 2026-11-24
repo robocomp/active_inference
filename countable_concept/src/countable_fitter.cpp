@@ -22,6 +22,7 @@
 #include "countable_mask_membership.h"   // rc::MaskMembership, make_membership (lidar-measures G2)
 #include "countable_viewpoint.h"         // ρ from odometry (lidar-measures §7c.2)
 #include "countable_config_error.h"     // rc::CountableConfigError (beam config refusal)
+#include "countable_replay.h"           // Model.ReplayDump (shared-engine plan rev 2, Task R1)
 #include "../../common/place_memory/place_map.h"   // rc::place::inv_se2 (the robot in the room from T(robot←room))
 
 #include <algorithm>
@@ -658,6 +659,7 @@ void CountableFitter::resolve_front_from_rgb(CountableInstance& inst, float mode
     inst.last_front_bearing = cue->bearing_rad;
     // evidence_weight = ego-motion reliability (a moving frame's smeared door face barely votes on the discrete
     // orientation); the belief additionally weights by the cue confidence. Adopt-on-argmax is inside the belief.
+    if (inst.replay) inst.replay->resolve_front(*cue, mode_evidence_weight);
     const bool flipped = inst.ai2_belief.resolve_front(*cue, mode_evidence_weight);
     if (cfg_.front_log and (flipped or should_log(inst)))
         std::print("[{}] FRONT cue bearing={:.3f} conf={:.2f} w={:.2f} → {} | door_mode={} p={:.2f} σyaw={:.2f}deg\n",
@@ -1255,6 +1257,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.gn_trace = cfg_.gn_trace;                    // diagnostic only (Model.GnTrace)
         inst.ai2_belief = CountableBelief(s0, p);
         if (birth_pos_cov) inst.ai2_belief.set_birth_position_cov(*birth_pos_cov);   // spec 7c.8 rev 3.3.14
+        inst.replay.reset();                                                           // a new birth starts a new stream
+        if (cfg_.replay_dump and p.persistent) open_replay(inst, s0, p, birth_pos_cov);
         inst.ai2_initialized = true;
         std::print("[{}] cold-start state: cx={:.2f} cy={:.2f} H={:.2f} w={:.2f} h={:.2f} yaw={:.2f}\n",
                    inst.node_name, s0.cx, s0.cy, s0.H, s0.w, s0.h, s0.yaw);
@@ -1292,6 +1296,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         if (cfg_.ai2_age_nominal_dt_s > 0.0f and inst.last_belief_touch.time_since_epoch().count() != 0)
         {
             const float dt = std::chrono::duration<float>(now - inst.last_belief_touch).count();
+            if (inst.replay) inst.replay->inflate(dt, cfg_.ai2_age_nominal_dt_s);
             inst.ai2_belief.inflate_for_age(dt, cfg_.ai2_age_nominal_dt_s);
         }
         inst.last_belief_touch = now;
@@ -1437,6 +1442,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
     {
         if (have_room_geometry_)
         {
+            if (inst.replay) inst.replay->room_interior(room_interior_);
             inst.ai2_belief.set_room_interior(room_interior_);
             const auto& bs_now = inst.ai2_belief.state();
             frame.wall = nearest_wall(inst.ai2_belief.back_centre(bs_now));
@@ -1457,7 +1463,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         // T6c-1: on the persistent path an instance's FIRST update starts from the birth seed, not a posterior — its move is
         // the class prior correcting the seed, so there is nothing for the step bound to protect (the finite checks stay).
         const bool first_update = pre_belief.params().persistent and not pre_belief.first_update_done();
+        if (inst.replay) inst.replay->update(inst.processed_cycles, gated, frame);
         energy = inst.ai2_belief.update(frame);
+        if (inst.replay) inst.replay->result(inst.ai2_belief, energy);
         const auto& ns = inst.ai2_belief.state();
         // Full-state jump: centre (cx,cy,H) AND EXTENT (w,h). A static bed can't grow/shrink its extent by
         // max_step_m in one frame any more than it can teleport — a close-range OVER-SEGMENTED mask (floor/wall
@@ -1472,6 +1480,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         {
             std::print("[{}] AI2 step-bound REJECT: state moved {:.2f}m (>{:.2f}){} — outlier frame dropped (w={:.2f} h={:.2f})\n",
                        inst.node_name, step, cfg_.max_step_m, bad ? " [non-finite]" : "", ns.w, ns.h);
+            if (inst.replay) { inst.replay->restore(); inst.replay->predict(); }
             inst.ai2_belief = pre_belief;     // reject the corrupted update (restore state + Σ)
             inst.ai2_belief.predict();        // widen Σ so the next good frame re-associates
             energy = inst.dbg_energy;         // HOLD last FE — a rejected outlier frame took no valid measurement
@@ -1535,7 +1544,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             }
         }
         if (not lidar_updated)
+        {
+            if (inst.replay) inst.replay->predict();
             inst.ai2_belief.predict();   // Σ inflates, mean unchanged
+        }
     }
     else
     {
@@ -1955,6 +1967,28 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
     }
     ai2_csv_.flush();
     if (cfg_.gn_trace > 0) log_gn_trace(inst);
+}
+
+// Model.ReplayDump (diagnostic; shared-engine plan rev 2, Task R1): one stream per persistent belief birth,
+// etc/replay/<node>_<run>_<serial>.bin (<run> = this run's start in unix seconds, <serial> = births dumped so far), opened
+// here with the seed; run_inference writes every later call that changes the belief (countable_replay.h).
+void CountableFitter::open_replay(CountableInstance& inst, const CountableBeliefState& s0, const CountableBeliefParams& p,
+                                  const std::optional<Eigen::Matrix2f>& birth_pos_cov)
+{
+    if (replay_run_ == 0)
+        replay_run_ = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::error_code ec;
+    std::filesystem::create_directories("etc/replay", ec);
+    const std::string path = std::format("etc/replay/{}_{}_{:04d}.bin", inst.node_name, replay_run_, ++replay_serial_);
+    inst.replay = rc::replay::Writer::open(path);
+    if (not inst.replay)
+    {
+        std::print("[{}] Model.ReplayDump: cannot create {} — this belief runs without a dump\n", inst.node_name, path);
+        return;
+    }
+    inst.replay->seed(inst.node_name, s0, p);
+    if (birth_pos_cov) inst.replay->birth_pos_cov(*birth_pos_cov);
+    std::print("[{}] Model.ReplayDump: writing {}\n", inst.node_name, path);
 }
 
 // Model.GnTrace (diagnostic): the last persistent update's GN steps and finite-difference check, beside the ai2 log.

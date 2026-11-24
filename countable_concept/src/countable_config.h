@@ -337,6 +337,9 @@ struct CountableConfig
     // mask runs a LiDAR-only update whose rays are weighted by the mask's membership. false ⇒ byte-identical to before.
     bool  lidar_measures_on_gated   = false;
     int   gn_trace                  = 0;       // Model.GnTrace (diagnostic; 0 off)
+    // Model.ReplayDump (diagnostic, shared-engine plan rev 2 Task R1): with LidarMeasuresOnGated, write every call that changes
+    // a persistent belief (seed, frames, predicts, …) to etc/replay/<node>_<run>_<serial>.bin for tools/replay. No model effect.
+    bool  replay_dump               = false;
     // Measurement only (spec 7c.8 a0, plan Task 15b): with LidarMeasuresOnGated, write label_dump.csv (one row per Helios
     // return in the select box: the camera label inputs) next to AI2CsvPath. Changes no behaviour.
     bool  label_dump_enabled        = false;
