@@ -25,6 +25,11 @@ import wbt_rooms as W
 
 CLASSES = ['nightstand', 'bed', 'toilet']
 TRIM_MS = 3000
+# Truth point = the Webots origin by default. With NEES_CENTRE=1 it is the centre of the graded footprint instead
+# (mesh bounding-box centre in the object frame, rotated by the object's yaw). Toilet: Toilet.proto IndexedFaceSets x 0.2
+# (Transform scale 0.2) span x [-0.435, 0.303], y [-0.303, 0.286], so the centre is (-0.066, -0.009) from the origin.
+CENTRE_LOCAL = {'toilet': (-0.066, -0.009)}
+USE_CENTRE = os.environ.get('NEES_CENTRE') == '1'
 
 
 def room_windows(run, polys):
@@ -34,13 +39,7 @@ def room_windows(run, polys):
     where = np.full(len(est), '', dtype=object)
     for name, poly in polys.items():
         where[W.inside(poly, P)] = name
-    fits, enter = {}, {}
-    for i, e in enumerate(est):
-        r = where[i]
-        if r and (r not in enter or e[0] - last.get(r, e[0]) > 10000):
-            enter[r] = e[0]
-        if r: last = {**globals().get('last', {}), r: e[0]}
-    last = {}
+    fits = {}
     first = {}
     for i, e in enumerate(est):
         r = where[i]
@@ -69,6 +68,13 @@ def run_rows(run, polys, gt):
     fits = room_windows(run, polys)
     G = N.gauges(run); Gts = [g[0] for g in G]
     out = []
+    if USE_CENTRE:
+        sys.path.insert(0, os.path.join(HERE, '..', 'mask_error'))
+        import measure_mask_error as MM
+        yaw = {b[0]: b[4] for b in MM.graded_boxes(W.WBT, ['toilet'], {'toilet': (0.738, 0.589, 0.002, 1.013, -0.066, -0.009)})}
+        gt = [(o[0], o[1], o[2] + math.cos(yaw[o[0]]) * CENTRE_LOCAL[o[1]][0] - math.sin(yaw[o[0]]) * CENTRE_LOCAL[o[1]][1],
+               o[3] + math.sin(yaw[o[0]]) * CENTRE_LOCAL[o[1]][0] + math.cos(yaw[o[0]]) * CENTRE_LOCAL[o[1]][1])
+              if o[1] in CENTRE_LOCAL and o[0] in yaw else o for o in gt]
     for cls in CLASSES:
         p = f'{run}/{cls}_ai2_log.csv'
         if not os.path.exists(p): continue

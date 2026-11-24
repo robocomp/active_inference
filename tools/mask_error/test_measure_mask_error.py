@@ -86,6 +86,12 @@ def test_projection_symmetric_ahead():
     assert M.project(M.box_corners(0.0, -1.0, 0.0, 0.5, 0.5, 0.0, 0.6), cam, K) is None   # behind the camera
 
 
+def test_box_centre_offset_rotates_with_yaw():
+    # a box whose centre is 0.1 m along the object's local +x, object yawed +90 deg: the centre lands 0.1 m along world +y
+    c = M.box_corners(5.0, 7.0, math.pi / 2, 0.4, 0.2, 0.0, 1.0, ox=0.1, oy=0.0)
+    assert np.allclose(c[:, :2].mean(0), [5.0, 7.1], atol=1e-9), c[:, :2].mean(0)
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_'):

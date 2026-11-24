@@ -54,13 +54,15 @@ def camera_pose(gt_x, gt_y, gt_angle, cam_z):
     return gt_x - CAM_BACK_M * math.cos(h), gt_y - CAM_BACK_M * math.sin(h), cam_z, h
 
 
-def box_corners(cx, cy, yaw, lx, ly, z0, z1):
+def box_corners(cx, cy, yaw, lx, ly, z0, z1, ox=0.0, oy=0.0):
+    """8 corners of the box whose centre is (ox, oy) in the object frame (origin at (cx, cy), heading yaw)."""
     c, s = math.cos(yaw), math.sin(yaw)
     out = []
     for sx in (-0.5, 0.5):
         for sy in (-0.5, 0.5):
             for z in (z0, z1):
-                out.append((cx + c * sx * lx - s * sy * ly, cy + s * sx * lx + c * sy * ly, z))
+                lx_, ly_ = ox + sx * lx, oy + sy * ly
+                out.append((cx + c * lx_ - s * ly_, cy + s * lx_ + c * ly_, z))
     return np.array(out)
 
 
@@ -118,7 +120,16 @@ def fraction_outside(mask, hull):
 
 # ---------------------------------------------------------------- world: graded boxes
 def obj_extents(path):
-    v = np.array([[float(t) for t in l.split()[1:4]] for l in open(path) if l.startswith('v ')])
+    """Bounding box (lo, hi) of the vertices of a .obj or Collada .dae mesh, in the mesh's own frame."""
+    if path.endswith('.dae'):
+        import xml.etree.ElementTree as ET
+        v = []
+        for fa in ET.parse(path).getroot().iter():
+            if fa.tag.endswith('float_array') and fa.get('id', '').endswith('positions-array'):
+                v.append(np.array(fa.text.split(), float).reshape(-1, 3))
+        v = np.vstack(v)
+    else:
+        v = np.array([[float(t) for t in l.split()[1:4]] for l in open(path) if l.startswith('v ')])
     return v.min(0), v.max(0)
 
 
@@ -157,6 +168,8 @@ def graded_boxes(wbt, classes, extents):
     def cls(n):
         ty, nm = n['_type'], name(n)
         if ty == 'Bed': return 'bed'
+        if nm == 'Fridge': return 'refrigerator'
+        if nm in ('Table1', 'Table1(1)'): return 'table'
         if nm.startswith('nightstand'): return 'nightstand'
         if ty == 'Toilet': return 'toilet'
         return None
@@ -169,13 +182,14 @@ def graded_boxes(wbt, classes, extents):
         c = cls(n)
         if c not in classes: return
         x, y, _, yaw = F.T(n)
-        if c in extents: lx, ly, z0, z1 = extents[c]
+        if c in extents: lx, ly, z0, z1, ox, oy = (tuple(extents[c]) + (0.0, 0.0))[:6]
         else:
-            objs = [u for u in urls(n) if u.endswith('.obj')]
+            objs = [u for u in urls(n) if u.endswith(('.obj', '.dae'))]
             if not objs: return
             lo, hi = obj_extents(os.path.join(os.path.dirname(wbt), objs[0]))
             lx, ly, z0, z1 = float(hi[0] - lo[0]), float(hi[1] - lo[1]), float(lo[2]), float(hi[2])
-        out.append((name(n) or n['_type'], c, x, y, yaw, lx, ly, z0, z1))
+            ox, oy = float(hi[0] + lo[0]) / 2, float(hi[1] + lo[1]) / 2
+        out.append((name(n) or n['_type'], c, x, y, yaw, lx, ly, z0, z1, ox, oy))
     for n in top: visit(n)
     return out
 
@@ -217,7 +231,7 @@ def measure(dump_dir, wbt, classes, extents, hfov):
             best = None
             for b in boxes:
                 if b[1] != m['label']: continue
-                px = project(box_corners(*b[2:5], *b[5:9]), cam, K)
+                px = project(box_corners(*b[2:5], *b[5:11]), cam, K)
                 if px is None: continue
                 hull = silhouette(px)
                 sil = np.zeros((h, w), np.uint8); cv2.fillConvexPoly(sil, np.round(hull).astype(np.int32).reshape(-1, 2), 1)
@@ -225,11 +239,13 @@ def measure(dump_dir, wbt, classes, extents, hfov):
                 if iou > 0 and (best is None or iou > best[0]): best = (iou, b, hull)
             if best is None: continue
             iou, b, hull = best
+            ctr = np.array([[b[2] + math.cos(b[4]) * b[9] - math.sin(b[4]) * b[10], b[3] + math.sin(b[4]) * b[9] + math.cos(b[4]) * b[10], 0.5 * (b[7] + b[8])]])
+            rng_m = float((ctr[0, :2] - np.array(cam[:2])) @ np.array([math.cos(cam[3]), math.sin(cam[3])]))   # depth along the optical axis
             cs = contour_samples(mk)
             if len(cs) < 2: continue
             mean, std = frame_stats(signed_offsets(cs, hull))
             rows.append(dict(stamp_ms=stamp, mask=int(m['mask']), cls=m['label'], gt_object=b[0], iou=iou,
-                             n_contour=len(cs), mean_offset_px=mean, resid_std_px=std,
+                             range_m=rng_m, n_contour=len(cs), mean_offset_px=mean, resid_std_px=std,
                              frac_outside=fraction_outside(mk, hull)))
     return rows
 
@@ -250,11 +266,35 @@ def summarise(rows):
     return out
 
 
+def range_bins(rows, f, n_bins=4, n_boot=2000, seed=0):
+    """Is the per-frame mean offset constant in PIXELS or in METRES?  Frames (one value per stamp and class) are binned by
+    range z in n_bins equal-COUNT bins (no cut-points chosen). Per bin: mean |offset| in px, and mean |offset| * z / f in m
+    (the same offset expressed at the object). Also the log-log slope b of |offset| against z over frames: b = 0 means
+    constant in pixels, b = -1 means constant in metres; a bootstrap over frames gives its 95% interval."""
+    out = {}
+    for c in sorted({r['cls'] for r in rows}):
+        by = {}
+        for r in rows:
+            if r['cls'] == c: by.setdefault(r['stamp_ms'], []).append(r)
+        z = np.array([np.mean([r['range_m'] for r in v]) for v in by.values()])
+        o = np.array([abs(np.mean([r['mean_offset_px'] for r in v])) for v in by.values()])
+        if len(z) < 2 * n_bins: out[c] = None; continue
+        order = np.argsort(z); bins = []
+        for q in np.array_split(order, n_bins):
+            bins.append((z[q].min(), z[q].max(), len(q), o[q].mean(), (o[q] * z[q] / f).mean()))
+        def slope(ix):
+            return np.polyfit(np.log(z[ix]), np.log(np.maximum(o[ix], 1e-3)), 1)[0]
+        rg = np.random.default_rng(seed)
+        bs = [slope(rg.integers(0, len(z), len(z))) for _ in range(n_boot)]
+        out[c] = dict(bins=bins, slope=float(slope(np.arange(len(z)))), lo=float(np.percentile(bs, 2.5)), hi=float(np.percentile(bs, 97.5)))
+    return out
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('dump_dir'); ap.add_argument('wbt'); ap.add_argument('slam_shadow', nargs='?')
     ap.add_argument('--classes', default='nightstand,bed,toilet')
-    ap.add_argument('--extents', nargs='*', default=[], help='class=lx,ly,z0,z1 (m, object frame, centred in x,y)')
+    ap.add_argument('--extents', nargs='*', default=[], help='class=lx,ly,z0,z1[,ox,oy] (m, object frame; box centre at ox,oy, default 0,0)')
     ap.add_argument('--hfov', type=float, default=1.9198)
     ap.add_argument('--out')
     a = ap.parse_args(argv)
@@ -268,6 +308,11 @@ def main(argv):
     for c, s in summarise(rows).items():
         print(f"{c} | {s['n_frames']} | {s['n_masks']} | {s['sigma_px_boundary']:.2f} | {s['mean_of_frame_means_px']:.2f} | "
               f"{s['eps_px']:.3f} | {s['median_resid_std_px']:.2f}")
+    for c, rb in range_bins(rows, intrinsics(1280, 720, a.hfov)[0]).items():
+        print(f'range bins, {c}: z range (m) | n frames | mean |offset| px | mean |offset|*z/f m')
+        if rb is None: print('  too few frames'); continue
+        for lo, hi, n, px, m in rb['bins']: print(f'  {lo:.2f}-{hi:.2f} | {n} | {px:.2f} | {m:.4f}')
+        print(f"  log-log slope of |offset| on z: {rb['slope']:.2f}  95% bootstrap [{rb['lo']:.2f}, {rb['hi']:.2f}]  (0 = flat in px, -1 = flat in m)")
     if not rows: print('no mask matched a graded box (no frame with gt_valid=1, or no overlap)')
 
 
