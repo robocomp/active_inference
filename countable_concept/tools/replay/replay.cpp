@@ -27,7 +27,8 @@
 //   1.2 m is a bed, else a nightstand — true of every neighbour in objects_replay1 (room_3: one bed, its nightstands), not
 //   general; the agent reads the class from the node name.
 //   --standoff DIR sets the seed's wall stand-off (F1.4) from the manifest of the dumped node's class in DIR
-//   (rc::manifest::wall_standoff), as a dump recorded before the stand-off existed lacks it.
+//   (rc::manifest::wall_standoff), as a dump recorded before the stand-off existed lacks it. --permanence DIR does the same for
+//   the class permanence prior (F1 round 6; predict_period_s then keeps its default 0.1 s, the configs' AI2AgeNominalDtS).
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
@@ -48,6 +49,7 @@
 #include "countable_latent_inputs.h"
 #include "countable_neighbour_size.h"
 #include "../../common/concept_manifest/wall_standoff.h"
+#include "../../common/concept_manifest/permanence.h"
 #include "countable_replay.h"
 
 namespace
@@ -71,12 +73,12 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
-    std::string neighbour_manifests, standoff_manifests;
+    std::string neighbour_manifests, standoff_manifests, permanence_manifests;
     for (int i = 2; i < argc; ++i)
     {
         const std::string_view k = argv[i];
@@ -84,6 +86,7 @@ int main(int argc, char** argv)
         if (k == "--sig2-cam-measured") { sig2_cam_measured = true; continue; }
         if (k == "--neighbour-size-std" and i + 1 < argc) { neighbour_manifests = argv[++i]; continue; }
         if (k == "--standoff" and i + 1 < argc) { standoff_manifests = argv[++i]; continue; }
+        if (k == "--permanence" and i + 1 < argc) { permanence_manifests = argv[++i]; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -182,6 +185,13 @@ int main(int argc, char** argv)
         },
         [&](rc::replay::SeedEv& seed)
         {
+            if (not permanence_manifests.empty())
+                if (const auto pm = rc::manifest::permanence(permanence_manifests + "/" + rc::node_class(seed.node) + ".concept.toml"))
+                {
+                    seed.params.move_rate_per_day = pm->move_rate_per_day;
+                    seed.params.move_scale_m = pm->move_scale_m;
+                    seed.params.move_scale_rad = pm->move_scale_rad;
+                }
             if (standoff_manifests.empty()) return;
             const std::string path = standoff_manifests + "/" + rc::node_class(seed.node) + ".concept.toml";
             if (const auto so = rc::manifest::wall_standoff(path))

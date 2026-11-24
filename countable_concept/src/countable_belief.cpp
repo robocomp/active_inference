@@ -307,7 +307,8 @@ Eigen::Matrix<float, 6, 1> CountableBelief::retention_frames() const
 {
     const Eigen::Matrix<float, 6, 1> q = process_noise_diag();
     Eigen::Matrix<float, 6, 1> tau;
-    for (int i = 0; i < 6; ++i) tau(i) = (q(i) > 1e-20f) ? Sigma_(i, i) / q(i) : 0.0f;
+    // q = 0 (no motion at all for that DOF) ⇒ the variance never doubles: τ = +inf, not 0 (F1 round 6)
+    for (int i = 0; i < 6; ++i) tau(i) = q(i) > 0.0f ? Sigma_(i, i) / q(i) : std::numeric_limits<float>::infinity();
     return tau;
 }
 
@@ -891,25 +892,35 @@ void CountableEngineModel::canonicalize(State& s) const { b->canonicalize(s); }
 CountableEngineModel::Vec6 CountableEngineModel::shape_spread() const
 { return Eigen::Map<const Vec6>(b->params_.layer_spread_m.data()); }
 CountableEngineModel::Vec6 CountableEngineModel::prior_cov_diag() const { return b->prior_cov_diag(); }
-// NO constant process noise on the persistent path (owner ruling 11-24; CONCEPT_AGENT_LIFECYCLE.md §4.1: a passive object's
-// state changes only when something acts on it). Q comes only from the volatility estimate, whose prior mean (this hook's
-// value, the engine's Q₀) is ZERO: the EM starts at q = 0 with its own hyperprior (n₀ pseudo-observations of 0). That fixed
-// point is absorbing — E[w²] = q + (q/Σ̄)²(…) is 0 at q = 0 — so a passive object's Q stays 0: the once-entered class and wall
-// priors are never forgotten, and a MOVED object is the lifecycle's case (absence removes, the tracker re-births), not
-// diffusion. The constant AI2ProcessStd* Q₀ was what let them decay: a constant force along a direction the view does not
-// observe (the beam's level-shift slope, beam_ray.h) then won linearly in the number of sweeps (the creep set, F1 round 4).
-// Q₀'s other uses on this path, each replaced: the EM's initial value (now 0, above); the predict before the EM has learned
-// (process_noise() returns this 0); inflate_for_age on a stale frame (q_scale · 0: a passive object does not age; its
-// uncertainty grows only by the latents' ρ when it is next measured); the size summary's forgetting (Q in force, 0).
-// No variance floor rests on it (sanitize re-seeds from the class prior, not from Q). The legacy path keeps Q₀ bit for bit
-// (CountableBelief::process_noise_diag's flag-off branch).
-CountableEngineModel::Vec6 CountableEngineModel::process_noise_diag() const { return Vec6::Zero(); }
+// Q on the persistent path comes from the class PERMANENCE prior (owner ruling 11-25; MODEL_HISTORY.md §3, CONCEPT_AGENT_LIFECYCLE.md
+// §4.1): no constant AI2ProcessStd* Q (round 5 removed it), and no absorbing Q = 0 either (round 5's start at 0 locked stiffness for
+// ever). The hyperprior mean is q₀ = π·M per predict step, π = move_rate_per_day·dt/86400 (dt = predict_period_s) and M the move's
+// variance: move_scale_m² on (cx, cy), move_scale_rad² on yaw, and on (H, w, h) the class size prior variance (a move may put a
+// different instance of the class in the slot). Q is then inferred AROUND q₀ (engine spike-and-slab statistic + hyperprior
+// pull-back). Q₀'s other uses, each now this class Q: the predict before the EM learns, inflate_for_age, the size summary's
+// forgetting. The legacy path keeps AI2ProcessStd* bit for bit.
+CountableEngineModel::Vec6 CountableEngineModel::jump_var() const
+{
+    const CountableBeliefParams& P = b->params_;
+    const float m2 = P.move_scale_m * P.move_scale_m, r2 = P.move_scale_rad * P.move_scale_rad;
+    const float H2 = P.prior_height_std * P.prior_height_std, f2 = P.prior_footprint_std * P.prior_footprint_std;
+    return (Vec6() << m2, m2, H2, f2, f2, r2).finished();
+}
+double CountableEngineModel::jump_prob() const
+{
+    const CountableBeliefParams& P = b->params_;
+    return double(P.move_rate_per_day) * double(P.predict_period_s) / 86400.0;
+}
+CountableEngineModel::Vec6 CountableEngineModel::process_noise_diag() const { return (float(jump_prob()) * jump_var()); }
 rc::ai::engine::VolatilityConfig CountableEngineModel::volatility() const
 {
     const CountableBeliefParams& P = b->params_;
     rc::ai::engine::VolatilityConfig v;
     v.infer = P.volatility_infer;
     v.sigma_omega = P.volatility_sigma;
+    const Vec6 M = jump_var();
+    v.jump_var.assign(M.data(), M.data() + 6);
+    v.jump_prob = jump_prob();
     return v;
 }
 

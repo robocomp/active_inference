@@ -40,6 +40,11 @@ static CountableBeliefParams params()
     p.wall_flush_prior = 0.90f;
     p.room_axis_std    = 3.0f * 0.017453293f;
     p.volatility_infer = true;
+    // F1 round 6: the nightstand class's permanence prior (nightstand.concept.toml [prior.permanence]: 0.011 moves/day, 0.3 m,
+    // 0.5 rad; size jumps at the class size stds), so Q is the class's q0 (h: π·0.06² = 4.6e-11 m² per 0.1 s step), not 0.
+    // PREDICTED before the run: the creep scaled from round 4's measured 1.25 mm per 200 sweeps at Q = 2.5e-5 (linear in q and
+    // in the sweep count) is 1.25e-3 · (4.6e-11/2.5e-5) · (2000/200) ≈ 2e-8 m over 2000 sweeps — negligible against 1 mm.
+    p.move_rate_per_day = 0.011f; p.move_scale_m = 0.3f; p.move_scale_rad = 0.5f;
     p.persistent       = true;
     p.beam             = rc::test::test_beam_config();
     return p;

@@ -251,6 +251,15 @@ struct CountableBeliefParams
     float wall_explain_sigma_m = 0.05f; // extra std (m) on the wall plane: room-polygon + localization slack
 
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
+    // PERMANENCE (persistent path, owner ruling 11-25; the class manifest's [prior.permanence]): how often a real object of the
+    // class is moved, and by how much. Per predict step (predict_period_s) the object is moved with probability
+    // move_rate_per_day·dt/86400, by a step of std move_scale_m on (cx, cy) and move_scale_rad on yaw; its size jumps by the class
+    // size prior std (a different instance of the class in the slot). That spike-and-slab is the volatility's hyperprior
+    // (VolatilityConfig::jump_*), and its mean π·M is q₀ = CountableEngineModel::process_noise_diag(). rate 0 ⇒ q₀ = 0.
+    float move_rate_per_day = 0.0f;
+    float move_scale_m      = 0.0f;
+    float move_scale_rad    = 0.0f;
+    float predict_period_s  = 0.1f;   // the agent's predict period (Model.AI2AgeNominalDtS, the mask stream's nominal period)
     float process_std_m   = 0.005f;  // cx,cy,H,w,h per-frame process std (m)
     float process_std_yaw = 0.01f;   // yaw per-frame process std (rad)
 
@@ -463,6 +472,8 @@ struct CountableEngineModel
     void  set_covariance(const Mat6& S);
     rc::ai::engine::SolverConfig solver() const;
     rc::ai::engine::VolatilityConfig volatility() const;
+    Vec6   jump_var() const;     // the class permanence prior's move variance per DOF (F1 round 6)
+    double jump_prob() const;    // its move probability per predict step
 };
 
 // The bed generative model wired onto the shared rc::ai recursive-Laplace engine. Supplies only the

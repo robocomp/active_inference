@@ -34,6 +34,8 @@ static CountableBeliefParams params()
     p.wall_flush_prior = 0.90f;
     p.room_axis_std    = 3.0f * 0.017453293f;
     p.volatility_infer = true;
+    // F1 round 6: the nightstand class's permanence prior (as creep_set_test): Q is the class's q0, not 0.
+    p.move_rate_per_day = 0.011f; p.move_scale_m = 0.3f; p.move_scale_rad = 0.5f;
     p.persistent       = true;
     p.beam             = rc::test::test_beam_config();
     return p;
@@ -276,27 +278,31 @@ static void prior_added_once()
 // any more — the class stand-off prior, entered once on the wall latent, carries "the back stands at or off the wall"; a
 // separate one-sided term counted σ_wall twice. The legacy path's hinge keeps its own self-test in countable_belief.cpp.)
 
-// F1 round 5 (owner ruling 11-24): a passive object on the persistent path has NO constant process noise, so 5000 predicts
-// leave Σ exactly where the update put it (was: it returned to the class P under Q₀ and the clamp). The clamp itself is the
-// legacy path's, untouched.
-static void aged_belief_returns_to_class_P()
+// F1 round 6 (owner ruling 11-25): on the persistent path Q is the class permanence prior's q₀ (inferred around it), so 5000
+// predicts after one update grow each θ variance by EXACTLY 5000·q (the clamp at the class P where that is reached) — a passive
+// object ages at its class's move rate, neither at a constant AI2ProcessStd* nor not at all.
+static void aged_belief_ages_by_class_q()
 {
     CountableBeliefParams p = params();
-    p.volatility_infer = false;   // Q = the model's Q₀, which is 0 on this path
+    p.volatility_infer = false;   // Q = the class q₀ throughout
     CountableBelief b = make_belief(0.05f, -0.04f, 0.03f, p);
     CountableFrame fc = camera_frame(); set_latents(fc, 1.0f);
     b.update(fc);
     const Vec6 th = b.state().vec();
-    const Vec6 s1 = b.covariance().diagonal();
+    const Vec6 s1 = b.covariance().diagonal(), q = b.process_noise_diag();
     for (int k = 0; k < 5000; ++k) b.predict();
     const Vec6 p0 = b.prior_cov_diag(), d = b.covariance().diagonal();
     float worst = 0.0f;
-    for (int i = 0; i < 6; ++i) worst = std::max(worst, std::abs(d(i) / p0(i) - 1.0f));
-    std::printf("  aged: |dtheta| %.3e ; diag after 1 update %.3e %.3e %.3e %.3e %.3e %.3e ; after 5000 predicts / class P worst rel %.3e"
-                " ; diag change %.3e\n", (b.state().vec() - th).cwiseAbs().maxCoeff(), s1(0), s1(1), s1(2), s1(3), s1(4), s1(5), worst,
-                (d - s1).cwiseAbs().maxCoeff());
+    for (int i = 0; i < 6; ++i)
+    {
+        const float want = std::min(s1(i) + 5000.0f * q(i), p0(i));
+        worst = std::max(worst, std::abs(d(i) - want) / want);
+    }
+    std::printf("  aged: |dtheta| %.3e ; q %.3e %.3e %.3e %.3e %.3e %.3e ; diag after 5000 predicts vs s1 + 5000 q: worst rel %.3e\n",
+                (b.state().vec() - th).cwiseAbs().maxCoeff(), q(0), q(1), q(2), q(3), q(4), q(5), worst);
     CHECK((b.state().vec() - th).cwiseAbs().maxCoeff() < 1e-6f);
-    CHECK(d == s1);   // a passive object does not age: no Q, Σ unchanged
+    CHECK(q.minCoeff() > 0.0f);   // the class prior makes no DOF a lock
+    CHECK(worst < 1e-4f);         // float accumulation of 5000 additions
 }
 
 static void wall_behind_does_not_pull()
@@ -830,24 +836,29 @@ static void bad_seed_recovers()
     }
 }
 
-// T6c-2, under the owner ruling of 11-24 (F1 round 5): the persistent path has NO constant process noise; the volatility's
-// prior mean is 0, an absorbing fixed point of the EM statistic, so Q = e^ω is 0 before, after the first and after the second
-// update (was: the first update teaches nothing, the second moves ω away from log Q₀ — Q₀ no longer exists on this path).
+// T6c-2 under the permanence prior (F1 round 6): Q starts at the class q₀; the first update (seed → posterior) teaches nothing;
+// the second, a static view, can only lower it (the spike-and-slab statistic is ≤ the prior mean π·M when the data say "not
+// moved"), and the hyperprior keeps it ≥ n₀/(n₀ + 1)·q₀.
 static void first_update_no_volatility()
 {
     const float h0 = 2.14f;
     CountableBelief b(CountableBeliefState{tx, -0.5f * h0, tH, tw, h0, 0.0f}, params());
     b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
-    // Q in force (process_noise_diag: the engine's e^ω on this path), checked exactly; ω itself is log 0 = −inf.
-    const float q0 = b.process_noise_diag().maxCoeff();
+    const Vec6 q0 = b.process_noise_diag();
     const CountableFrame f = one_face_frame();
     b.update(f);
-    const float q1 = b.process_noise_diag().maxCoeff();
+    const Vec6 q1 = b.process_noise_diag();
     b.update(f);
-    const float q2 = b.process_noise_diag().maxCoeff();
-    std::printf("  first_update_no_volatility: Q before %.3e, after the first update %.3e, after the second %.3e (max) ; omega %.1f\n",
-                q0, q1, q2, b.log_volatility().maxCoeff());
-    CHECK(q0 == 0.0f and q1 == 0.0f and q2 == 0.0f);
+    const Vec6 q2 = b.process_noise_diag();
+    const float n0 = 1.0f / (params().volatility_sigma * params().volatility_sigma);
+    std::printf("  first_update_no_volatility: Q_cx %.3e -> %.3e (first) -> %.3e (second) ; omega_cx %.2f (finite)\n", q0(0), q1(0),
+                q2(0), b.log_volatility()(0));
+    CHECK(q0.minCoeff() > 0.0f);
+    CHECK((q1 - q0).cwiseAbs().maxCoeff() == 0.0f);
+    bool in = true;
+    for (int i = 0; i < 6; ++i) in = in and q2(i) <= q0(i) * (1.0f + 1e-5f) and q2(i) >= n0 / (n0 + 1.0f) * q0(i) * (1.0f - 1e-5f);
+    CHECK(in);
+    CHECK(b.log_volatility().allFinite());
 }
 
 static void good_seed_stays()
@@ -1270,7 +1281,7 @@ int main()
     nonlinear_restart_matches_eliminated();
     rho0_regression_zero_pose_cov(true);   // camera-only frames only (spec 7c.8: frames with rays differ by design)
     prior_added_once();
-    aged_belief_returns_to_class_P();
+    aged_belief_ages_by_class_q();
     wall_behind_does_not_pull();
     physical_lidar_only_sigma_bounded();
     parked_camera_is_one_look();

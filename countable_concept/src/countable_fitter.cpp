@@ -1231,6 +1231,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.wall_no_cross_margin_m  = cfg_.ai2_wall_no_cross_margin_m;
         p.wall_standoff_m         = cfg_.wall_standoff_m;       // [prior.attachment] standoff (F1.4; the persistent path's flush prior)
         p.wall_standoff_std_m     = cfg_.wall_standoff_std_m;
+        p.move_rate_per_day       = cfg_.move_rate_per_day;     // [prior.permanence] (F1 round 6): the volatility's hyperprior
+        p.move_scale_m            = cfg_.move_scale_m;
+        p.move_scale_rad          = cfg_.move_scale_rad;
+        if (cfg_.ai2_age_nominal_dt_s > 0.0f) p.predict_period_s = cfg_.ai2_age_nominal_dt_s;
         // The wall may only explain away mask points to the extent the room itself is trusted: with no room
         // polygon pushed this session there is nothing to explain away with, so the component is OFF and the
         // mixture is box+clutter exactly as before. (When room_concept publishes a map-trust scalar, multiply

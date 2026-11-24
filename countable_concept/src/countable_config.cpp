@@ -20,6 +20,7 @@
 #include "../../common/concept_manifest/concept_manifest.h"
 #include "../../common/concept_manifest/class_prior.h"   // rc::manifest (SHARED)
 #include "../../common/concept_manifest/wall_standoff.h"   // rc::manifest::wall_standoff (F1.4)
+#include "../../common/concept_manifest/permanence.h"      // rc::manifest::permanence (F1 round 6)
 #include <string>
 
 #include <genericworker.h>   // ConfigLoader
@@ -157,6 +158,21 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
     }
     std::print("[manifest] {} shape: {} part(s)\n", out.concept_class, out.shape_parts.size());
+    try
+    {   // The permanence prior (F1 round 6): how often a real object of the class is moved — the volatility's hyperprior.
+        if (const auto pm = rc::manifest::permanence(manifest_path))
+        {
+            out.move_rate_per_day = pm->move_rate_per_day; out.move_scale_m = pm->move_scale_m; out.move_scale_rad = pm->move_scale_rad;
+            std::print("[manifest] {} permanence: {:.5f} moves/day, {:.2f} m, {:.2f} rad — {}\n", out.concept_class, pm->move_rate_per_day,
+                       pm->move_scale_m, pm->move_scale_rad, pm->source);
+        }
+        else
+            std::print("[manifest] {} declares no [prior.permanence] — q0 = 0 on the persistent path\n", out.concept_class);
+    }
+    catch (const std::exception& e)
+    {
+        throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
+    }
     try
     {   // The wall stand-off (F1.4): a CLASS fact from typical real placement, no config key.
         if (const auto so = rc::manifest::wall_standoff(manifest_path))

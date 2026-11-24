@@ -107,13 +107,23 @@ struct SolverConfig
 // updates θ takes random-walk steps w ~ N(0, Q), Q = diag(e^ω) unknown and per object. Q's conjugate running estimate is the
 // mean of the EM statistic of the steps (see update()), with the configured Q₀ (the model's process_noise_diag) as a prior
 // worth n₀ = 1/σ_ω² pseudo-observations and a memory λ per measured update. infer = false: Q = Q₀ throughout.
-// Q₀ = 0 (the countable persistent model, owner ruling 11-24: no constant process noise for a passive object) is an absorbing
-// fixed point of the statistic (E[w²] = 0 at q = 0), so Q stays 0 and ω = log Q = −inf: priors entered once are never forgotten.
+// With a permanence prior (jump_var, jump_prob below) q₀ = π·M is the class's mean per-step motion variance and Q is inferred
+// AROUND it; the Gaussian statistic alone would make a small q near-absorbing (gain (q/Σ̄)²), the spike-and-slab one does not.
 struct VolatilityConfig
 {
     bool   infer = false;
     double sigma_omega = 2.0;            // the hyperprior's width; its strength n₀ = 1/σ_ω² in pseudo-observations
     double memory = 0.995;               // λ per measured update (~200 updates): long enough to earn stiffness, short to recant
+    // PERMANENCE (owner ruling 11-25; MODEL_HISTORY.md §3, CONCEPT_AGENT_LIFECYCLE.md §4.1 "stiffness is never a lock"). A passive
+    // object of the class is MOVED now and then: per predict step with probability jump_prob, by a step of variance jump_var(i)
+    // per θ component (a spike-and-slab process noise, the class manifest's [prior.permanence]). Its mean per-step variance is
+    // the hyperprior mean q₀ = jump_prob · jump_var (= the model's process_noise_diag). When jump_var has N entries the EM
+    // statistic is the spike-and-slab one (learn_volatility): each update weighs "moved in this interval" against "stayed" by
+    // the innovation's likelihood under both, so a shove is recognised at ANY q — the Gaussian statistic's gain (q/Σ̄)² makes a
+    // small q near-absorbing — and a static object pulls Q back toward q₀ through the hyperprior. Empty ⇒ the Gaussian
+    // statistic below (item 2), for models with no permanence prior.
+    std::vector<double> jump_var;
+    double jump_prob = 0.0;
 };
 
 // GnTrace (diagnostic): one row per GN step of the last update, and the finite-difference check.
@@ -349,6 +359,7 @@ public:
     void predict(M& m, float q_scale)
     {
         ensure_joint(m.covariance());
+        steps_since_update_ += double(std::max(0.0f, q_scale));     // the predict steps the next measured update's interval spans
         predict_theta(m, q_scale);
         m.set_covariance(Sigma_theta());
     }
@@ -687,6 +698,11 @@ public:
         int steps = 0;
         bool undamped_checked = false;                                     // the λ = 0 proposal at this linearisation was tested
         build(theta, b_);                                                  // step 2: x̃_0 = (θ_0, b̄)
+        // the jump statistic's view of this update's data (learn_volatility): per θ component, the data's own information W_ii and
+        // Newton step g_i/W_ii from the PREDICTED state (θ̄, b̄), i.e. where the data alone would put θ_i — independent of how far
+        // the prior let the GN follow
+        const VecNd w_data = (Id_cam + Id_L + Id_th).diagonal().template cast<double>();
+        const VecNd g_data = (bd_cam + bd_L + bd_th).template cast<double>();
         while (steps < cfg.iters_max)
         {
             VecXd x_tilde; x_tilde << theta, (consistent ? b_post : b_);   // consistent: (θ_k, b_k); restart: (θ_k, b̄)
@@ -800,6 +816,7 @@ public:
         // (zero if none): a frame that stopped while still moving carries its last move as uncertainty.
         build(theta_post, consistent ? b_post : b_);
         P_ = pu::joint_cov<N, K>(P_bar, chans(), theta_only);
+        const VecNd post_var = P_.diagonal().template head<N>();          // the model's posterior, before the solver's last-step term
         P_.template topLeftCorner<N, N>() += d_last * d_last.transpose();
         if (cfg.gn_trace >= 2 or (cfg.gn_trace == 1 and not converged))
         {   // GnTrace: does the solver's G / W match the energy J it accepts against? Per channel, the raw −bd, the
@@ -861,7 +878,8 @@ public:
         }
         b_ = b_post;
         m.set_covariance(Sigma_theta());
-        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, theta_post);
+        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, w_data, g_data, theta_post);
+        steps_since_update_ = 0.0;
         dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
         // G5: what this update delivered (the θ-marginal entropy drop of the published Σ), and what the next offer's
         // hypothetical look starts from: the camera's position, how many points it gave and their mean variance, b_cam's
@@ -1184,7 +1202,8 @@ private:
     // collapsing onto data) reads as the prior being corrected, a shove of a converged object (Σ̄ a few q) as motion.
     // Running mean, conjugate in the per-step variance: n ← λn + 1, S ← λS + E[w²], Q = (n₀Q₀ + S)/(n₀ + n), ω = log Q; Q is a
     // weighted mean of Q₀ and of non-negative statistics, so it stays positive with no clamp.
-    void learn_volatility(const M& m, const VecNf& q_used, const VecNd& theta_pred, const MatJd& P_bar, const VecNd& theta_post)
+    void learn_volatility(const M& m, const VecNf& q_used, const VecNd& theta_pred, const MatJd& P_bar, const VecNd& post_var,
+                          const VecNd& w_data, const VecNd& g_data, const VecNd& theta_post)
     {
         const VolatilityConfig vc = volatility_of(m);
         if (not vc.infer) return;
@@ -1197,14 +1216,49 @@ private:
             vol_init_ = true;
         }
         const double n0 = 1.0 / (vc.sigma_omega * vc.sigma_omega);
+        const bool jumps = static_cast<int>(vc.jump_var.size()) == N;
+        const double k_steps = std::max(1.0, steps_since_update_);      // the update's own predict is always one
+        // P(at least one move in the interval) = 1 − (1 − π)^k
+        const double pi_int = jumps ? -std::expm1(k_steps * std::log1p(-std::min(vc.jump_prob, 1.0))) : 0.0;
         vol_n_ = vc.memory * vol_n_ + 1.0;
         for (int i = 0; i < N; ++i)
         {
             double dth = theta_post(i) - theta_pred(i);
             if (i == kYaw) dth = std::remainder(dth, 2.0 * M_PI);
-            const double q = double(q_used(i)), sbar = P_bar(i, i), spost = P_(i, i);
-            const double k = q / sbar;
-            const double ew2 = q + k * k * (dth * dth - (sbar - spost));
+            const double q = double(q_used(i)), sbar = P_bar(i, i), spost = post_var(i);
+            double ew2;
+            if (not jumps)
+            {   // Gaussian random walk (item 2): E[w²] = q + (q/Σ̄)²(δθ² − (Σ̄ − Σ⁺))
+                const double k = q / sbar;
+                ew2 = q + k * k * (dth * dth - (sbar - spost));
+            }
+            else
+            {   // Spike-and-slab. Per component, the update is read as a scalar Kalman step on THIS update's data: measurement
+                // variance R = 1/W_ii and innovation ν = g_i/W_ii, the data's own Newton step from the predicted state (both at the
+                // first linearisation, every channel); S = Σ̄ + R. Not ν = δθ/κ from the posterior: the GN follows a shove only as far
+                // as the prior lets it in one update, and on a converged belief the marginal gain 1 − Σ⁺/Σ̄ is ~1e-3. Under "moved by v ~ N(0, M)" the predicted variance is Σ̄ + M and S_m = S + M.
+                // p = P(moved | ν) by Bayes with prior π_int; E[v² | moved, ν] = M + (M/(Σ̄+M))²(δ_m² − (Σ̄ + M − Σ⁺_m)) with
+                // δ_m = κ_m ν, κ_m = (Σ̄+M)/S_m, Σ⁺_m = (1 − κ_m)(Σ̄+M); "stayed" contributes no step. The interval's E[w²] = p·E[v²],
+                // per predict step ÷ k. A component the update did not inform (κ = 0) carries the prior, π_int·M.
+                const double Mj = vc.jump_var[std::size_t(i)];
+                const double Wd = w_data(i);
+                (void)spost; (void)dth;
+                if (not (Wd > 0.0) or not (Mj > 0.0)) ew2 = pi_int * Mj;
+                else
+                {
+                    const double kap = Wd * sbar / (1.0 + Wd * sbar);
+                    const double nu = g_data(i) / Wd, S = sbar + 1.0 / Wd, Sm = S + Mj;
+                    const double llr = -0.5 * std::log(Sm / S) - 0.5 * nu * nu * (1.0 / Sm - 1.0 / S);   // log N(ν;0,S_m) − log N(ν;0,S)
+                    const double lo = std::log(pi_int) + llr, ls = std::log1p(-pi_int);
+                    const double mx = std::max(lo, ls);
+                    const double p = std::exp(lo - mx) / (std::exp(lo - mx) + std::exp(ls - mx));
+                    const double km = (sbar + Mj) / Sm, dm = km * nu, spm = (1.0 - km) * (sbar + Mj);
+                    const double r = Mj / (sbar + Mj);
+                    const double ev2 = Mj + r * r * (dm * dm - (sbar + Mj - spm));
+                    ew2 = p * ev2;
+                }
+                ew2 /= k_steps;
+            }
             vol_s_(i) = vc.memory * vol_s_(i) + ew2;
             vol_omega_(i) = std::log((n0 * q0(i) + vol_s_(i)) / (n0 + vol_n_));
         }
@@ -1422,6 +1476,7 @@ private:
     bool   last_wall_entered_ = false;
     // the inferred volatility (learn_volatility): ω = log Q per θ component, the running statistic S and count n
     bool   vol_init_ = false;
+    double steps_since_update_ = 0.0;                // predict steps (Σ q_scale) since the last measured update
     VecNd  vol_omega_ = VecNd::Zero();
     VecNd  vol_s_ = VecNd::Zero();
     double vol_n_ = 0.0;

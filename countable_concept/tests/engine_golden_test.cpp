@@ -24,6 +24,8 @@
 // carries it; this fixture declares none, so it gets the old flush form once and no no-cross).
 // Re-recorded for F1 round 5 (owner ruling 11-24): no constant process noise on the persistent path (Q from the volatility
 // estimate only, whose prior mean is 0), so no predict adds variance.
+// Re-recorded for F1 round 6 (owner ruling 11-25): Q from the nightstand class permanence prior (fixture params), inferred
+// around q0 by the spike-and-slab statistic.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
@@ -55,6 +57,8 @@ static CountableBeliefParams params()
     p.wall_flush_prior = 0.90f;
     p.room_axis_std    = 3.0f * 0.017453293f;
     p.volatility_infer = true;
+    // F1 round 6: the nightstand class's permanence prior (the volatility's hyperprior), as the agent stages it.
+    p.move_rate_per_day = 0.011f; p.move_scale_m = 0.3f; p.move_scale_rad = 0.5f;
     p.persistent       = true;
     p.beam             = ts::test_beam_config();
     p.layer_spread_m   = {0.025f, 0.025f, 0.0f, 0.04f, 0.05f, 0.0f};   // nightstand.concept.toml [shape].layer_spread_m (Task 5)

@@ -87,6 +87,8 @@ template <class V> void fields(V& v, CountableBeliefParams& x)
     v("room_axis_std", x.room_axis_std); v("wall_parallel_precision", x.wall_parallel_precision);
     v("wall_no_cross_precision", x.wall_no_cross_precision); v("wall_no_cross_margin_m", x.wall_no_cross_margin_m);
     v("wall_standoff_m", x.wall_standoff_m); v("wall_standoff_std_m", x.wall_standoff_std_m);
+    v("move_rate_per_day", x.move_rate_per_day); v("move_scale_m", x.move_scale_m); v("move_scale_rad", x.move_scale_rad);
+    v("predict_period_s", x.predict_period_s);
     v("door_clearance_gain", x.door_clearance_gain);
     v("volatility_infer", x.volatility_infer); v("volatility_lr", x.volatility_lr);
     v("volatility_sigma", x.volatility_sigma); v("volatility_omega_min", x.volatility_omega_min);

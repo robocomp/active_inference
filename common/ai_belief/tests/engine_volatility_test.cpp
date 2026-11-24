@@ -6,7 +6,11 @@
 //   (3) a large correction of a WIDE prior (a seed collapsing onto data, engine1's bed) barely moves ω — the raw-step rule
 //       it replaces would have raised Q by ~δθ²/(n₀+1);
 //   (4) a shove of a CONVERGED object (Σ̄ a few q) is learned: ω rises by orders of magnitude;
-//   (5) without volatility() (infer off) Q is Q₀ throughout.
+//   (5) without volatility() (infer off) Q is Q₀ throughout;
+//   (6) PERMANENCE (owner ruling 11-25, spike-and-slab statistic) with the PRODUCTION bed class values (bed.concept.toml:
+//       0.0027 moves/day, 0.5 m, dt 0.1 s ⇒ π = 3.125e-9 per step, q₀ = π·0.25 = 7.8e-10 m²): a static box keeps Q in
+//       [n₀/(n₀ + n)·q₀, q₀] (it can only lower the statistic below the prior mean, and the hyperprior bounds that), and a 0.10 m
+//       shove raises Q to at least a quarter of the shove's share δ²/(n₀ + n) — the Gaussian statistic would leave it at q₀.
 // Run: ./engine_volatility_test
 #include <cmath>
 #include <cstdio>
@@ -19,6 +23,18 @@ static int bad = 0;
 struct VolBox : toy::ToyBox
 {
     rc::ai::engine::VolatilityConfig volatility() const { rc::ai::engine::VolatilityConfig v; v.infer = true; return v; }
+};
+// the bed class's permanence prior (production values)
+constexpr double kBedPi = 0.0027 * 0.1 / 86400.0;
+struct BedBox : toy::ToyBox
+{
+    rc::ai::engine::VolatilityConfig volatility() const
+    {
+        rc::ai::engine::VolatilityConfig v; v.infer = true;
+        v.jump_var = {0.25, 0.25, 0.01, 0.04, 0.04, 0.25};   // 0.5 m, the class size stds (0.10 H, 0.20 w/h), 0.5 rad
+        v.jump_prob = kBedPi;
+        return v;
+    }
 };
 using Engine = rc::ai::engine::PersistentEngine<VolBox>;
 using Plain  = rc::ai::engine::PersistentEngine<toy::ToyBox>;
@@ -117,6 +133,29 @@ int main()
         Plain e;
         for (int k = 0; k < 5; ++k) e.update(a, f, cam_latents());
         CHECK(e.process_noise(a) == a.process_noise_diag());
+    }
+    // (6) permanence, production bed values
+    {
+        BedBox a;
+        a.s = toy::ToyState{1.05f, 1.96f, 0.85f, 0.57f, 0.43f, 0.35f};
+        a.prior_mean << 0.f, 0.f, 0.8f, 0.6f, 0.4f, 0.f;
+        a.Sigma = a.prior_diag.asDiagonal();
+        const auto vc = a.volatility();
+        for (int i = 0; i < N; ++i) a.q_diag(i) = float(vc.jump_prob * vc.jump_var[std::size_t(i)]);
+        const double q0 = double(a.q_diag(0)), n0 = 0.25;
+        rc::ai::engine::PersistentEngine<BedBox> e;
+        constexpr int kStatic = 30;
+        for (int k = 0; k < kStatic; ++k) e.update(a, f, cam_latents());
+        const double Qs = std::exp(e.log_volatility(a)(0));
+        double n = 0.0; for (int k = 0; k < kStatic - 1; ++k) n = 0.995 * n + 1.0;   // the first update teaches nothing
+        std::printf("  (6) bed permanence: q0 %.3e ; after %d static updates Q_cx %.3e (bounds [%.3e, %.3e])\n", q0, kStatic, Qs,
+                    n0 / (n0 + n) * q0, q0);
+        CHECK(Qs <= q0 * (1.0 + 1e-6) and Qs >= n0 / (n0 + n) * q0 * (1.0 - 1e-6));
+        toy::ToyState moved = truth; moved.cx += 0.10f;
+        e.update(a, toy::make_frame(toy::surface_points(moved, 6), {}), cam_latents());
+        const double Qm = std::exp(e.log_volatility(a)(0)), share = 0.10 * 0.10 / (n0 + 0.995 * n + 1.0);
+        std::printf("      shoved 0.10 m: Q_cx %.3e (omega %.2f -> %.2f) ; the shove's share %.3e\n", Qm, std::log(Qs), std::log(Qm), share);
+        CHECK(Qm >= 0.25 * share);
     }
     std::printf(bad ? "engine_volatility_test: %d FAILED\n" : "engine_volatility_test: OK\n", bad);
     return bad != 0;

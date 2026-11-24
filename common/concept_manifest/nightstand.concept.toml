@@ -71,6 +71,14 @@ standoff_std_m = 0.02
 # above is the legacy path's hinge only.
 standoff_source = "uncited convention: a nightstand against a wall stands off it by the skirting board (commonly 10-20 mm) plus room for a cable or a plug behind it; not measured, no source read. Not from the Webots world."
 
+[prior.permanence]
+# The volatility's hyperprior (persistent path, F1 round 6): Q is inferred around q0 = rate * dt * scale^2 (spike-and-slab).
+from = "nominal"
+move_rate_per_day = 0.011
+move_scale_m = 0.3
+move_scale_rad = 0.5
+source = "uncited convention: a nightstand is moved about once a quarter (1/90 per day: cleaning, rearranging), by about 0.3 m and possibly turned (0.5 rad). Not measured; not from the Webots world."
+
 [prior.alignment]
 kind = "room_axis"
 fold = 4

@@ -158,6 +158,8 @@ struct CountableConfig
     // [prior.attachment] stand-off (manifest; F1.4): the back face's typical real distance off its wall, mean and std (m).
     float wall_standoff_m     = 0.0f;
     float wall_standoff_std_m = 0.0f;   // 0 ⇒ none declared: the flush prior keeps its old form
+    // [prior.permanence] (manifest; F1 round 6): the volatility's hyperprior on the persistent path
+    float move_rate_per_day = 0.0f, move_scale_m = 0.0f, move_scale_rad = 0.0f;
     float ai2_process_std_m   = 0.005f;  // predict process-noise std, length DOFs (m/frame)
     float ai2_process_std_yaw = 0.01f;   // predict process-noise std, yaw (rad/frame)
     // Stale-belief aging (measurement-age → covariance). Nominal inter-frame period (s) of the mask stream,
