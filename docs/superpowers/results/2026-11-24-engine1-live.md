@@ -35,7 +35,7 @@ Where the time goes (median / p95 / max ms of the tick, when the agent holds at 
 - The bed stalls:
   - Step0 had one 8-tick burst of 260 to 525 ms at 138 s, all inside `infer` (the first big view).
   - Engine1 has the same kind of burst at 113 to 118 s (8 ticks, 330 to 700 ms, `infer` 290 to 660 ms), plus 15 smaller ticks of 150 to 190 ms.
-  - Seven of those are `publish` spikes of 66 to 78 ms with `infer` = 0, about one per 4 s on the bed. That is the planning cycle at its full cost, about 70 ms.
+  - Six of those are `publish` spikes of 66 to 78 ms with `infer` = 0. That looks like the planning cycle at its full cost, about 70 ms (I did not confirm the cause in code).
 - The stall in `infer` is not new. It is larger by 30% in its worst tick (700 against 525 ms). I cannot say from one run whether that is the build or the view.
 - Conclusion: rates are at nominal for nightstand and toilet. For the bed they are 9.85 Hz. The offer cost (about 25 ms per tick on the bed) takes a quarter of the 100 ms budget, and its spikes of 70 ms plus a normal tick are what push ticks past 100 ms. This is the point to watch if more beds are born.
 
