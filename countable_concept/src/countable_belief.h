@@ -613,7 +613,7 @@ public:
                              Eigen::Matrix<float, 6, 6>& Id_cam, Eigen::Matrix<float, 6, 1>& bd_cam,
                              Eigen::Matrix<float, 6, 6>& Id_L,   Eigen::Matrix<float, 6, 1>& bd_L,
                              Eigen::Matrix<float, 6, 6>& Id_th,  Eigen::Matrix<float, 6, 1>& bd_th) const
-    { engine_.accumulate_channels(model(), s_th, s_cam, s_L, f, lidar_measured(f), Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th); }
+    { engine_.accumulate_channels(model(), s_th, s_cam, s_L, f, not f.points.empty(), lidar_measured(f), Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th); }
     // Test/diagnostic record of the last persistent update: θ after each GN iterate, the predicted θθ block, and the
     // channel information at the converged state.
     const std::vector<Eigen::Matrix<float, 6, 1>>& dbg_iterates() const { return engine_.dbg_iterates(); }   // ACCEPTED θ iterates
@@ -642,7 +642,7 @@ public:
     // enters J through the prior term, as the step's G does (the old "zero while parked, step only" was wrong: live13trace).
     double persistent_data_energy(const CountableBeliefState& s_cam, const CountableBeliefState& s_L,
                                   const CountableBeliefState& s_th, const CountableFrame& f) const
-    { return engine_.data_energy(model(), s_cam, s_L, s_th, f, lidar_measured(f)); }
+    { return engine_.data_energy(model(), s_cam, s_L, s_th, f, not f.points.empty(), lidar_measured(f)); }
     const Eigen::Matrix<float, 6, 6>& dbg_Pbar_tt() const { return engine_.dbg_Pbar_tt(); }
     const Eigen::Matrix<float, 6, 6>& dbg_Id_th()   const { return engine_.dbg_Id_th(); }
     const Eigen::Matrix<float, 6, 6>& dbg_Id_cam()  const { return engine_.dbg_Id_cam(); }

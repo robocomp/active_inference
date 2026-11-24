@@ -37,6 +37,7 @@
 #include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <cstdio>
 #include <limits>
 #include <span>
 #include <vector>
@@ -110,9 +111,11 @@ struct GnTraceFd
 };
 
 // What a model provides. Required hooks beyond the camera-point ones of recursive_laplace.h:
-//   accumulate_extra(s, f, I, b [, E])        the θ-only channel (what the latents must not absorb); with E non-null each
-//                                              term ALSO adds its energy ½λr² (the GN acceptance objective);
-//   accumulate_camera_extra(s, f, I, b, E)    the camera channel's non-point terms, same energy convention;
+//   Frame::points, Frame::R                    the camera points (indexable Eigen::Vector3f) and their per-point variances
+//                                              (indexable float; empty or ≤ 0 ⇒ sigma2()), read by the engine's point loop;
+//   accumulate_extra(s, f, I, b, E)            the θ-only channel (what the latents must not absorb); with E non-null each
+//                                              term ALSO adds its energy ½λr² (the GN acceptance objective), E = nullptr when
+//                                              only the information is wanted — the engine calls this one signature;
 //   point_energy(p, s, R)                      one camera point's −log mixture likelihood (double);
 //   beam_parts(s), beam_rays(f), beam_config() the LiDAR channel's convex parts, staged rays and beam config;
 //   chain_jacobian(s, lever)                   how a robot pose error (δx, δy, δψ) moves θ;
@@ -121,9 +124,13 @@ struct GnTraceFd
 //   state(), set_state(s), covariance(), set_covariance(Σ)   the model's θ and its float N×N mirror of P_θθ (the model's
 //                                              own terms may read the mirror: the engine sets it to the predicted P̄_θθ
 //                                              before the first linearisation, and to the posterior after);
-//   solver()                                   SolverConfig;
 //   shape_spread()                             σ of the shape misfit per θ component (zeros until Task 5).
-// Optional: accumulate_lidar_override(s, f, I*, b*, E*) -> bool — a model may route its LiDAR channel elsewhere (a test hook).
+// Optional (detected by requires-expressions; absent ⇒ the stated default):
+//   accumulate_camera_extra(s, f, I, b, E)     the camera channel's non-point terms, same energy convention (absent: none);
+//   solver()                                   SolverConfig (absent: SolverConfig{});
+//   accumulate_lidar_override(s, f, I*, b*, E*) -> bool   route the LiDAR channel elsewhere (a test hook; absent: never).
+// The camera channel's flag is FrameLatents::camera_measured alone: it gates both the camera's accumulation (information and
+// energy) and its channel in the joint step, so G and J cannot disagree about whether the camera measured.
 template <class M>
 concept PersistentModel =
     requires {
@@ -144,9 +151,11 @@ concept PersistentModel =
         { cm.n_prims() } -> std::convertible_to<int>;
         { cm.sigma2() } -> std::convertible_to<float>;
         { cm.point_energy(p, cs, R) } -> std::convertible_to<double>;
-        cm.accumulate_extra(cs, f, I, b);
+        { f.points.size() } -> std::convertible_to<std::size_t>;
+        { f.points[0] } -> std::convertible_to<const Eigen::Vector3f&>;
+        { f.R.size() } -> std::convertible_to<std::size_t>;
+        { f.R[0] } -> std::convertible_to<float>;
         cm.accumulate_extra(cs, f, I, b, E);
-        cm.accumulate_camera_extra(cs, f, I, b, E);
         { cm.beam_parts(cs) } -> std::convertible_to<std::vector<rc::ai::beam::BeamPart>>;
         { cm.beam_rays(f) } -> std::convertible_to<const rc::ai::beam::BeamRays&>;
         { cm.beam_config() } -> std::convertible_to<const rc::ai::beam::BeamConfig&>;
@@ -161,7 +170,6 @@ concept PersistentModel =
         { cm.covariance() } -> std::convertible_to<Eigen::Matrix<float, M::N, M::N>>;
         m.set_state(cs);
         m.set_covariance(S);
-        { cm.solver() } -> std::convertible_to<SolverConfig>;
     };
 
 template <PersistentModel M>
@@ -332,38 +340,39 @@ public:
     }
 
     // ── The channels ────────────────────────────────────────────────────────────────────────────────────────────────
-    // Each channel is linearised at its own state: s_th = θ_k, s_cam = θ_k + B_cam b, s_L = θ_k + B_L b. Camera = the
-    // points' GN information + the model's camera extra terms; LiDAR = the beam set (when `lidar`) or the model's override;
-    // θ-only = the model's accumulate_extra.
-    void accumulate_channels(const M& m, const State& s_th, const State& s_cam, const State& s_L, const Frame& f, bool lidar,
-                             MatNf& Id_cam, VecNf& bd_cam, MatNf& Id_L, VecNf& bd_L, MatNf& Id_th, VecNf& bd_th) const
+    // Each channel is linearised at its own state: s_th = θ_k, s_cam = θ_k + B_cam b, s_L = θ_k + B_L b. Camera (when
+    // `camera`) = the points' GN information + the model's camera extra terms; LiDAR = the beam set (when `lidar`) or the
+    // model's override; θ-only = the model's accumulate_extra.
+    void accumulate_channels(const M& m, const State& s_th, const State& s_cam, const State& s_L, const Frame& f, bool camera,
+                             bool lidar, MatNf& Id_cam, VecNf& bd_cam, MatNf& Id_L, VecNf& bd_L, MatNf& Id_th, VecNf& bd_th) const
     {
         Id_cam.setZero(); bd_cam.setZero(); Id_L.setZero(); bd_L.setZero(); Id_th.setZero(); bd_th.setZero();
-        if (not f.points.empty())
+        if (camera)
         {
             accumulate_points(m, s_cam, f, Id_cam, bd_cam);
-            m.accumulate_camera_extra(s_cam, f, Id_cam, bd_cam, nullptr);
+            camera_extra(m, s_cam, f, Id_cam, bd_cam, nullptr);
         }
         if (not lidar_override(m, s_L, f, &Id_L, &bd_L, nullptr) and lidar)
             beam_.accumulate(key_of(s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), &Id_L, &bd_L);
-        m.accumulate_extra(s_th, f, Id_th, bd_th);
+        m.accumulate_extra(s_th, f, Id_th, bd_th, nullptr);
     }
 
     // The energy whose gradients accumulate_channels builds, term by term, with the same per-frame gates: the camera points'
     // −log mixture likelihood and the camera extra terms at s_cam, the beam energy (or the override's) at s_L, the θ-only
     // terms at s_th. ∇E = −(bd_cam + bd_L + bd_th) up to the state dependence of the terms' weights, which the GN information
     // also holds fixed.
-    double data_energy(const M& m, const State& s_cam, const State& s_L, const State& s_th, const Frame& f, bool lidar) const
+    double data_energy(const M& m, const State& s_cam, const State& s_L, const State& s_th, const Frame& f, bool camera,
+                       bool lidar) const
     {
         MatNf Id = MatNf::Zero();   // the terms' information is not wanted here
         VecNf bd = VecNf::Zero();
         double E = 0.0;
-        if (not f.points.empty())
+        if (camera)
         {
             const float sig2 = m.sigma2();
             for (std::size_t i = 0; i < f.points.size(); ++i)
                 E += m.point_energy(f.points[i], s_cam, R_of(f, i, sig2));
-            m.accumulate_camera_extra(s_cam, f, Id, bd, &E);
+            camera_extra(m, s_cam, f, Id, bd, &E);
         }
         if (not lidar_override(m, s_L, f, nullptr, nullptr, &E) and lidar)
             E += beam_.accumulate(key_of(s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), nullptr, nullptr);
@@ -380,7 +389,7 @@ public:
         using MatN = MatNf;
         using VecN = VecNf;
         namespace pu = rc::ai::persistent;
-        const SolverConfig cfg = m.solver();
+        const SolverConfig cfg = solver_of(m);
 
         predict(m, 1.0f);                                                  // step 1, θ
         dbg_iterates_.clear();
@@ -391,11 +400,16 @@ public:
         last_beam_staged_ = 0; last_gap_rays_ = 0; beam_.reset_ms();
         dbg_Pbar_tt_ = m.covariance();
         const bool camera = fl.camera_measured;
-        const bool lidar  = fl.lidar_measured;
+        // The LiDAR channel measures only a ray-set that is a measurement (spec 7c.8 rev 3.3.11): an empty one (or Σq = 0)
+        // silently does not; a misaligned one or a BeamConfig not built by BeamConfig::make is refused, loudly, once per
+        // engine. A model's LiDAR override (a test hook) reads its own rays and is not judged here.
+        const bool lidar = fl.lidar_measured and lidar_ready(m, f);
         if (not camera and not lidar)
             return 0.0f;                                                   // predict-only
 
-        predict_latents(m, fl);                                            // step 1, latents
+        FrameLatents<N> fl_used = fl;
+        fl_used.lidar_measured = lidar;                                    // the latents follow the channels that measure
+        predict_latents(m, fl_used);                                       // step 1, latents
         const typename rc::ai::beam::BeamChannel<N>::Scope cache_scope(beam_);   // the beam cache lives for this update
         MatJd P_bar = P_;
         VecXd x_bar; x_bar << m.state().vec().template cast<double>(), b_;
@@ -427,7 +441,7 @@ public:
         MatN Id_cam, Id_L, Id_th; VecN bd_cam, bd_L, bd_th;
         const auto build = [&](const VecNd& th, const VecKd& bb)
         {
-            accumulate_channels(m, S(th), S(th + B_cam * bb), S(th + B_L * bb), f, lidar, Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th);
+            accumulate_channels(m, S(th), S(th + B_cam * bb), S(th + B_L * bb), f, camera, lidar, Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th);
             channels.clear();
             if (camera) { pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Id_cam, bd_cam, Sf_cam); c.B = B_cam; channels.push_back(c); }
             if (lidar)  { pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Id_L,   bd_L,   Sf_L);   c.B = B_L;   channels.push_back(c); }
@@ -445,7 +459,7 @@ public:
         {
             const VecNd th = x.template head<N>();
             const VecKd bb = x.template tail<K>();
-            return data_energy(m, S(th + B_cam * bb), S(th + B_L * bb), S(th), f, lidar);
+            return data_energy(m, S(th + B_cam * bb), S(th + B_L * bb), S(th), f, camera, lidar);
         };
         const auto wrapped = [](VecXd d) { if constexpr (kYaw >= 0) d(kYaw) = std::remainder(d(kYaw), 2.0 * M_PI); return d; };
         const auto below_tol = [&](const VecNd& d)
@@ -611,10 +625,10 @@ public:
             {
                 MatN Ic, IL, It; VecN gc, gL, gt;
                 const VecNd sc0 = th + B_cam * bb, sl0 = th + B_L * bb;
-                accumulate_channels(m, S(th), S(sc0), S(sl0), f, lidar, Ic, gc, IL, gL, It, gt);
+                accumulate_channels(m, S(th), S(sc0), S(sl0), f, camera, lidar, Ic, gc, IL, gL, It, gt);
                 const auto mc = pu::marginalise_fresh<N>(Ic, gc, Sf_cam);
                 const auto mL = pu::marginalise_fresh<N>(IL, gL, Sf_L);
-                const double E0 = data_energy(m, S(sc0), S(sl0), S(th), f, lidar);
+                const double E0 = data_energy(m, S(sc0), S(sl0), S(th), f, camera, lidar);
                 for (int ch = 0; ch < 3; ++ch)
                 {
                     if (ch == 0 and not camera) continue;
@@ -625,7 +639,7 @@ public:
                         {
                             VecNd a = sc0, l = sl0, t = th;
                             (ch == 0 ? a : ch == 1 ? l : t)(k) += h;
-                            return data_energy(m, S(a), S(l), S(t), f, lidar);
+                            return data_energy(m, S(a), S(l), S(t), f, camera, lidar);
                         };
                         GnTraceFd r; r.at = at; r.channel = ch; r.k = k;
                         const VecN& g = ch == 0 ? gc : ch == 1 ? gL : gt;
@@ -673,7 +687,7 @@ public:
         first_update_done_ = true;                                         // the class prior at the class mean has entered, once
         birth_pos_excess_.setZero();                                       // the birth spread entered with it, once (rev 3.3.14)
 
-        if (not camera) return 0.0f;
+        if (not camera or f.points.empty()) return 0.0f;
         // Per-point energy at what the camera MEASURES, θ + B_cam b (posterior b), not at the state θ — the engine's surface
         // energy on the biased quantity. Diagnostic.
         const State s_cam = State::from_vec((theta_post + B_cam * b_).template cast<float>());
@@ -742,6 +756,49 @@ private:
         }
     }
 
+    // The model's optional camera extra terms: none when absent.
+    static void camera_extra(const M& m, const State& s, const Frame& f, MatNf& Id, VecNf& bd, double* E)
+    {
+        if constexpr (requires { m.accumulate_camera_extra(s, f, Id, bd, E); })
+            m.accumulate_camera_extra(s, f, Id, bd, E);
+    }
+
+    // The model's optional solver constants: SolverConfig{} when absent.
+    static SolverConfig solver_of(const M& m)
+    {
+        if constexpr (requires { { m.solver() } -> std::convertible_to<SolverConfig>; })
+            return m.solver();
+        else
+            return SolverConfig{};
+    }
+
+    // Whether this frame's staged ray-set measures (rc::ai::beam::beam_readiness), logging a refusal once per engine. A model
+    // whose LiDAR override handles the channel is ready by its own account.
+    bool lidar_ready(const M& m, const Frame& f) const
+    {
+        if (lidar_override(m, m.state(), f, nullptr, nullptr, nullptr)) return true;
+        namespace bm = rc::ai::beam;
+        const bm::BeamRays& rays = m.beam_rays(f);
+        switch (bm::beam_readiness(rays, m.beam_config()))
+        {
+            case bm::Readiness::kMeasured: return true;
+            case bm::Readiness::kEmpty:    return false;
+            case bm::Readiness::kInconsistent:
+                if (not beam_inconsistent_logged_)
+                    std::fprintf(stderr, "PersistentEngine: beam ray-set refused — m (%zu) / p_f (%zu) do not match the %zu staged "
+                                 "rays (the LiDAR channel does not measure)\n", rays.m.size(), rays.p_f.size(), rays.endpoints.size());
+                beam_inconsistent_logged_ = true;
+                return false;
+            case bm::Readiness::kUnready:
+                if (not beam_unready_logged_)
+                    std::fprintf(stderr, "PersistentEngine: beam not ready — the model's BeamConfig was not built by "
+                                 "BeamConfig::make; the staged rays are NOT used (the LiDAR channel does not measure)\n");
+                beam_unready_logged_ = true;
+                return false;
+        }
+        return false;
+    }
+
     // The model's optional LiDAR override (a test hook): true when it handled the channel.
     static bool lidar_override(const M& m, const State& s, const Frame& f, MatNf* Id, VecNf* bd, double* E)
     {
@@ -772,6 +829,8 @@ private:
     bool first_update_done_ = false;                 // the class prior at the class mean has entered
     Eigen::Matrix2f birth_pos_excess_ = Eigen::Matrix2f::Zero();
     rc::ai::beam::BeamChannel<N> beam_;
+    mutable bool beam_unready_logged_ = false;       // "beam not ready" printed (once per engine)
+    mutable bool beam_inconsistent_logged_ = false;  // "beam ray-set refused" printed (once per engine)
     std::vector<VecNf> dbg_iterates_;
     std::vector<double> dbg_gn_energy_;
     std::vector<GnTraceStep<N>> dbg_gn_steps_;

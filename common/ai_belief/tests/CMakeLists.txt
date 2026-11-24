@@ -20,3 +20,14 @@ target_include_directories(viewpoint_rho_test PRIVATE ../..)
 target_compile_options(viewpoint_rho_test PRIVATE -O2)
 target_link_libraries(viewpoint_rho_test PRIVATE Eigen3::Eigen)
 add_test(NAME viewpoint_rho_test COMMAND viewpoint_rho_test)
+
+# The shared persistent engine (common/ai_belief/persistent_engine.h) on the minimal toy model (toy_model.h; shared-engine
+# Task 4, Review Focus 1, 2): an unready BeamConfig is refused once and the camera still converges; an update that measures
+# nothing leaves θ bit-identical and moves P only by the latents' prediction. Run: ./engine_no_beam_test, ./engine_predict_only_test
+foreach(t engine_no_beam_test engine_predict_only_test)
+    add_executable(${t} ${t}.cpp)
+    target_include_directories(${t} PRIVATE ../..)
+    target_compile_options(${t} PRIVATE -O2)
+    target_link_libraries(${t} PRIVATE Eigen3::Eigen)
+    add_test(NAME ${t} COMMAND ${t})
+endforeach()
