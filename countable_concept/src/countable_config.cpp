@@ -548,15 +548,16 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
 // world fact, and one of them is wrong. A MISSING line means the manifest does not yet describe that prior.
 bool verify_countable_manifest(const CountableConfig& out, const std::string& path)
 {
-    ConfigLoader man;
-    try { man.load(path); }
-    catch (...) { std::print("[manifest] not loaded ({}) — cross-check skipped\n", path); return false; }
+    toml::table man;   // toml++, not ConfigLoader: the manifest carries arrays of tables (rc::manifest::parse_manifest)
+    try { man = rc::manifest::parse_manifest(path); }
+    catch (const std::exception& e) { std::print("[manifest] not loaded ({}) — cross-check skipped: {}\n", path, e.what()); return false; }
 
     int agree = 0, differ = 0, missing = 0;
     const auto chk = [&](const char* key, float live, const char* what) {
-        if (not man.exists(key)) { ++missing;
+        const auto v = man.at_path(key).value<double>();
+        if (not v) { ++missing;
             std::print("[manifest] MISSING  {:<42} live={:<10.4g} ({})\n", key, live, what); return; }
-        const float m = static_cast<float>(man.get<double>(key));
+        const float m = static_cast<float>(*v);
         const float tol = 1e-4f * std::max(1.0f, std::abs(live));
         if (std::abs(m - live) <= tol) { ++agree; }
         else { ++differ;

@@ -31,13 +31,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <fstream>
 #include <print>
+#include <stdexcept>
 #include <vector>
 #include <string>
 #include <string_view>
 
-#include <genericworker.h>   // ConfigLoader
+#include <genericworker.h>   // ConfigLoader (resolve(), for the agents' etc/config)
+#include <toml++/toml.h>     // parse_manifest: a manifest is TOML, read whole by toml++
 
 #include "back_panel.h"   // rc::manifest::load_back_panel (textual, Qt-free)
 #include "../config_report/config_read.h"   // rc::cfg::Reader / registry (SHARED)
@@ -137,14 +140,33 @@ struct Geometry
     }
 };
 
+// ─── PARSING A MANIFEST: toml++ directly, never ConfigLoader ──────────────────────────────────────
+//
+// ★A manifest is TOML, and ConfigLoader is not a TOML reader. ConfigLoader (RoboComp's agent-config loader) flattens a
+// file into scalars and homogeneous scalar arrays and THROWS on anything else: an array of tables ("Unsupported array
+// type encountered." — [[shape.part]], on bed / nightstand / toilet since 2026-11-15) or an empty array ("Empty arrays
+// are not supported." — hood). A whole-file load then fails for a valid manifest, and every live countable run printed
+// MANIFEST NOT LOADED while the textual readers (back panel, shape parts, class prior) read the same file fine. So the
+// whole-file reads parse with toml++ (the parser ConfigLoader itself wraps) and look keys up by dotted path. Throws
+// with the parser's reason (file, line) on an unreadable or malformed file — callers print it, never swallow it.
+inline toml::table parse_manifest(const std::string& path)
+{
+    try { return toml::parse_file(path); }
+    catch (const toml::parse_error& e)
+    {
+        const auto& b = e.source().begin;
+        throw std::runtime_error(std::format("{}:{}:{}: {}", path, b.line, b.column, e.description()));
+    }
+}
+
 // Load the [model.geometry] block. Missing file or missing block ⇒ valid = false, never a guess: an agent
 // that cannot read its manifest must fall back to its own defaults LOUDLY, not silently adopt zeros.
 inline Geometry load_geometry(const std::string& path, std::string_view concept_name = "")
 {
     Geometry g;
-    ConfigLoader m;
-    try { m.load(path); }
-    catch (...)
+    toml::table m;
+    try { m = parse_manifest(path); }
+    catch (const std::exception& e)
     {
         // ★NOT a benign note. This is the declarative layer being INERT: the agent silently keeps whatever
         // its template left behind, which for a clone is the template's geometry — the exact failure the
@@ -152,15 +174,18 @@ inline Geometry load_geometry(const std::string& path, std::string_view concept_
         // was written 2026-08-03 with a path relative to the SOURCE tree ("../../common/…", correct for
         // an #include from <agent>/src/) rather than to the agent's CWD ("../common/…", where it actually
         // runs), so it printed this line and skipped, every start, for a week. Same string, right in one
-        // place and wrong in the other, which is precisely why nobody looked twice.
+        // place and wrong in the other, which is precisely why nobody looked twice. The REASON is printed:
+        // the countable manifests failed here for a week on a parser limit, not a path (see parse_manifest).
         std::print("[manifest] ★★{} MANIFEST NOT LOADED ({}) — THE DECLARATIVE GEOMETRY IS INERT and the\n"
                    "[manifest]   agent is running on its own defaults, which for a CLONE are its template's.\n"
-                   "[manifest]   The path is relative to the agent's CWD, not to src/.\n",
-                   concept_name, path);
+                   "[manifest]   The path is relative to the agent's CWD, not to src/.\n"
+                   "[manifest]   reason: {}\n",
+                   concept_name, path, e.what());
         return g;
     }
-    const auto getf = [&](const char* k, float d) { return m.exists(k) ? static_cast<float>(m.get<double>(k)) : d; };
-    const auto gets = [&](const char* k) { return m.exists(k) ? m.get<std::string>(k) : std::string{}; };
+    const auto getf = [&](const char* k, float d)
+    { const auto v = m.at_path(k).value<double>(); return v ? static_cast<float>(*v) : d; };
+    const auto gets = [&](const char* k) { return m.at_path(k).value_or(std::string{}); };
 
     g.support  = support_from(gets("model.geometry.support"));
     g.z_top_m  = getf("model.geometry.z_top_m",  0.0f);
