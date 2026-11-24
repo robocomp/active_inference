@@ -51,6 +51,17 @@ def main():
     assert q['dz'] < 0.01 and close(q['dphi'], math.pi / 4, 1e-3), q
     assert close(q['rho_cam'], math.exp(-q['dphi'] / math.atan(q['w_perp'] / 4.0) - q['dz'] / 2.0), 1e-9)
     assert pr['chord']['dz'] > 0 and pr['chord']['rho_cam'] < pr['arc']['rho_cam']
+    # 4b. the Kalman form (theta_var) and the GLS form (theta_var_gls) of the same model agree, on mixed channels, rho, chain
+    import random
+    rnd = random.Random(7)
+    for trial in range(20):
+        p = prm(rnd.uniform(1e-4, 1e-3), rnd.uniform(1e-4, 1e-3), rnd.uniform(0.0, 0.2), rnd.choice([math.inf, 0.01]))
+        vs = [dict(cam=rnd.random() < 0.7, L=rnd.random() < 0.8, rho_cam=rnd.random(), rho_L=rnd.random(),
+                   rho_chain=rnd.random(), chain=[rnd.uniform(0.0, 0.003)] * 6) for _ in range(rnd.randint(1, 12))]
+        vs[0]['cam'] = True
+        for h in M.HYPS:
+            a, b = M.theta_var(vs, 0, p, h), M.theta_var_gls(vs, 0, p, h)
+            assert abs(a - b) <= 1e-6 * b, (trial, h, a, b)
     # 5. the run-log views: updates with every rho exactly 1 are one view; a rho below 1 starts a new one
     ups = [dict(t=t, cam=True, L=True, rho_cam=r, rho_L=r, rho_chain=1.0, chain=[0.0] * 6) for t, r in
            ((0, 0.5), (1, 1.0), (2, 1.0), (3, 0.2), (4, 1.0))]
@@ -60,6 +71,7 @@ def main():
     assert len(vh) == 2 and close(vh[1]['rho_cam'], 0.2)   # the product since the first dwell ended (t = 1): 1 * 0.2 * 1
     assert [len(r) for r in R.parked_runs(ups)] == [3, 2]
     visits()
+    node_match()
     print('test_aba_model: OK')
 
 
@@ -113,6 +125,37 @@ def visits():
             for bad in ('NOB', 'TIMEOUT', 'OFF', 'FRAME', 'NOFACE'):
                 assert f'== {bad}: NO VERDICT -> FAIL' in out, (rep, bad, out)
             assert 'PASS' not in out.split('== summary')[-1], (rep, out)
+
+
+AI2_COLS = ('node pkt_ts gated npts lidar_only beam_qsum rho_cam rho_L rho_chain std_cx std_cy std_H std_w std_h std_yaw_within '
+            'cx cy H w h yaw spose_x spose_y spose_psi lever_x lever_y').split()
+
+
+def node_match():
+    # 7. the node is matched to the ground truth by its own posterior (live run p1_nightstand2: the most-updated node was the
+    #    OTHER nightstand). The decoy has 5x the updates; the right node is chosen; a run where no node is near is NO VERDICT.
+    with tempfile.TemporaryDirectory() as d:
+        run = Path(d)
+        # gt_error: internal frame == world (est = gt, est_theta = gt_theta - pi/2), no gauge file: published == world
+        with open(run / 'gt_error.csv', 'w') as f:
+            f.write('ts_ms,est_x,est_y,est_theta,gt_x_world,gt_y_world,gt_theta\n')
+            for t in range(0, 4000, 100): f.write(f'{t},{1.0 + t * 1e-4},2.0,0.0,{1.0 + t * 1e-4},2.0,{math.pi / 2}\n')
+        def row(node, t, cx, cy):
+            v = dict(node=node, pkt_ts=t, gated=0, npts=100, lidar_only=0, beam_qsum=1, rho_cam=1, rho_L=1, rho_chain=1,
+                     std_cx=0.03, std_cy=0.03, std_H=0.02, std_w=0.02, std_h=0.02, std_yaw_within=0.02, cx=cx, cy=cy, H=0.6,
+                     w=0.5, h=0.5, yaw=0, spose_x=0.01, spose_y=0.01, spose_psi=0.01, lever_x=0, lever_y=1)
+            return ','.join(str(v[c]) for c in AI2_COLS)
+        lines = [row('nightstand_6', t, -1.36, 3.88) for t in range(1000, 2000, 10)]          # the decoy: 100 updates
+        lines += [row('nightstand_5', t, 0.88, 3.86) for t in range(1000, 2000, 50)]          # the object: 20 updates
+        (run / 'nightstand_ai2_log.csv').write_text(','.join(AI2_COLS) + '\n' + '\n'.join(lines) + '\n')
+        rows = R.ai2_rows(run, 'nightstand')
+        S = {'A1': dict(t_claim_ms=500, t_dwell0_ms=1000, t_dwell1_ms=2000), 'A2': dict(t_dwell1_ms=3900)}
+        assert R.match_node(rows, 1000, 2000)[0] == 'nightstand_6'                          # what update counting picked
+        m = R.match_node_to_truth(run, rows, S, dict(cx=0.867, cy=3.878))
+        assert m['node'] == 'nightstand_5' and m['runner'] == 'nightstand_6', m
+        assert m['d2'] <= R.CHI2_2_99 < m['runner_d2'], m
+        m = R.match_node_to_truth(run, rows, S, dict(cx=5.0, cy=-3.0))                      # nothing there
+        assert m['node'] is None and 'chi2' in m['why'], m
 
 
 if __name__ == '__main__': main()

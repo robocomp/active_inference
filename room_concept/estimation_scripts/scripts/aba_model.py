@@ -126,7 +126,7 @@ def class_params(cls, root):
 
 
 # ------------------------------------------------------------------------------------- the scalar model
-def theta_var(views, k, prm, hyp):
+def theta_var_gls(views, k, prm, hyp):
     """sigma_k^2 after the views. views: [dict(cam, L (bools), rho_cam, rho_L, rho_chain (the rho INTO this view from the
     previous one), chain (list of 6 chain variances))]."""
     idx = [(j, c) for j, v in enumerate(views) for c in ('cam', 'L') if v[c]]
@@ -150,6 +150,65 @@ def theta_var(views, k, prm, hyp):
     x = np.linalg.lstsq(C, one, rcond=None)[0]
     info = float(one @ x) + (0.0 if math.isinf(prm['P0'][k]) else 1.0 / prm['P0'][k])
     return 1.0 / info if info > 0 else math.inf
+
+
+def theta_var(views, k, prm, hyp):
+    """sigma_k^2 after the views: the same model as theta_var_gls (the GLS 1/(1/P0 + 1'C^-1 1)), computed by a Kalman filter over
+    the latent state [theta, b_cam, b_L, e, s_cam, s_L] (PC) or [theta, b_cam, b_L, e, s] (S) — O(views) instead of the GLS's
+    O(views^3), which took minutes on a live run's ~1700 updates (test_aba_model checks the two agree). Each view measures
+    theta + b_c + e + s_c exactly (R = 0); a view repeating what is already known has a singular innovation, which the
+    pseudo-inverse handles (numerical rank, not a modelling cut-off). Between views: b_c <- rho_c b_c + w, e <- rho a e + w with
+    a = sd_j / sd_{j-1} (the marginal follows the logged chain), s unchanged. NO PRIOR (cx, cy): the first exact measurement
+    defines theta = y - (the latents it carries), so theta's covariance is that of those latents — exact, no diffuse stand-in."""
+    if not any(vw['cam'] or vw['L'] for vw in views): return prm['P0'][k]
+    pc = hyp == 'PC'
+    n = 6 if pc else 5
+    TH, BC, BL, E = 0, 1, 2, 3
+    SC, SL = (4, 5) if pc else (4, 4)
+    P0 = prm['P0'][k]
+    v, d = prm['v'], prm['d'][k]
+
+    def h_of(c):
+        h = np.zeros(n); h[TH] = 1.0; h[BC if c == 'cam' else BL] = 1.0; h[E] = 1.0; h[SC if c == 'cam' else SL] = 1.0
+        return h
+
+    def update(P, chans):
+        H = np.array([h_of(c) for c in chans])
+        Sx = H @ P @ H.T
+        K = P @ H.T @ np.linalg.pinv(Sx, rcond=1e-12, hermitian=True)
+        P = P - K @ Sx @ K.T
+        return 0.5 * (P + P.T)
+
+    P = np.zeros((n, n))
+    P[BC, BC], P[BL, BL] = v['cam'][k], v['L'][k]
+    P[SC, SC] = d; P[SL, SL] = d
+    sd_prev = None
+    started = False
+    for j, vw in enumerate(views):
+        sd = math.sqrt(vw['chain'][k])
+        if not started:
+            P[E, E] = sd * sd
+        else:
+            F = np.eye(n); Q = np.zeros((n, n))
+            for c, i in (('cam', BC), ('L', BL)):
+                r = vw['rho_' + c]; F[i, i] = r; Q[i, i] = v[c][k] * (1.0 - r * r)
+            r = vw['rho_chain']
+            if sd_prev and sd_prev > 0.0: F[E, E] = r * sd / sd_prev; Q[E, E] = sd * sd * (1.0 - r * r)
+            else: F[E, E] = 0.0; Q[E, E] = sd * sd
+            P = F @ P @ F.T + Q
+        sd_prev = sd
+        chans = [c for c in ('cam', 'L') if vw[c]]
+        if not chans: continue
+        if not started and math.isinf(P0):
+            # theta := y1 - (latents of the first channel): theta's row/column are minus that combination of the latents
+            T = np.eye(n); T[TH] = -h_of(chans[0]); T[TH, TH] = 0.0
+            P = T @ P @ T.T
+            started = True
+            if len(chans) > 1: P = update(P, chans[1:])
+            continue
+        if not started: P[TH, TH] = P0; started = True
+        P = update(P, chans)
+    return float(P[TH, TH])
 
 
 def floor(k, prm, hyp, n_channels):

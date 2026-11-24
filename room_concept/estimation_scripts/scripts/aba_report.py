@@ -81,10 +81,11 @@ def main(arg):
             continue
         cls = plan['truth']['cls']; prm = Mdl.class_params(cls, root)
         rows = R.ai2_rows(run, cls)
-        node, n = R.match_node(rows, S['A1']['t_dwell0_ms'], S['A1']['t_dwell1_ms'])
-        print(f'== {defn} ({cls}): node {node}')
+        m = R.match_node_to_truth(run, rows, S, plan['truth'])
+        node = m['node']
+        print(f'== {defn} ({cls}): {R.describe_match(m)}')
         if node is None:
-            print('   no update in the A1 dwell: NO VERDICT -> FAIL')
+            print('   no node is the object: NO VERDICT -> FAIL')
             for h in Mdl.HYPS: score[h][1] += 1
             continue
         ups = R.updates(rows, node)

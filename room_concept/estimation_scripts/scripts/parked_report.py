@@ -83,7 +83,6 @@ def main(arg):
     if not segs:
         no_aba(run, ('nightstand', 'bed', 'toilet')); return 0
     root = R.checkout_root(run)
-    gt_rows, gauge = read_gt_error(run / 'gt_error.csv'), read_gauge(run / 'proto_room.csv')
     print(f'{run.name}: parked test, predictions registered in docs/superpowers/results/2026-11-25-p1-predictions.md; '
           f'manifest/config from {root}')
     score = {h: [0, 0] for h in Mdl.HYPS}   # passes, checks
@@ -105,10 +104,11 @@ def main(arg):
         T = plan['truth']; cls = T['cls']; prm = Mdl.class_params(cls, root)
         rows = R.ai2_rows(run, cls)
         a1 = S['A1']
-        node, n = R.match_node(rows, a1['t_dwell0_ms'], a1['t_dwell1_ms'])
-        print(f'== {defn} ({cls}): node {node} ({n} updates in the A1 dwell)')
+        m = R.match_node_to_truth(run, rows, S, T)
+        node = m['node']
+        print(f'== {defn} ({cls}): {R.describe_match(m)}')
         if node is None:
-            print('   no update of any node in the A1 dwell: NO VERDICT -> FAIL')
+            print('   no node is the object: NO VERDICT -> FAIL')
             for h in Mdl.HYPS: score[h][1] += 1
             continue
         ups = R.updates(rows, node)
@@ -162,10 +162,7 @@ def main(arg):
         # ground truth at the end of the last dwell, in the published room frame of this visit
         last = order[-1]; t_end = S[last]['t_dwell1_ms']
         d_end = R.last_before(ups, t_end)
-        try:
-            fr = Frames(gt_rows, gauge, S['A1']['t_claim_ms'], t_end)
-        except ValueError as e:
-            print(f'   ground truth: no frame fit ({e})'); continue
+        fr = m['frames']   # the same visit fit the match used
         px, py, pyaw = fr.world_to_pub(T['cx'], T['cy'], T['yaw_theta_world'], t_end)
         truth = [px, py, T['H'], T['w'], T['h'], pyaw]
         print(f'   ground truth (published frame, fit n={fr.n} rms {fr.rms:.3f} m): ' +

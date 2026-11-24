@@ -147,6 +147,51 @@ def match_node(rows, t0, t1):
     return max(n.items(), key=lambda kv: kv[1]) if n else (None, 0)
 
 
+CHI2_2_99 = -2.0 * math.log(0.01)   # chi-square with 2 dof at 99 %: 9.2103 (the 2-D Gaussian's tail is exp(-d2/2))
+
+
+def match_node_to_truth(run, rows, S, T):
+    """The node that IS the ground-truth object (live run p1_nightstand2: the most-updated node was the OTHER nightstand).
+    For every node of the class, its last logged posterior at or before the end of the A1 dwell: its (cx, cy) and their
+    sigmas; the truth's centre taken to the published room frame by the visit's frame fit (gt_error over A1 claim .. A2 end,
+    the gauge at the A1 dwell end). d2 = sum over x, y of (est - truth)^2 / (sigma^2 + fit_rms^2): the node's own covariance
+    (the x-y cross term is not logged) plus the frame fit's error, which is in the comparison too. The match is the smallest d2,
+    and only if d2 <= chi2_2(99 %); else no node is the object (NO VERDICT). Returns a dict: node (or None), d2, runner, runner_d2,
+    truth (px, py), fit_rms, fit_n, frames, why."""
+    from aba_geometry import Frames, read_gauge, read_gt_error
+    t1 = S['A1']['t_dwell1_ms']
+    out = dict(node=None, d2=math.inf, runner=None, runner_d2=math.inf, truth=None, fit_rms=math.nan, fit_n=0, frames=None, why='')
+    try:
+        fr = Frames(read_gt_error(run / 'gt_error.csv'), read_gauge(run / 'proto_room.csv'), S['A1']['t_claim_ms'],
+                    S['A2']['t_dwell1_ms'])
+    except ValueError as e:
+        out['why'] = f'no frame fit ({e})'; return out
+    px, py, _ = fr.world_to_pub(T['cx'], T['cy'], 0.0, t1)
+    out.update(truth=(px, py), fit_rms=fr.rms, fit_n=fr.n, frames=fr)
+    cands = []
+    for node in sorted({d['node'] for d in rows}):
+        d = last_before([u for u in rows if u['node'] == node], t1)
+        if d is None: continue
+        vx, vy = d['sig'][0] ** 2 + fr.rms ** 2, d['sig'][1] ** 2 + fr.rms ** 2
+        cands.append(((d['est'][0] - px) ** 2 / vx + (d['est'][1] - py) ** 2 / vy, node, d))
+    cands.sort(key=lambda c: c[0])
+    if not cands: out['why'] = 'no node of the class has a posterior before the end of the A1 dwell'; return out
+    if len(cands) > 1: out.update(runner=cands[1][1], runner_d2=cands[1][0])
+    out['d2'] = cands[0][0]
+    if cands[0][0] <= CHI2_2_99: out['node'] = cands[0][1]
+    else: out['why'] = f'nearest node {cands[0][1]} at d2 {cands[0][0]:.1f} > chi2_2(99 %) {CHI2_2_99:.2f}'
+    out['est'] = cands[0][2]['est'][:2]
+    return out
+
+
+def describe_match(m):
+    s = (f"truth ({m['truth'][0]:.3f}, {m['truth'][1]:.3f}) published (fit n={m['fit_n']} rms {m['fit_rms']:.3f} m); "
+         if m['truth'] else '')
+    s += f"match {m['node'] or 'NONE'} d2 {m['d2']:.2f}" + (f" at ({m['est'][0]:.3f}, {m['est'][1]:.3f})" if 'est' in m else '')
+    s += f"; runner-up {m['runner']} d2 {m['runner_d2']:.2f}" if m['runner'] else '; no runner-up'
+    return s + f" (bound chi2_2(99 %) = {CHI2_2_99:.2f})" + (f" — {m['why']}" if m['why'] else '')
+
+
 def last_before(ups, t):
     best = None
     for d in ups:
