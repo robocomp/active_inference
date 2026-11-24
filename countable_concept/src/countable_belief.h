@@ -102,6 +102,7 @@ struct CountableBeliefParams
 {
     // Observation model
     float sigma_base_m    = 0.03f;   // base on-surface noise std (m); R = σ² (+ motion_var + …) per point
+    float range_noise_lat_per_m = 0.0f;   // AI2RangeNoiseLatPerM: the per-point R's lateral deprojection term, (k·range)²
     float clutter_frac    = 0.10f;   // ε: prior weight of the uniform clutter component
     float clutter_scale_m = 0.15f;   // a point further than ~this from the box surface is likely clutter
     float model_sigma_m   = 0.010f;  // residual model/surface std (m) added in quadrature (R floor)
@@ -389,6 +390,7 @@ struct CountableEngineModel
 {
     static constexpr int N = 6;
     static constexpr int kYaw = 5;                 // θ = [cx, cy, H, w, h, yaw]
+    static constexpr int kHeight = 2;              // H: the DOF the LiDAR's top-grazing ring decorrelates (ρ_L height)
     using State = CountableBeliefState;
     using Frame = CountableFrame;
     using Mat6 = Eigen::Matrix<float, 6, 6>;
@@ -403,6 +405,9 @@ struct CountableEngineModel
     int   n_prims() const;
     float sigma2() const;
     double point_energy(const Eigen::Vector3f& p, const State& s, float R) const;
+    // a STANDING look's per-point R at range d (the offer gain, shared-engine G5): the fitter's R without the ego-motion
+    // term — σ_base² + (AI2RangeNoiseLatPerM·d)²; mask_depth_var is 0 for the ZED masks that fit (ricoh slices never fit)
+    float standing_point_variance(float range_m) const;
     // the camera channel's non-point terms: (2d) top and the depth_unobs_precision shares (flush boost, footprint boost)
     void accumulate_camera_extra(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
     // the θ-only channel
@@ -562,7 +567,7 @@ public:
     // The persistent path's offer gain (shared-engine G5): the θ-marginal entropy drop of a camera look from standpoint `s`
     // under the engine's own joint update (PersistentEngine::predicted_gain), and what the last update delivered (the same
     // quantity; NaN after a predict-only update).
-    double predicted_gain(const rc::ai::offer::Standpoint& s, const rc::ai::offer::OfferCamera& cam) const
+    double predicted_gain(const rc::ai::offer::Standpoint& s, const rc::ai::offer::OfferSensors& cam) const
     { return engine_.predicted_gain(model(), s, cam); }
     double last_delivered_nats() const { return engine_.last_delivered_nats(); }
 

@@ -19,7 +19,7 @@ Promised = the node's last offer at or before the claim. Delivered = the sum of 
 window (an update's drop, summed over the visit's updates; no row = 0, a true "no update").
 
 Prints per class (and ALL): n, promised median [IQR], the spread of promises (min-max, std, distinct values), delivered
-median [IQR], and Spearman(promised, delivered) where there are >= 3 claims and the promises are not all equal.
+median [IQR], and Spearman(promised, delivered) where there are >= 3 claims and neither series is constant.
 """
 import bisect
 import collections
@@ -158,8 +158,9 @@ def main():
             rs = [r for r in by[cls] if r[key] is not None]
             p = [r["promised"] for r in rs]
             d = [r[key] for r in rs]
-            sp = "n too small" if len(rs) < 3 else ("promises constant" if len(set(p)) < 2 else
-                                                    "rho {:.2f}, p {:.2g}".format(*spearman(p, d)))
+            # a rank correlation needs both series to vary: a constant one has no ranks (scipy would warn and return nan)
+            sp = ("n too small" if len(rs) < 3 else "promises constant" if len(set(p)) < 2 else
+                  "deliveries constant" if len(set(d)) < 2 else "rho {:.2f}, p {:.2g}".format(*spearman(p, d)))
             print(f"{cls:<13} {len(rs):>3}  {quart(p):<24} {spread(p):<38} {quart(d):<24} {sp}")
 
 

@@ -73,7 +73,8 @@ std::vector<Eigen::Vector3f> sample_face_surface(const CountableBeliefState& s, 
 EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float lat_rate, float sigma_base,
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<EpistemicPlanner::Obstacle>& obstacles,
-                                            const std::vector<Eigen::Vector2f>& room_polygon) const
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            const std::optional<rc::ai::offer::OfferLidar>& offer_lidar) const
 {
     constexpr float kRobotRadiusM = 0.30f;   // Shadow's footprint radius — a physical dimension, not a knob
 
@@ -132,14 +133,17 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     target.sigma_extent_m = std::sqrt(std::max(0.0f, 0.5f * (S(3, 3) + S(4, 4))));
 
     // ── The belief half: what a detection from face i at range d would tell us ───────────────────
-    // Rᵢ = σ_base² + (lat_rate·d)² — range-aware, so the same face is worth less from further away. rc::nbv
+    // Legacy path: Rᵢ = σ_base² + (lat_rate·d)² — range-aware, so the same face is worth less from further away. Persistent
+    // path: the engine's look (below) puts every point at the model's standing_point_variance at the look's mean range — the
+    // same σ_base² + (lat_rate·d)², the fitter's R with its motion term 0 — and adds the rays and the extra terms. rc::nbv
     // calls this at each face's own stand-off, so the trade "further ⇒ detectable but less informative" is
     // resolved with the real numbers on both sides instead of one shared range.
     // On the persistent path the belief runs on the shared engine, and so does its offer (spec shared-engine G5): face i at its
     // stand-off is the standpoint plan_faces publishes (rc::nbv::face_viewpoint), and its raw gain is the engine's predicted
-    // θ-marginal entropy drop of a camera look from there — the camera the planner scores (sensor) and the occluders it sees
-    // (obstacles). The flag that selects the engine for the update selects it for the offer: one switch, one engine.
-    const rc::ai::offer::OfferCamera offer_cam{sensor, obstacles};
+    // θ-marginal entropy drop of a look from there — the camera the planner scores (sensor), the occluders it sees
+    // (obstacles) and the Helios as the fitter stages it (offer_lidar; absent ⇒ camera-only). The flag that selects the engine
+    // for the update selects it for the offer: one switch, one engine.
+    const rc::ai::offer::OfferSensors offer_cam{sensor, obstacles, offer_lidar};
     const auto engine_gain = rc::nbv::raw_gain_from_standpoints(target, [&](const Eigen::Vector2f& pos, float yaw)
     { return belief.predicted_gain(rc::ai::offer::Standpoint{pos, yaw}, offer_cam); });
     const bool persistent = belief.params().persistent;

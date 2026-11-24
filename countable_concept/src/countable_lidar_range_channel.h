@@ -64,6 +64,22 @@ public:
                    const std::function<std::optional<std::pair<double, float>>(const Eigen::Vector3f&)>& label) const;
     // The beam config's Student-t (for p_f); set once by the fitter from the BeamConfig it built. Unset ⇒ feed_beam stages nothing.
     void set_beam_density(const rc::ai::beam::StudentT& st) { beam_st_ = st; }
+    // The parts of an offer's LiDAR (shared-engine G5) feed_beam would stage with: ρ_max, the model σ, the room's known
+    // surfaces (floor, walls, the neighbours), the beam density. nullopt without a beam density (flag off).
+    std::optional<rc::ai::offer::OfferLidar> offer_lidar_base(std::vector<rc::ai::beam::ForeignBox> neighbours) const
+    {
+        if (not beam_st_) return std::nullopt;
+        rc::ai::offer::OfferLidar L;
+        L.rho_max = static_cast<double>(rc::ai::LidarRays{}.max_range_m);
+        L.sigma_s = static_cast<double>(cfg_.model_sigma_m);
+        L.room.floor = true;
+        L.room.floor_z = 0.0;
+        L.room.floor_sigma = cfg_.floor_sigma_m;
+        L.room.walls = room_walls_;
+        L.room.neighbours = std::move(neighbours);
+        L.st = *beam_st_;
+        return L;
+    }
     // The room polygon's walls as known surfaces of p_f, each with its position σ (the WallRef σ; room_concept publishes none).
     void set_room_walls(const std::vector<Eigen::Vector2f>& polygon, double sigma_m)
     {

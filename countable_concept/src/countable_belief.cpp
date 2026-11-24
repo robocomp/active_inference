@@ -713,6 +713,12 @@ CountableEngineModel::Vec6 CountableEngineModel::sdf_jacobian(const Eigen::Vecto
 std::array<float, 3> CountableEngineModel::responsibilities(const Eigen::Vector3f& p, const State& s, float R) const
 { return b->responsibilities(p, s, R); }
 int   CountableEngineModel::n_prims() const { return b->n_prims(); }
+float CountableEngineModel::standing_point_variance(float range_m) const
+{
+    const auto& P = b->params_;
+    const float lat = P.range_noise_lat_per_m * range_m;
+    return P.sigma_base_m * P.sigma_base_m + lat * lat;
+}
 float CountableEngineModel::sigma2()  const { return b->sigma2(); }
 
 // One point's −log of the mixture (box + clutter + wall), in double from the float SDF. Its gradient is Σ r_box·(d/R)·∇d — the

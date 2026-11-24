@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -112,7 +113,8 @@ public:
     EpistemicProposal compute(const CountableBelief& belief, float lat_rate, float sigma_base,
                               const rc::nbv::Sensor& sensor = {},
                               const std::vector<Obstacle>& obstacles = {},
-                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
+                              const std::vector<Eigen::Vector2f>& room_polygon = {},
+                              const std::optional<rc::ai::offer::OfferLidar>& offer_lidar = std::nullopt) const;
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
     // the one where the detector is most likely to fire — the same model the removal channel weights absence by.

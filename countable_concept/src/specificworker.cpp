@@ -907,7 +907,9 @@ void SpecificWorker::step_epistemic(rc::CountableInstance& inst, DSR::Node& node
                                        // viewpoint — including the ones behind the wall the bed is pushed
                                        // against — read as reachable. Empty until room_concept publishes, and
                                        // is_reachable then imposes no constraint (the pre-existing behaviour).
-                                       fitter_->room_polygon());
+                                       fitter_->room_polygon(),
+                                       // G5: the Helios the offer's look stages rays with (persistent path; else none)
+                                       fitter_->offer_lidar(inst));
         // Degenerate fit, or no sensor model yet — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;

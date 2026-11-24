@@ -184,6 +184,8 @@ void CountableFitter::read_odometry_and_pose(const std::optional<Eigen::Matrix4d
                 if (const auto g = rc::media::max_ring_gap_rad(*sm); g.has_value())
                 {
                     helios_ring_gap_rad_ = *g;
+                    helios_ring_elev_dev_deg_ = sm->ring_elev_deg;                    // the offer's ray pattern (G5)
+                    if (sm->azimuth_step_deg.has_value()) helios_az_step_rad_ = *sm->azimuth_step_deg * float(M_PI / 180.0);
                     std::print("[lidar-measures] Helios SensorModel: max ring gap {:.4f} rad\n", *g);
                 }
             // The beam density was built with kHeliosRangeSigmaM at start (spec 7c.8); the advertised value is logged beside it.
@@ -1185,6 +1187,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         }
         CountableBeliefParams p;
         p.sigma_base_m    = cfg_.ai2_sigma_base_m;
+        p.range_noise_lat_per_m = cfg_.ai2_range_noise_lat_per_m;
         p.clutter_frac    = cfg_.ai2_clutter_frac;
         p.clutter_scale_m = cfg_.ai2_clutter_scale_m;
         p.prior_size_std  = cfg_.ai2_prior_size_std;
@@ -1990,6 +1993,30 @@ void CountableFitter::log_delivered(const CountableInstance& inst)
     if (not open_g5_csv(delivered_csv_, "delivered.csv", "t_ms,node,delivered_nats")) return;
     delivered_csv_ << wall_ms() << ',' << inst.node_name << ',' << d << '\n';
     delivered_csv_.flush();
+}
+
+std::optional<rc::ai::offer::OfferLidar> CountableFitter::offer_lidar(const CountableInstance& inst) const
+{
+    if (not cfg_.lidar_measures_on_gated or not have_helios_ or not have_pose_now_ or not G_ or not inner_eigen_
+        or helios_ring_elev_dev_deg_.empty() or not (helios_az_step_rad_ > 0.0f))
+        return std::nullopt;
+    auto L = lidar_channel_.offer_lidar_base(neighbours_of(inst.node_id));
+    if (not L) return std::nullopt;
+    // room←helios: its rotation carries the device-frame ring table into the room. The mount is level up to its 180° flip
+    // (ROBOT_GEOMETRY.md: body←helios = Ry(π)), so a ring's room elevation is asin(R₂₂ sin e) — the R₂₀/R₂₁ tilt terms,
+    // which would make it depend on azimuth, are dropped (they vanish on this mount).
+    const auto rth = rc::cached_rt(inner_eigen_, rc::room::current_room_frame(*G_), "helios", 0);
+    if (not rth.has_value()) return std::nullopt;
+    const double r22 = rth->linear()(2, 2);
+    for (const float e : helios_ring_elev_dev_deg_)
+        L->ring_elev_rad.push_back(std::asin(std::clamp(r22 * std::sin(double(e) * M_PI / 180.0), -1.0, 1.0)));
+    L->azimuth_step_rad = helios_az_step_rad_;
+    L->eps_px = cfg_.mask_pixel_error_rate;
+    // the Helios origin relative to the camera, in the heading frame (x right, y forward; robot forward = R(yaw)·(0, 1))
+    const Eigen::Vector2f fwd(-std::sin(robot_yaw_now_), std::cos(robot_yaw_now_)), right(fwd.y(), -fwd.x());
+    const Eigen::Vector2f d = helios_now_.head<2>() - zed_xy_now_;
+    L->offset = {d.dot(right), d.dot(fwd), helios_now_.z()};
+    return L;
 }
 
 void CountableFitter::log_gn_trace(const CountableInstance& inst)
