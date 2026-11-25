@@ -135,9 +135,26 @@ static void persistent_label_bounds()
     CHECK(f2(Eigen::Vector3f::Zero()) == a->q);
 }
 
+// F1 round 8 (revert of round 7 B): the persistent label is the mask's q on the return's PIXEL, whatever the return's depth
+// along that pixel's ray. Two returns on the same line of sight, one at 2 m (a visible face) and one at 2.6 m (where a wall
+// behind an under-sized belief box would be), carry the same label m = ε + (1 − 2ε)q exactly (σ_px is the same: z enters it
+// only through f/z, and the projector reports z = 2 for both here, as for a fixed pixel). Round 7 B scaled the far one by
+// 1 − P(behind the belief box), which held p1r7_bed's bed narrow (task-F1r7-bed-regression.md).
+static void label_ignores_depth_along_the_ray()
+{
+    const auto mm = MaskMembership::build(rect(100, 50, 40, 30));
+    const double eps = 0.001;
+    const auto lab = make_persistent_label(fixed(120, 65, 2.f), mm, 900.f, 0.03f, 0.f, 0.f, 0.8f, eps);
+    const auto near = lab(Eigen::Vector3f(0.f, 2.0f, 0.5f)), far = lab(Eigen::Vector3f(0.f, 2.6f, 0.5f));
+    CHECK(near.has_value() and far.has_value());
+    CHECK(near->m == far->m and near->q == far->q);
+    CHECK(far->m == eps + (1.0 - 2.0 * eps) * double(far->q));
+}
+
 int main()
 {
     persistent_label_bounds();
+    label_ignores_depth_along_the_ray();
     inside_one_boundary_half_outside_zero();
     symmetric_in_s();
     sigma_grows_as_z_shrinks();

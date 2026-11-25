@@ -292,11 +292,3 @@ target_include_directories(gain_query_test PRIVATE ../src ../../common ../../com
 target_compile_options(gain_query_test PRIVATE -O2)
 target_link_libraries(gain_query_test PRIVATE Eigen3::Eigen)
 add_test(NAME gain_query_test COMMAND gain_query_test)
-
-# F1 round 7 B: the depth ordering of a LiDAR return against the object along the camera's line of sight (a return behind the
-# object is not labelled by its mask). Run: ./depth_order_test
-add_executable(depth_order_test depth_order_test.cpp)
-target_include_directories(depth_order_test PRIVATE ../src)
-target_compile_options(depth_order_test PRIVATE -O2)
-target_link_libraries(depth_order_test PRIVATE Eigen3::Eigen)
-add_test(NAME depth_order_test COMMAND depth_order_test)

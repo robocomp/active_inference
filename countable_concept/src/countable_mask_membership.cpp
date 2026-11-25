@@ -130,21 +130,18 @@ std::function<MembershipComponents(const Eigen::Vector3f&)> make_membership_comp
 
 std::function<std::optional<PersistentLabel>(const Eigen::Vector3f&)> make_persistent_label(
     Projector proj, const MaskMembership& mm, float f_px, float sigma_range_m, float sigma_chain_m,
-    float mot_pos_var_m2, float pi_mask, double eps_px, std::function<double(const Eigen::Vector3f&)> p_behind)
+    float mot_pos_var_m2, float pi_mask, double eps_px)
 {
     // q is the arithmetic of make_membership (same components), not a copy of it.
     return [comp = make_membership_components(std::move(proj), mm, f_px, sigma_range_m, sigma_chain_m,
-                                              mot_pos_var_m2, pi_mask), eps_px, p_behind = std::move(p_behind)](const Eigen::Vector3f& p_room)
+                                              mot_pos_var_m2, pi_mask), eps_px](const Eigen::Vector3f& p_room)
                -> std::optional<PersistentLabel>
     {
         const MembershipComponents c = comp(p_room);
         if (not c.in_image)
             return std::nullopt;
-        const double b = p_behind ? p_behind(p_room) : 0.0;
-        return PersistentLabel{depth_ordered_label(static_cast<double>(c.q), b, eps_px), static_cast<float>(double(c.q) * (1.0 - b))};
+        return PersistentLabel{eps_px + (1.0 - 2.0 * eps_px) * static_cast<double>(c.q), c.q};
     };
 }
-
-
 
 }  // namespace rc
