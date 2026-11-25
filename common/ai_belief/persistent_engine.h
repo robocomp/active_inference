@@ -288,14 +288,18 @@ inline bool same_physical_wall(const WallAnchor& a, const WallAnchor& b)
 
 namespace detail
 {
-// The move evidence of one update (F1 round 6c; PersistentEngine::learn_volatility): g = the data's θ-gradient at the predicted
-// state, Ss its "stayed" covariance A P̄ Aᵀ + W, W the data's information, m_var = diag M (the move's variance per θ component),
-// pi = the prior probability of a move in the interval. A move v ~ N(0, M) enters g as W v, so with F = W S_s⁻¹ W, h = W S_s⁻¹ g,
-// K = 𝟙 + M^½ F M^½ (⪰ 𝟙, so LLT is always defined):
-//   log BF = ½ (M^½h)ᵀ K⁻¹ (M^½h) − ½ log det K,   p = π BF / (π BF + 1 − π),
-//   E[v | moved, g] = M^½ K⁻¹ M^½ h,   Cov[v | moved, g] = M^½ K⁻¹ M^½.
-// A direction with W → 0 has F, h → 0 and contributes exactly 0, continuously — whatever the gradient there (a biased channel's
-// slope on a direction it does not inform is not evidence of a move): no rank, no tolerance. S_s ⪰ W keeps S_s⁻¹W bounded.
+// The move evidence of one update (F1 round 6c; round 7 A2: information form). The data of the update, linearised at the
+// predicted joint state x̄ = (θ̄, b̄), are a Gaussian factor on x with information Λ and gradient η (every channel, at the first
+// linearisation: pu::detail::information). Under "stayed" x ~ N(x̄, P̄); under "moved" the θ block also takes a step v ~ N(0, M),
+// i.e. x ~ N(x̄, P̄_m), P̄_m = P̄ + E M Eᵀ (E = the θ rows). Each hypothesis's evidence is
+//   log Z(P) = ½ ηᵀ P (𝟙 + ΛP)⁻¹ η − ½ log det(𝟙 + ΛP),
+// so log BF = log Z(P̄_m) − log Z(P̄), p = π BF / (π BF + 1 − π), and under "moved"
+//   E[v | data] = M Eᵀ (𝟙 + ΛP̄_m)⁻¹ η,   Cov[v | data] = M − M Eᵀ (𝟙 + ΛP̄_m)⁻¹ Λ E M.
+// 𝟙 + ΛP has eigenvalues ≥ 1 for PSD Λ, P (it is similar to 𝟙 + P^½ΛP^½), so nothing singular is ever inverted: a direction the
+// data do not inform (Λ's null space) contributes exactly its η there, which a consistent linearisation makes 0, and a direction
+// with no prior variance contributes 0. Round 6c's g-space form solved S_s = A P̄ Aᵀ + W; on bed_5 update 140 (p1_bed, a LiDAR-only
+// frame with the depth h wholly uninformed) S_s had a 1e-91 eigenvalue, S_s⁻¹W came out at 1e30, log BF 1.3e62 and ω → +134,
+// "DEGENERATE joint P". Same Bayes factor, conditioned the other way round.
 template <int N>
 struct JumpEvidence
 {
@@ -303,30 +307,34 @@ struct JumpEvidence
     Eigen::Matrix<double, N, 1> v_mean = Eigen::Matrix<double, N, 1>::Zero();
     Eigen::Matrix<double, N, N> v_cov = Eigen::Matrix<double, N, N>::Zero();
 };
-template <int N>
-inline JumpEvidence<N> jump_evidence(const Eigen::Matrix<double, N, N>& Ss, const Eigen::Matrix<double, N, N>& W,
-                                     const Eigen::Matrix<double, N, 1>& g, const Eigen::Matrix<double, N, 1>& m_var, double pi)
+template <int N, int NX>
+inline JumpEvidence<N> jump_evidence(const Eigen::Matrix<double, NX, NX>& Lambda, const Eigen::Matrix<double, NX, 1>& eta,
+                                     const Eigen::Matrix<double, NX, NX>& P_bar, const Eigen::Matrix<double, N, 1>& m_var, double pi)
 {
-    using MatN = Eigen::Matrix<double, N, N>;
-    using VecN = Eigen::Matrix<double, N, 1>;
+    using MatX = Eigen::Matrix<double, NX, NX>;
+    using VecX = Eigen::Matrix<double, NX, 1>;
     JumpEvidence<N> out;
-    const Eigen::LDLT<MatN> Ss_ldlt(MatN(0.5 * (Ss + Ss.transpose())));
-    const MatN X = Ss_ldlt.solve(W);                                // S_s⁻¹ W
-    const MatN F = 0.5 * (W * X + (W * X).transpose());            // W S_s⁻¹ W
-    const VecN h = X.transpose() * g;                               // W S_s⁻¹ g
-    const VecN msq = m_var.cwiseSqrt();
-    MatN K = msq.asDiagonal() * F * msq.asDiagonal();
-    K.diagonal().array() += 1.0;
-    const Eigen::LLT<MatN> K_llt(K);
-    const VecN ht = msq.cwiseProduct(h);
-    const VecN Kinv_ht = K_llt.solve(ht);
-    double logdetK = 0.0;
-    for (int i = 0; i < N; ++i) logdetK += 2.0 * std::log(K_llt.matrixL()(i, i));
-    out.log_bf = 0.5 * ht.dot(Kinv_ht) - 0.5 * logdetK;
-    const double lo = std::log(pi) + out.log_bf, ls = std::log1p(-pi), mx = std::max(lo, ls);
-    out.p = std::exp(lo - mx) / (std::exp(lo - mx) + std::exp(ls - mx));
-    out.v_mean = msq.cwiseProduct(Kinv_ht);
-    out.v_cov = msq.asDiagonal() * K_llt.solve(MatN(msq.asDiagonal()));
+    const MatX L = 0.5 * (Lambda + Lambda.transpose());
+    const auto logZ = [&](const MatX& P, Eigen::PartialPivLU<MatX>& lu)
+    {
+        lu.compute(MatX::Identity() + L * P);
+        double logdet = 0.0;
+        for (int i = 0; i < NX; ++i) logdet += std::log(std::abs(lu.matrixLU()(i, i)));
+        const VecX y = lu.solve(eta);                                   // (𝟙 + ΛP)⁻¹ η
+        return 0.5 * eta.dot(P * y) - 0.5 * logdet;
+    };
+    MatX Pm = P_bar;
+    for (int i = 0; i < N; ++i) Pm(i, i) += m_var(i);
+    Eigen::PartialPivLU<MatX> lu_s, lu_m;
+    const double ls = logZ(P_bar, lu_s), lm = logZ(Pm, lu_m);
+    out.log_bf = lm - ls;
+    const double lo = std::log(pi) + out.log_bf, lst = std::log1p(-pi), mx = std::max(lo, lst);
+    out.p = std::exp(lo - mx) / (std::exp(lo - mx) + std::exp(lst - mx));
+    const VecX ym = lu_m.solve(eta);
+    out.v_mean = m_var.cwiseProduct(ym.template head<N>());
+    const MatX YL = lu_m.solve(L);                                     // (𝟙 + ΛP̄_m)⁻¹ Λ
+    const Eigen::Matrix<double, N, N> Mm = m_var.asDiagonal();
+    out.v_cov = Mm - Mm * YL.template topLeftCorner<N, N>() * Mm;
     return out;
 }
 
@@ -765,26 +773,12 @@ public:
         int steps = 0;
         bool undamped_checked = false;                                     // the λ = 0 proposal at this linearisation was tested
         build(theta, b_);                                                  // step 2: x̃_0 = (θ_0, b̄)
-        // the jump statistic's view of this update's data (learn_volatility): the data's own information W and gradient g on θ at
-        // the PREDICTED state (θ̄, b̄), every channel — independent of how far the prior lets the GN follow a shove
-        // A = Σ_c W_c H_c with H_c = [𝟙 | B_c] (what channel c measures of x = (θ, b)), Wsum = Σ_c W_c: the data's gradient on θ is
-        // g = A (x_true − x̄) + noise of covariance Wsum, so the LATENTS' predicted covariance (b_cam, b_L, e, …) is part of what g
-        // may legitimately be — a shared sensor error is not a move.
-        Eigen::Matrix<double, N, N + K> A_data = Eigen::Matrix<double, N, N + K>::Zero();
-        Eigen::Matrix<double, N, N> W_data = Eigen::Matrix<double, N, N>::Zero();
-        {
-            const auto add = [&](const MatN& Wf, const Eigen::Matrix<double, N, K>* B)
-            {
-                const Eigen::Matrix<double, N, N> Wc = Wf.template cast<double>();
-                W_data += Wc;
-                A_data.template leftCols<N>() += Wc;
-                if (B) A_data.template rightCols<K>() += Wc * (*B);
-            };
-            if (camera) add(Id_cam, &B_cam);
-            if (lidar)  add(Id_L, &B_L);
-            add(Id_th, nullptr);
-        }
-        const VecNd g_data = (bd_cam + bd_L + bd_th).template cast<double>();
+        // the jump statistic's view of this update's data (learn_volatility): the data as a factor on the joint x — information Λ
+        // and gradient η at the PREDICTED state (θ̄, b̄), every channel, so the latents' predicted covariance (b_cam, b_L, e, u, s)
+        // is part of what the data may legitimately say (a shared sensor error is not a move), independent of how far the prior
+        // lets the GN follow a shove.
+        MatJd Lambda_data; VecXd eta_data;
+        pu::detail::information<N, K>(chans(), theta_only, Lambda_data, eta_data);
         while (steps < cfg.iters_max)
         {
             VecXd x_tilde; x_tilde << theta, (consistent ? b_post : b_);   // consistent: (θ_k, b_k); restart: (θ_k, b̄)
@@ -960,7 +954,7 @@ public:
         }
         b_ = b_post;
         m.set_covariance(Sigma_theta());
-        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, W_data, A_data, g_data, theta_post);
+        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, Lambda_data, eta_data, theta_post);
         steps_since_update_ = 0.0;
         dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
         // G5: what this update delivered (the θ-marginal entropy drop of the published Σ), and what the next offer's
@@ -1282,8 +1276,7 @@ private:
     // Running mean, conjugate in the per-step variance: n ← λn + 1, S ← λS + E[w²], Q = (n₀Q₀ + S)/(n₀ + n), ω = log Q; Q is a
     // weighted mean of Q₀ and of non-negative statistics, so it stays positive with no clamp.
     void learn_volatility(const M& m, const VecNf& q_used, const VecNd& theta_pred, const MatJd& P_bar, const VecNd& post_var,
-                          const Eigen::Matrix<double, N, N>& W_data, const Eigen::Matrix<double, N, N + K>& A_data,
-                          const VecNd& g_data, const VecNd& theta_post)
+                          const MatJd& Lambda_data, const VecXd& eta_data, const VecNd& theta_post)
     {
         const VolatilityConfig vc = volatility_of(m);
         if (not vc.infer) return;
@@ -1300,29 +1293,16 @@ private:
         const double k_steps = std::max(1.0, steps_since_update_);      // the update's own predict is always one
         // P(at least one move in the interval) = 1 − (1 − π)^k
         const double pi_int = jumps ? -std::expm1(k_steps * std::log1p(-std::min(vc.jump_prob, 1.0))) : 0.0;
-        // Spike-and-slab, JOINT over θ (one move moves the object as a whole). Linearised at the predicted joint state x̄, the
-        // data's gradient on θ is g = A (x_true − x̄) + noise of covariance W (A, W: every channel, see update()), so under "stayed"
-        // g ~ N(0, S_s = A P̄ Aᵀ + W) — P̄ the predicted JOINT covariance, latents included — and under "moved by v ~ N(0, M)" on θ
-        // g ~ N(0, S_m = S_s + W M W) (A's θ columns are W), M = diag(jump_var). p = P(moved | g) by Bayes with prior π_int;
-        // E[v | moved, g], Cov[v | moved, g] below; per component E[w_i²] = p·E[v_i² | moved, g], ÷ k per predict step. The Bayes
-        // factor is computed in v's coordinates (no pseudo-inverse): a direction the data do not inform carries no evidence either
-        // way, continuously, and coupled DOFs (a front view's cy and h) are read together, not one by one.
+        // Spike-and-slab, JOINT over θ (one move moves the object as a whole): the data of this update as a factor (Λ, η) on the
+        // joint x at x̄; "stayed" x ~ N(x̄, P̄), "moved" adds v ~ N(0, M) on θ (M = diag jump_var). p = P(moved | data) by Bayes with
+        // prior π_int (detail::jump_evidence, information form); per component E[w_i²] = p·E[v_i² | moved, data], ÷ k per step.
         VecNd ew2_jump = VecNd::Zero();
         if (jumps)
         {
             Eigen::Matrix<double, N, N> Mj = Eigen::Matrix<double, N, N>::Zero();
             for (int i = 0; i < N; ++i) Mj(i, i) = vc.jump_var[std::size_t(i)];
-            const Eigen::Matrix<double, N, N> W = 0.5 * (W_data + W_data.transpose());
-            const Eigen::Matrix<double, N, N> Ss = A_data * P_bar * A_data.transpose() + W;
-            // The Bayes factor of "moved" over "stayed" in the move's OWN coordinates (F1 round 6c): v enters g as W v, so with
-            // F = W S_s⁻¹ W (the data's information on v) and h = W S_s⁻¹ g,
-            //   log BF = ½ h̃ᵀ K⁻¹ h̃ − ½ log det K,   K = 𝟙 + M^½ F M^½ ⪰ 𝟙,   h̃ = M^½ h,
-            //   E[v | moved, g] = M^½ K⁻¹ h̃,   Cov[v | moved, g] = M^½ K⁻¹ M^½.
-            // A direction the data do not inform (W → 0) has F and h → 0 there and contributes EXACTLY 0, continuously as its
-            // eigenvalue goes to 0: no rank, no tolerance. (Round 6b's 6.1b form took each Gaussian's pseudo-determinant on its own
-            // numerical rank, 1e-12·its own largest eigenvalue; S_m's larger maximum dropped an H direction S_s kept, the −½g²/s
-            // term of a near-null direction landed in log N(g; S_s) only, and p(moved) = 1 on static nightstands.)
-            const auto je = detail::jump_evidence<N>(Ss, W, g_data, Mj.diagonal(), pi_int);
+            // the Bayes factor in information form on the joint x (detail::jump_evidence, round 7 A2)
+            const auto je = detail::jump_evidence<N, N + K>(Lambda_data, eta_data, P_bar, VecNd(Mj.diagonal()), pi_int);
             for (int i = 0; i < N; ++i) ew2_jump(i) = je.p * (je.v_mean(i) * je.v_mean(i) + je.v_cov(i, i)) / k_steps;
             last_jump_log_bf_ = je.log_bf; last_jump_p_ = je.p;
         }

@@ -28,6 +28,8 @@
 // around q0 by the spike-and-slab statistic.
 // Re-recorded for F1 round 6.1b: the spike-and-slab statistic is JOINT over θ and counts the latents' predicted covariance in what
 // the data's gradient may legitimately be.
+// Re-recorded for F1 round 7 A2: the move evidence in information form on the joint x (no singular S_s solve), which changes
+// P(moved), hence Q, in the 6 cm moved-box phase.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
