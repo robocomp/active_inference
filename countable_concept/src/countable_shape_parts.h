@@ -1,13 +1,15 @@
 // countable_shape_parts.h — the carve parts of a countable object laid out on its CURRENT fitted box.
 // Box frame: x across width w, +y toward the BACK face (countable_belief.cpp), z from the floor.
+// The geometry lives in common/ai_belief/parts_geometry.h (K2a: one table gives the camera SDF, the beam parts and this carve);
+// this wrapper keeps the manifest-struct signature the existence channel and the carve replay tool call.
 #pragma once
 
-#include <algorithm>
 #include <optional>
 #include <span>
 #include <vector>
 #include "existence_belief/existence_belief.h"
 #include "../../common/concept_manifest/shape_parts.h"
+#include "../../common/ai_belief/parts_geometry.h"
 
 namespace rc::countable {
 
@@ -21,17 +23,10 @@ inline std::vector<rc::exist::BoxPart> carve_parts_for(float w, float h, float H
                                                        std::optional<rc::manifest::BackPanel> panel,
                                                        float z0 = 0.0f)
 {
-    std::vector<rc::exist::BoxPart> out;
-    const float dz = H - z0;
-    if (parts.empty()) out.push_back({0.0f, 0.0f, w, h, z0, H});
-    for (const auto& p : parts)
-        out.push_back({p.x_f * w, p.y_f * h, p.w_f * w, p.h_f * h, z0 + p.z0_f * dz, z0 + p.z1_f * dz});
-    if (panel)
-    {
-        const float t = std::min(panel->thickness_m, h);
-        out.push_back({0.0f, h * 0.5f - t * 0.5f, w, t, 0.0f, panel->height_m});
-    }
-    return out;
+    rc::ai::parts::Table T;
+    T.parts = parts;
+    if (panel) { T.panel_h_m = panel->height_m; T.panel_t_m = panel->thickness_m; }
+    return rc::ai::parts::carve_parts(w, h, H, T, z0);
 }
 
 }  // namespace rc::countable

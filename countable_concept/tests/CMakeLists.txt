@@ -72,6 +72,14 @@ target_link_libraries(hanging_box_test PRIVATE Eigen3::Eigen)
 add_test(NAME hanging_box_test COMMAND hanging_box_test)
 
 
+# K2a: one parts table (common/ai_belief/parts_geometry.h) gives the camera SDF, the beam parts and the carve; the toilet is a
+# bowl and a tank; a solid = "box" class stays bit-identical. Run: ./parts_geometry_test ../../../common/concept_manifest
+add_executable(parts_geometry_test parts_geometry_test.cpp ../src/countable_belief.cpp)
+target_include_directories(parts_geometry_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(parts_geometry_test PRIVATE -O2)
+target_link_libraries(parts_geometry_test PRIVATE Eigen3::Eigen)
+add_test(NAME parts_geometry_test COMMAND parts_geometry_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
+
 # The back panel comes from the class manifest ([prior.headboard]); textual reader, no Qt. Run: LANG=es_ES.UTF-8 ./back_panel_test
 add_executable(back_panel_test back_panel_test.cpp ../src/countable_belief.cpp)
 target_include_directories(back_panel_test PRIVATE ../src ../../common ../../common/concept_manifest ../../common/media_transport)

@@ -154,12 +154,17 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         out.ai2_headboard_t_m = bp->thickness_m;
         std::print("[manifest] {} back panel: height {:.2f} m, thickness {:.2f} m\n", out.concept_class, bp->height_m, bp->thickness_m);
     }
-    try { out.shape_parts = rc::manifest::load_shape_parts(manifest_path); }
+    try
+    {
+        out.shape_parts = rc::manifest::load_shape_parts(manifest_path);
+        out.solid_parts = rc::manifest::load_solid_is_parts(manifest_path);
+    }
     catch (const std::exception& e)
     {
         throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
     }
-    std::print("[manifest] {} shape: {} part(s)\n", out.concept_class, out.shape_parts.size());
+    std::print("[manifest] {} shape: {} part(s); the model's solid is {}\n", out.concept_class, out.shape_parts.size(),
+               out.solid_parts ? "the parts" : "the whole box (the parts are the carve's)");
     try
     {   // The permanence prior (F1 round 6): how often a real object of the class is moved — the volatility's hyperprior.
         if (const auto pm = rc::manifest::permanence(manifest_path))

@@ -1242,6 +1242,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.room_axis_std       = cfg_.ai2_room_axis_std_deg * 0.017453293f;
         p.headboard_h_m       = cfg_.ai2_headboard_h_m;
         p.headboard_t_m       = cfg_.ai2_headboard_t_m;
+        p.shape_parts         = cfg_.shape_parts;   // the solid: one table for the SDF, the beam parts and the carve (K2a)
+        p.solid_parts         = cfg_.solid_parts;
         p.prior_height_m      = cfg_.ai2_prior_height_m;
         p.prior_height_std    = cfg_.ai2_prior_height_std;
         p.depth_unobs_precision = cfg_.ai2_depth_unobs_precision;

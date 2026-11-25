@@ -53,7 +53,8 @@ int main()
     CHECK(load_shape_parts(mf("nightstand")).size() == 5);
     const auto bed = load_shape_parts(mf("bed"));
     CHECK(bed.size() == 2);
-    CHECK(load_shape_parts(mf("toilet")).size() == 3);
+    CHECK(load_shape_parts(mf("toilet")).size() == 2);   // K2a: bowl + tank (class knowledge), the model's solid
+    CHECK(load_solid_is_parts(mf("toilet")) and not load_solid_is_parts(mf("bed")) and not load_solid_is_parts(mf("nightstand")));
     // bed layout
     const auto bp = load_back_panel(mf("bed"));
     CHECK(bp.has_value());
@@ -79,12 +80,14 @@ int main()
         }
         const auto ts = load_shape_parts(mf("toilet"));
         const auto T = rc::countable::carve_parts_for(0.58f, 0.733f, 1.02f, ts, std::nullopt);
-        CHECK(T.size() == 3);
-        if (T.size() == 3)
-        {
-            CHECK(near(T[0].cy, 0.349f * 0.733f, 0.001f) and near(T[0].sx, 0.58f, 0.001f) and near(T[0].sy, 0.30f * 0.733f, 0.001f));
-            CHECK(near(T[0].z0, 0.233f * 1.02f, 0.001f) and near(T[0].z1, 1.02f, 0.001f));
-            CHECK(near(T[1].sx, 0.83f * 0.58f, 0.001f) and near(T[1].sy, 0.696f * 0.733f, 0.001f));
+        CHECK(T.size() == 2);
+        if (T.size() == 2)
+        {   // bowl: full length, 0.76 of the width, floor to 0.54 H; tank: full width, back 0.29 of the length, 0.54 H to H
+            CHECK(near(T[0].cy, 0.0f, 0.001f) and near(T[0].sx, 0.76f * 0.58f, 0.001f) and near(T[0].sy, 0.733f, 0.001f));
+            CHECK(T[0].z0 == 0.0f and near(T[0].z1, 0.54f * 1.02f, 0.001f));
+            CHECK(near(T[1].cy, 0.355f * 0.733f, 0.001f) and near(T[1].sx, 0.58f, 0.001f) and near(T[1].sy, 0.29f * 0.733f, 0.001f));
+            CHECK(near(T[1].z0, 0.54f * 1.02f, 0.001f) and near(T[1].z1, 1.02f, 0.001f));
+            CHECK(near(T[1].cy + 0.5f * T[1].sy, 0.5f * 0.733f, 0.001f));   // the tank's back is the box's back
         }
     }
     // block ended by a following table, comment inside, shuffled keys
@@ -105,6 +108,18 @@ int main()
     CHECK(throws("[[shape.part]]\nname = \"p\"\nx_f = 0\ny_f = 0\nw_f = 1\nh_f = 1\nz0_f = 0.5\nz1_f = 0.5\n"));
     CHECK(throws("[[shape.part]]\nname = \"p\"\nx_f = 0\ny_f = 0\nw_f = 1\nh_f = 1\nz1_f = 1\n"));
     CHECK(throws("[[shape.part]]\nname = \"p\"\nx_f = 0\ny_f = 0\nw_f = 0,5\nh_f = 1\nz0_f = 0\nz1_f = 1\n"));
+    // ── [shape] solid (K2a) ──
+    {
+        const auto solid_throws = [](const std::string& body)
+        { try { load_solid_is_parts(tmp_manifest(body)); } catch (const std::runtime_error&) { return true; } return false; };
+        CHECK(not load_solid_is_parts(tmp_manifest("[shape]\nfrom = \"x\"\n" + ok)));          // absent: the box
+        CHECK(not load_solid_is_parts(tmp_manifest("[shape]\nsolid = \"box\"\n" + ok)));
+        CHECK(load_solid_is_parts(tmp_manifest("[shape]\nsolid = \"parts\"  # c\n" + ok)));
+        CHECK(not load_solid_is_parts(tmp_manifest("[other]\nsolid = \"parts\"\n" + ok)));   // outside [shape]: not read
+        CHECK(solid_throws("[shape]\nsolid = \"legs\"\n" + ok));                              // unknown value
+        CHECK(solid_throws("[shape]\nsolid = parts\n" + ok));                                  // not a string
+        CHECK(solid_throws("[shape]\nsolid = \"parts\"\n"));                                  // parts without a row
+    }
     // ── [shape] layer spread ──
     {
         CHECK(layer_spread(tmp_manifest("[concept]\nname = \"x\"\n"), 6).delta_m.empty());   // absent: no layering declared

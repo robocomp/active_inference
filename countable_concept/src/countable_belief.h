@@ -28,6 +28,8 @@
 
 #include "countable_class_evidence.h"
 #include "countable_vertical_span.h"                      // where the box stands: floor-anchored [0,H] or hanging [H−e,H]
+#include "../../common/ai_belief/parts_geometry.h"       // the solid from the manifest's one parts table (K2a)
+#include "../../common/concept_manifest/shape_parts.h"   // rc::manifest::ShapePart
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
 #include "../../common/ai_belief/persistent_update.h"    // persistent shared-error latents (lidar-measures §7c.2)
@@ -157,6 +159,14 @@ struct CountableBeliefParams
     // with this vertical extent below its top H, z ∈ [H − e, H] — the manifest's [model.geometry] support = "hangs" extent_m.
     float vertical_extent_m = -1.0f;
     rc::countable::VerticalSpan span() const { return {vertical_extent_m}; }
+    // THE SOLID (K2a, common/ai_belief/parts_geometry.h): the class manifest's [[shape.part]] rows and its [shape] solid key. With
+    // solid_parts the model's solid (camera SDF, beam parts) is the union of these boxes (∪ the headboard panel above); without,
+    // it is the whole fitted box (∪ the panel) and the rows are the existence carve's only — every class before K2a. The carve
+    // (countable_existence.cpp) reads the same rows through the same header.
+    std::vector<rc::manifest::ShapePart> shape_parts;
+    bool solid_parts = false;
+    rc::ai::parts::Table parts_table() const
+    { return {std::span<const rc::manifest::ShapePart>(shape_parts), solid_parts, headboard_h_m, headboard_t_m}; }
 
     // ── CLASS EXISTENCE (spec 2026-11-14 countable class existence) ──────────────────────────────────────
     // π_cls: P(a mask carrying this class's label is really this class), from the manifest's [prior.class]. The
@@ -585,11 +595,10 @@ public:
     bool lidar_measured(const CountableFrame& f) const;
     // The beam config was built by BeamConfig::make (it carries the quantile levels of the composite rule).
     bool beam_ready() const { return not params_.beam.e_levels.empty(); }
-    // The model's convex parts for the beam path (spec 7c.8 a, R6-I1): 1 (the box), or 2 with a headboard. beam_part(s, 0) is the
-    // floor-anchored box z ∈ [0, H]; beam_part(s, 1) the headboard panel as sdf_headboard (local y ∈ [h/2 − t, h/2],
+    // The model's convex parts for the beam path (spec 7c.8 a, R6-I1; K2a: common/ai_belief/parts_geometry.h): the box, or the
+    // [[shape.part]] boxes of a solid = "parts" class, then the headboard panel when there is one (local y ∈ [h/2 − t, h/2],
     // t = min(headboard_t_m, h), z ∈ [0, headboard_h_m]). J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ, analytic.
-    int n_beam_parts() const { return params_.headboard_h_m > 0.0f ? 2 : 1; }
-    rc::ai::beam::BeamPart beam_part(const CountableBeliefState& s, int k) const;
+    int n_beam_parts() const { return params_.parts_table().n_model_boxes(); }
     std::vector<rc::ai::beam::BeamPart> beam_parts_for_test(const CountableBeliefState& s) const { return beam_parts(s); }
     // The last persistent update's beam log (spec 7c.8 stated limit 1): the staged ray count of the frame (0 when the LiDAR
     // channel did not measure), and the count of rays with π_i > 0.99 and e_i < −5c at the returned θ (e at the model's
@@ -752,11 +761,12 @@ public:
     void    set_first_crossing_for_test(bool v) { first_crossing_for_test_ = v; }
 
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
+    // sdf_box: the whole fitted box (the envelope, every class); sdf_headboard: the panel; sdf_compound: the MODEL's solid
+    // (parts_geometry.h: box ∪ panel, or the [[shape.part]] boxes ∪ panel for a solid = "parts" class).
     float sdf_box(const Eigen::Vector3f& p, const CountableBeliefState& s) const;
     float sdf_prim(const Eigen::Vector3f& p, const CountableBeliefState& s, int prim) const;   // prim == 0
     float sdf_headboard(const Eigen::Vector3f& p, const CountableBeliefState& s) const;   // +inf when no headboard
-    float sdf_compound(const Eigen::Vector3f& p, const CountableBeliefState& s) const
-    { return std::min(sdf_box(p, s), sdf_headboard(p, s)); }
+    float sdf_compound(const Eigen::Vector3f& p, const CountableBeliefState& s) const;
     Eigen::Matrix<float, 6, 1> sdf_jacobian(const Eigen::Vector3f& p, const CountableBeliefState& s, int prim) const;
     // Soft responsibilities: [box, clutter, wall] (sum = 1) at measurement variance R. The engine reads only
     // index 0 (n_prims()==1); the rest exist so the marginal likelihood is honest about what else explains a point.

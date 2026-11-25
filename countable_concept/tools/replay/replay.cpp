@@ -22,7 +22,7 @@
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
 // Run: ./replay DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std MANIFEST_DIR]
-//              [--standoff MANIFEST_DIR]
+//              [--standoff MANIFEST_DIR] [--permanence MANIFEST_DIR] [--parts MANIFEST_DIR]
 //   (N = update index; rows outside are computed, not printed). --sig2-cam-measured re-stages every frame's camera latent
 //   marginal with today's rule (rc::persistent_latent_inputs: the measured ZED boundary std, F1.6) from the frame's yaw entry,
 //   so a dump recorded before that change replays with it; dth_live / dP_live then measure the change, not a stream defect.
@@ -32,6 +32,9 @@
 //   --standoff DIR sets the seed's wall stand-off (F1.4) from the manifest of the dumped node's class in DIR
 //   (rc::manifest::wall_standoff), as a dump recorded before the stand-off existed lacks it. --permanence DIR does the same for
 //   the class permanence prior (F1 round 6; predict_period_s then keeps its default 0.1 s, the configs' AI2AgeNominalDtS).
+//   --parts DIR sets the seed's solid (K2a: params.shape_parts and params.solid_parts, common/ai_belief/parts_geometry.h) from the
+//   manifest of the dumped node's class in DIR ([[shape.part]] and [shape] solid), as a dump recorded before K2a lacks it (and ran
+//   the one-box solid). The dumped FRAMES are unchanged: what the live agent staged with its own θ trajectory (see the K2a report).
 //   --seed-h-rule re-derives the seed's H with the birth rule (CountableBelief::seed_height, F1 round 6.2) from the dump's FIRST
 //   camera frame (the birth cloud itself is not recorded), at the recorded born pose.
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
@@ -55,6 +58,7 @@
 #include "countable_neighbour_size.h"
 #include "../../common/concept_manifest/wall_standoff.h"
 #include "../../common/concept_manifest/permanence.h"
+#include "../../common/concept_manifest/shape_parts.h"
 #include "countable_replay.h"
 
 namespace
@@ -78,12 +82,12 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--seed-h-rule]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--parts DIR] [--seed-h-rule]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
-    std::string neighbour_manifests, standoff_manifests, permanence_manifests;
+    std::string neighbour_manifests, standoff_manifests, permanence_manifests, parts_manifests;
     bool seed_h_rule = false;
     long neighbours_without_class = 0;
     for (int i = 2; i < argc; ++i)
@@ -94,6 +98,7 @@ int main(int argc, char** argv)
         if (k == "--neighbour-size-std" and i + 1 < argc) { neighbour_manifests = argv[++i]; continue; }
         if (k == "--standoff" and i + 1 < argc) { standoff_manifests = argv[++i]; continue; }
         if (k == "--permanence" and i + 1 < argc) { permanence_manifests = argv[++i]; continue; }
+        if (k == "--parts" and i + 1 < argc) { parts_manifests = argv[++i]; continue; }
         if (k == "--seed-h-rule") { seed_h_rule = true; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
@@ -212,6 +217,14 @@ int main(int argc, char** argv)
                     seed.params.move_scale_m = pm->move_scale_m;
                     seed.params.move_scale_rad = pm->move_scale_rad;
                 }
+            if (not parts_manifests.empty())
+            {
+                const std::string path = parts_manifests + "/" + rc::node_class(seed.node) + ".concept.toml";
+                seed.params.shape_parts = rc::manifest::load_shape_parts(path);   // throws on a malformed table: a stream error
+                seed.params.solid_parts = rc::manifest::load_solid_is_parts(path);
+                std::fprintf(stderr, "replay: solid %s (%zu part(s)) from %s\n", seed.params.solid_parts ? "parts" : "box",
+                             seed.params.shape_parts.size(), path.c_str());
+            }
             if (standoff_manifests.empty()) return;
             const std::string path = standoff_manifests + "/" + rc::node_class(seed.node) + ".concept.toml";
             if (const auto so = rc::manifest::wall_standoff(path))

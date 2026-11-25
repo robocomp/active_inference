@@ -212,6 +212,7 @@ int main(int argc, char** argv)
     CHECK(replay::field_count<rc::ai::beam::BeamConfig>() == int(boost::pfr::tuple_size_v<rc::ai::beam::BeamConfig>));
     CHECK(replay::field_count<rc::ai::beam::StudentT>() == int(boost::pfr::tuple_size_v<rc::ai::beam::StudentT>));
     CHECK(replay::field_count<rc::ai::beam::GaussLegendre01>() == int(boost::pfr::tuple_size_v<rc::ai::beam::GaussLegendre01>));
+    CHECK(replay::field_count<rc::manifest::ShapePart>() == int(boost::pfr::tuple_size_v<rc::manifest::ShapePart>));
 
     // 1. bit-identity
     const bool keep = argc > 1;

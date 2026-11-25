@@ -131,6 +131,7 @@ mesh = "meshes/toilet.obj"
 # spread on a typical real two-piece toilet (class knowledge, NOT the Webots mesh), in [model].state order.
 [shape]
 from = "nominal"
+solid = "parts"   # K2a: the [[shape.part]] bowl + tank below ARE the model's solid (camera SDF, beam parts, carve)
 layer_spread_m = [
     0.06,   # cx: the depth layers are all at the FRONT (the pedestal foot is set back from the bowl's front by 10-15 cm; the tank's back is the back of every layer), so the outer layer's centre sits ~half the depth spread forward; room-frame cx/cy, so the full shift on each (the yaw is not class knowledge)
     0.06,   # cy: as cx
@@ -141,34 +142,47 @@ layer_spread_m = [
 ]
 layer_spread_source = "plumbing-fixture dimension conventions for a real two-piece toilet: tank 17-21 in (43-53 cm) wide, bowl about 14-15 in (36-39 cm) wide, pedestal foot 9-12 in (22-30 cm) wide; the pedestal foot set 4-6 in (10-15 cm) back from the bowl's front. H is not graded (Delta_H = 0): the tank lid is the top every sensor sees; tank vs tankless is variation within the class, carried by the H prior std. Not from the Webots Toilet.proto."
 
-# ── Solid parts (fractions of the fitted w, h, H; H = true top 1.02) ──
-
-[[shape.part]]
-name = "tank"
-x_f = 0.0
-y_f = 0.349
-w_f = 1.0
-h_f = 0.3
-z0_f = 0.233
-z1_f = 1.0
-why = "numbers measured on the Webots model (threerooms-piso)"
+# ── The solid: a bowl and a tank (shared-engine K2a; the P1 diagnosis task-P1-toilet-bias-diagnosis.md) ──
+# One box on this stepped shape put its front BETWEEN the bowl front and the tank front (0.4-0.5 m apart) and so its centre
+# 23 cm off at d2 ~ 100. solid = "parts" makes these two boxes the MODEL's solid (camera SDF and beam parts,
+# common/ai_belief/parts_geometry.h), not only the existence carve's. The fitted box (cx, cy, H, w, h, yaw) stays the
+# bowl + tank FOOTPRINT envelope (the graded quantity): w = the widest part (the tank), h = tank back to bowl front, H = tank lid.
+# The parts are FIXED fractions of that box (no extra DOF): the spread of real toilets about these fractions is variation within
+# the class, which the G4 layer spread above carries per DOF.
+# Fractions (class knowledge, NOT the Webots mesh), from two manufacturer spec sheets of two-piece floor-mount toilets on a 12 in
+# rough-in (Kohler, "all product dimensions are nominal"):
+#   Kohler K-3519 Highline Classic: 30-1/8 in (765 mm) long x 21-1/4 in (540 mm) wide x 31-1/4 in (794 mm) high; tank 8-5/8 in
+#     (219 mm) deep; bowl rim 17-1/4 in (438 mm)   (resources.kohler.com/webassets/kpna/catalog/pdf/en/K-3519_spec.pdf)
+#   Kohler K-3979 Highline: 29-3/4 in (756 mm) long x 18-1/8 in (460 mm) wide x 31-1/4 in (794 mm) high; tank 8-5/8 in (219 mm)
+#     deep; bowl height 16-1/2 or 16-5/8 in (419 / 422 mm; the drawing carries both, which is which is not legible in the text)   (s3.amazonaws.com/s3.supplyhouse.com/product_files/K-3979_spec_US-CA_Kohler_en.pdf)
+#   the SEAT is not part of the fixture: both Kohler sheets list it apart ("Less seat", "Seat sold separately"); it adds about
+#     1 in (American Standard lists bowl height 16-1/2 in without the seat, 17-1/2 in with it: Lowe's listing, American Standard
+#     Clean, chair height, 2-piece, 12 in rough-in), a thin hinged layer the G4 spread carries, not a solid part
+#   tank 17-21 in (43-53 cm) wide vs bowl about 14-15 in (36-39 cm) wide: the plumbing-fixture convention cited in
+#     [shape].layer_spread_source above
+# ⇒ tank depth / length = 219/765, 219/756 = 0.286, 0.290 → h_f 0.29, back-anchored (y_f = 0.5 − 0.29/2 = 0.355);
+#   bowl rim / height = 438/794, 422/794 = 0.552, 0.531 (0.528 with 419) → 0.54 (the tank stands on the bowl from there up);
+#   bowl width / tank width = 14.5/19 = 0.76.
+# The bowl spans the full length (its front is the box front; its deck runs under the tank to the back), z from the floor to the
+# rim; the tank is the full width, back-anchored, from the seat height to the lid (H). The pedestal's narrower foot is inside the
+# bowl box (the G4 spread Δ_w, Δ_h covers it), so N stays 2.
 
 [[shape.part]]
 name = "bowl"
 x_f = 0.0
-y_f = -0.153
-w_f = 0.83
-h_f = 0.696
-z0_f = 0.235
-z1_f = 0.451
-why = "numbers measured on the Webots model (threerooms-piso)"
+y_f = 0.0
+w_f = 0.76
+h_f = 1.0
+z0_f = 0.0
+z1_f = 0.54
+why = "class knowledge: Kohler K-3519 / K-3979 spec sheets (see the block above)"
 
 [[shape.part]]
-name = "pedestal"
+name = "tank"
 x_f = 0.0
-y_f = -0.033
-w_f = 0.62
-h_f = 0.682
-z0_f = 0.0
-z1_f = 0.235
-why = "numbers measured on the Webots model (threerooms-piso)"
+y_f = 0.355
+w_f = 1.0
+h_f = 0.29
+z0_f = 0.54
+z1_f = 1.0
+why = "class knowledge: Kohler K-3519 / K-3979 spec sheets (see the block above)"

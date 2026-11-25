@@ -1,6 +1,7 @@
 /*
  * shape_parts.h — the [[shape.part]] tables of a <concept>.concept.toml: the class's solid PARTS as fractions of the
- * fitted box (w, h, H). They feed the 3-D LiDAR existence carve. Absent table ⇒ the whole box is one part.
+ * fitted box (w, h, H). They feed the 3-D LiDAR existence carve, and, when [shape] solid = "parts", the model's solid too (the
+ * camera SDF and the beam parts; common/ai_belief/parts_geometry.h). Absent table ⇒ the whole box is one part.
  * Textual like back_panel.h (no Qt, no DSR); numbers through std::from_chars only (LANG=es_ES.UTF-8 safe).
  * Local axes: x across the width w, +y toward the BACK face.
  */
@@ -81,6 +82,40 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
         out.push_back({r.name, x[0], x[1], x[2], x[3], x[4], x[5]});
     }
     return out;
+}
+
+// [shape] solid: what the class MODEL's solid is (common/ai_belief/parts_geometry.h). "box" (or absent) ⇒ the whole fitted box (the
+// [[shape.part]] rows then describe the carve only); "parts" ⇒ the union of the [[shape.part]] boxes, which must then exist.
+// Anything else, or "parts" without a [[shape.part]] row, throws std::runtime_error naming the file.
+inline bool load_solid_is_parts(const std::string& path)
+{
+    std::ifstream f(path);
+    if (not f) throw std::runtime_error(std::format("{}: cannot open the manifest to read [shape].solid", path));
+    bool in_shape = false, parts = false, seen = false;
+    std::string val, line;
+    while (std::getline(f, line))
+    {
+        std::string_view l = detail::trim(line);
+        if (l.empty() or l.front() == '#') continue;
+        if (l.front() == '[')
+        {
+            if (l.starts_with("[[") and detail::trim(l.substr(2, l.find(']') - 2)) == "shape.part") parts = true;
+            in_shape = l == "[shape]";
+            continue;
+        }
+        if (not in_shape) continue;
+        const auto eq = l.find('=');
+        if (eq == std::string_view::npos or detail::trim(l.substr(0, eq)) != "solid") continue;
+        auto v = detail::trim(l.substr(eq + 1));
+        if (v.empty() or v.front() != '"' or v.find('"', 1) == std::string_view::npos)
+            throw std::runtime_error(std::format("{}: [shape].solid must be a quoted string (\"box\" or \"parts\")", path));
+        val = std::string(v.substr(1, v.find('"', 1) - 1));
+        seen = true;
+    }
+    if (not seen or val == "box") return false;
+    if (val != "parts") throw std::runtime_error(std::format("{}: [shape].solid = \"{}\": not \"box\" or \"parts\"", path, val));
+    if (not parts) throw std::runtime_error(std::format("{}: [shape].solid = \"parts\" without any [[shape.part]] row", path));
+    return true;
 }
 
 }  // namespace rc::manifest

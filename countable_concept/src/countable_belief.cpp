@@ -23,49 +23,30 @@
 namespace rc
 {
 
-// ─── SDF primitive (scalar; room→local handled inline) ───────────────────────────────────────────
+// ─── SDF (common/ai_belief/parts_geometry.h: the one parts table, K2a) ─────────────────────────────────────────
 
-namespace
-{
-// Box SDF given the point's distances-to-face along each axis (|local| − half_extent).
-float box_sdf(float dx, float dy, float dz)
-{
-    const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f), oz = std::max(dz, 0.0f);
-    const float outside = std::sqrt(ox * ox + oy * oy + oz * oz);
-    const float inside  = std::min(std::max(dx, std::max(dy, dz)), 0.0f);
-    return outside + inside;
-}
-}  // namespace
-
-// Signed distance to the solid box: centre (cx, cy, zc), half extents (w/2, h/2, half), yaw. Floor-anchored: zc = half = H/2;
-// hanging (VerticalSpan): zc = H − e/2, half = e/2.
+// Signed distance to the whole fitted box: centre (cx, cy, zc), half extents (w/2, h/2, half), yaw. Floor-anchored: zc = half =
+// H/2; hanging (VerticalSpan): zc = H − e/2, half = e/2.
 float CountableBelief::sdf_box(const Eigen::Vector3f& p, const CountableBeliefState& s) const
 {
-    const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
-    const float px = p.x() - s.cx, py = p.y() - s.cy;
-    const float lx = px * c - py * sn;
-    const float ly = px * sn + py * c;
-    const auto span = params_.span();
-    return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly) - 0.5f * s.h, std::abs(p.z() - span.zc(s.H)) - span.half(s.H));
+    return rc::ai::parts::envelope_sdf(rc::ai::parts::to_local(p, s.cx, s.cy, s.yaw), s.w, s.h, s.H, params_.span());
 }
 
 // The headboard panel: local x ∈ [−w/2, w/2], y ∈ [h/2 − t, h/2] (the back, +Y), z ∈ [0, headboard_h_m].
 float CountableBelief::sdf_headboard(const Eigen::Vector3f& p, const CountableBeliefState& s) const
 {
-    if (params_.headboard_h_m <= 0.0f) return std::numeric_limits<float>::infinity();
-    const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
-    const float px = p.x() - s.cx, py = p.y() - s.cy;
-    const float lx = px * c - py * sn;
-    const float ly = px * sn + py * c;
-    const float t  = std::min(params_.headboard_t_m, s.h);
-    const float yc = 0.5f * s.h - 0.5f * t;
-    const float hz = 0.5f * params_.headboard_h_m;
-    return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly - yc) - 0.5f * t, std::abs(p.z() - hz) - hz);
+    return rc::ai::parts::panel_sdf(rc::ai::parts::to_local(p, s.cx, s.cy, s.yaw), s.w, s.h, params_.parts_table());
+}
+
+// The model's solid: box ∪ panel, or the [[shape.part]] boxes ∪ panel (solid = "parts").
+float CountableBelief::sdf_compound(const Eigen::Vector3f& p, const CountableBeliefState& s) const
+{
+    return rc::ai::parts::sdf(p, s.cx, s.cy, s.H, s.w, s.h, s.yaw, params_.parts_table(), params_.span());
 }
 
 float CountableBelief::sdf_prim(const Eigen::Vector3f& p, const CountableBeliefState& s, int) const
 {
-    return sdf_compound(p, s);   // prim == 0: box ∪ headboard, ONE primitive (the engine's mixture is unchanged)
+    return sdf_compound(p, s);   // prim == 0: the whole solid, ONE primitive (the engine's mixture is unchanged)
 }
 
 // ─── Mixture responsibilities ────────────────────────────────────────────────────────────────────
@@ -701,9 +682,9 @@ void CountableBelief::accumulate_no_cross(const CountableBeliefState& s, const C
 void CountableBelief::accumulate_rays(const CountableBeliefState& s, const CountableFrame& f,
                                       Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd, bool first_crossing) const
 {
-    // No copy of the ray-set per GN iterate: the first-crossing factor takes σ_s and convexity as arguments. The plain box
-    // (no headboard) is one convex solid; box ∪ headboard is not, so the convex early exit is off for it.
-    const bool convex = not (params_.headboard_h_m > 0.0f);
+    // No copy of the ray-set per GN iterate: the first-crossing factor takes σ_s and convexity as arguments. A solid of one box
+    // is convex; box ∪ headboard or a union of parts is not, so the convex early exit is off for it.
+    const bool convex = n_beam_parts() == 1;
     const auto one = [&](const rc::ai::LidarRays& lr)
     {
         if (first_crossing)
@@ -899,7 +880,7 @@ bool CountableEngineModel::accumulate_lidar_override(const State& s, const Frame
     if (Id and bd) b->accumulate_rays(s, f, *Id, *bd, /*first_crossing*/ true);
     if (E)
     {
-        const bool convex = not (b->params_.headboard_h_m > 0.0f);
+        const bool convex = b->n_beam_parts() == 1;
         *E += rc::ai::lidar_rays_first_crossing_energy(*b, s, f.lidar, b->params_.model_sigma_m, convex);
         for (const auto& lr : f.lidar_extra)
             *E += rc::ai::lidar_rays_first_crossing_energy(*b, s, lr, b->params_.model_sigma_m, convex);
@@ -1053,45 +1034,11 @@ bool CountableBelief::lidar_measured(const CountableFrame& f) const
 }
 
 // ─── The smooth beam model's parts (spec 7c.8 a, R6-I1) ─────────────────────────────────────────────────────────
-// Rows of J: ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ, θ = (cx, cy, H, w, h, yaw). The box: c = (cx, cy, zc), half = (w/2, h/2, hz), with
-// (zc, hz) = (H/2, H/2) floor-anchored and (H − e/2, e/2) hanging (VerticalSpan: ∂zc/∂H = 1, ∂hz/∂H = 0).
-// The headboard (sdf_headboard): t = min(t_hb, h), local centre y_c = h/2 − t/2, so c = (cx − sin ψ·y_c, cy + cos ψ·y_c, H_hb/2),
-// half = (w/2, t/2, H_hb/2); while t_hb < h, ∂y_c/∂h = ½ and ∂t/∂h = 0; else (t = h) y_c = 0 and ∂(t/2)/∂h = ½ (one-sided at
-// t_hb = h, as the SDF's min).
-rc::ai::beam::BeamPart CountableBelief::beam_part(const CountableBeliefState& s, int k) const
-{
-    rc::ai::beam::BeamPart P;
-    const double cx = s.cx, cy = s.cy, H = s.H, w = s.w, h = s.h, yaw = s.yaw;
-    P.yaw = yaw;
-    P.J.setZero();
-    if (k == 0)
-    {
-        const auto span = params_.span();
-        P.c = {cx, cy, span.zc(H)};
-        P.half = {0.5 * w, 0.5 * h, span.half(H)};
-        P.J(0, 0) = 1.0; P.J(1, 1) = 1.0; P.J(2, 2) = span.dzc_dH(); P.J(3, 5) = 1.0; P.J(4, 3) = 0.5; P.J(5, 4) = 0.5;
-        P.J(6, 2) = span.dhalf_dH();
-        return P;
-    }
-    const double t_hb = params_.headboard_t_m, H_hb = params_.headboard_h_m;
-    const bool thin = t_hb < h;
-    const double t = thin ? t_hb : h, yc = 0.5 * h - 0.5 * t, dyc = thin ? 0.5 : 0.0, dhalf_t = thin ? 0.0 : 0.5;
-    const double c = std::cos(yaw), sn = std::sin(yaw);
-    P.c = {cx - sn * yc, cy + c * yc, 0.5 * H_hb};
-    P.half = {0.5 * w, 0.5 * t, 0.5 * H_hb};
-    P.J(0, 0) = 1.0; P.J(0, 4) = -sn * dyc; P.J(0, 5) = -c * yc;
-    P.J(1, 1) = 1.0; P.J(1, 4) =  c * dyc;  P.J(1, 5) = -sn * yc;
-    P.J(3, 5) = 1.0; P.J(4, 3) = 0.5; P.J(5, 4) = dhalf_t;
-    return P;
-}
-
+// The model solid's convex parts with their analytic J = ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ: common/ai_belief/parts_geometry.h
+// (K2a), from the same table as sdf_compound.
 std::vector<rc::ai::beam::BeamPart> CountableBelief::beam_parts(const CountableBeliefState& s) const
 {
-    std::vector<rc::ai::beam::BeamPart> parts;
-    const int n = n_beam_parts();
-    parts.reserve(n);
-    for (int k = 0; k < n; ++k) parts.push_back(beam_part(s, k));
-    return parts;
+    return rc::ai::parts::beam_parts(s.cx, s.cy, s.H, s.w, s.h, s.yaw, params_.parts_table(), params_.span());
 }
 
 // update() under persistent: the engine's update with the cycle around it. The size summary is unchanged (§7c.1). ω is the

@@ -99,6 +99,7 @@ struct CountableConfig
     float birth_height_noise_m      = 0.05f;   // birth height noise σ_z (m)
     float birth_height_outlier_frac = 0.05f;   // birth mask-bleed outlier fraction ε
     std::vector<rc::manifest::ShapePart> shape_parts;   // [[shape.part]] of the class manifest (empty = whole box)
+    bool solid_parts = false;                           // [shape] solid = "parts": the parts ARE the model's solid (K2a)
     // Δ per DOF (cx, cy, H, w, h, yaw), the manifest's [shape].layer_spread_m (spec shared-engine G4): the class's layer
     // spread, the persistent path's shape latent (marginal Δ²/12, ρ = 1). Absent ⇒ zeros (no layering declared, said so).
     std::array<float, 6> layer_spread_m{};
