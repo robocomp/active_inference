@@ -22,6 +22,7 @@
 #include <QDebug>
 
 #include "countable_model.h"   // rc::CountableModel statics (TOP_THICKNESS, LEG_RADIUS)
+#include "../../common/appearance_belief/colour_name.h"   // rc::appearance::name_colour (K2b colour names)
 #include "countable_assets.h"  // rc::countable_mesh_path / countable_texture_path (class-folder conventions)
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
@@ -80,7 +81,7 @@ std::uint64_t CountableSceneGraph::create_instance_from_detection(const Eigen::V
     G_->add_or_modify_attrib_local<object_subtype_att>(countable_node, cfg_.concept_class);
     // Display asset for the retina 3D viewer (relative to its meshes/ root). The agent owns its
     // appearance; the viewer loads & scales this to the fitted box (see cortex mesh_path contract).
-    G_->add_or_modify_attrib_local<mesh_path_att>(countable_node, rc::countable_mesh_path(cfg_.concept_class));
+    G_->add_or_modify_attrib_local<mesh_path_att>(countable_node, cfg_.mesh_path.empty() ? rc::countable_mesh_path(cfg_.concept_class) : cfg_.mesh_path);
     // Texture by convention (countable_assets.h): published only when the class folder ships <cls>_basecolor.jpg
     // (nightstand); bed and toilet are coloured by their .mtl, so they publish none.
     if (const auto tex = rc::countable_texture_path(cfg_.concept_class))
@@ -218,13 +219,69 @@ void CountableSceneGraph::step_write_model(CountableInstance& inst, DSR::Node& n
     //  - table_roi_fill: projected extent fraction (drive toward a sweet-spot for stand-off/scale).
     //  - table_roi_valid: model currently projects in front of the camera.
     //  - table_detection_alive / _confidence / _frames_since: is YOLO firing here, and how strongly.
-    G_->add_or_modify_attrib_local<table_roi_offset_att>(node,
-        std::vector<float>{inst.roi_offset_x, inst.roi_offset_y});
-    G_->add_or_modify_attrib_local<table_roi_fill_att>(node, inst.roi_fill);
-    G_->add_or_modify_attrib_local<table_roi_valid_att>(node, inst.roi_valid);
-    G_->add_or_modify_attrib_local<table_detection_alive_att>(node, inst.detection_alive);
-    G_->add_or_modify_attrib_local<table_detection_confidence_att>(node, inst.last_mask_confidence);
-    G_->add_or_modify_attrib_local<table_frames_since_detection_att>(node, inst.frames_since_detection);
+    // K2b: the family is the class's (Concept.LookAttrs). The controller's chair contract waits on chair_front_seen +
+    // chair_detection_confidence (affordance_protocol.h) and counts looks by chair_front_seen_frame (controller_session.cpp),
+    // the attributes the legacy chair agent wrote; every other class keeps table_*.
+    if (cfg_.look_attrs == "chair")
+    {
+        G_->add_or_modify_attrib_local<chair_roi_offset_att>(node, std::vector<float>{inst.roi_offset_x, inst.roi_offset_y});
+        G_->add_or_modify_attrib_local<chair_roi_fill_att>(node, inst.roi_fill);
+        G_->add_or_modify_attrib_local<chair_roi_valid_att>(node, inst.roi_valid);
+        G_->add_or_modify_attrib_local<chair_detection_alive_att>(node, inst.detection_alive);
+        G_->add_or_modify_attrib_local<chair_detection_confidence_att>(node, inst.last_mask_confidence);
+        G_->add_or_modify_attrib_local<chair_frames_since_detection_att>(node, inst.frames_since_detection);
+        G_->add_or_modify_attrib_local<chair_front_seen_att>(node, inst.front_seen);
+        G_->add_or_modify_attrib_local<chair_front_seen_frame_att>(node, inst.front_seen_frame);
+    }
+    else
+    {
+        G_->add_or_modify_attrib_local<table_roi_offset_att>(node,
+            std::vector<float>{inst.roi_offset_x, inst.roi_offset_y});
+        G_->add_or_modify_attrib_local<table_roi_fill_att>(node, inst.roi_fill);
+        G_->add_or_modify_attrib_local<table_roi_valid_att>(node, inst.roi_valid);
+        G_->add_or_modify_attrib_local<table_detection_alive_att>(node, inst.detection_alive);
+        G_->add_or_modify_attrib_local<table_detection_confidence_att>(node, inst.last_mask_confidence);
+        G_->add_or_modify_attrib_local<table_frames_since_detection_att>(node, inst.frames_since_detection);
+    }
+
+    // Colour (K2b, Concept.AppearanceEnabled; from the legacy chair). The display tint as CHROMATICITY pre-scaled by the belief's
+    // confidence toward neutral grey (it fades in as evidence accumulates), and the palette name with its probability (what the
+    // chat says). Absent until something was measured. Reads the appearance belief only; nothing geometric depends on it.
+    if (cfg_.appearance_enabled and inst.appearance.initialized())
+    {
+        const float           c       = inst.appearance.confidence();
+        const Eigen::Vector3f neutral = Eigen::Vector3f::Constant(1.0f / 3.0f);
+        const Eigen::Vector3f tint    = neutral + c * (inst.appearance.map() - neutral);
+        G_->add_or_modify_attrib_local<mesh_color_rgb_att>(node, std::vector<float>{tint.x(), tint.y(), tint.z()});
+    }
+    if (cfg_.appearance_enabled)
+        if (const auto cn = rc::appearance::name_colour(inst.appearance); not cn.name.empty())
+        {
+            G_->add_or_modify_attrib_local<color_name_att>(node, cn.name);
+            G_->add_or_modify_attrib_local<color_prob_att>(node, cn.prob);
+        }
+    // P(this object is really there) = occupancy x class (K2b, Concept.PublishExistProb): ltom keeps the last value as what the
+    // memory is worth, and a recalled candidate's prior is this number (recall_match.h).
+    if (cfg_.publish_exist_prob and inst.ai2_initialized)
+        if (const float p = inst.p_exists(); std::isfinite(p))
+            G_->add_or_modify_attrib_local<obj_exist_prob_att>(node, p);
+    // The identity link (changed object, K2b, Concept.ChangedObjectEnabled): the node's name never changes; ltom joins the
+    // histories. Absent = no link.
+    if (cfg_.changed_object_enabled)
+    {
+        if (inst.link_uid != 0)
+        {
+            G_->add_or_modify_attrib_local<same_as_uid_att>(node, inst.link_uid);
+            G_->add_or_modify_attrib_local<same_as_prob_att>(node, inst.link_prob);
+            G_->add_or_modify_attrib_local<left_spot_prob_att>(node, inst.link_left_spot_prob);
+        }
+        else
+        {
+            G_->remove_attrib_local<same_as_uid_att>(node);
+            G_->remove_attrib_local<same_as_prob_att>(node);
+            G_->remove_attrib_local<left_spot_prob_att>(node);
+        }
+    }
 
     // Object-anchor observation z_o (raw camera-frame centroid → static body extrinsic) for the room
     // localizer's landmark factor. Position-only (single-view yaw is biased). Batched into this node

@@ -148,6 +148,11 @@ public:
     // compute_contour_set each do on entry). Returns whether a CameraAPI is bound. Main/compute thread only.
     bool ensure_camera();
 
+    // K2b (from the legacy chair's ChairFitter::best_view_distance): the range at which an object of this width and height fills
+    // the ZED frame at the detector envelope's BEST fill (rc::detect::best_fill) — where it is seen best. nullopt without a bound
+    // CameraAPI, a degenerate size or an envelope with no best fill. The approach stands at least this far (object_approach_geometry.h).
+    std::optional<float> best_view_distance(float width_m, float height_m, float min_fill, float max_fill, float soft);
+
     // A room point in the DELIVERED image: (col, row, depth) with depth = the camera-frame forward coordinate, scaled
     // intrinsic->delivered exactly as compute_contour_set. nullopt when depth < 0.20 m (near clip), the point is
     // outside the image, there is no CameraAPI (not bound yet), or a size is <= 0.

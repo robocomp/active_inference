@@ -437,6 +437,23 @@ struct CountableConfig
     float tracker_detection_noise_m = 0.35f;
     float recall_pi_move = 0.05f;              // Tracker.RecallPiMove — class prior that a remembered bed was MOVED (guess; learned in step 4)
     float recall_log_prior_new = 0.0f;        // Tracker.RecallLogPriorNew — log prior of "new bed" vs one recalled candidate
+    // ── The graph consumers' channels a class may publish beyond the common set (K2b: what the legacy chair agent published,
+    //    so the chair keeps every consumer when it runs on this binary). Every one defaults to the pre-K2b behaviour. ──
+    // Concept.MeshPath: the display mesh, relative to the meshes root as mesh_path_att wants it; empty = the class-folder convention
+    // <cls>_concept/meshes/<cls>.obj. The chair needs its own: the legacy chair.obj has the backrest at −y, and every consumer
+    // (viewer3d, language_agent's canvas) draws a unit mesh at the node's yaw, whose +y is the BACK on this binary.
+    std::string mesh_path;
+    std::string look_attrs = "table";   // Concept.LookAttrs: the typed attribute family of the controller's look contract (table | chair)
+    bool  appearance_enabled = false;   // Concept.AppearanceEnabled: colour belief → mesh_color_rgb, color_name, color_prob
+    bool  publish_exist_prob = false;   // Concept.PublishExistProb: obj_exist_prob = P(exists) (ltom, language_agent, controller)
+    bool  thumbnails_enabled = false;   // Concept.ThumbnailsEnabled: the best crop per viewing angle on "<class>_thumbs" (ltom)
+    bool  approach_enabled = false;     // Concept.ApproachEnabled: the pragmatic aff_<name>_approach (object_approach.h)
+    bool  epistemic_offer_enabled = true;   // Concept.EpistemicOfferEnabled: false = no viewpoint offer (AuRo C3(b) comparison arm)
+    bool  changed_object_enabled = false;   // Concept.ChangedObjectEnabled: ghosts at remembered spots + same_as identity links
+    float link_pi_move = 0.10f;         // Tracker.LinkPiMove — per-visit P(a remembered object was moved)
+    float link_pi_gone = 0.10f;         // Tracker.LinkPiGone — per-visit P(a remembered object left the room)
+    float link_lambda_new = 0.10f;      // Tracker.LinkLambdaNew — per-visit rate of a NEW object arriving
+    float ghost_evidence_gain = 0.15f;  // Tracker.GhostEvidenceGain — |ΔL| per look at a ghost's spot (the legacy chair's Existence.EvidenceGain, ported unchanged)
     int   tracker_birth_frames      = 8;      // frames a mask must stay unexplained before spawning a bed
     // FUSED BIRTH (EXPERIMENTAL, off by default): let residual-grid SURPRISE MASS under a detection accelerate its
     // birth. Per frame a detection contributes birth_evidence = 1 + gain·(m/(m+ref)) toward the birth_frames

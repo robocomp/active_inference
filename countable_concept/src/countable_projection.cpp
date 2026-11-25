@@ -9,6 +9,7 @@
  */
 
 #include "countable_projection.h"
+#include "../../common/detectability/detectability.h"   // rc::detect::best_fill (K2b best_view_distance)
 #include "tick_timing.h"
 #include "rt_memo.h"
 #include "countable_config.h"   // rc::k*OwnWallSkipM (shared with the perception card)
@@ -715,4 +716,18 @@ bool CountableProjection::self_test()
     return ok and ok_seam;
 }
 
+}  // namespace rc
+
+namespace rc {
+std::optional<float> CountableProjection::best_view_distance(float width_m, float height_m, float min_fill, float max_fill, float soft)
+{
+    if (not ensure_camera()) return std::nullopt;
+    const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
+    const float W = static_cast<float>(camera_api_->get_width()), H = static_cast<float>(camera_api_->get_height());
+    // degenerate-geometry guard (no camera model / no object): not a threshold on a belief
+    if (fx <= 0.f or fy <= 0.f or W <= 0.f or H <= 0.f or width_m <= 0.f or height_m <= 0.f) return std::nullopt;
+    const float f_best = rc::detect::best_fill(rc::detect::DetectorEnvelope{min_fill, max_fill, soft});
+    if (f_best <= 0.f) return std::nullopt;
+    return std::max(fx * width_m / (f_best * W), fy * height_m / (f_best * H));
+}
 }  // namespace rc

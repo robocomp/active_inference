@@ -448,6 +448,9 @@ void SpecificWorker::compute()
     // pushed by update_node_attr_signal — see the connect block in initialize() for why that subscription
     // could starve this very loop.
     poll_affordance_protocol();
+    // K2b: approaches whose object was deleted from outside (del_node_slot) go now, on the main thread.
+    for (auto& a : retired_approaches_) a.remove();
+    retired_approaches_.clear();
 
     bool fresh_masks = false;
     {
@@ -469,6 +472,7 @@ void SpecificWorker::compute()
         const rc::StageTimer t(&timing_.tracker);   // [timing] tracker (birth/associate/merge)
         run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
     }
+    if (cfg_.thumbnails_enabled) update_thumbnails();   // K2b: the best crop retina offered for each instance, per viewing angle
 
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
     // never consumes a stale sweep; pump() is main-thread (reads the graph) + dormant while the feature is off.
@@ -534,7 +538,7 @@ void SpecificWorker::compute()
     rc::room::drop_left_behind(*G, cfg_.concept_class + "_", room_node_id_, [this](std::uint64_t id)
     {
         if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-            it->second.affordance.remove();
+            teardown_consumers(it->second);
         fitter_->forget_node(id);
     });
     const auto object_nodes = G->get_nodes_by_type("object");
@@ -585,6 +589,10 @@ void SpecificWorker::compute()
                                   std::format("L {:.2f}", inst.existence.logodds()));
             });
     }
+
+    // K2b changed object: ghosts at remembered spots, the identity link of objects born new (after the fits and the removals,
+    // so the live instances are this tick's).
+    if (cfg_.changed_object_enabled) update_identity_links();
 
     // The CLASS factor of existence (existence = occupancy x class): soft SINGLETON + shape evidence → retire mis-detections. The
     // worker sees ALL instances, so mutual inhibition + the removal decision live here (not in the fitter). It
@@ -746,8 +754,29 @@ void SpecificWorker::process_countable_node(const DSR::Node& node)
     // frame. timestamp_ms==0 (older producer with no capture stamp) ⇒ fall back to the frame_id gate alone.
     const bool fresh_frame   = pkt.valid and pkt.frame_id > inst.last_masks_frame_seen;
     const bool fresh_capture = pkt.timestamp_ms == 0 or pkt.timestamp_ms > inst.last_mask_timestamp_ms;
+    // Colour drift (K2b, Concept.AppearanceEnabled; DISPLAY + names only): every cycle, seen or not, on wall-clock time —
+    // an unobserved object's colour genuinely becomes less certain as lighting and viewpoint move on (as in the legacy chair).
+    if (cfg_.appearance_enabled)
+    {
+        const auto tp_now = std::chrono::steady_clock::now();
+        if (inst.last_appearance_tp.time_since_epoch().count() != 0)
+            inst.appearance.inflate_for_age(std::chrono::duration<float>(tp_now - inst.last_appearance_tp).count());
+        inst.last_appearance_tp = tp_now;
+    }
     if (fresh_frame and fresh_capture)
     {
+        // The FRONT camera's verdict on this mask frame (K2b): a ZED slice assigned to this instance. Once per new frame.
+        inst.front_seen = std::ranges::any_of(inst.assigned_mask_idxs, [&](int idx)
+            { return idx >= 0 and idx < static_cast<int>(pkt.slices.size()) and pkt.slices[idx].is_zed(); });
+        if (inst.front_seen) inst.front_seen_frame = pkt.frame_id;
+        // Colour: both channels of every assigned slice; a slice with no colour cells (ricoh) is a no-op inside observe().
+        if (cfg_.appearance_enabled)
+            for (const int idx : inst.assigned_mask_idxs)
+                if (idx >= 0 and idx < static_cast<int>(pkt.slices.size()))
+                {
+                    const auto& sl = pkt.slices[idx];
+                    inst.appearance.observe(sl.color_chroma, sl.color_var, sl.color_neff, sl.color_lum, sl.color_lum_var, sl.color_lum_n);
+                }
         for (const int idx : inst.assigned_mask_idxs)
         {
             auto obs = fitter_->observe_slice(inst, idx);
@@ -830,8 +859,13 @@ void SpecificWorker::publish_countable_intentions(rc::CountableInstance& inst,
     // step_epistemic now owns the propose-vs-withdraw decision via the planner's ΔH (it withdraws
     // when the expected information gain falls below threshold), so it runs unconditionally rather
     // than being gated on the legacy coverage-deficit proxy.
-    if (auto node_opt = G->get_node(node_id); node_opt.has_value())
-        step_epistemic(inst, node_opt.value());
+    // Concept.EpistemicOfferEnabled = false (K2b; the legacy chair's AuRo C3(b) comparison arm): no viewpoint offer; the belief
+    // still updates from whatever the robot happens to see, and the approach is still offered.
+    if (cfg_.epistemic_offer_enabled)
+        if (auto node_opt = G->get_node(node_id); node_opt.has_value())
+            step_epistemic(inst, node_opt.value());
+    if (cfg_.approach_enabled)
+        step_approach(inst);
 }
 
 // ─── Initialisation helpers ──────────────────────────────────────────────────────────────────────
@@ -1085,12 +1119,18 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         return;
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [countable_id, inst] : fitter_->instances())
+    {
         if (inst.affordance.node_id() == id)
             inst.affordance.on_node_deleted(id);
+        inst.approach.on_node_deleted(id);   // K2b: its own approach node deleted from outside
+    }
 
     if (fitter_->instances().count(id))
     {
         std::print("{}: node {} removed from DSR, destroying instance\n", log_name(), id);
+        // K2b: its approach node would stay on offer for an object that no longer exists; compute() deletes it on the main
+        // thread next tick (as the legacy chair does)
+        retired_approaches_.push_back(std::move(fitter_->instances().at(id).approach));
         fitter_->instances().erase(id);
     }
 }

@@ -232,6 +232,12 @@ public:
     // CountableProjection; see rc::SilhouetteExistence in countable_projection.h. Called from update_existence.
     SilhouetteExistence compute_silhouette_existence(const CountableInstance& inst)
     { return projection_->compute_silhouette_existence(inst); }
+    // K2b: where an object of this size is seen best (the approach's stand-off floor), and P(a ZED look would resolve a
+    // prior-sized object standing at xy) for a changed-object ghost — P(detect) × central, the silhouette's own frustum + occlusion
+    // (YOLO occluders and the room walls). 0 when out of view. *cam_xy (optional) receives the robot's xy for the viewpoint note.
+    std::optional<float> best_view_distance(float width_m, float height_m)
+    { return projection_->best_view_distance(width_m, height_m, cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft); }
+    float ghost_p_vis(const Eigen::Vector2f& xy);
 
     // The classifier-free contour channel's geometry (shared construction; see countable_projection.h).
     rc::edges::ContourSet compute_contour_set(const CountableInstance& inst, std::uint64_t stamp_ms,

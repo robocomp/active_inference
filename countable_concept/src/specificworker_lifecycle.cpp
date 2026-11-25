@@ -109,7 +109,7 @@ float SpecificWorker::slice_world_fraction(const rc::MaskIngestor::MasksPacket& 
 void SpecificWorker::retire_instance(std::uint64_t id)
 {
     if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-        it->second.affordance.remove();
+        teardown_consumers(it->second);
     fitter_->forget_node(id);
     G->delete_node(id);
 }
@@ -517,6 +517,7 @@ void SpecificWorker::run_instance_tracker()
             std::print("{}: [tracker] RESURRECT {}_{} {}\n", cfg_.agent_name, cfg_.concept_class, resurrect->n, what);
             log_phantom_event("RESURRECT", new_id, "", c.x(), c.y(), nullptr, what);
         }
+        if (new_id != 0 and not resurrect) born_new_ids_.insert(new_id);   // K2b: a candidate for the identity link
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));

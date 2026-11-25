@@ -547,6 +547,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
             // Record BEFORE teardown, while the existence state that justified the kill is readable.
             if (on_remove) on_remove(id, it->second);
             it->second.affordance.remove();
+            it->second.approach.remove();   // K2b: its approach node goes with it
         }
         fitter.forget_node(id);
         G_->delete_node(id);

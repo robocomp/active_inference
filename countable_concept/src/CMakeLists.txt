@@ -19,6 +19,7 @@ LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/specificworker_lifecycle.cpp
+  ../src/specificworker_consumers.cpp
   ../src/specificworker_dashboard.cpp
   ../src/countable_config.cpp
   ../src/countable_scene_graph.cpp

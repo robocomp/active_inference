@@ -26,6 +26,10 @@
 #include "epistemic_planner.h"          // rc::EpistemicProposal (the held offer)
 #include "../../common/epistemic_step/offer_cache.h"   // rc::epistemic::OfferCache
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
+#include "../../common/pragmatic_affordance/object_approach.h"   // rc::pragmatic::ObjectApproach (SHARED; K2b, Concept.ApproachEnabled)
+#include "../../common/appearance_belief/appearance_belief.h"     // per-instance colour (K2b, Concept.AppearanceEnabled; DISPLAY + names only)
+#include "../../common/thumbs/thumb_select.h"                     // rc::thumbs::ThumbSet (K2b, Concept.ThumbnailsEnabled)
+#include <chrono>
 #include "../../common/existence_belief/existence_belief.h"
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)   // per-instance existence log-odds (removal)
 
@@ -186,6 +190,21 @@ struct CountableInstance
     int   frames_since_detection = 100000;   // cycles since last fresh bed mask (0 = just detected)
     float last_mask_confidence   = 0.0f;     // YOLO confidence of the last bed detection
     bool  detection_alive        = false;    // frames_since_detection < threshold
+    // The FRONT camera's verdict on the newest mask frame (K2b, from the legacy chair): was a ZED slice assigned to this instance
+    // on it, and on which mask_frame_id it last was — the controller's chair look contract (chair_front_seen / _frame) counts
+    // each distinct advance as one front look. Decided once per new mask frame, never latched across frames.
+    bool  front_seen          = false;
+    int   front_seen_frame    = -1;   // mask_frame_id of the last ZED win (-1 never)
+
+    // ── Consumers' channels beyond the common set (K2b: what the legacy chair agent published) ───────────────────────────
+    rc::pragmatic::ObjectApproach approach;                    // aff_<name>_approach (Concept.ApproachEnabled)
+    rc::appearance::AppearanceBelief appearance;               // colour (Concept.AppearanceEnabled); never read by the fit
+    std::chrono::steady_clock::time_point last_appearance_tp{};   // wall stamp of the last drift step (drift tracks real time)
+    rc::thumbs::ThumbSet thumbs;                               // the best crop per viewing angle (Concept.ThumbnailsEnabled)
+    // The identity link (changed object, Concept.ChangedObjectEnabled): "I believe this is <remembered object>, p". 0 = none.
+    std::uint64_t link_uid = 0;
+    float link_prob = 0.0f;
+    float link_left_spot_prob = 0.0f;
 
     // ── Existence log-odds (removal) ──────────────────────────────────────────────────────────────
     // LiDAR free-space carve + mask-absence accrue negative evidence when the bed is demonstrably gone.

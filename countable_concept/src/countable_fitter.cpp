@@ -10,6 +10,7 @@
  */
 
 #include "countable_fitter.h"
+#include "../../common/detectability/detectability.h"   // rc::detect::p_detect (K2b ghost_p_vis)
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 
@@ -892,6 +893,11 @@ bool CountableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_
 
     inst.model = CountableModel(init_state, make_model_params());
     inst.affordance.init(G_, node.id(), node.name(), cfg_.concept_class);
+    // K2b: the pragmatic approach (Concept.ApproachEnabled; the legacy chair's). The Schmitt band and debounce are
+    // PragmaticAffordance's defaults; Fronted: the class has a front (its −y face), named once the yaw is surely known.
+    if (cfg_.approach_enabled)
+        inst.approach.init(G_, node.id(), node.name(), rc::pragmatic::PragmaticAffordance::Policy{},
+                           rc::pragmatic::ObjectApproach::Sides::Fronted);
     inst.subtype = cfg_.concept_class;
     inst.class_belief = rc::exist::ExistenceBelief(rc::countable::logit(cfg_.class_p_label_true), cfg_.existence_logodds_max);   // L_cls starts at logit(π_cls)
 
@@ -1956,7 +1962,9 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  // 2 no fresh Helios sweep; gap_rays = rays with π > 0.99 and e < −5c after this cycle's accepted update (stated
                  // limit 1); beam_qsum = Σ q over the staged rays (rev 3.3.11: the LiDAR channel measured ⇔ staged and
                  // beam_qsum > 0). All 0 with the flag off.
-                 << "beam_staged,beam_nolabel,beam_kappa,nomem_cycle,gap_rays,beam_qsum\n";
+                 << "beam_staged,beam_nolabel,beam_kappa,nomem_cycle,gap_rays,beam_qsum,"
+                 // K2b: the wall clock (epoch ms) last, as the legacy chair's log had it (AuRo C3 tooling, c3b_timeline.py)
+                 << "t_ms\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -2034,7 +2042,9 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << ',' << inst.ai2_belief.last_gn_iters() << ',' << (inst.ai2_belief.last_gn_converged() ? 1 : 0)
                  << ',' << inst.ai2_belief.last_lambda()
                  << ',' << inst.beam_log.staged << ',' << inst.beam_log.nolabel << ',' << inst.beam_log.kappa
-                 << ',' << inst.beam_log.nomem_cycle << ',' << inst.beam_log.gap_rays << ',' << inst.beam_log.qsum << '\n';
+                 << ',' << inst.beam_log.nomem_cycle << ',' << inst.beam_log.gap_rays << ',' << inst.beam_log.qsum
+                 << ',' << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()
+                 << '\n';
     }
     ai2_csv_.flush();
     if (cfg_.gn_trace > 0) log_gn_trace(inst);
@@ -2323,4 +2333,28 @@ bool CountableFitter::self_test()
     return all;
 }
 
+}  // namespace rc
+
+namespace rc {
+// K2b (the legacy chair's ChairFitter::ghost_p_vis on this binary's silhouette): a prior-sized box of this class at xy, yaw 0
+// (the remembered spot carries no yaw; the silhouette's fill and frustum barely depend on it at the prior's near-square
+// footprint), projected exactly as a live instance's silhouette is. P(detect) from the shared detector envelope over the
+// projected fill and the in-view fraction (frustum + YOLO occluders + room walls), times the central fraction — the same
+// p_detect the existence channel weighs a live instance's absence by. Not in view ⇒ 0 (the ghost HOLDs).
+float CountableFitter::ghost_p_vis(const Eigen::Vector2f& xy)
+{
+    CountableBeliefParams p;
+    p.vertical_extent_m = cfg_.vertical_extent_m;
+    p.prior_footprint_m = cfg_.ai2_prior_footprint_m;
+    p.prior_depth_m     = cfg_.ai2_prior_depth_m;
+    p.prior_height_m    = cfg_.ai2_prior_height_m;
+    const float depth = cfg_.ai2_prior_depth_m > 0.0f ? cfg_.ai2_prior_depth_m : cfg_.ai2_prior_footprint_m;
+    CountableInstance g;
+    g.ai2_belief = CountableBelief(CountableBeliefState{xy.x(), xy.y(), cfg_.ai2_prior_height_m, cfg_.ai2_prior_footprint_m, depth, 0.0f}, p);
+    g.ai2_initialized = true;
+    const auto sil = projection_->compute_silhouette_existence(g);
+    if (sil.n_total <= 0) return 0.0f;
+    return rc::detect::p_detect(sil.fill, sil.in_fov_frac(), rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft})
+         * sil.central_frac();   // both factors are probabilities in [0, 1]
+}
 }  // namespace rc

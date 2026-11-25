@@ -32,6 +32,8 @@
 #define SPECIFICWORKER_H
 
 #include <atomic>
+#include <map>
+#include <set>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -158,6 +160,12 @@ private:
     std::filesystem::file_time_type gain_query_mtime_{};
     long gain_query_last_id_ = 0;
     void step_epistemic(rc::CountableInstance& inst, DSR::Node& node);
+    // ── K2b: the consumers' channels the legacy chair agent published (specificworker_consumers.cpp), each behind its
+    //    Concept.* switch; every other class keeps the pre-K2b behaviour ──
+    void step_approach(rc::CountableInstance& inst);   // aff_<name>_approach (Concept.ApproachEnabled)
+    void update_thumbnails();                          // "<class>_thumbs" for ltom (Concept.ThumbnailsEnabled)
+    void update_identity_links();                      // ghosts + same_as links (Concept.ChangedObjectEnabled)
+    void teardown_consumers(rc::CountableInstance& inst) { inst.affordance.remove(); inst.approach.remove(); }
     void trigger_graph_layout_twopi();   // injected into CountableSceneGraph as the relayout callback
 
     // Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path).
@@ -234,6 +242,14 @@ private:
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
     bool warned_recall_area_ = false;   // log "no room polygon" for the recall area once
+    // K2b consumers' state
+    std::vector<rc::pragmatic::ObjectApproach> retired_approaches_;   // their object was deleted from outside: removed next tick
+    std::uint64_t last_thumb_frame_ = 0;
+    bool thumbs_dirty_ = false;
+    std::chrono::steady_clock::time_point last_thumb_publish_{};
+    struct Ghost { rc::exist::ExistenceBelief belief{0.0f, 4.0f}; float L0 = 0.f; };
+    std::map<std::uint64_t, Ghost> ghosts_;     // recall uid -> its old spot's belief "still there"
+    std::set<std::uint64_t> born_new_ids_;      // node ids born this run without a resurrection (identity-link candidates)
     std::atomic<bool> shutting_down_{false};
     // The presence protocol AND the gate state it owns (operating_since_ms / stall_reported /
     // degraded_from_input / first_operating_done) — SHARED, common/concept_presence. The transitions set

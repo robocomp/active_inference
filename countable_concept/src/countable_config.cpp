@@ -403,6 +403,30 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "Mixture weight of 'the remembered bed was moved' in the recall location likelihood (class prior; GUESS, beds almost never move)");
     out.recall_log_prior_new = getf("Tracker.RecallLogPriorNew", 0.0f,
             "Log prior of 'new bed' against one recalled candidate (0 = equal)");
+    // K2b: the consumers' channels the legacy chair agent published (defaults = the pre-K2b behaviour of every other class)
+    out.mesh_path = gets("Concept.MeshPath", "",
+            "display mesh (relative to the meshes root); empty = <cls>_concept/meshes/<cls>.obj (the class-folder convention)");
+    out.look_attrs = gets("Concept.LookAttrs", "table",
+            "typed attribute family of the controller's look contract: table (table_roi_*, table_detection_*) or chair "
+            "(chair_roi_*, chair_detection_*, chair_front_seen*)");
+    if (out.look_attrs != "table" and out.look_attrs != "chair")
+        throw CountableConfigError(std::format("{}: Concept.LookAttrs = \"{}\": not table or chair — refusing to start\n",
+                                               out.agent_name, out.look_attrs));
+    out.appearance_enabled = getb("Concept.AppearanceEnabled", false,
+            "colour belief from the assigned ZED masks → mesh_color_rgb, color_name, color_prob (display + names; never the fit)");
+    out.publish_exist_prob = getb("Concept.PublishExistProb", false, "publish obj_exist_prob = P(exists) = occupancy x class");
+    out.thumbnails_enabled = getb("Concept.ThumbnailsEnabled", false,
+            "keep the best retina crop per viewing angle and publish them on the <class>_thumbs node (ltom)");
+    out.approach_enabled = getb("Concept.ApproachEnabled", false, "offer the pragmatic approach affordance aff_<name>_approach");
+    out.epistemic_offer_enabled = getb("Concept.EpistemicOfferEnabled", true,
+            "false = no epistemic viewpoint offer (AuRo C3(b) comparison arm); the belief still updates from what is seen");
+    out.changed_object_enabled = getb("Concept.ChangedObjectEnabled", false,
+            "changed object: ghost existence at remembered spots + the same_as identity link on objects born new");
+    out.link_pi_move = getf("Tracker.LinkPiMove", 0.10f, "identity link: per-visit P(a remembered object was moved) (a GUESS)");
+    out.link_pi_gone = getf("Tracker.LinkPiGone", 0.10f, "identity link: per-visit P(a remembered object left the room) (a GUESS)");
+    out.link_lambda_new = getf("Tracker.LinkLambdaNew", 0.10f, "identity link: per-visit rate of a NEW object arriving (a GUESS)");
+    out.ghost_evidence_gain = getf("Tracker.GhostEvidenceGain", 0.15f,
+            "changed object: |dL| per look at a remembered spot's ghost (the legacy chair's Existence.EvidenceGain, ported unchanged)");
     out.tracker_birth_frames     = geti("Tracker.BirthFrames", 8,
             "frames a mask must stay unexplained before spawning a bed");
     out.birth_fusion             = getb("Tracker.BirthFusion", false,
