@@ -136,6 +136,16 @@ visit() {   # seg world_x world_y world_yaw
     "${face// /_}" "$gx" "$gy" "$gyaw" "${dw// /_}" "$qid" "$qa" "$aqid" "$aqa" >> "$SEG"
 }
 
+# The class agent must hold an instance before the A1 claim query, or nobody answers it (live run p1_toilet: the leg ended
+# ~20 s before toilet_2's first update; the claim query got no answer and the whole visit had NO VERDICT). An instance exists
+# once the agent writes an offer row stamped after this script started. Wait for it (<= NODE_WAIT_S, 120); if none comes the
+# claim query is still asked and the report gives NO VERDICT, as before.
+T_START=$(now_ms); NODE_WAIT_S=${NODE_WAIT_S:-120}
+has_instance() { awk -F, -v t="$T_START" 'NR > 1 && $1 + 0 >= t { f = 1; exit } END { exit !f }' "$OFFERS" 2>/dev/null; }
+for i in $(seq 1 $((NODE_WAIT_S * 2))); do has_instance && break; sleep 0.5; done
+if has_instance; then log "instance up after $(( ($(now_ms) - T_START) / 1000 )) s"
+else log "NO $CLS instance after ${NODE_WAIT_S}s: claiming anyway (A1 will have no verdict)"; fi
+
 visit A1 $AX $AY $AYAW
 visit B  $BX $BY $BYAW
 visit A2 $AX $AY $AYAW
