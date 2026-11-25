@@ -11,8 +11,8 @@
 #  2. MAIN's warm_start_tour.sh <run_name> crossing/fixtures/three_rooms_door0 (main's copy: its graph recorder and START
 #     handling; the objects_replay1 flow): the fleet from WT, warm-started in room_1 (kitchen);
 #     ON_FLEET_UP starts the three countable agents from CONCEPT_WT (concept_agents.sh); LEGS goes to the object's room by
-#     relation (bedroom = room_2: LEGS="room_2"; bathroom = room_3: LEGS="room_2 room_3"; kitchen = room_1: START_ROOM=room_2 and
-#     LEGS="room_1", the warm tour's START / START_ROOM), the fixture's names, and AFTER_LEG
+#     relation (bedroom = room_2: LEGS="room_2"; bathroom = room_3: LEGS="room_2 room_3"; kitchen = room_1: LEGS="room_2 room_1",
+#     out and back from the room_1 start), the fixture's names, and AFTER_LEG
 #     runs aba_visit.sh right after the leg that enters it. The tour then ends as usual (fleet stopped, logs collected).
 #     concept_agents.sh / aba_visit.sh / the reports are THIS checkout's (its harvest copies offers.csv + delivered.csv).
 #  3. The countables are stopped (SIGTERM), harvested (ai2_log / offers / delivered), and this run's replay dumps moved into
@@ -35,10 +35,10 @@ ROOM=$(awk -v x="$OX" -v y="$OY" 'BEGIN{ if (x > -1.705) print "room_3"; else if
 case $ROOM in
   room_2) LEGS="room_2"; N=1;;
   room_3) LEGS="room_2 room_3"; N=2;;
-  # room_1 (the kitchen: fridge, hood) is the warm tour's default start, so no leg could enter it: start in room_2 instead and
-  # cross into room_1. The start pose is one the robot HELD in room_2 (crossing/p1r8_bed/gt_pose.tsv: 18 s at (-4.742, 10.669)
-  # right after leg 1), turned to face DOOR_1 (its centre (-4.769, 9.3796): Webots yaw atan2(-dx, dy) = 3.1206 rad).
-  room_1) export START=${START:-"-4.742 10.669 3.1206"} START_ROOM=room_2; LEGS="room_1"; N=1;;
+  # room_1 (the kitchen: fridge, hood) is the warm tour's start room. A room_2 start does not boot (room session 2026-11-25:
+  # room_concept's warm start adopts only room_1; START_ROOM=room_2 aborted "not ready in 120 s"), so start in room_1 as usual
+  # and route out and back: LEGS="room_2 room_1", the visit after leg 2.
+  room_1) LEGS="room_2 room_1"; N=2;;
 esac
 echo "$DEF at ($OX, $OY) -> $ROOM: LEGS=\"$LEGS\", visit after leg $N${START_ROOM:+, start $START_ROOM at ($START)}; countables from $CONCEPT_WT ($(git -C $CONCEPT_WT rev-parse --short HEAD))"
 
