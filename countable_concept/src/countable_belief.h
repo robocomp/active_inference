@@ -22,6 +22,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+#include <stdexcept>
+#include <variant>
 #include <limits>
 #include <optional>
 #include <Eigen/Dense>
@@ -486,6 +488,7 @@ struct CountableEngineModel
     Eigen::Matrix<double, 1, 1> proportions() const;         // the q the model evaluates at now
     void set_proportions(const Eigen::Matrix<double, 1, 1>& q) const;
     Eigen::Matrix<float, 1, 1> sdf_jacobian_q(const Eigen::Vector3f& p, const State& s, int prim) const;   // ∂sdf/∂q (central FD)
+    double proportion_extent() const;   // H − z0 at the state: the band a proportion scales (the q common mode's σ maps through it)
     // e measured through B_chain = chain_B(ℓ) (spec 7c.7 b); θ does not enter it
     Eigen::Matrix<double, 6, 3> chain_jacobian(const State&, const Eigen::Vector2f& lever) const { return rc::ai::view::chain_B(lever); }
     void apply_constraints(State& s) const;
@@ -521,29 +524,40 @@ class CountableBelief
 {
 public:
     static constexpr int N = 6;
-    // K2a-L: two engines, one used per instance: Engine (no proportion slot) for a class that declares none — bit-identical to
-    // before — and EngineQ (one ρ = 1 proportion latent appended after the wall latent) for a class that does (the toilet).
+    // K2a-L: the engine is ONE of two, chosen at construction and held in a std::variant (fix round 1, I2): Engine (no proportion
+    // slot) for a class that declares none — bit-identical to before — and EngineQ (the proportion's latents appended after the
+    // wall latent) for a class that does (the toilet). set_params refuses a change of the declared proportions (it would need
+    // the other engine, un-seeded).
     using Engine  = rc::ai::engine::PersistentEngine<CountableEngineModelBox>;
     using EngineQ = rc::ai::engine::PersistentEngine<CountableEngineModel>;
-    // K2a-L: the engine an instance runs on (uses_q: the class declares a proportion), and the model view that engine takes.
-    // with_engine / with_engine_mut hand the active one to f (defined here, before their uses: their return types are deduced).
-    bool uses_q() const { return not params_.shape_proportions.empty(); }
+    bool uses_q() const { return std::holds_alternative<EngineQ>(engine_); }
     CountableEngineModelBox model_of(const Engine&) const { return CountableEngineModelBox{{const_cast<CountableBelief*>(this)}}; }
     CountableEngineModel    model_of(const EngineQ&) const { return CountableEngineModel{const_cast<CountableBelief*>(this)}; }
-    template <class F> decltype(auto) with_engine(F&& f) const { if (uses_q()) return f(engine_q_); else return f(engine_); }
-    template <class F> decltype(auto) with_engine_mut(F&& f) { if (uses_q()) return f(engine_q_); else return f(engine_); }
+    // the active engine handed to f (std::visit); defined before their uses, as their return types are deduced
+    template <class F> decltype(auto) with_engine(F&& f) const { return std::visit(std::forward<F>(f), engine_); }
+    template <class F> decltype(auto) with_engine_mut(F&& f) { return std::visit(std::forward<F>(f), engine_); }
     using State = CountableBeliefState;
     using Frame = CountableFrame;
 
     CountableBelief() = default;
     CountableBelief(const CountableBeliefState& s, const CountableBeliefParams& p) : state_(s), params_(p)
-    { Sigma_.setZero(); Sigma_.diagonal() = prior_cov_diag(); }
+    {
+        Sigma_.setZero(); Sigma_.diagonal() = prior_cov_diag();
+        if (not p.shape_proportions.empty()) engine_.emplace<EngineQ>();
+    }
 
     const CountableBeliefState&     state()      const { return state_; }
     const Eigen::Matrix<float, 6, 6>&  covariance() const { return Sigma_; }
     const CountableBeliefParams&    params()     const { return params_; }
     void set_state(const CountableBeliefState& s) { state_ = s; }
-    void set_params(const CountableBeliefParams& p) { params_ = p; }
+    // Refuses (throws std::logic_error) a change in whether the class declares proportions: the engine was chosen for it.
+    void set_params(const CountableBeliefParams& p)
+    {
+        if (p.shape_proportions.empty() != params_.shape_proportions.empty())
+            throw std::logic_error("CountableBelief::set_params: the declared shape proportions changed; the engine was chosen at "
+                                   "construction for them — build a new belief");
+        params_ = p;
+    }
 
     // Room interior reference (polygon centroid). Used ONLY to pick which of the two depth faces is the
     // BACK face (the one whose outward normal points AWAY from the interior) — the face driven onto the wall.
@@ -636,7 +650,7 @@ public:
     double proportion_value(int k = 0) const
     { const auto& q = q_now(); return k < int(q.size()) ? q[std::size_t(k)] : std::numeric_limits<double>::quiet_NaN(); }
     double proportion_std(int k = 0) const
-    { return uses_q() and k < CountableEngineModel::kProportions ? engine_q_.latent_std()(EngineQ::kProp + k) : 0.0; }
+    { return uses_q() and k < CountableEngineModel::kProportions ? std::get<EngineQ>(engine_).latent_std()(EngineQ::kProp + k) : 0.0; }
     std::vector<rc::ai::beam::BeamPart> beam_parts_for_test(const CountableBeliefState& s) const { return beam_parts(s); }
     float sdf_dq_for_test(const Eigen::Vector3f& p, const CountableBeliefState& s) const { return model().sdf_jacobian_q(p, s, 0)(0); }
     // The last persistent update's beam log (spec 7c.8 stated limit 1): the staged ray count of the frame (0 when the LiDAR
@@ -788,9 +802,19 @@ public:
     const Eigen::Matrix<float, 6, 6>& dbg_Id_cam()  const { return with_engine([](const auto& e) -> decltype(auto) { return e.dbg_Id_cam(); }); }
     const Eigen::Matrix<float, 6, 6>& dbg_Id_L()    const { return with_engine([](const auto& e) -> decltype(auto) { return e.dbg_Id_L(); }); }
     // Test hooks.
-    // (the box engine's: these hooks are for classes without a proportion)
-    MatJd&  joint_covariance_for_test() { engine_.ensure_joint(Sigma_); return engine_.P_for_test(); }
-    void    set_latent_mean_for_test(const VecKd& b) { engine_.ensure_joint(Sigma_); engine_.set_latent_mean(b); }
+    // (on the ACTIVE engine; a latent vector of the wrong size throws)
+    Eigen::Ref<Eigen::MatrixXd> joint_covariance_for_test()
+    { return with_engine_mut([&](auto& e) { e.ensure_joint(Sigma_); return Eigen::Ref<Eigen::MatrixXd>(e.P_for_test()); }); }
+    void set_latent_mean_for_test(const Eigen::VectorXd& b)
+    {
+        with_engine_mut([&](auto& e)
+        {
+            using E = std::decay_t<decltype(e)>;
+            if (b.size() != E::K) throw std::invalid_argument("set_latent_mean_for_test: the latent vector has the wrong size");
+            e.ensure_joint(Sigma_);
+            e.set_latent_mean(typename E::VecKd(b));
+        });
+    }
     // The latent predict of one persistent update alone (e with its lever, and the latents of the channels f measures).
     void    predict_latents_for_test(const CountableFrame& f)
     { with_engine_mut([&](auto& e) { e.ensure_joint(Sigma_); e.predict_latents(model_of(e), frame_latents(f)); }); }
@@ -1038,8 +1062,7 @@ private:
     // class-prior and birth-spread flags and the GN diagnostics; wall_/axis_prior_added_ = the relational anchors have entered
     // (model-side: the θ-only channel reads them). Sigma_ mirrors P's θθ block in float for every reader of covariance().
     // Neither e nor ℓ is stored by any recall (a pose error is not an object property).
-    Engine  engine_;
-    EngineQ engine_q_;
+    std::variant<Engine, EngineQ> engine_;   // the active engine, chosen at construction (I2)
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
     bool   first_crossing_for_test_ = false;   // see set_first_crossing_for_test
     mutable bool   beam_unready_logged_ = false;        // "BeamConfig not built by make" printed once per belief

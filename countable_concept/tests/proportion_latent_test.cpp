@@ -16,6 +16,11 @@
 //      σ_θᵢ · Δμ / σ_q,prior = σ_θᵢ · (Δ/12)/(Δ/√12) = σ_θᵢ/√12 — bound: |Δθ̂ᵢ| ≤ max(σ_θᵢ at both ends)/√12 for i = cy (the
 //      depth centre), H, h. A mode switch moves h by the step between the modes (≫ σ). The same sweep with the fraction FIXED at μ
 //      (the K2a model) is printed beside it (not checked: it is the model the latent replaces).
+//   5. the proportion's information is capped by each channel's per-view common mode on q (fix round 1, I1): a channel measures
+//      q + b_q,c, b_q,c born at σ²_q,cm = σ²_size,cm/(H − z0)² (H the seed's at the first predict, z0 = 0) and carried with the
+//      view's ρ. Identical frames from ONE view (ρ = 1) at best reveal q + b_q,cam and q + b_q,L exactly, so σ²_q ≥
+//      (1/σ²_q,prior + 1/σ²_q,cm,cam + 1/σ²_q,cm,L)⁻¹ — the floor, checked after 40 such frames (relative tolerance 1e-9, rounding);
+//      a SECOND view (ρ = 0: both common modes re-drawn) then lowers σ_q below the one-view value.
 // Run: ./proportion_latent_test MANIFEST_DIR
 #include <clocale>
 #include <cmath>
@@ -128,7 +133,7 @@ int main(int argc, char** argv)
         b.predict_latents_for_test(f);
         const Eigen::MatrixXd P = b.joint_covariance();
         constexpr int j = CountableBelief::N + CountableBelief::EngineQ::kProp;
-        CHECK(P.rows() == CountableBelief::N + CountableBelief::EngineQ::K and CountableBelief::EngineQ::K == CountableBelief::K + 1);
+        CHECK(P.rows() == CountableBelief::N + CountableBelief::EngineQ::K and CountableBelief::EngineQ::K == CountableBelief::K + 3);   // q, and its camera and LiDAR common modes (I1)
         CHECK(P(j, j) == D * D / 12.0);
         CHECK(b.latent_mean()(CountableBelief::EngineQ::kProp) == 0.0);
         CHECK(near(b.proportion_std(0), D / std::sqrt(12.0), 1e-15));
@@ -203,6 +208,24 @@ int main(int argc, char** argv)
                 worst_f = std::max(worst_f, std::abs(double(F[k + 1].s.vec()(i)) - double(F[k].s.vec()(i)))
                                                 / (ratio * double(std::max(F[k].sd(i), F[k + 1].sd(i)))));
         std::printf("  smoothness: latent worst step / bound %.3f (pass <= 1); fixed fraction (K2a, not checked) %.3f\n", worst, worst_f);
+    }
+    // 5. the one-view floor and the second view
+    {
+        CountableBelief b(CountableBeliefState{0.0f, 0.10f, 0.90f, 0.58f, 0.73f, 0.0f}, tp);
+        b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+        CountableFrame f = frame(tp);
+        for (int k = 0; k < 40; ++k) b.update(f);
+        const double sq1 = b.proportion_std(0);
+        const double cm2 = double(tp.common_mode_size_std) * double(tp.common_mode_size_std) / (0.90 * 0.90);
+        const double floor2 = 1.0 / (12.0 / (D * D) + 2.0 / cm2);
+        CHECK(sq1 >= std::sqrt(floor2) * (1.0 - 1e-9));
+        f.rho_cam.fill(0.0f); f.rho_L.fill(0.0f); f.rho_chain = 0.0f;   // a new view: every common mode re-drawn
+        b.update(f);
+        f.rho_cam.fill(1.0f); f.rho_L.fill(1.0f); f.rho_chain = 1.0f;
+        for (int k = 0; k < 40; ++k) b.update(f);
+        const double sq2 = b.proportion_std(0);
+        CHECK(sq2 < sq1);
+        std::printf("  sigma_q: one view (41 frames) %.5f >= floor %.5f; after a second view %.5f\n", sq1, std::sqrt(floor2), sq2);
     }
     std::printf(bad ? "FAILED (%d)\n" : "proportion_latent_test OK\n", bad);
     return bad ? 1 : 0;

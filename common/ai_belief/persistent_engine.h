@@ -370,11 +370,16 @@ public:
     // only) and outside the move statistic (jump_evidence moves θ only). Δ = 0 keeps the latent exactly 0 with zero variance.
     // Required hooks when NP > 0: proportion_mean(), proportion_spread() (Eigen P-vectors, double), set_proportions(q) const
     // (the model evaluates its SDF, beam parts and carve at q from then on), proportions() (the q it evaluates at),
-    // sdf_jacobian_q(p, s, prim) (float P-vector).
+    // sdf_jacobian_q(p, s, prim) (float P-vector), proportion_extent() (H − z0 at the model's state: the band a proportion
+    // scales), and M::kHeight (the θ component whose common-mode size std and view ρ the q common mode takes).
     static constexpr int NP = detail::proportion_latents<M>();
-    static constexpr int K = 3 + 6 * N + W + NP;
+    // Per proportion THREE latents (fix round 1, I1): the object's q (shared by the sensors, ρ = 1) and, per sensor channel, a
+    // per-view COMMON MODE of that channel on q — re-drawn with the channel's view ρ exactly as b_cam / b_L are for θ — so a
+    // channel measures q + b_q,c: many frames from one view cannot pin q below that view's common mode, and a new view adds.
+    static constexpr int K = 3 + 6 * N + W + 3 * NP;
     static constexpr int kWall = 3 + 6 * N;                          // the wall latent's index inside b (when W = 1)
-    static constexpr int kProp = 3 + 6 * N + W;                      // the first proportion latent's index inside b (when P > 0)
+    static constexpr int kProp = 3 + 6 * N + W;                      // the first proportion latent's index inside b (when NP > 0)
+    static constexpr int kPropCam = kProp + NP, kPropL = kProp + 2 * NP;   // the camera's / LiDAR's common mode on q
     static constexpr int NC = N + NP;                                 // a sensor channel's coordinates: θ + B b, then q
     static constexpr int kChain = 0, kCam = 3, kL = 3 + N, kFc = 3 + 2 * N, kFL = 3 + 3 * N, kSc = 3 + 4 * N, kSL = 3 + 5 * N;
     static constexpr int kYaw = M::kYaw;
@@ -579,6 +584,30 @@ public:
                 x(r) = 0.0;
                 sig_prev_(kProp + j) = spread(j) / std::sqrt(12.0);
             }
+            // the per-view common mode of each channel on q (fix round 1, I1). A common-mode error of the channel's SIZE along
+            // the vertical, std σ_size,cm = √sig2_c[kHeight] (the channel's existing common-mode size std, what b_c carries on
+            // H), moves a part boundary z = z0 + q·(H − z0) by that much, i.e. q by σ_q,cm = σ_size,cm / (H − z0). It is
+            // predicted like b_c on θ: F = I, ρ = the channel's view ρ on that DOF, a new source while σ_prev = 0. A class with
+            // Δ = 0 keeps it at 0 (no proportion: nothing to carry).
+            const double ext = m.proportion_extent();
+            const auto cm_block = [&](int off, const std::array<float, N>& rho, const std::array<float, N>& s2)
+            {
+                const double sg2 = std::max(0.0, double(s2[M::kHeight])) / (ext * ext);
+                Eigen::VectorXd rv(NP), sv(NP);
+                bool all_new = true;
+                for (int j = 0; j < NP; ++j)
+                {
+                    const bool on = spread(j) > 0.0 and ext > 0.0;
+                    const bool nw = sig_prev_(off + j) == 0.0;
+                    rv(j) = nw ? 0.0 : double(rho[M::kHeight]);
+                    sv(j) = on ? sg2 : 0.0;
+                    all_new = all_new and nw;
+                }
+                pu::predict_block<N, K>(P_, x, off, NP, Eigen::MatrixXd::Identity(NP, NP), rv, sv.asDiagonal().toDenseMatrix(), all_new);
+                for (int j = 0; j < NP; ++j) sig_prev_(off + j) = std::sqrt(sv(j));
+            };
+            if (camera) cm_block(kPropCam, fl.rho_cam, fl.sig2_cam);
+            if (lidar)  cm_block(kPropL,   fl.rho_L,   fl.sig2_L);
         }
         b_ = x.template tail<K>();
     }
@@ -607,16 +636,18 @@ public:
     // P > 0: the model evaluates at the proportions last set (set_q), and qc / qL receive the channels' q information.
     void accumulate_channels(const M& m, const State& s_th, const State& s_cam, const State& s_L, const Frame& f, bool camera,
                              bool lidar, MatNf& Id_cam, VecNf& bd_cam, MatNf& Id_L, VecNf& bd_L, MatNf& Id_th, VecNf& bd_th,
-                             QInfo* qc = nullptr, QInfo* qL = nullptr) const
+                             QInfo* qc = nullptr, QInfo* qL = nullptr, const VecKd* bb = nullptr) const
     {
         Id_cam.setZero(); bd_cam.setZero(); Id_L.setZero(); bd_L.setZero(); Id_th.setZero(); bd_th.setZero();
         if (qc) *qc = QInfo{};
         if (qL) *qL = QInfo{};
         if (camera)
         {
+            if (bb) set_q_channel(m, *bb, true);                       // the camera measures q + b_q,cam
             accumulate_points(m, s_cam, f, Id_cam, bd_cam, qc);
             camera_extra(m, s_cam, f, Id_cam, bd_cam, nullptr);
         }
+        if (bb and lidar) set_q_channel(m, *bb, false);                  // the rays measure q + b_q,L
         if (not lidar_override(m, s_L, f, &Id_L, &bd_L, nullptr) and lidar)
         {
             if constexpr (NP == 0)
@@ -638,19 +669,26 @@ public:
         }
         m.accumulate_extra(s_th, f, Id_th, bd_th, nullptr);
     }
-    // The model's proportions at the latent mean bb (NP > 0): q = q₀ + b_q. No-op for P = 0.
+    // The model's proportions at the latent mean bb (NP > 0): the object's q = q₀ + b_q. No-op for NP = 0.
     void set_q(const M& m, const VecKd& bb) const
     {
         if constexpr (NP > 0) m.set_proportions(VecPd(m.proportion_mean() + bb.template segment<NP>(kProp)));
     }
+    // What channel c measures: q₀ + b_q + b_q,c.
+    void set_q_channel(const M& m, const VecKd& bb, bool camera) const
+    {
+        if constexpr (NP > 0)
+            m.set_proportions(VecPd(m.proportion_mean() + bb.template segment<NP>(kProp)
+                                    + bb.template segment<NP>(camera ? kPropCam : kPropL)));
+    }
     // A sensor channel on (θ + B b, q): its q information and Bq (the q rows of H_c select b_q).
-    void add_q(Chan& c, const QInfo& qi) const
+    void add_q(Chan& c, const QInfo& qi, bool camera) const
     {
         if constexpr (NP > 0)
         {
             c.Iuq = qi.Iuq; c.Iqq = qi.Iqq; c.gq = qi.gq;
             c.Bq.setZero();
-            for (int j = 0; j < NP; ++j) c.Bq(j, kProp + j) = 1.0;
+            for (int j = 0; j < NP; ++j) { c.Bq(j, kProp + j) = 1.0; c.Bq(j, (camera ? kPropCam : kPropL) + j) = 1.0; }
         }
     }
 
@@ -659,13 +697,14 @@ public:
     // terms at s_th. ∇E = −(bd_cam + bd_L + bd_th) up to the state dependence of the terms' weights, which the GN information
     // also holds fixed.
     double data_energy(const M& m, const State& s_cam, const State& s_L, const State& s_th, const Frame& f, bool camera,
-                       bool lidar) const
+                       bool lidar, const VecKd* bb = nullptr) const
     {
         MatNf Id = MatNf::Zero();   // the terms' information is not wanted here
         VecNf bd = VecNf::Zero();
         double E = 0.0;
         if (camera)
         {
+            if (bb) set_q_channel(m, *bb, true);
             const float sig2 = m.sigma2();
             for (std::size_t i = 0; i < f.points.size(); ++i)
             {
@@ -674,6 +713,7 @@ public:
             }
             camera_extra(m, s_cam, f, Id, bd, &E);
         }
+        if (bb and lidar) set_q_channel(m, *bb, false);
         if (not lidar_override(m, s_L, f, nullptr, nullptr, &E) and lidar)
             E += beam_.accumulate(key_of(m, s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), nullptr, nullptr);
         m.accumulate_extra(s_th, f, Id, bd, &E);
@@ -777,12 +817,11 @@ public:
         QInfo q_cam, q_L;
         const auto build = [&](const VecNd& th, const VecKd& bb)
         {
-            set_q(m, bb);
             accumulate_channels(m, S(th), S(th + B_cam * bb), S(th + B_L * bb), f, camera, lidar, Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th,
-                                &q_cam, &q_L);
+                                &q_cam, &q_L, &bb);
             channels.clear();
-            if (camera) { Chan c; c.info = pu::marginalise_fresh<N>(Id_cam, bd_cam, Sf_cam); c.B = B_cam; add_q(c, q_cam); channels.push_back(c); }
-            if (lidar)  { Chan c; c.info = pu::marginalise_fresh<N>(Id_L,   bd_L,   Sf_L);   c.B = B_L;   add_q(c, q_L);   channels.push_back(c); }
+            if (camera) { Chan c; c.info = pu::marginalise_fresh<N>(Id_cam, bd_cam, Sf_cam); c.B = B_cam; add_q(c, q_cam, true); channels.push_back(c); }
+            if (lidar)  { Chan c; c.info = pu::marginalise_fresh<N>(Id_L,   bd_L,   Sf_L);   c.B = B_L;   add_q(c, q_L, false);  channels.push_back(c); }
             theta_only.I = Id_th.template cast<double>();
             theta_only.g = bd_th.template cast<double>();
             if constexpr (W > 0)
@@ -804,8 +843,7 @@ public:
         {
             const VecNd th = x.template head<N>();
             const VecKd bb = x.template tail<K>();
-            set_q(m, bb);
-            double E = data_energy(m, S(th + B_cam * bb), S(th + B_L * bb), S(th), f, camera, lidar);
+            double E = data_energy(m, S(th + B_cam * bb), S(th + B_L * bb), S(th), f, camera, lidar, &bb);
             if constexpr (W > 0)
                 if (wall_enter)
                 {
@@ -995,11 +1033,10 @@ public:
             {
                 MatN Ic, IL, It; VecN gc, gL, gt;
                 const VecNd sc0 = th + B_cam * bb, sl0 = th + B_L * bb;
-                set_q(m, bb);
-                accumulate_channels(m, S(th), S(sc0), S(sl0), f, camera, lidar, Ic, gc, IL, gL, It, gt);
+                accumulate_channels(m, S(th), S(sc0), S(sl0), f, camera, lidar, Ic, gc, IL, gL, It, gt, nullptr, nullptr, &bb);
                 const auto mc = pu::marginalise_fresh<N>(Ic, gc, Sf_cam);
                 const auto mL = pu::marginalise_fresh<N>(IL, gL, Sf_L);
-                const double E0 = data_energy(m, S(sc0), S(sl0), S(th), f, camera, lidar);
+                const double E0 = data_energy(m, S(sc0), S(sl0), S(th), f, camera, lidar, &bb);
                 for (int ch = 0; ch < 3; ++ch)
                 {
                     if (ch == 0 and not camera) continue;
@@ -1010,7 +1047,7 @@ public:
                         {
                             VecNd a = sc0, l = sl0, t = th;
                             (ch == 0 ? a : ch == 1 ? l : t)(k) += h;
-                            return data_energy(m, S(a), S(l), S(t), f, camera, lidar);
+                            return data_energy(m, S(a), S(l), S(t), f, camera, lidar, &bb);
                         };
                         GnTraceFd r; r.at = at; r.channel = ch; r.k = k;
                         const VecN& g = ch == 0 ? gc : ch == 1 ? gL : gt;
@@ -1267,16 +1304,18 @@ public:
             MatNf Id = MatNf::Zero();
             VecNf bd = VecNf::Zero();
             QInfo qi;
+            set_q_channel(m, b, true);
             accumulate_offer_points(m, s_cam, obs.points, obs.weight, obs.R, Id, &qi);
             if (ctx != nullptr) camera_extra(m, s_cam, *ctx, Id, bd, nullptr);
             Chan ch;
             ch.info = pu::marginalise_fresh<N>(Id, VecNf::Zero(), MatNf::Zero());
             ch.B = B_cam;
-            add_q(ch, qi);
+            add_q(ch, qi, true);
             chans.push_back(ch);
         }
         if (lidar)
         {
+            set_q_channel(m, b, false);
             Eigen::Matrix<double, NC, NC> W = Eigen::Matrix<double, NC, NC>::Zero();
             Eigen::Matrix<double, NC, 1> g = Eigen::Matrix<double, NC, 1>::Zero();
             const std::vector<rc::ai::beam::BeamPart> parts_L = m.beam_parts(s_L);
@@ -1289,7 +1328,7 @@ public:
                 QInfo qi;
                 qi.Iuq = W.template topRightCorner<N, NP>();
                 qi.Iqq = W.template bottomRightCorner<NP, NP>();
-                add_q(ch, qi);
+                add_q(ch, qi, false);
             }
             chans.push_back(ch);
         }

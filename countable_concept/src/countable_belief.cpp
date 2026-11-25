@@ -1061,6 +1061,11 @@ Eigen::Matrix<double, 1, 1> CountableEngineModel::proportion_spread() const
     const auto& pr = b->params_.shape_proportions;
     return Eigen::Matrix<double, 1, 1>(pr.empty() ? 0.0 : double(pr[0].hi) - double(pr[0].lo));
 }
+double CountableEngineModel::proportion_extent() const
+{
+    const auto& s = b->state_;
+    return double(s.H) - double(b->params_.span().z0(s.H));
+}
 Eigen::Matrix<double, 1, 1> CountableEngineModel::proportions() const
 {
     const auto& q = b->q_now();
