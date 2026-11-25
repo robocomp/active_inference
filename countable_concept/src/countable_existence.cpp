@@ -366,7 +366,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
                 std::optional<rc::manifest::BackPanel> panel;
                 if (cfg_.ai2_headboard_h_m > 0.0f)
                     panel = rc::manifest::BackPanel{cfg_.ai2_headboard_h_m, cfg_.ai2_headboard_t_m};
-                carve_parts = rc::countable::carve_parts_for(bs.w, bs.h, bs.H, cfg_.shape_parts, panel);
+                carve_parts = rc::countable::carve_parts_for(bs.w, bs.h, bs.H, cfg_.shape_parts, panel, span.z0(bs.H));
             }
             rc::exist::Evidence ev = cfg_.existence_carve_parts
                 ? rc::exist::carve_parts(origin, *sweep, bs.cx, bs.cy, bs.yaw, carve_parts, surf_sigma, sm)

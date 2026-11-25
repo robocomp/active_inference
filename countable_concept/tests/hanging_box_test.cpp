@@ -9,7 +9,9 @@
 //   4. the birth height evidence of a hanging class scores the cloud's TOP against the H prior: a canopy cloud at
 //      [1.55, 2.05] under H ~ N(2.05, 0.30) is evidence FOR the class (p > π_cls), whereas read as floor-anchored its 0.5 m
 //      z-extent is evidence AGAINST it (p < π_cls) — the sign is the claim, so no magnitude bound is needed;
-//   5. the LiDAR select box: z band [z_base − margin, top + margin].
+//   5. the LiDAR select box: z band [z_base − margin, top + margin];
+//   6. the existence carve volume (fix round 1): carve_parts_for's whole box spans [z0, H] (z0 = H − e hanging), the
+//      parts' z fractions are scaled over [z0, H], and with z0 = 0 every part is bit-identical to the old f·H.
 // Run: ./hanging_box_test
 #include <cmath>
 #include <cstdio>
@@ -17,6 +19,7 @@
 #include <vector>
 #include "countable_belief.h"
 #include "countable_beam_staging.h"
+#include "countable_shape_parts.h"
 
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
@@ -86,6 +89,23 @@ int main()
         CHECK(fb.z_lo == -0.10f and fb.z_hi == 0.75f + 0.10f);
         const auto hb = countable_select_box(1.0f, 0.6f, 2.05f, 0.10f, 1.55f);
         CHECK(near(hb.z_lo, 1.45f) and near(hb.z_hi, 2.15f) and hb.radius_xy == fb.radius_xy);
+    }
+    // 6. the carve volume
+    {
+        const rc::countable::VerticalSpan hs{0.50f};
+        const auto whole = rc::countable::carve_parts_for(0.90f, 0.50f, 2.05f, {}, std::nullopt, hs.z0(2.05f));
+        CHECK(whole.size() == 1 and near(whole[0].z0, 1.55f) and whole[0].z1 == 2.05f);   // the canopy, not the floor column
+        const std::vector<rc::manifest::ShapePart> parts = {{"a", 0.0f, 0.0f, 1.0f, 1.0f, 0.38f, 1.0f},
+                                                            {"b", 0.0f, -0.476f, 1.0f, 0.048f, 0.0f, 1.28f}};
+        const auto hp = rc::countable::carve_parts_for(0.90f, 0.50f, 2.05f, parts, std::nullopt, 1.55f);
+        CHECK(near(hp[0].z0, 1.55f + 0.38f * 0.50f) and near(hp[0].z1, 2.05f) and near(hp[1].z0, 1.55f));
+        for (const float H : {0.65f, 0.62f, 1.02f, 0.7312345f})   // floor: exactly the old p.z_f · H
+        {
+            const auto fp = rc::countable::carve_parts_for(1.75f, 2.10f, H, parts, std::nullopt);
+            const auto fw = rc::countable::carve_parts_for(1.75f, 2.10f, H, {}, std::nullopt);
+            CHECK(fp[0].z0 == 0.38f * H and fp[0].z1 == 1.0f * H and fp[1].z0 == 0.0f * H and fp[1].z1 == 1.28f * H);
+            CHECK(fw[0].z0 == 0.0f and fw[0].z1 == H);
+        }
     }
     std::printf("hanging_box_test: %s\n", bad ? "FAILED" : "OK");
     return bad ? 1 : 0;

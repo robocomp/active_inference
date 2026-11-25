@@ -66,7 +66,7 @@ add_test(NAME headboard_sdf_test COMMAND headboard_sdf_test)
 
 # K1: a HANGING countable class (the hood): span, SDF, beam part, birth height evidence, select box. Run: ./hanging_box_test
 add_executable(hanging_box_test hanging_box_test.cpp ../src/countable_belief.cpp)
-target_include_directories(hanging_box_test PRIVATE ../src ../../common ../../common/media_transport)
+target_include_directories(hanging_box_test PRIVATE ../src ../../common ../../common/media_transport ../../common/concept_manifest)
 target_compile_options(hanging_box_test PRIVATE -O2)
 target_link_libraries(hanging_box_test PRIVATE Eigen3::Eigen)
 add_test(NAME hanging_box_test COMMAND hanging_box_test)
