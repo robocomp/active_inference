@@ -40,6 +40,11 @@ why       = """
 A domestic extractor over a 0.90 m worktop: the underside must clear the cook's head, which puts it at
 ~1.55 m, and the body is ~0.50 m deep vertically. NOMINAL — from the appliance class, not from this
 kitchen. Measure the real one and set from = "measured".
+Source (K1): manufacturers' minimum mounting heights above the hob — Bosch 650 mm over gas (Bosch UK chimney-hood
+installation tips), 550 mm over electric (Bosch DWA07E650B technical overview), 500-600 mm in other Bosch manuals —
+over a ~0.90 m worktop (EN 1116 kitchen co-ordinating sizes: worktop 850-950 mm) put the underside at 1.40-1.55 m;
+the 1.55 used here is the gas/upper end. The 0.50 m vertical extent is the canopy plus the visible lower chimney,
+uncited.
 """
 
 # ★extent IS A PARAMETER, NOT A DOF, and that is a modelling claim rather than laziness. A hood's underside
@@ -64,12 +69,14 @@ mean_m = 0.90                      # along the wall
 std_m  = 0.30
 from   = "nominal"
 why    = "domestic extractors cluster 0.60-1.20 m wide; broad enough not to fight a real measurement"
+source = "K1: chimney hoods are sold in 60 / 90 / 120 cm widths to match the hob (e.g. the Bosch 36-inch HCP36651UC, 914 mm, cited in [shape]); 0.90 +- 0.30 spans the three."
 
 [prior.depth]
 mean_m = 0.50                      # out from the wall
 std_m  = 0.15
 from   = "nominal"
 why    = "must cover the hob it serves; shallower than a fridge, and the depth is poorly observed head-on"
+source = "K1: Bosch HCP36651UC spec sheet (BSH, 07/18): canopy depth 19 11/16 in = 500 mm; +-0.15 covers shallower slimline and deeper island-depth canopies."
 
 [prior.height]
 mean_m = 2.05
@@ -86,6 +93,17 @@ flush_prior = 1.0                  # pi_flush: the class prior that a hood is mo
                                    # back-face gap cannot discriminate flush from free-standing: the posterior
                                    # then falls back to this prior, and the wall — not a nominal depth guess —
                                    # supplies the second equation that determines the depth.
+standoff_m = 0.0                   # K1 (countable class, F1.4 persistent path): the canopy's back is ON its wall
+standoff_std_m = 0.01
+standoff_source = "uncited convention: a chimney hood hangs on a wall bracket with its back panel against the wall; the bracket and the wall's flatness leave at most ~1 cm. Not measured; not from the Webots world."
+
+[prior.permanence]
+# The volatility's hyperprior (countable persistent path, F1 round 6; K1).
+from = "nominal"
+move_rate_per_day = 0.000196
+move_scale_m = 0.05
+move_scale_rad = 0.02
+source = "rate: a range hood is replaced about once per service life, 14 years (InterNACHI 'Standard Estimated Life Expectancy Chart for Homes': range/oven hood 14; secondary source, not checked against the NAHB 2007 original) -> 1/(14*365) = 1.96e-4 per day; it is bolted to the wall and otherwise never moves. scale: uncited convention — a replacement hangs over the same hob, on the same wall, within a few cm (0.05 m) and square to the wall (0.02 rad); its size changes by the class size prior std. Not from the Webots world."
 
 # ── σ* — the consumer's precision demand ───────────────────────────────────────────────────────────────
 # SIGMA-STAR: none — nothing consumes a hood's pose. Nothing grasps it, nothing plans a path through it,

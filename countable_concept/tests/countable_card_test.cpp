@@ -70,12 +70,15 @@ std::optional<float> manifest_peek(const std::string& path, const std::string& b
 int main(int argc, char** argv)
 {
     CHECK(std::setlocale(LC_ALL, "") != nullptr);
-    if (argc < 2) { std::puts("usage: countable_card_test <agent_dir> [--json]"); return 2; }
+    if (argc < 2) { std::puts("usage: countable_card_test <agent_dir> [<config, relative to it>] [--json]"); return 2; }
+    // K1: refrigerator / hood keep their legacy etc/config.toml; their countable config is etc/countable.toml.
+    const bool json = std::string_view(argv[argc - 1]) == "--json";
+    const std::string cfg_rel = (argc > 2 and std::string_view(argv[2]) != "--json") ? argv[2] : "etc/config.toml";
     const std::filesystem::path dir = std::filesystem::path(argv[1]).lexically_normal();
     std::string folder = (dir.has_filename() ? dir : dir.parent_path()).filename().string();
     CHECK(folder.ends_with("_concept"));
     const std::string cls = folder.substr(0, folder.size() - std::string_view("_concept").size());
-    const std::string toml = (dir / "etc/config.toml").string();
+    const std::string toml = (dir / cfg_rel).string();
     const std::string manifest = (dir / ".." / "common/concept_manifest" / (cls + ".concept.toml")).lexically_normal().string();
 
     CountableConfig cfg;   // struct defaults, then what etc/config.toml sets on top (the loader's behaviour)
@@ -88,28 +91,39 @@ int main(int argc, char** argv)
     cfg.ai2_prior_height_m = toml_peek(toml, "AI2PriorHeightM", cfg.ai2_prior_height_m);
     cfg.ai2_prior_depth_m = toml_peek(toml, "AI2PriorDepthM", cfg.ai2_prior_depth_m);
 
-    // This class's own geometry, from its manifest (a square-plan class declares no depth_mean_m: depth = width).
+    // This class's own geometry, from its manifest (a square-plan class declares no depth_mean_m: depth = width; the hood
+    // declares its depth as [prior.depth] mean_m). A HANGING class (support = "hangs") spans [H − extent, H], extent from
+    // [model.geometry] extent_m — the loader puts that in vertical_extent_m (countable_config.cpp), so the test does too.
     const auto mw = manifest_peek(manifest, "prior.footprint", "mean_m");
     const auto md = manifest_peek(manifest, "prior.footprint", "depth_mean_m");
+    const auto md2 = manifest_peek(manifest, "prior.depth", "mean_m");
     const auto mh = manifest_peek(manifest, "prior.height", "mean_m");
-    CHECK(mw.has_value() and mh.has_value());
-    const float ew = mw.value_or(-1.0f), ed = md.value_or(ew), eh = mh.value_or(-1.0f);
+    const bool hangs = toml_peek_str(manifest, "support") == "hangs";
+    const auto mext = manifest_peek(manifest, "model.geometry", "extent_m");
+    CHECK(mw.has_value() and mh.has_value() and (not hangs or mext.has_value()));
+    if (hangs) cfg.vertical_extent_m = mext.value_or(-1.0f);
+    const float ew = mw.value_or(-1.0f), ed = md.value_or(md2.value_or(ew)), eh = mh.value_or(-1.0f);
+    const float eext = hangs ? mext.value_or(-1.0f) : eh, ez0 = hangs ? eh - eext : 0.0f;
+    // The envelope and the LiDAR return rate are the config's when it sets them (the refrigerator's own fitted envelope, the
+    // hood's measured return rate), else the fleet prior 0.10 / 0.60 / 0.06 and the code default 0.85.
+    const float env_min = toml_peek(toml, "DetectMinFill", 0.10f), env_max = toml_peek(toml, "DetectMaxFill", 0.60f),
+                env_soft = toml_peek(toml, "DetectSoft", 0.06f), q_ret = toml_peek(toml, "ExistenceDetectionProb", 0.85f);
 
-    // Expected, literally: the fleet-prior envelope 0.10 / 0.60 / 0.06 (never fitted on any of the three).
     const card::Card c = make_card(cfg);
-    if (argc > 2 and std::string_view(argv[2]) == "--json") std::puts(card::to_json(c).c_str());
+    if (json) std::puts(card::to_json(c).c_str());
     CHECK(c.concept_ == cls and c.level == card::Level::Countable);
     CHECK(c.channels.size() == 3 and c.channels[0].sensor == "zed" and c.channels[0].role == card::Role::Identity);
     CHECK(c.channels[1].sensor == "helios" and c.channels[1].role == card::Role::Occupancy);
     CHECK(c.channels[2].sensor == "ricoh" and not c.channels[2].modelled);
     const auto& p = c.subtypes.at("");
-    CHECK(near(p.env.min_fill, 0.10f) and near(p.env.max_fill, 0.60f) and near(p.env.soft, 0.06f));
-    CHECK(near(p.q_return, 0.85f));
+    CHECK(near(p.env.min_fill, env_min) and near(p.env.max_fill, env_max) and near(p.env.soft, env_soft));
+    CHECK(near(p.q_return, q_ret));
     CHECK(p.terms.size() == 2 and p.terms[0].name == "envelope" and p.terms[1].name == "central");
     CHECK(near(p.terms[0].params.at("axes"), 1.0f));
-    CHECK(near(c.geometry.w, ew) and near(c.geometry.d, ed) and near(c.geometry.h, eh));
-    CHECK(near(c.geometry.z0, 0.0f) and near(c.geometry.z1, eh));
-    CHECK(c.calibration == "prior" and c.calibration_date.empty());
+    CHECK(near(c.geometry.w, ew) and near(c.geometry.d, ed) and near(c.geometry.h, eext));
+    CHECK(near(c.geometry.z0, ez0) and near(c.geometry.z1, eh));
+    const bool fitted_env = not (near(env_min, 0.10f) and near(env_max, 0.60f) and near(env_soft, 0.06f));
+    CHECK(c.calibration == (fitted_env ? "fitted" : "prior") and c.calibration_date.empty());
     // Level 1 = countable_projection.cpp's own-wall skip (rc::kCountableOwnWallSkipM) against LINE walls.
     CHECK(c.walls and near(c.walls->own_wall_skip_m, 0.70f) and near(c.walls->own_wall_skip_m, kCountableOwnWallSkipM));
     CHECK(c.walls and c.walls->own_wall_plane_m < 0.0f and near(c.walls->wall_thickness_m, 0.0f));

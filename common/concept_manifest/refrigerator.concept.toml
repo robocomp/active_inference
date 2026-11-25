@@ -52,6 +52,7 @@ dims = ["w", "h"]
 mean_m = 0.60
 std_m = 0.08
 why  = "a standard fridge footprint is ~0.60x0.60 and TIGHT, so a front-only view cannot float the unseen depth"
+source = "K1: Smeg UK 'fridge freezer sizes' — most freestanding fridge-freezers are 55-70 cm wide and 160-200 cm high; retailer listings (Appliances Direct, John Lewis) 60 cm wide, 58-68 cm deep. 0.60 +- 0.08 covers both footprint axes. Not from the Webots world."
 
 [prior.height]
 kind = "gaussian"
@@ -59,6 +60,7 @@ dims = ["H"]
 mean_m = 1.90
 std_m = 0.30
 why  = "tall, but height varies a lot across models — deliberately BROAD so data leads"
+source = "K1: Smeg UK 'fridge freezer sizes' — 160-200 cm high (retailers list 186-203 cm for 60 cm models). 1.90 +- 0.30 sits at the upper end and covers the range; the mean is kept because the legacy agent reads it too."
 
 [prior.depth_observability]
 kind = "conditional_precision"
@@ -88,6 +90,10 @@ parallel_precision = 200.0
 reach_m = 0.15
 no_cross_precision = 2000.0
 why  = "the back rests against a room wall; the mixture weight decays to 0 for a genuine mid-room fridge"
+class_prior = 0.0                   # π_flush (Model.WallFlushPrior): COMMONLY against a wall, not definitionally (see refrigerator_belief.cpp)
+standoff_m = 0.05                   # K1 (countable class, F1.4 persistent path): the back stands off its wall by the ventilation gap
+standoff_std_m = 0.02
+standoff_source = "manufacturer installation guidance for freestanding fridge-freezers: leave ~5 cm behind the appliance for ventilation (Bosch UK, 'how to measure fridge height' / installation FAQ: 'leave 5cm for ventilation'; Liebherr freestanding design guide: min 50 mm at the rear). std 2 cm: real placements are pushed closer or left wider than the guidance (uncited spread). Not from the Webots world."
 
 [prior.clearance]                       # ★ ADDED 2026-08-03 — was missing, caused persistent 180° errors
 kind = "facing_free_space"
@@ -111,6 +117,14 @@ weight = 0.25
 sigma_m = 0.05
 one_sided = true
 why  = "a mask point on a wall is already explained; one_sided ⇒ at/beyond the wall the exterior explains it fully, which also stops births outside the layout"
+
+[prior.permanence]
+# The volatility's hyperprior (countable persistent path, F1 round 6; K1): Q is inferred around q0 = rate * dt * scale^2.
+from = "nominal"
+move_rate_per_day = 0.00021
+move_scale_m = 0.10
+move_scale_rad = 0.05
+source = "rate: a refrigerator is replaced about once per service life, 13 years (NAHB / Bank of America Home Equity 'Study of Life Expectancy of Home Components', 2007: refrigerator 13 yrs) -> 1/(13*365) = 2.1e-4 per day; being pulled out to clean and pushed back is not a move (it returns to its slot). scale: uncited convention — a replacement stands in the same kitchen slot, so it shifts by its own depth/stand-off difference (~0.10 m) and the slot's alignment (~0.05 rad); its size changes by the class size prior std. Not from the Webots world."
 
 # ── Appearance cues: evidence about the discrete door mode, not about geometry ────────────────────────
 [cue.door_seam]

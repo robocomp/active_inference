@@ -16,6 +16,11 @@ foreach(cls nightstand bed toilet)
   add_test(NAME countable_card_test_${cls} COMMAND countable_card_test ${CMAKE_CURRENT_LIST_DIR}/../../${cls}_concept)
   set_tests_properties(countable_card_test_${cls} PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
 endforeach()
+# K1: refrigerator and hood run as countable classes from etc/countable.toml (their etc/config.toml is the legacy agent's).
+foreach(cls refrigerator hood)
+  add_test(NAME countable_card_test_${cls} COMMAND countable_card_test ${CMAKE_CURRENT_LIST_DIR}/../../${cls}_concept etc/countable.toml)
+  set_tests_properties(countable_card_test_${cls} PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+endforeach()
 
 # Task 4 config migration: every pre-countable value survives the section/key rename (old text read from git at BASE_REV,
 # the commit before the migration), and a config with a [<X>Model]/[<X>Concept] section is refused. Compiles RoboComp's
@@ -41,12 +46,30 @@ target_compile_options(manifest_load_test PRIVATE -O2)
 add_test(NAME manifest_load_test COMMAND manifest_load_test)
 set_tests_properties(manifest_load_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
 
+# K1: every countable class's config loads through the agent's own rc::load_countable_config (refrigerator / hood from
+# etc/countable.toml), from the class folder, under es_ES, on the real ConfigLoader.cpp. Run: LANG=es_ES.UTF-8 ./config_load_test
+add_executable(config_load_test config_load_test.cpp ../src/countable_config.cpp $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp)
+target_include_directories(config_load_test PRIVATE manifest_stub ../src ../../common ../../common/concept_manifest
+                           ../../common/config_report ../../common/media_transport $ENV{ROBOCOMP}/classes)
+target_compile_definitions(config_load_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+target_compile_options(config_load_test PRIVATE -O2)
+target_link_libraries(config_load_test PRIVATE Eigen3::Eigen)
+add_test(NAME config_load_test COMMAND config_load_test)
+set_tests_properties(config_load_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+
 # The bed's compound SDF: box ∪ headboard panel (2026-11-14). Run: ./headboard_sdf_test
 add_executable(headboard_sdf_test headboard_sdf_test.cpp ../src/countable_belief.cpp)
 target_include_directories(headboard_sdf_test PRIVATE ../src ../../common ../../common/media_transport)
 target_compile_options(headboard_sdf_test PRIVATE -O2)
 target_link_libraries(headboard_sdf_test PRIVATE Eigen3::Eigen)
 add_test(NAME headboard_sdf_test COMMAND headboard_sdf_test)
+
+# K1: a HANGING countable class (the hood): span, SDF, beam part, birth height evidence, select box. Run: ./hanging_box_test
+add_executable(hanging_box_test hanging_box_test.cpp ../src/countable_belief.cpp)
+target_include_directories(hanging_box_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(hanging_box_test PRIVATE -O2)
+target_link_libraries(hanging_box_test PRIVATE Eigen3::Eigen)
+add_test(NAME hanging_box_test COMMAND hanging_box_test)
 
 
 # The back panel comes from the class manifest ([prior.headboard]); textual reader, no Qt. Run: LANG=es_ES.UTF-8 ./back_panel_test
