@@ -11,8 +11,8 @@
 //       0.0027 moves/day, 0.5 m, dt 0.1 s ⇒ π = 3.125e-9 per step, q₀ = π·0.25 = 7.8e-10 m²): a static box keeps Q in
 //       [n₀/(n₀ + n)·q₀, q₀] (it can only lower the statistic below the prior mean, and the hyperprior bounds that), and a 0.10 m
 //       shove raises Q to at least a quarter of the shove's share δ²/(n₀ + n) — the Gaussian statistic would leave it at q₀.
-//   (7) F1 round 7 A1: a refuted-ray-shaped θ-only term the stayed fit can free inside its prior is NOT a move (the evidence
-//       read at the stayed posterior mode); a Gaussian term saying the object is 0.20 m off IS one.
+//   (7) F1 round 7 A1: a refuted-ray-shaped θ-only term the stayed fit can free inside its prior is NOT a move (log BF < 0: the
+//       data do not favour it; the evidence read at the stayed posterior mode); a Gaussian term saying the object is 0.20 m off IS one.
 // Run: ./engine_volatility_test
 #include <cmath>
 #include <cstdio>
@@ -209,8 +209,8 @@ int main()
         e.update(a, fr, cam_latents());
         std::printf("  (7) %s: cx %+.4f, log BF %.3f, P(moved) %.3e\n", quad ? "real 0.20 m move (Gaussian term)" :
                     "5 refuted rays 2 sigma_s deep", double(a.s.cx), e.last_jump_log_bf(), e.last_jump_p());
-        if (quad) CHECK(e.last_jump_p() > 0.5);
-        else      CHECK(e.last_jump_p() < 1e-6);
+        if (quad) CHECK(e.last_jump_p() > 0.5);                         // moved is the more probable hypothesis
+        else      CHECK(e.last_jump_log_bf() < 0.0);                     // the data do not favour a move (fix round 1, I2)
     }
     std::printf(bad ? "engine_volatility_test: %d FAILED\n" : "engine_volatility_test: OK\n", bad);
     return bad != 0;

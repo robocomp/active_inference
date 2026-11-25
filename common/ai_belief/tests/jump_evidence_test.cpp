@@ -13,6 +13,8 @@
 // (4) Round 7 A2: an exactly uninformed direction with a stray gradient (bed_5 update 140): finite, its share the closed form.
 // Run: ./jump_evidence_test
 #include <cmath>
+#include <limits>
+#include <algorithm>
 #include <cstdio>
 #include "ai_belief/persistent_engine.h"
 
@@ -81,8 +83,26 @@ int main()
         std::printf("  uninformed h with a stray gradient: log BF %.6e (finite %d), h share %.3e (closed form %.3e), |E[v]| max %.3e\n",
                     je.log_bf, int(std::isfinite(je.log_bf)), share, want, je.v_mean.cwiseAbs().maxCoeff());
         CHECK(std::isfinite(je.log_bf) and std::isfinite(je.p) and je.v_mean.allFinite() and je.v_cov.allFinite());
-        CHECK(std::abs(share - want) <= 1e-12);
-        CHECK(je.v_mean.cwiseAbs().maxCoeff() <= 1.0);                 // a posterior move within a few √M, not 1e30
+        {   // to rounding: each log Z carries ≤ κ·ε_mach of its magnitude (κ the condition number of 𝟙 + ΛP̄_m, below)
+            double kap = 1.0;
+            for (int i = 0; i < 6; ++i) kap = std::max(kap, 1.0 + w(i) * (pbar(i) + m(i)));
+            const double tol = kap * std::numeric_limits<double>::epsilon() * (std::abs(je.log_bf) + std::abs(j0.log_bf) + 1.0);
+            CHECK(std::abs(share - want) <= tol);
+        }
+        // E[v | moved] against its closed form: Λ and P̄_m diagonal (the denormal coupling is 1e-45), so E[v_i] = M_i η_i /
+        // (1 + W_i(P̄_i + M_i)), to LU rounding: |error| ≤ κ·ε_mach·|E[v_i]| + ε_mach, κ = 1 + max_i W_i(P̄_i + M_i) the condition
+        // number of 𝟙 + ΛP̄_m (fix round 1, I2: derived, not fitted).
+        double kappa = 1.0;
+        for (int i = 0; i < 6; ++i) kappa = std::max(kappa, 1.0 + w(i) * (pbar(i) + m(i)));
+        const double em = std::numeric_limits<double>::epsilon();
+        double worst_v = 0.0;
+        for (int i = 0; i < 6; ++i)
+        {
+            const double want_v = m(i) * g(i) / (1.0 + w(i) * (pbar(i) + m(i)));
+            worst_v = std::max(worst_v, std::abs(je.v_mean(i) - want_v) / (kappa * em * std::abs(want_v) + em));
+            CHECK(std::abs(je.v_mean(i) - want_v) <= kappa * em * std::abs(want_v) + em);
+        }
+        std::printf("  E[v | moved] vs the closed form: worst error %.3f of its rounding bound (kappa %.0f)\n", worst_v, kappa);
     }
     std::printf(bad ? "jump_evidence_test: %d FAILED\n" : "jump_evidence_test: OK\n", bad);
     return bad != 0;
