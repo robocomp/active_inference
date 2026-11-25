@@ -84,3 +84,14 @@ add_executable(test_thumbnail_view test_thumbnail_view.cpp ../src/thumbnail_view
 target_include_directories(test_thumbnail_view PRIVATE ../../common $ENV{ROBOCOMP}/classes)
 target_link_libraries(test_thumbnail_view ${QT_LIBRARIES})
 set_target_properties(test_thumbnail_view PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# K2b fix round 1: the one-time chair yaw migration (src/yaw_migration.h) and its tool, tested on a SYNTHETIC repertory only.
+#   ltom_agent/tests/build/test_yaw_migration      (the tool itself: ltom_agent/tests/build/chair_yaw_migrate <file> <legacy_until_ms>)
+add_executable(chair_yaw_migrate ../tools/chair_yaw_migrate.cpp ../src/repertory_io.cpp ../src/repertory.cpp ../src/human.cpp)
+set_target_properties(chair_yaw_migrate PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_link_libraries(chair_yaw_migrate PRIVATE Qt6::Core)
+add_executable(test_yaw_migration test_yaw_migration.cpp ../src/repertory_io.cpp ../src/repertory.cpp ../src/human.cpp)
+set_target_properties(test_yaw_migration PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_link_libraries(test_yaw_migration PRIVATE Qt6::Core)
+target_compile_definitions(test_yaw_migration PRIVATE TOOL_PATH="$<TARGET_FILE:chair_yaw_migrate>")
+add_dependencies(test_yaw_migration chair_yaw_migrate)

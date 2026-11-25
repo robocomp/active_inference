@@ -19,6 +19,13 @@ States, ground truth and frames:
          inverse of the grader's to_world. Unmatched / phantom nodes are skipped. Split by visit: on the RETURN to a room
          the map frame has moved (c3a: room_1 rotated ~0.1 rad, shifted ~0.5 m between first visit and return) while a
          remembered object keeps its old room-frame centre, and its sigma carries no room-frame term.
+  object YAW (not graded here yet; read this before writing a chair/countable yaw grader). Every countable class publishes
+         yaw with R(yaw)*y_hat pointing from the FRONT into the BACK (+y local = the back: a bed's headboard, a toilet's tank,
+         a chair's backrest). Since K2b (2026-11-25) the chair runs on the countable binary in that convention; the legacy
+         chair_concept published the backrest on -y, i.e. its yaw is the countable yaw - pi. A chair yaw grader must know
+         which binary produced the run (<run>/agents.txt records it) and compare modulo nothing: front/back is graded, so a
+         pi error is a real error, not a symmetry. ltom repertories written by the legacy chair are turned by
+         ltom_agent/tools/chair_yaw_migrate (entries marked yaw_convention = "back_plus_y" are in the countable frame).
 Every logged update row counts as one sample; consecutive rows are strongly autocorrelated, so n overstates the
 independent evidence (the number of instances / visits is printed too).
 """

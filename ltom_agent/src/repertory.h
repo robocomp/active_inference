@@ -8,6 +8,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ltom
@@ -79,7 +80,12 @@ struct Entry
     // On a live uid's entry: the owner said they did not move it (their "no"). The owner is the only one who moves
     // things, so it is NEW: no memory may continue it, whichever the chair agent's MAP names next (moved_chair_4).
     bool said_new = false;
+    // The object frame the stored yaws and thumbnail bins are in (K2b, 2026-11-25). "" = as its producer wrote it, unstated.
+    // kYawBackPlusY = +y is the object's BACK (the countable convention); written by the one-time chair migration
+    // (yaw_migration.h), which also uses it to stay idempotent. Absent in older files.
+    std::string yaw_convention;
 };
+inline constexpr std::string_view kYawBackPlusY = "back_plus_y";
 
 // A question to the person about a move (derived from the open Move; persisted with it). again = the memory already
 // holds a confirmed move (directly, or through the memory it continues).

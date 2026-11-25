@@ -108,7 +108,7 @@ Not expected to move in part 1: existence and plausibility (`FeRef`, `FeScale`, 
 | bed | (AuRo A3, 11-25) per DOF, the extent of the mesh surfaces the likelihood fits: w = outer width of frame ∪ blanket 1.766; h (depth) = frame incl. headboard 2.09–2.12; H = blanket top 0.72; centre of that box | Bed.proto visual meshes (the prior's "mattress layer" comment is recorded as inconsistent; prior unchanged) |
 | nightstand | body box | proto body mesh |
 | toilet | footprint of bowl + tank | proto mesh |
-| chair | seat centre and yaw | proto seat mesh |
+| chair | seat centre and yaw (yaw in the countable convention: +y local = the backrest; the legacy chair's yaw = this − π; see the nees_agents.py header, K2b) | proto seat mesh |
 | table | top centre, extent, yaw | proto top mesh |
 | refrigerator | body footprint centre | proto body mesh (the 11-22 regrade already uses this) |
 | hood | canopy box | proto mesh; the Webots origin must be verified first |

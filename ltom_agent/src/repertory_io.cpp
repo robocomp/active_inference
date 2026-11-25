@@ -116,6 +116,7 @@ QJsonObject to_json(const Entry& e)
         o["gone"] = gn;
     }
     if (e.said_new) o["said_new"] = true;
+    if (not e.yaw_convention.empty()) o["yaw_convention"] = QString::fromStdString(e.yaw_convention);   // absent = unstated
     QJsonArray thumbs;
     for (const auto& [bin, t] : e.thumbs)
     {
@@ -294,6 +295,7 @@ bool from_json(const QJsonObject& o, Entry& e)
                                       static_cast<std::int64_t>(j["room_key"].toDouble(-1)), j["words"].toString().toStdString()});
     }
     e.said_new = o["said_new"].toBool();   // absent = false (files written before 2026-11-16)
+    e.yaw_convention = o["yaw_convention"].toString().toStdString();   // absent = "" (unstated; files written before K2b)
     for (const QJsonValue& v : o["thumbs"].toArray())   // absent in files written before thumbnails existed
     {
         const QJsonObject j = v.toObject();
