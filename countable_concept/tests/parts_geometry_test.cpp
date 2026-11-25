@@ -4,19 +4,24 @@
 // What is checked, every bound derived before running (exact geometry or rounding, nothing fitted):
 //   1. the toilet manifest declares solid = "parts" with two rows, bowl and tank (class knowledge, cited in the manifest);
 //   2. the toilet's camera SDF is the STEPPED solid: on θ = (0, 0, H 1.0, w 0.58, h 0.74, yaw 0) the bowl front (y = −0.37) is a
-//      surface at z 0.30 (SDF 0); a point at that front at z 0.80 is OUTSIDE, 0.26 above the bowl top 0.54 (the tank front is
+//      surface at z 0.30 (SDF 0); a point at that front at z 0.80 is OUTSIDE, 0.23 above the bowl top 0.57 (the tank front is
 //      0.5254 behind it, the nearer face wins); the tank front y = 0.37 − 0.29·0.74 = 0.1554 at z 0.80 is a surface; a point
 //      beside the bowl under the tank (x 0.27, y 0.30, z 0.30) is 0.27 − 0.76·0.29 = 0.0496 outside. Tolerance 1e-5 (float
 //      rounding of terms ≤ 1 m). One box would hold the two outside points INSIDE (negative SDF);
 //   3. the beam parts are the same solid: for 2000 random points min over the parts' box SDFs (the test's own, double) equals
 //      sdf_compound to 1e-5 (float rounding), the convex flag is off (2 parts);
-//   4. each part's analytic J (rows ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ) equals a central finite difference of beam_parts itself:
-//      linear in (cx, cy, H, w, h) ⇒ exact up to rounding (tol 1e-7 at step 1e-4); in yaw the FD error is O(e²)·|lever| ≤ 1e-8·1
-//      at e 1e-4 (tol 1e-7). Also on a HANGING span (∂z0/∂H = 1), which no manifest declares yet;
+//   4. each part's analytic J (rows ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ) equals a central finite difference of beam_parts itself,
+//      step e = 1e-4 taken on the FLOAT state (the divisor is the step the floats actually hold, so it is exact). Tolerance 2e-7:
+//      the parts are computed in double from the float θ, so a component linear in (cx, cy, H, w, h) differences exactly (double
+//      rounding ~1e-16 / 2e-4 ≈ 1e-12); in yaw (c, the lever terms) the error is the truncation e²/6·|third derivative| ≤
+//      (1e-4)²/6·0.6 ≈ 1e-9 plus the secant's midpoint offset from θ (each stepped float rounds by ≤ ½ ulp(2.05) = 1.2e-7, so
+//      the midpoint moves ≤ 1.2e-7) times |second derivative| ≤ |lever| ≤ 0.6, ≈ 7e-8: total ≤ 1e-7, tolerance 2e-7. Also on a
+//      HANGING span (∂z0/∂H = 1), which no manifest declares yet;
 //   5. the carve reads the same rows: carve_parts' boxes have the beam parts' local centres and sizes (tol 1e-6);
 //   6. a solid = "box" class (the nightstand: 5 carve rows) keeps the pre-K2a solid BIT-identically: the SDF is the whole box
 //      (the old expression, copied here, compared with ==), one beam part equal (==) to the old envelope part, and the bed's
-//      headboard panel likewise.
+//      headboard panel likewise. §6 CANNOT fail before the change by construction (it compares against the pre-K2a code itself);
+//      it is a regression guard. The "fails before" evidence is checks 1–5 run against the BASE 93f3b35b manifests (11 FAIL).
 // Run: ./parts_geometry_test MANIFEST_DIR   (pass a copy of the BASE 93f3b35b manifests to see checks 1–5 fail there)
 #include <clocale>
 #include <cmath>
@@ -67,7 +72,7 @@ static void check_jacobian(const CountableBelief& b, const CountableBeliefState&
         {
             const Eigen::Matrix<double, 7, 1> fd = (pack(Pp[k]) - pack(Pm[k])) / step;
             for (int r = 0; r < 7; ++r)
-                if (not near(fd(r), P0[k].J(r, j), 1e-3))   // the float state's rounding (~6e-8 / 2e-4) bounds the FD at 1e-3
+                if (not near(fd(r), P0[k].J(r, j), 2e-7))   // derived in the header, check 4
                 { std::printf("FAIL J part %zu row %d col %d: fd %.9f analytic %.9f\n", k, r, j, fd(r), P0[k].J(r, j)); ++bad; }
         }
     }
@@ -95,11 +100,11 @@ int main(int argc, char** argv)
     // 2. the stepped SDF
     {
         CHECK(near(tb.sdf_compound({0.0f, -0.37f, 0.30f}, ts), 0.0, 1e-5));      // bowl front
-        CHECK(near(tb.sdf_compound({0.0f, -0.37f, 0.80f}, ts), 0.26, 1e-5));     // in front of the tank, above the bowl
+        CHECK(near(tb.sdf_compound({0.0f, -0.37f, 0.80f}, ts), 0.23, 1e-5));     // in front of the tank, above the bowl
         CHECK(near(tb.sdf_compound({0.0f, 0.1554f, 0.80f}, ts), 0.0, 1e-5));     // tank front
         CHECK(near(tb.sdf_compound({0.27f, 0.30f, 0.30f}, ts), 0.0496, 1e-5));   // beside the bowl, under the tank
-        // 7 cm behind the bowl front at z 0.80: inside the envelope (sdf_box −0.07), 0.26 above the bowl in the parts solid
-        CHECK(near(tb.sdf_box({0.0f, -0.30f, 0.80f}, ts), -0.07, 1e-5) and near(tb.sdf_compound({0.0f, -0.30f, 0.80f}, ts), 0.26, 1e-5));
+        // 7 cm behind the bowl front at z 0.80: inside the envelope (sdf_box −0.07), 0.23 above the bowl in the parts solid
+        CHECK(near(tb.sdf_box({0.0f, -0.30f, 0.80f}, ts), -0.07, 1e-5) and near(tb.sdf_compound({0.0f, -0.30f, 0.80f}, ts), 0.23, 1e-5));
     }
     // 3. the beam parts are the SDF's solid
     {

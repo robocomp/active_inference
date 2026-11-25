@@ -82,11 +82,11 @@ int main()
         const auto T = rc::countable::carve_parts_for(0.58f, 0.733f, 1.02f, ts, std::nullopt);
         CHECK(T.size() == 2);
         if (T.size() == 2)
-        {   // bowl: full length, 0.76 of the width, floor to 0.54 H; tank: full width, back 0.29 of the length, 0.54 H to H
+        {   // bowl: full length, 0.76 of the width, floor to 0.57 H; tank: full width, back 0.29 of the length, 0.57 H to H
             CHECK(near(T[0].cy, 0.0f, 0.001f) and near(T[0].sx, 0.76f * 0.58f, 0.001f) and near(T[0].sy, 0.733f, 0.001f));
-            CHECK(T[0].z0 == 0.0f and near(T[0].z1, 0.54f * 1.02f, 0.001f));
+            CHECK(T[0].z0 == 0.0f and near(T[0].z1, 0.57f * 1.02f, 0.001f));
             CHECK(near(T[1].cy, 0.355f * 0.733f, 0.001f) and near(T[1].sx, 0.58f, 0.001f) and near(T[1].sy, 0.29f * 0.733f, 0.001f));
-            CHECK(near(T[1].z0, 0.54f * 1.02f, 0.001f) and near(T[1].z1, 1.02f, 0.001f));
+            CHECK(near(T[1].z0, 0.57f * 1.02f, 0.001f) and near(T[1].z1, 1.02f, 0.001f));
             CHECK(near(T[1].cy + 0.5f * T[1].sy, 0.5f * 0.733f, 0.001f));   // the tank's back is the box's back
         }
     }
@@ -115,6 +115,7 @@ int main()
         CHECK(not load_solid_is_parts(tmp_manifest("[shape]\nfrom = \"x\"\n" + ok)));          // absent: the box
         CHECK(not load_solid_is_parts(tmp_manifest("[shape]\nsolid = \"box\"\n" + ok)));
         CHECK(load_solid_is_parts(tmp_manifest("[shape]\nsolid = \"parts\"  # c\n" + ok)));
+        CHECK(load_solid_is_parts(tmp_manifest("[shape]   # a trailing comment\nsolid = \"parts\"\n" + ok)));
         CHECK(not load_solid_is_parts(tmp_manifest("[other]\nsolid = \"parts\"\n" + ok)));   // outside [shape]: not read
         CHECK(solid_throws("[shape]\nsolid = \"legs\"\n" + ok));                              // unknown value
         CHECK(solid_throws("[shape]\nsolid = parts\n" + ok));                                  // not a string

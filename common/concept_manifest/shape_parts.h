@@ -100,7 +100,8 @@ inline bool load_solid_is_parts(const std::string& path)
         if (l.front() == '[')
         {
             if (l.starts_with("[[") and detail::trim(l.substr(2, l.find(']') - 2)) == "shape.part") parts = true;
-            in_shape = l == "[shape]";
+            const auto c = l.find('#');   // a header may carry a trailing comment: "[shape]   # ..."
+            in_shape = detail::trim(c == std::string_view::npos ? l : l.substr(0, c)) == "[shape]";
             continue;
         }
         if (not in_shape) continue;
