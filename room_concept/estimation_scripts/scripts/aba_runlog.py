@@ -79,7 +79,7 @@ def controller_goal_tolerance(root='/home/pbustos/robocomp/components/active_inf
 
 def visit_validity(S, tol_m):
     """[] when the visit happened as scripted, else the reasons it did not: all three segments present, goto / dwell completed,
-    face completed or none, both gain queries answered, and the Webots arrival within the controller's goal tolerance of the
+    face completed or none, the arrival gain query answered (the claim one is context only), and the Webots arrival within the controller's goal tolerance of the
     scripted standpoint."""
     why = []
     for s in SEGS:
@@ -90,7 +90,8 @@ def visit_validity(S, tol_m):
         f = r.get('face') or ''
         if not (f in ('completed', 'none') or f.startswith('completed[')): why.append(f'{s}: face {f}')
         if r.get('dwell') != 'completed': why.append(f'{s}: dwell {r.get("dwell")}')
-        if r.get('query_answered') != 'yes': why.append(f'{s}: claim gain query {r.get("query_answered")}')
+        # the claim-time query is context only (predictions doc, addendum 2): an object not yet born at the claim cannot answer
+        # it (live run p1_toilet: the toilet is first seen on the drive to A1), and that is not a visit gone wrong
         if r.get('arr_query_answered') != 'yes': why.append(f'{s}: arrival gain query {r.get("arr_query_answered")}')
         try:
             d = math.hypot(float(r['gt_x']) - float(r['stand_x']), float(r['gt_y']) - float(r['stand_y']))

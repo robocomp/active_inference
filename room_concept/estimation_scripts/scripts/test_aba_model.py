@@ -95,6 +95,7 @@ def visits():
     rows = [seg_row('OK', 'A1', 1000), seg_row('OK', 'B', 2000), seg_row('OK', 'A2', 3000),
             seg_row('NOB', 'A1', 1000), seg_row('NOB', 'A2', 3000),
             seg_row('TIMEOUT', 'A1', 1000), seg_row('TIMEOUT', 'B', 2000, goto='TIMEOUT'), seg_row('TIMEOUT', 'A2', 3000),
+            seg_row('NOCLAIM', 'A1', 1000, query_answered='no'), seg_row('NOCLAIM', 'B', 2000), seg_row('NOCLAIM', 'A2', 3000),
             seg_row('RETRY', 'A1', 1000), seg_row('RETRY', 'A2', 3000),
             seg_row('RETRY', 'B', 2000, face='completed[a1:165.5deg:failed_timeout;a2:132.0deg:completed;a3:1.2deg:within]'),
             seg_row('NOFACE', 'A1', 1000), seg_row('NOFACE', 'A2', 3000),
@@ -114,6 +115,7 @@ def visits():
         assert any('B: segment missing' in w for w in R.visit_validity(S['NOB'], tol))
         assert any('B: goto TIMEOUT' in w for w in R.visit_validity(S['TIMEOUT'], tol))
         assert any('B: arrival' in w for w in R.visit_validity(S['OFF'], tol))
+        assert R.visit_validity(S['NOCLAIM'], tol) == []                     # unanswered claim query: context only
         assert R.visit_validity(S['RETRY'], tol) == []                       # a face that needed retries but got there
         assert any('B: face failed[' in w for w in R.visit_validity(S['NOFACE'], tol))
         assert any('B: goto frame_failed' in w for w in R.visit_validity(S['FRAME'], tol))
