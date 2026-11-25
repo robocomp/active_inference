@@ -120,3 +120,137 @@ mesh = "meshes/table.obj"
 # file. Before step 2, close the two gaps this exercise surfaced in table_concept — they are live bugs, and
 # they are worth more than the codegen.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+
+# ══ The table as a box-part class on the countable binary (shared-engine K2c, 2026-11-26) ══════════════════════════════════
+# Read by countable_concept only (table_concept/etc/countable.toml). The legacy table_concept agent reads the blocks above and none
+# of these; no value it reads was changed. Every fraction and range below is CLASS KNOWLEDGE (furniture retailers' size guides and
+# woodworking guides, cited per value), written and committed before any code, replay or live run of a table on the countable
+# binary. None is from the Webots world.
+#
+# The class is what the detector calls "table": the retina maps YOLO's "dining table" AND "coffee table" to it
+# (retina/src/yolo_processor.cpp), so the ranges below span both.
+#
+# θ = (cx, cy, H, w, h, yaw) is the table TOP's box: w, h = the top's extents along local x, y; H = the top surface's height.
+# A table has NO front and NO labelled sides, so θ's (w, h, yaw) carries the symmetry the [model] block calls c2v: the four
+# representations (w, h, yaw), (w, h, yaw + π), (h, w, yaw ± π/2) are the SAME table. [shape] symmetry = "c2v" states it to the
+# countable binary, which then requires every model term to be invariant under that group (the parts below are; see the K2c report).
+# Note: the legacy [model].state carries 7 DOF (+ the depth tilt t); the countable θ has 6, its per-view camera latents carry t.
+#
+# Sources:
+#   [BAS-G] Bassett Furniture, "The Complete Guide to Table Sizes" (bassettfurniture.com/blog/complete-guide-to-table-sizes.html):
+#           rectangular dining tables "between 36" and 40" wide"; "A table that seats four should be about 48" long", six to eight
+#           "at least 78" long"; square dining tables "between 36" and 44" wide"; coffee table height "typically ranges from 15" to 20"".
+#   [BAS-C] Bassett Furniture, "Standard Furniture Sizes and Dimensions" chart (bassettfurniture.com/standard-furniture-dimensions.html):
+#           coffee table width 18", length 36–48", height 19"; dining table height 29".
+#   [RF]    Raymour & Flanigan dining-table size guide (raymourflanigan.com/blog/expertise/guides/dining-table-size-guide), read through
+#           a web-search summary (the page refused the fetch, 403): 84" long for six to eight, 96" for eight to ten; height 28–30",
+#           30" the most common.
+#   [TL]    TableLegs.com, "A Guide to Table Top Thickness" (tablelegs.com/resources-how-tos/a-guide-to-table-top-thickness/):
+#           tops "from 3/4" to an impressive 1 3/4"".
+#   [LEG]   a designer's table-leg guide (coohom.com, "best legs for diy table: a designer's guide"), read through a web-search summary
+#           (page not opened): solid wood legs "2.5–3 inches square" for a 72–84" table.
+#   [OVH]   a Fine Woodworking forum thread ("size of table base", finewoodworking.com/forum/size-of-table-base), read through a
+#           web-search summary (page not opened): a leg-and-apron table needs "at least 2 inches of overhang". Other bases
+#           (stretcher, pedestal) overhang 8–14" — the parts below are the four-corner-leg table; see the K2c report.
+# Ranges used:
+#   either top extent (unlabelled): 18" (coffee-table width [BAS-C]) .. 96" (the longest dining table [RF]) = 0.457 .. 2.438 m,
+#                                   mid 1.448 m (the fractions below are of this mid value);
+#   height H: 15" (the lowest coffee table [BAS-G]) .. 30" (dining [RF]) = 0.381 .. 0.762 m;
+#   top thickness t: 3/4" .. 1 3/4" = 0.019 .. 0.044 m [TL];
+#   leg: 2.5–3" square, mid 0.070 m [LEG] ⇒ w_f = h_f = 0.070 / 1.448 = 0.048;
+#   overhang: 2" = 0.051 m [OVH] ⇒ 0.035 of the mid extent; leg centre at ±(0.5 − 0.035 − 0.024) = ±0.441.
+
+[shape]
+from = "nominal"
+solid = "parts"     # the [[shape.part]] rows below ARE the model's solid (camera SDF, beam parts, carve): the top and four legs
+symmetry = "c2v"    # no front, no labelled sides: the model must be invariant under (w,h,yaw) → (w,h,yaw+π), (h,w,yaw±π/2)
+layer_spread_m = [
+    0.0,    # cx: the layers share the centre (the legs stand symmetric under the top)
+    0.0,    # cy: as cx
+    0.0,    # H: the top surface is the top every sensor sees
+    0.10,   # w: the top's extent vs the legs' outer extent, 2 × the 2" overhang [OVH]
+    0.10,   # h: as w (no labelled sides)
+    0.0,    # yaw: every layer shares the table's axes
+]
+layer_spread_source = "four-corner-leg table: the legs stand 2 inches in from the top's edge on each side (Fine Woodworking forum, leg-and-apron table, via a search summary), so the top layer is 2 x 0.051 m = 0.10 m wider than the leg layer along each axis. Not from the Webots world."
+
+# ── The parts (fractions of θ; z boundaries named "top_under" are the class proportion below) ──
+#   top  : the full footprint; z from top_under to H (the slab, thickness t = (1 − top_under)·H).
+#   legs : 0.070 m square [LEG] at the corners, 2" in from the edge [OVH]; z from the floor to the top's underside.
+# The set is invariant under (x_f, y_f, w_f, h_f) → (−x_f, −y_f, w_f, h_f) and → (y_f, −x_f, h_f, w_f): what symmetry = "c2v" requires.
+# NOT modelled: an apron (a rail under the top, between the legs; present on many dining tables, absent on others — a part the class
+# varies on by presence, which a proportion cannot carry). The parts under-claim it: a beam that hits it is explained by the foreign
+# density, not refuted against claimed solid.
+
+[[shape.part]]
+name = "top"
+x_f = 0.0
+y_f = 0.0
+w_f = 1.0
+h_f = 1.0
+z0_f = "top_under"
+z1_f = 1.0
+why = "the table top, thickness 3/4–1 3/4 in [TL] through the top_under proportion"
+
+[[shape.part]]
+name = "leg_a"
+x_f = -0.441
+y_f = -0.441
+w_f = 0.048
+h_f = 0.048
+z0_f = 0.0
+z1_f = "top_under"
+why = "2.5–3 in square leg [LEG], 2 in in from the edge [OVH]"
+
+[[shape.part]]
+name = "leg_b"
+x_f = 0.441
+y_f = -0.441
+w_f = 0.048
+h_f = 0.048
+z0_f = 0.0
+z1_f = "top_under"
+why = "2.5–3 in square leg [LEG], 2 in in from the edge [OVH]"
+
+[[shape.part]]
+name = "leg_c"
+x_f = 0.441
+y_f = 0.441
+w_f = 0.048
+h_f = 0.048
+z0_f = 0.0
+z1_f = "top_under"
+why = "2.5–3 in square leg [LEG], 2 in in from the edge [OVH]"
+
+[[shape.part]]
+name = "leg_d"
+x_f = -0.441
+y_f = 0.441
+w_f = 0.048
+h_f = 0.048
+z0_f = 0.0
+z1_f = "top_under"
+why = "2.5–3 in square leg [LEG], 2 in in from the edge [OVH]"
+
+# ── The proportion (spec G4, K2a-L): the top's UNDERSIDE as a fraction of H, i.e. 1 − t/H. It sets the top's thickness AND the legs'
+# height, the boundary a table genuinely varies on (H itself is θ). Uniform over the class range ⇒ mean (lo + hi)/2, σ = (hi − lo)/√12.
+#   lo = 1 − 0.044/0.381 = 0.883 (the thickest top on the lowest table); hi = 1 − 0.019/0.762 = 0.975 (the thinnest on the tallest).
+#   Δ = 0.092, σ = 0.027, midpoint 0.929.
+[[shape.proportion]]
+name = "top_under"
+lo = 0.883
+hi = 0.975
+source = "table top thickness 3/4 to 1 3/4 in (TableLegs.com, A Guide to Table Top Thickness); table height 15 in (lowest coffee table, Bassett guide) to 30 in (dining, Raymour & Flanigan via a search summary). lo = 1 - 0.044/0.381, hi = 1 - 0.019/0.762."
+
+[prior.permanence]
+# The volatility's hyperprior (countable persistent path): Q is inferred around q0 = rate * dt * scale^2 (spike-and-slab).
+from = "nominal"
+move_rate_per_day = 0.14
+move_scale_m = 0.1
+move_scale_rad = 0.1
+source = "uncited convention: a table is nudged when chairs are pulled against it or the floor is cleaned, about once a week (1/7 per day), by about 0.1 m and 0.1 rad; rearranged far more rarely. Not measured; not from the Webots world."
+
+[prior.class]
+kind = "label_reliability"
+p_label_true = 0.8
+why  = "P(a mask with this label is really this class): the same value as the other countable classes (YOLOE's median confidence on the real bed, .85, detcheck3). Not measured on tables."
