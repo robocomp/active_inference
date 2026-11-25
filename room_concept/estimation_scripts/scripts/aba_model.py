@@ -110,16 +110,22 @@ def _config_float(path, key):
 def class_params(cls, root):
     """Every model input that is not logged: Delta, d = Delta^2/12, P0, v_cam, v_L, q0 (permanence, per predict step)."""
     man = _toml(os.path.join(root, 'common', 'concept_manifest', f'{cls}.concept.toml'))
-    cfg = os.path.join(root, f'{cls}_concept', 'etc', 'config.toml')
+    # the config the countable binary reads: etc/countable.toml for a K1 class (refrigerator, hood), else etc/config.toml
+    cfg = os.path.join(root, f'{cls}_concept', 'etc', 'countable.toml')
+    if not os.path.exists(cfg): cfg = os.path.join(root, f'{cls}_concept', 'etc', 'config.toml')
     delta = [float(x) for x in man['shape']['layer_spread_m']]
-    fp, ht = man['prior']['footprint'], man['prior']['height']
-    yaw_std = math.radians(float(man['prior']['alignment']['std_deg']))
-    P0 = [math.inf, math.inf, ht['std_m'] ** 2, fp['std_m'] ** 2, fp['std_m'] ** 2, yaw_std ** 2]
+    pr = man['prior']
+    fp, ht = pr['footprint'], pr['height']
+    h_std = pr['depth']['std_m'] if 'depth' in pr else fp['std_m']   # the hood states its depth prior apart ([prior.depth])
+    # the room-axis prior: the manifest's [prior.alignment] where it has one, else the config's Model.RoomAxisStdDeg (K1 classes)
+    yaw_std = math.radians(float(pr['alignment']['std_deg']) if 'alignment' in pr else _config_float(cfg, 'RoomAxisStdDeg'))
+    P0 = [math.inf, math.inf, ht['std_m'] ** 2, fp['std_m'] ** 2, h_std ** 2, yaw_std ** 2]
     pos, size, yaw = (_config_float(cfg, f'AI2CommonMode{k}Std') for k in ('Pos', 'Size', 'Yaw'))
     b2 = KZED_BOUNDARY_STD_M ** 2
     perm = man['prior']['permanence']; dt = _config_float(cfg, 'AI2AgeNominalDtS')
     rate = perm['move_rate_per_day'] / 86400.0 * dt
     q0 = [rate * perm['move_scale_m'] ** 2] * 2 + [rate * fp['std_m'] ** 2] * 3 + [rate * perm['move_scale_rad'] ** 2]
+    if yaw_std <= 0.0: P0[5] = math.inf                                # RoomAxisStdDeg <= 0: the prior is off
     return dict(cls=cls, delta=delta, d=[x * x / 12 for x in delta], P0=P0,
                 v={'cam': [b2] * 5 + [yaw ** 2], 'L': [pos ** 2, pos ** 2, size ** 2, size ** 2, size ** 2, yaw ** 2]},
                 q0=q0, predict_dt_s=dt, layer_source=man['shape'].get('layer_spread_source', ''))

@@ -66,11 +66,11 @@ def route_safety_margin(cfg=f'{B}/controller/etc/config.toml'):
 
 
 def webots_pose(defn):
-    """(x, y, yaw) of a Webots node now (webots_object.py get: x y z qx qy qz qw)."""
+    """(x, y, yaw, z) of a Webots node now (webots_object.py get: x y z qx qy qz qw)."""
     out = subprocess.run([sys.executable, os.path.join(HERE, 'webots_object.py'), 'get', defn], capture_output=True,
                          text=True, check=True).stdout.split()
-    x, y, qx, qy, qz, qw = float(out[0]), float(out[1]), *map(float, out[3:7])
-    return x, y, math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    x, y, z, qx, qy, qz, qw = map(float, out[0:7])
+    return x, y, math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz)), z
 
 
 def robot_pose():
@@ -163,10 +163,10 @@ def footprints(wbt):
 def object_truth(wbt, defn, live=False):
     import furniture as F
     import mesh_extents as M
-    nm, cls, x, y, _, yaw, node = M.graded(wbt, defn)
+    nm, cls, x, y, z, yaw, node = M.graded(wbt, defn)
     pose_src = 'wbt'
     if live:
-        x, y, yaw = webots_pose(defn); pose_src = 'webots'
+        x, y, yaw, z = webots_pose(defn); pose_src = 'webots'
     b = M.layer_box(cls, node, wbt)
     cx, cy = M.to_world(x, y, yaw, b[4], b[5])
     polys = room_polygons()
@@ -181,15 +181,22 @@ def object_truth(wbt, defn, live=False):
         s = min(max(float((np.array([cx, cy]) - a) @ d) / L2, 0.0), 1.0)
         q = a + s * d; dist = math.hypot(q[0] - cx, q[1] - cy)
         if best is None or dist < best[0]: best = (dist, q)
-    back = np.array([best[1][0] - cx, best[1][1] - cy]); back /= np.linalg.norm(back)
+    wall_n = np.array([best[1][0] - cx, best[1][1] - cy]); wall_n /= np.linalg.norm(wall_n)
+    # the BACK is the object's own axis (±local x, ±local y) nearest that wall normal: the object's axes are the truth's
+    # orientation; the rasterised, simplified room polygon tilts its edges by a degree or so (the kitchen's west wall: 1.0°)
     lx_dir = np.array([math.cos(yaw), math.sin(yaw)])
+    axes = [lx_dir, -lx_dir, np.array([-math.sin(yaw), math.cos(yaw)]), np.array([math.sin(yaw), -math.cos(yaw)])]
+    back = max(axes, key=lambda a: float(a @ wall_n))
     along_x = abs(float(lx_dir @ back)) >= abs(float(np.array([-math.sin(yaw), math.cos(yaw)]) @ back))
     h_mesh, w_mesh = (b[0], b[1]) if along_x else (b[1], b[0])
     if cls == 'bed':
         w, h, H, src = BED_A3['w'], BED_A3['h'], BED_A3['H'], 'AuRo A3 (spec Graded quantities): frame u blanket w, frame+headboard h, blanket top H'
     else:
-        w, h, H, src = w_mesh, (h_mesh, h_mesh), b[3], f'mesh layer ({M.__name__}.layer_box)'
-    return dict(defn=defn, name=nm, cls=cls, room_poly=room, pose_src=pose_src, origin=[x, y, yaw], cx=cx, cy=cy,
+        w, h, H, src = w_mesh, (h_mesh, h_mesh), z + b[3], f'mesh layer ({M.__name__}.layer_box)'
+    # vertical span as the engine publishes it (countable_vertical_span.h): H = the body's TOP above the floor for every class;
+    # z0 = its underside (0 for a floor-standing object; the canopy's underside for the hood, whose node hangs at origin z)
+    z0 = 0.0 if cls == 'bed' else z + b[2]
+    return dict(defn=defn, name=nm, cls=cls, room_poly=room, pose_src=pose_src, origin=[x, y, yaw, z], z0=z0, cx=cx, cy=cy,
                 back=[float(back[0]), float(back[1])], yaw_theta_world=math.atan2(-back[0], back[1]),
                 w=w, h=list(h), H=H, wall_gap=best[0], source=src)
 

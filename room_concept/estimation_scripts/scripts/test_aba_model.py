@@ -72,6 +72,7 @@ def main():
     assert [len(r) for r in R.parked_runs(ups)] == [3, 2]
     visits()
     node_match()
+    kitchen_plans()
     print('test_aba_model: OK')
 
 
@@ -158,6 +159,30 @@ def node_match():
         assert m['d2'] <= R.CHI2_2_99 < m['runner_d2'], m
         m = R.match_node_to_truth(run, rows, S, dict(cx=5.0, cy=-3.0))                      # nothing there
         assert m['node'] is None and 'chi2' in m['why'], m
+
+
+def kitchen_plans():
+    # 8. K1 live validation: the fridge and the hood (room_1, the kitchen) planned from the world file. The truth is the mesh layer
+    #    (Fridge body; the hood's canopy frustum, which hangs: H = its TOP above the floor, z0 = its underside, as the engine
+    #    publishes a hanging class, countable_vertical_span.h); the back is the object's own axis facing the wall; the standpoint
+    #    rule is unchanged (the hood's nominal A, 1.5 m in front, stands in Worktop3: the rule moves it in, and says so).
+    import aba_geometry as G
+    wbt = os.environ.get('WBT_PATH', '/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt')
+    if not os.path.exists(wbt):
+        print('test_aba_model: SKIP kitchen plans (no world file)'); return
+    f = G.plan(wbt, 'FRIDGE_0'); T = f['truth']
+    assert T['cls'] == 'refrigerator' and T['room_poly'] == 'room_1', T
+    assert abs(T['back'][0] + 1.0) < 1e-4 and abs(T['back'][1]) < 1e-4, T['back']   # the west wall (the node's yaw is pi - 7e-6)
+    assert abs(T['w'] - 0.6792) < 1e-3 and abs(T['h'][0] - 0.5389) < 1e-3 and abs(T['H'] - 1.9888) < 1e-3 and abs(T['z0']) < 1e-3, T
+    assert f['feasible']
+    c = (T['cx'], T['cy'])
+    for p in (f['A'], f['B']): assert abs(math.hypot(p[0] - c[0], p[1] - c[1]) - f['z']) < 1e-6   # same range at A and B
+    assert f['A'][0] > T['cx'] and abs(f['A'][1] - T['cy']) < 1e-4                               # A straight in front
+    h = G.plan(wbt, 'HOOD_0'); T = h['truth']
+    assert T['cls'] == 'hood' and abs(T['H'] - 1.9) < 1e-6 and abs(T['z0'] - 1.6) < 1e-6, T       # hangs: top 1.9, underside 1.6
+    assert abs(T['w'] - 1.296) < 1e-6 and abs(T['h'][0] - 0.5) < 1e-6, T
+    assert h['feasible'] and h['moved_m'] < 0.0, h                                                # moved IN by the worktop
+    assert 'Worktop3' in h['obstacles']
 
 
 if __name__ == '__main__': main()
