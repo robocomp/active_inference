@@ -172,6 +172,39 @@ int main(int argc, char** argv)
         CHECK(near(g, -1.0, 1e-4));
         if (not near(g, -1.0, 1e-4)) std::printf("  dsdf/dq %.6f (want -1)\n", g);
     }
+    // 3b. K2b: the chair's rows, whose seat underside and leg tops are seat_top + a fixed offset (−0.066): the same Jq against
+    // a central difference. q + offset is rounded to float in z0_of / z1_of (the toilet's q ± 2⁻⁸ was exact), so the derived
+    // tolerance is: each boundary off by ≤ ½ ulp of a value < 1 (2⁻²⁵), times dz ≤ H, two boundaries per row, over 2e:
+    // 2 · 2⁻²⁵ · H / (2e) = H · 2⁻²⁵ / e.
+    {
+        const auto cp = rc::manifest::load_shape_parts(dir + "/chair.concept.toml");
+        CHECK(cp.size() == 6);
+        const rc::countable::VerticalSpan span{};
+        const double q0 = 0.5, e = 1.0 / 256.0, Hc = 0.95;
+        std::vector<double> qv{q0};
+        rc::ai::parts::Table T{std::span<const rc::manifest::ShapePart>(cp), true, -1.0f, 0.10f};
+        T.n_q = 1;
+        const auto at = [&](double q) { qv[0] = q; T.q = std::span<const double>(qv); return rc::ai::parts::beam_parts(0.3, -0.2, Hc, 0.50, 0.47, 0.4, T, span); };
+        const auto Pp = at(q0 + e), Pm = at(q0 - e), P0 = at(q0);
+        double worst = 0.0;
+        for (std::size_t k = 0; k < P0.size(); ++k)
+        {
+            CHECK(P0[k].Jq.cols() == 1);
+            Eigen::Matrix<double, 7, 1> a, b;
+            a << Pp[k].c, Pp[k].yaw, Pp[k].half;
+            b << Pm[k].c, Pm[k].yaw, Pm[k].half;
+            worst = std::max(worst, ((a - b) / (2.0 * e) - P0[k].Jq.col(0)).cwiseAbs().maxCoeff());
+        }
+        const double tol = Hc * std::ldexp(1.0, -25) / e;
+        CHECK(worst <= tol);
+        std::printf("  chair Jq worst %.3g (tolerance %.3g)\n", worst, tol);
+        // the seat slab moves with q (∂zc/∂q = H) and keeps its thickness (∂hz/∂q = 0, 2·hz = 0.066·H up to float rounding)
+        if (P0.size() == 6)
+        {
+            CHECK(near(P0[0].Jq(2, 0), Hc, 1e-12) and P0[0].Jq(6, 0) == 0.0);
+            CHECK(near(2.0 * P0[0].half.z(), 0.066 * Hc, 1e-6));
+        }
+    }
     // 4. the cliff
     {
         const int n = 12;

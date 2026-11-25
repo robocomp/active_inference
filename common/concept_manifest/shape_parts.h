@@ -21,8 +21,10 @@
 namespace rc::manifest {
 
 // Fractions of the fitted (w, h, H). z0_ref / z1_ref ≥ 0: that boundary is the class PROPORTION of that index (K2a-L,
-// [[shape.proportion]] below), and z0_f / z1_f hold the proportion's midpoint; −1: a fixed fraction.
-struct ShapePart { std::string name; float x_f, y_f, w_f, h_f, z0_f, z1_f; int z0_ref = -1, z1_ref = -1; };
+// [[shape.proportion]] below) plus the fixed fraction z0_off / z1_off (K2b, the manifest's z0_off_f / z1_off_f: a chair's seat
+// underside is a slab thickness below its seat top), and z0_f / z1_f hold the proportion's midpoint + that offset; −1: a fixed
+// fraction (offset 0).
+struct ShapePart { std::string name; float x_f, y_f, w_f, h_f, z0_f, z1_f; int z0_ref = -1, z1_ref = -1; float z0_off = 0.0f, z1_off = 0.0f; };
 
 // A [[shape.proportion]]: a fraction whose real value varies across the class, over [lo, hi] (class knowledge, `source`
 // mandatory). The model carries it as a ρ = 1 latent, mean (lo + hi)/2, variance (hi − lo)²/12 (spec G4). K2a-L.
@@ -91,8 +93,9 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
     std::ifstream f(path);
     if (not f) throw std::runtime_error(std::format("{}: cannot open the manifest to read [[shape.part]]", path));
     const std::vector<ShapeProportion> props = load_shape_proportions(path);
-    struct Raw { std::string name; std::string v[6]; bool has[6] = {}, quoted[6] = {}; int index = 0; };
+    struct Raw { std::string name; std::string v[6], off[2]; bool has[6] = {}, quoted[6] = {}, has_off[2] = {}; int index = 0; };
     static constexpr std::string_view keys[6] = {"x_f", "y_f", "w_f", "h_f", "z0_f", "z1_f"};
+    static constexpr std::string_view off_keys[2] = {"z0_off_f", "z1_off_f"};
     std::vector<Raw> raws;
     bool in_part = false;
     std::string line;
@@ -120,6 +123,14 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
         else if (const auto c = val.find('#'); c != std::string_view::npos) val = detail::trim(val.substr(0, c));
         Raw& r = raws.back();
         if (key == "name") { r.name = val; continue; }
+        for (int j = 0; j < 2; ++j)
+            if (key == off_keys[j])
+            {
+                if (r.has_off[j])
+                    throw std::runtime_error(std::format("{}: [[shape.part]] '{}': duplicate key {}",
+                                                         path, r.name.empty() ? std::format("#{}", r.index) : r.name, off_keys[j]));
+                r.off[j] = val; r.has_off[j] = true;
+            }
         for (int i = 0; i < 6; ++i)
             if (key == keys[i])
             {
@@ -135,7 +146,17 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
         const std::string who = r.name.empty() ? std::format("#{}", r.index) : r.name;
         float x[6];
         int ref[6] = {-1, -1, -1, -1, -1, -1};
-        float lo[6], hi[6];
+        float lo[6], hi[6], off[2] = {0.0f, 0.0f};
+        for (int j = 0; j < 2; ++j)
+        {   // an offset from a proportion (K2b): a number, and only on a boundary that names one
+            if (not r.has_off[j]) continue;
+            if (not r.quoted[4 + j])
+                throw std::runtime_error(std::format("{}: [[shape.part]] '{}': {} needs {} to name a proportion", path, who, off_keys[j], keys[4 + j]));
+            const auto p = detail::parse_float(r.off[j]);
+            if (not p or not std::isfinite(*p))
+                throw std::runtime_error(std::format("{}: [[shape.part]] '{}': key {} is not a number ('{}')", path, who, off_keys[j], r.off[j]));
+            off[j] = *p;
+        }
         for (int i = 0; i < 6; ++i)
         {
             if (not r.has[i])
@@ -147,7 +168,8 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
                 if (it == props.end())
                     throw std::runtime_error(std::format("{}: [[shape.part]] '{}': {} names an undeclared proportion '{}'", path, who, keys[i], r.v[i]));
                 ref[i] = int(it - props.begin());
-                x[i] = 0.5f * (it->lo + it->hi); lo[i] = it->lo; hi[i] = it->hi;
+                const float o = off[i - 4];
+                x[i] = 0.5f * (it->lo + it->hi) + o; lo[i] = it->lo + o; hi[i] = it->hi + o;
                 continue;
             }
             const auto p = detail::parse_float(r.v[i]);
@@ -157,9 +179,17 @@ inline std::vector<ShapePart> load_shape_parts(const std::string& path)
         }
         if (not (x[2] > 0.0f)) throw std::runtime_error(std::format("{}: [[shape.part]] '{}': w_f must be > 0", path, who));
         if (not (x[3] > 0.0f)) throw std::runtime_error(std::format("{}: [[shape.part]] '{}': h_f must be > 0", path, who));
-        // over the whole range of a proportion: z1 above z0 for every value it may take
-        if (not (lo[5] > hi[4])) throw std::runtime_error(std::format("{}: [[shape.part]] '{}': z1_f must exceed z0_f", path, who));
-        out.push_back({r.name, x[0], x[1], x[2], x[3], x[4], x[5], ref[4], ref[5]});
+        // over the whole range of a proportion: z1 above z0 for every value it may take. Both on the SAME proportion, they move
+        // together, so the offsets alone decide (K2b: a slab of fixed thickness under the seat top)
+        const bool same = ref[4] >= 0 and ref[4] == ref[5];
+        if (not (same ? off[1] > off[0] : lo[5] > hi[4]))
+            throw std::runtime_error(std::format("{}: [[shape.part]] '{}': z1_f must exceed z0_f", path, who));
+        // a boundary shifted off a proportion stays a fraction of the box over the proportion's whole range
+        for (int i = 4; i < 6; ++i)
+            if (ref[i] >= 0 and (lo[i] < 0.0f or hi[i] > 1.0f))
+                throw std::runtime_error(std::format("{}: [[shape.part]] '{}': {} + {} leaves [0, 1] over the proportion's range", path, who,
+                                                     keys[i], off_keys[i - 4]));
+        out.push_back({r.name, x[0], x[1], x[2], x[3], x[4], x[5], ref[4], ref[5], off[0], off[1]});
     }
     return out;
 }

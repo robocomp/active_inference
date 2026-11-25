@@ -50,8 +50,10 @@ struct Table
     std::span<const double> q;
     int n_q = 0;                                       // the model's proportion count (the beam parts' Jq columns); 0 ⇒ no Jq
 
-    float z0_of(const rc::manifest::ShapePart& P) const { return P.z0_ref >= 0 and std::size_t(P.z0_ref) < q.size() ? float(q[std::size_t(P.z0_ref)]) : P.z0_f; }
-    float z1_of(const rc::manifest::ShapePart& P) const { return P.z1_ref >= 0 and std::size_t(P.z1_ref) < q.size() ? float(q[std::size_t(P.z1_ref)]) : P.z1_f; }
+    // K2b: a boundary on a proportion is q[k] + its fixed offset (∂/∂q_k = 1, so the beam Jq below is unchanged); without q the
+    // stored z*_f already holds midpoint + offset.
+    float z0_of(const rc::manifest::ShapePart& P) const { return P.z0_ref >= 0 and std::size_t(P.z0_ref) < q.size() ? float(q[std::size_t(P.z0_ref)] + double(P.z0_off)) : P.z0_f; }
+    float z1_of(const rc::manifest::ShapePart& P) const { return P.z1_ref >= 0 and std::size_t(P.z1_ref) < q.size() ? float(q[std::size_t(P.z1_ref)] + double(P.z1_off)) : P.z1_f; }
 
     bool has_panel() const { return panel_h_m > 0.0f; }
     bool model_uses_parts() const { return solid_is_parts and not parts.empty(); }

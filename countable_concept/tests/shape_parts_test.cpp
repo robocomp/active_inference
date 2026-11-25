@@ -91,6 +91,45 @@ int main()
             CHECK(near(T[1].cy + 0.5f * T[1].sy, 0.5f * 0.733f, 0.001f));   // the tank's back is the box's back
         }
     }
+    // ── K2b: the chair, six parts on the seat_top proportion, two boundaries with a fixed offset from it (z*_off_f) ──
+    {
+        const auto cs = load_shape_parts(mf("chair"));
+        CHECK(cs.size() == 6 and load_solid_is_parts(mf("chair")));
+        if (cs.size() == 6)
+        {
+            // the seat slab: both boundaries name seat_top, the lower one 0.066 below it; midpoint (0.377 + 0.667)/2 = 0.522
+            CHECK(cs[0].name == "seat" and cs[0].z0_ref == 0 and cs[0].z1_ref == 0);
+            CHECK(near(cs[0].z0_off, -0.066f, 1e-6f) and cs[0].z1_off == 0.0f);
+            CHECK(near(cs[0].z0_f, 0.522f - 0.066f, 1e-6f) and near(cs[0].z1_f, 0.522f, 1e-6f));
+            CHECK(cs[1].name == "back" and cs[1].z0_ref == 0 and cs[1].z1_ref == -1 and cs[1].z1_f == 1.0f);
+            for (int k = 2; k < 6; ++k)
+                CHECK(cs[k].z0_ref == -1 and cs[k].z1_ref == 0 and near(cs[k].z1_off, -0.066f, 1e-6f));
+            // laid on a 0.50 x 0.465 x 0.905 box: legs up to the seat's underside, the backrest from the seat top to H
+            const auto C = rc::countable::carve_parts_for(0.50f, 0.465f, 0.905f, cs, std::nullopt);
+            CHECK(C.size() == 6);
+            if (C.size() == 6)
+            {
+                const float seat_top = 0.522f * 0.905f, under = (0.522f - 0.066f) * 0.905f;
+                CHECK(near(C[0].z0, under, 1e-4f) and near(C[0].z1, seat_top, 1e-4f));
+                CHECK(near(C[1].z0, seat_top, 1e-4f) and near(C[1].z1, 0.905f, 1e-4f));
+                for (int k = 2; k < 6; ++k) CHECK(C[k].z0 == 0.0f and near(C[k].z1, under, 1e-4f));
+                CHECK(near(C[1].cy + 0.5f * C[1].sy, 0.5f * 0.465f, 1e-4f));            // the backrest's back is the box's back
+                CHECK(near(C[0].cy - 0.5f * C[0].sy, -0.5f * 0.465f, 1e-4f));           // the seat's front is the box's front
+                CHECK(near(C[0].cy + 0.5f * C[0].sy, C[1].cy - 0.5f * C[1].sy, 1e-4f)); // the seat meets the backrest
+            }
+        }
+        // the offset's grammar: only on a boundary that names a proportion; z1 above z0 for every value (same proportion ⇒ by the
+        // offsets alone); every boundary inside [0, 1] over the whole range
+        const std::string prop = "[[shape.proportion]]\nname = \"p\"\nlo = 0.3\nhi = 0.6\nsource = \"s\"\n";
+        const std::string row = "[[shape.part]]\nname = \"r\"\nx_f = 0\ny_f = 0\nw_f = 1\nh_f = 1\n";
+        CHECK(not throws(prop + row + "z0_f = \"p\"\nz0_off_f = -0.05\nz1_f = \"p\"\n"));
+        CHECK(throws(prop + row + "z0_f = 0.1\nz0_off_f = -0.05\nz1_f = \"p\"\n"));          // offset on a fixed fraction
+        CHECK(throws(prop + row + "z0_f = \"p\"\nz1_f = \"p\"\nz1_off_f = -0.01\n"));        // z1 below z0 on the same proportion
+        CHECK(throws(prop + row + "z0_f = \"p\"\nz1_f = \"p\"\n"));                           // zero thickness
+        CHECK(throws(prop + row + "z0_f = \"p\"\nz0_off_f = -0.35\nz1_f = \"p\"\n"));        // below the floor at lo
+        CHECK(throws(prop + row + "z0_f = \"p\"\nz0_off_f = abc\nz1_f = \"p\"\n"));          // not a number
+        CHECK(throws(prop + row + "z0_f = \"p\"\nz0_off_f = -0.05\nz0_off_f = -0.04\nz1_f = \"p\"\n"));   // duplicate
+    }
     // block ended by a following table, comment inside, shuffled keys
     {
         const auto v = load_shape_parts(tmp_manifest(

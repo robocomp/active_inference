@@ -68,7 +68,7 @@ template <class V> void fields(V& v, rc::ai::beam::BeamConfig& x)
 template <class V> void fields(V& v, rc::manifest::ShapePart& x)
 {
     v("name", x.name); v("x_f", x.x_f); v("y_f", x.y_f); v("w_f", x.w_f); v("h_f", x.h_f); v("z0_f", x.z0_f); v("z1_f", x.z1_f);
-    v("z0_ref", x.z0_ref); v("z1_ref", x.z1_ref);
+    v("z0_ref", x.z0_ref); v("z1_ref", x.z1_ref); v("z0_off", x.z0_off); v("z1_off", x.z1_off);
 }
 template <class V> void fields(V& v, rc::manifest::ShapeProportion& x)
 { v("name", x.name); v("lo", x.lo); v("hi", x.hi); v("source", x.source); }
