@@ -42,6 +42,8 @@ echo "$DEF at ($OX, $OY) -> $ROOM: LEGS=\"$LEGS\", visit after leg $N; countable
 CFGS=""
 for a in $CONCEPT_AGENTS; do
   c=$CONCEPT_WT/$a/etc/config.toml; cp $c $c.p1_bak; CFGS="$CFGS $c"
+  # an engine without the replay tap (main's, for the live A/B against the old engine) has no ReplayDump key: no dumps then
+  grep -q '^ReplayDump' $c || { echo "$a: no Model.ReplayDump key in $c (engine without the replay tap): no dumps"; continue; }
   sed -i 's/^ReplayDump = false/ReplayDump = true /' $c
   grep -q '^ReplayDump = true' $c || { echo "could not set Model.ReplayDump in $c"; for f in $CFGS; do mv -f $f.p1_bak $f; done; exit 1; }
 done

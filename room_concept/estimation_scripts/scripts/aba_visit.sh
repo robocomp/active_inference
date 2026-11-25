@@ -141,7 +141,10 @@ visit() {   # seg world_x world_y world_yaw
 # once the agent writes an offer row stamped after this script started. Wait for it (<= NODE_WAIT_S, 120); if none comes the
 # claim query is still asked and the report gives NO VERDICT, as before.
 T_START=$(now_ms); NODE_WAIT_S=${NODE_WAIT_S:-120}
-has_instance() { awk -F, -v t="$T_START" 'NR > 1 && $1 + 0 >= t { f = 1; exit } END { exit !f }' "$OFFERS" 2>/dev/null; }
+# an engine without offers (main's, for the live A/B) shows its instance in ai2_log.csv instead (pkt_ts, column 4, epoch ms)
+AI2=$CWT/${CLS}_concept/etc/ai2_log.csv
+has_instance() { awk -F, -v t="$T_START" 'NR > 1 && $1 + 0 >= t { f = 1; exit } END { exit !f }' "$OFFERS" 2>/dev/null ||
+                 awk -F, -v t="$T_START" 'NR > 1 && $4 + 0 >= t { f = 1; exit } END { exit !f }' "$AI2" 2>/dev/null; }
 for i in $(seq 1 $((NODE_WAIT_S * 2))); do has_instance && break; sleep 0.5; done
 if has_instance; then log "instance up after $(( ($(now_ms) - T_START) / 1000 )) s"
 else log "NO $CLS instance after ${NODE_WAIT_S}s: claiming anyway (A1 will have no verdict)"; fi
