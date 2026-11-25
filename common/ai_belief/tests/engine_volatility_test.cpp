@@ -11,6 +11,8 @@
 //       0.0027 moves/day, 0.5 m, dt 0.1 s ⇒ π = 3.125e-9 per step, q₀ = π·0.25 = 7.8e-10 m²): a static box keeps Q in
 //       [n₀/(n₀ + n)·q₀, q₀] (it can only lower the statistic below the prior mean, and the hyperprior bounds that), and a 0.10 m
 //       shove raises Q to at least a quarter of the shove's share δ²/(n₀ + n) — the Gaussian statistic would leave it at q₀.
+//   (7) F1 round 7 A1: a refuted-ray-shaped θ-only term the stayed fit can free inside its prior is NOT a move (the evidence
+//       read at the stayed posterior mode); a Gaussian term saying the object is 0.20 m off IS one.
 // Run: ./engine_volatility_test
 #include <cmath>
 #include <cstdio>
@@ -34,6 +36,30 @@ struct BedBox : toy::ToyBox
         v.jump_var = {0.25, 0.25, 0.01, 0.04, 0.04, 0.25};   // 0.5 m, the class size stds (0.10 H, 0.20 w/h), 0.5 rad
         v.jump_prob = kBedPi;
         return v;
+    }
+};
+// (7) a θ-only term shaped like a REFUTED LiDAR ray (bed_5 cycles 1708/1709, p1_bed): n rays crossing the box `depth` deep at
+// σ_s and ending behind it, E = −n·log Φ((a − cx)/s) with a = −depth, its Fisher curvature n(φ/s)²[1/Φ + 1/(1 − Φ)] (the
+// beam's I_d); `quad` instead: a Gaussian term saying cx = 0.20 (a real 0.20 m move, n points at σ 1 cm).
+struct RefutedBox : BedBox
+{
+    double a = -0.02, s_ray = 0.01, n = 5.0;
+    bool quad = false;
+    void accumulate_extra(const State& st, const Frame&, MatN& I, VecN& b, double* E) const
+    {
+        const double cx = double(st.cx);
+        if (quad)
+        {
+            const double lam = n / (0.01 * 0.01), r = cx - 0.20;
+            I(0, 0) += float(lam); b(0) += float(-lam * r);
+            if (E) *E += 0.5 * lam * r * r;
+            return;
+        }
+        const double z = (a - cx) / s_ray, phi = std::exp(-0.5 * z * z) / std::sqrt(2.0 * M_PI);
+        const double Phi = 0.5 * std::erfc(-z / std::sqrt(2.0)), Phic = 0.5 * std::erfc(z / std::sqrt(2.0));
+        I(0, 0) += float(n * (phi / s_ray) * (phi / s_ray) * (1.0 / Phi + 1.0 / Phic));
+        b(0) += float(-n * phi / (Phi * s_ray));                       // b = −∂E/∂cx
+        if (E) *E += -n * std::log(Phi);
     }
 };
 using Engine = rc::ai::engine::PersistentEngine<VolBox>;
@@ -156,6 +182,35 @@ int main()
         const double Qm = std::exp(e.log_volatility(a)(0)), share = 0.10 * 0.10 / (n0 + 0.995 * n + 1.0);
         std::printf("      shoved 0.10 m: Q_cx %.3e (omega %.2f -> %.2f) ; the shove's share %.3e\n", Qm, std::log(Qs), std::log(Qm), share);
         CHECK(Qm >= 0.25 * share);
+    }
+    // (7) F1 round 7 A1: the move evidence of a non-quadratic term is read at the STAYED POSTERIOR MODE. Five refuted rays 2σ_s
+    //     deep under a 2 cm prior on cx (the LiDAR's ego-motion reach on bed_5): the stayed fit frees them inside its prior
+    //     (cx ≈ −3.4 cm), so P(moved) must stay at the prior level (the factor at the PREDICTED state put the data's mean
+    //     ~0.2 m away and gave log BF 26.5, P(moved) 0.999). A Gaussian term saying cx = 0.20 (a real move, 10 σ of the stayed prior) is detected.
+    for (const bool quad : {false, true})
+    {
+        RefutedBox a;
+        a.s = toy::ToyState{0.f, 0.f, 0.8f, 0.6f, 0.4f, 0.f};
+        a.prior_mean << 0.f, 0.f, 0.8f, 0.6f, 0.4f, 0.f;
+        a.Sigma = a.prior_diag.asDiagonal();
+        const auto vc = a.volatility();
+        for (int i = 0; i < N; ++i) a.q_diag(i) = float(vc.jump_prob * vc.jump_var[std::size_t(i)]);
+        auto pts = toy::surface_points(a.s, 2);
+        toy::ToyFrame fr = toy::make_frame(pts, {});
+        fr.R.assign(pts.size(), 1.0f);                                  // the camera barely informs (σ 1 m per point)
+        rc::ai::engine::PersistentEngine<RefutedBox> e;
+        a.n = 0.0;                                                      // the first update: no extra term
+        e.update(a, fr, cam_latents());
+        a.s = toy::ToyState{0.f, 0.f, 0.8f, 0.6f, 0.4f, 0.f};
+        e.P_for_test().row(0).setZero(); e.P_for_test().col(0).setZero();
+        e.P_for_test()(0, 0) = 0.02 * 0.02;                             // the stayed prior on cx: 2 cm
+        a.set_covariance(e.Sigma_theta());
+        a.n = 5.0; a.quad = quad;
+        e.update(a, fr, cam_latents());
+        std::printf("  (7) %s: cx %+.4f, log BF %.3f, P(moved) %.3e\n", quad ? "real 0.20 m move (Gaussian term)" :
+                    "5 refuted rays 2 sigma_s deep", double(a.s.cx), e.last_jump_log_bf(), e.last_jump_p());
+        if (quad) CHECK(e.last_jump_p() > 0.5);
+        else      CHECK(e.last_jump_p() < 1e-6);
     }
     std::printf(bad ? "engine_volatility_test: %d FAILED\n" : "engine_volatility_test: OK\n", bad);
     return bad != 0;

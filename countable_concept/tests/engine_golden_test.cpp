@@ -30,6 +30,8 @@
 // the data's gradient may legitimately be.
 // Re-recorded for F1 round 7 A2: the move evidence in information form on the joint x (no singular S_s solve), which changes
 // P(moved), hence Q, in the 6 cm moved-box phase.
+// Re-recorded for F1 round 7 A1: the move evidence reads the data linearised at the stayed posterior mode (written about x̄), so
+// P(moved), hence Q, moves again in the moved-box phase.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)

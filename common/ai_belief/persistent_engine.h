@@ -288,9 +288,9 @@ inline bool same_physical_wall(const WallAnchor& a, const WallAnchor& b)
 
 namespace detail
 {
-// The move evidence of one update (F1 round 6c; round 7 A2: information form). The data of the update, linearised at the
-// predicted joint state x̄ = (θ̄, b̄), are a Gaussian factor on x with information Λ and gradient η (every channel, at the first
-// linearisation: pu::detail::information). Under "stayed" x ~ N(x̄, P̄); under "moved" the θ block also takes a step v ~ N(0, M),
+// The move evidence of one update (F1 round 6c; round 7 A2: information form). The data of the update are a Gaussian factor on x
+// about the predicted joint state x̄ = (θ̄, b̄), with information Λ and gradient η (every channel; linearised at the stayed
+// posterior mode, round 7 A1, see update()). Under "stayed" x ~ N(x̄, P̄); under "moved" the θ block also takes a step v ~ N(0, M),
 // i.e. x ~ N(x̄, P̄_m), P̄_m = P̄ + E M Eᵀ (E = the θ rows). Each hypothesis's evidence is
 //   log Z(P) = ½ ηᵀ P (𝟙 + ΛP)⁻¹ η − ½ log det(𝟙 + ΛP),
 // so log BF = log Z(P̄_m) − log Z(P̄), p = π BF / (π BF + 1 − π), and under "moved"
@@ -773,12 +773,6 @@ public:
         int steps = 0;
         bool undamped_checked = false;                                     // the λ = 0 proposal at this linearisation was tested
         build(theta, b_);                                                  // step 2: x̃_0 = (θ_0, b̄)
-        // the jump statistic's view of this update's data (learn_volatility): the data as a factor on the joint x — information Λ
-        // and gradient η at the PREDICTED state (θ̄, b̄), every channel, so the latents' predicted covariance (b_cam, b_L, e, u, s)
-        // is part of what the data may legitimately say (a shared sensor error is not a move), independent of how far the prior
-        // lets the GN follow a shove.
-        MatJd Lambda_data; VecXd eta_data;
-        pu::detail::information<N, K>(chans(), theta_only, Lambda_data, eta_data);
         while (steps < cfg.iters_max)
         {
             VecXd x_tilde; x_tilde << theta, (consistent ? b_post : b_);   // consistent: (θ_k, b_k); restart: (θ_k, b̄)
@@ -891,6 +885,22 @@ public:
         // Step 4 at the returned θ (consistent: at θ + B b_post; restart: b̄), plus the last ACCEPTED step's outer product on θθ
         // (zero if none): a frame that stopped while still moving carries its last move as uncertainty.
         build(theta_post, consistent ? b_post : b_);
+        // The jump statistic's view of this update's data (learn_volatility, F1 round 7 A1): the data as a Gaussian factor on the
+        // joint x, LINEARISED AT THE STAYED POSTERIOR MODE x̂ = (θ̂, b̂) — the Laplace point of the stayed evidence — and written as a
+        // factor about x̄: information Λ̂ and gradient η̂ + Λ̂(x̂ − x̄). For data that are quadratic in x this is the factor at x̄ bit
+        // for bit (the evidence does not depend on how far the prior let the GN follow a shove). For data that are not, the stayed
+        // evidence is only right at its own mode, and the factor at x̄ extrapolates: bed_5 (p1_bed) cycles 1708/1709, LiDAR-only
+        // while driving, 14 rays crossing the box's top side edge 1–3.4 σ_s deep and ending on the wall behind (refuted, E up to
+        // 7.6 each). Their gradient is large and their curvature small (a hit/miss tail, I_d ≪ g²), so the factor at x̄ put the
+        // data's mean ~0.8 m / 0.9 rad away — reachable only by the 0.5 m slab — and log BF = 36 / 22 (P(moved) 1.0 / 0.94). The
+        // stayed fit frees them inside its own prior (the LiDAR's ego-motion latent u_L, σ 6 cm / 4°): at x̂ the same factor gives
+        // log BF −3.3 / −2.5.
+        MatJd Lambda_data; VecXd eta_data;
+        pu::detail::information<N, K>(chans(), theta_only, Lambda_data, eta_data);
+        {
+            VecXd x_hat; x_hat << theta_post, (consistent ? b_post : b_);
+            eta_data += Lambda_data * wrapped(x_hat - x_bar);
+        }
         P_ = pu::joint_cov<N, K>(P_bar, chans(), theta_only);
         const VecNd post_var = P_.diagonal().template head<N>();          // the model's posterior, before the solver's last-step term
         P_.template topLeftCorner<N, N>() += d_last * d_last.transpose();
