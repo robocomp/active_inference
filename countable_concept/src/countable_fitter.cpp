@@ -537,9 +537,25 @@ std::function<float(const Eigen::Vector3f&)> CountableFitter::build_membership(c
         label_components_ = rc::make_membership_components(project, mm, f, cfg_.existence_sensor_sigma_m, sigma_chain,
                                                            mot_pos_var, sl.confidence);
     // The persistent label (spec 7c.8 a0): the same components, floored into [ε_px, 1 − ε_px]; nullopt off the image.
+    // F1 round 7 B: the depth ordering. The mask labels the surface the camera SEES; a return beyond the object along the camera's
+    // line of sight is hidden by it and carries the camera's label only as far as it is not behind (rc::behind_object_probability,
+    // the belief's box with its Σ; σ_m² = range σ² + chain σ² + ego-motion variance + the model's surface σ²).
     if (persistent_label and cfg_.lidar_measures_on_gated)
+    {
+        const Eigen::Matrix3d Rz = zed_T_room.topLeftCorner<3, 3>().cast<double>();
+        const Eigen::Vector3d cam_room = -Rz.transpose() * zed_T_room.topRightCorner<3, 1>().cast<double>();
+        const auto& bs = inst.ai2_belief.state();
+        const auto& S = inst.ai2_belief.covariance();
+        rc::LosBox box{bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw, S(0, 0), S(1, 1), S(2, 2), S(3, 3), S(4, 4)};
+        const double sig_m = std::sqrt(double(cfg_.existence_sensor_sigma_m) * cfg_.existence_sensor_sigma_m
+                                       + double(sigma_chain) * sigma_chain + double(mot_pos_var)
+                                       + double(cfg_.model_sigma_m) * cfg_.model_sigma_m);
+        auto behind = [cam_room, box, sig_m](const Eigen::Vector3f& p)
+        { return rc::behind_object_probability(cam_room, p.cast<double>(), box, sig_m); };
         *persistent_label = rc::beam_label(rc::make_persistent_label(project, mm, f, cfg_.existence_sensor_sigma_m, sigma_chain,
-                                                                     mot_pos_var, sl.confidence, cfg_.mask_pixel_error_rate));
+                                                                     mot_pos_var, sl.confidence, cfg_.mask_pixel_error_rate,
+                                                                     std::move(behind)));
+    }
     return rc::make_membership(std::move(project), mm, f, cfg_.existence_sensor_sigma_m, sigma_chain, mot_pos_var,
                                sl.confidence);
 }

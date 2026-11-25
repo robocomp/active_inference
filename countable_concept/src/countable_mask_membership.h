@@ -14,6 +14,8 @@
 
 #include <Eigen/Dense>
 
+#include "countable_depth_order.h"
+
 namespace rc {
 
 class MaskMembership
@@ -78,8 +80,12 @@ struct PersistentLabel
     double m = 0.0;
     float  q = 0.f;
 };
+// The persistent label with the depth ordering: the camera's label q applies to the return only as far as the return is NOT
+// behind the object along the camera ray, q_eff = q·(1 − P(behind)), m = ε + (1 − 2ε)·q_eff. An empty p_behind is the plain
+// make_persistent_label.
 std::function<std::optional<PersistentLabel>(const Eigen::Vector3f&)> make_persistent_label(
     Projector proj, const MaskMembership& mm, float f_px, float sigma_range_m, float sigma_chain_m,
-    float mot_pos_var_m2, float pi_mask, double eps_px);
+    float mot_pos_var_m2, float pi_mask, double eps_px,
+    std::function<double(const Eigen::Vector3f&)> p_behind = {});
 
 }  // namespace rc

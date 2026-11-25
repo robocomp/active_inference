@@ -34,12 +34,16 @@
 //   the class permanence prior (F1 round 6; predict_period_s then keeps its default 0.1 s, the configs' AI2AgeNominalDtS).
 //   --seed-h-rule re-derives the seed's H with the birth rule (CountableBelief::seed_height, F1 round 6.2) from the dump's FIRST
 //   camera frame (the birth cloud itself is not recorded), at the recorded born pose.
+//   --depth-order CAM_Z re-labels every frame's staged rays with the depth ordering (F1 round 7 B, rc::behind_object_probability)
+//   against the belief the update starts from, the camera at (camera_xy, CAM_Z) (the ZED: 0.9775 m on Shadow); stderr gets
+//   one line per frame with the label mass before/after and the part within 5 cm of the staged wall (reporting only).
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
 // The last lines (stderr) are always the summary: the final θ and σ, the max σ per DOF over every event after the first update (predicts
 // included),
 // the total GN steps, and the max dth_live and dP_live over the whole dump.
+#include "countable_depth_order.h"
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -78,13 +82,15 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--seed-h-rule]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--seed-h-rule] [--depth-order CAM_Z]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
     std::string neighbour_manifests, standoff_manifests, permanence_manifests;
     bool seed_h_rule = false;
+    double depth_order_z = 0.0, depth_order_range_sigma = 0.03;   // --depth-order CAM_Z [RANGE_SIGMA] (F1 round 7 B)
+    long long depth_order_cycle = 0;
     long neighbours_without_class = 0;
     for (int i = 2; i < argc; ++i)
     {
@@ -95,6 +101,12 @@ int main(int argc, char** argv)
         if (k == "--standoff" and i + 1 < argc) { standoff_manifests = argv[++i]; continue; }
         if (k == "--permanence" and i + 1 < argc) { permanence_manifests = argv[++i]; continue; }
         if (k == "--seed-h-rule") { seed_h_rule = true; continue; }
+        if (k == "--depth-order" and i + 1 < argc)
+        {
+            const std::string_view v = argv[++i];
+            if (std::from_chars(v.data(), v.data() + v.size(), depth_order_z).ec != std::errc{}) { std::fprintf(stderr, "replay: bad --depth-order\n"); return 1; }
+            continue;
+        }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -183,6 +195,38 @@ int main(int argc, char** argv)
         track,
         [&](rc::CountableFrame& f)
         {
+            if (depth_order_z > 0.0 and not f.beam.m.empty() and f.camera_xy)
+            {   // F1 round 7 B: re-label the staged rays with the depth ordering against the belief this update starts from. The
+                // dump keeps m = ε + (1 − 2ε)q; q is recovered from it. The camera centre: the frame's camera_xy (the ZED at the
+                // update; live uses zed_T_room at the MASK stamp) at height depth_order_z; σ_m from the range σ, the frame's
+                // chain covariance and the model surface σ (live adds the mask's ego-motion variance, not in the dump).
+                const double eps = f.mask_error_rate;
+                const auto& bs = belief.state();
+                const auto& S = belief.covariance();
+                const rc::LosBox box{bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw, S(0, 0), S(1, 1), S(2, 2), S(3, 3), S(4, 4)};
+                const Eigen::Vector3d C(f.camera_xy->x(), f.camera_xy->y(), depth_order_z);
+                const double sm = std::sqrt(depth_order_range_sigma * depth_order_range_sigma
+                                            + 0.5 * double(f.chain_cov_xx + f.chain_cov_yy)
+                                            + double(belief.params().model_sigma_m) * belief.params().model_sigma_m);
+                double qs = 0.0, mw0 = 0.0, mw1 = 0.0, m0 = 0.0, m1 = 0.0;
+                for (std::size_t i = 0; i < f.beam.m.size(); ++i)
+                {
+                    const double q = (f.beam.m[i] - eps) / (1.0 - 2.0 * eps);
+                    const double pb = rc::behind_object_probability(C, f.beam.endpoints[i], box, sm);
+                    const double mn = rc::depth_ordered_label(q, pb, eps);
+                    if (f.wall.ok)
+                    {   // reporting only: the label mass within 5 cm of the staged wall line
+                        const double dw = double(f.wall.n.dot(f.beam.endpoints[i].head<2>().cast<float>() - f.wall.p));
+                        if (std::abs(dw) < 0.05) { mw0 += f.beam.m[i]; mw1 += mn; }
+                    }
+                    m0 += f.beam.m[i]; m1 += mn;
+                    f.beam.m[i] = mn;
+                    qs += q * (1.0 - pb);
+                }
+                f.beam.q_sum = qs;
+                std::fprintf(stderr, "depth_order: update %lld label mass %.3f -> %.3f, on the staged wall %.3f -> %.3f\n",
+                             (long long)depth_order_cycle++, m0, m1, mw0, mw1);
+            }
             if (sig2_cam_measured)
             {
                 const float yaw_std = std::sqrt(std::max(0.0f, f.sig2_cam[5]));
