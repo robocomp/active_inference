@@ -85,3 +85,149 @@ below the very template they were born with. NOMINAL: a generous envelope for do
 #                      rc::detect::p_detect, so declaring an envelope here would describe a model the
 #                      removal path does not consult. Fix the consumer first, then declare.
 # [sigma_star]       — chair_dof.h declares 3 of 3; that is a real demand and needs no manifest entry yet.
+
+# ══ The chair as a box-part class on the countable binary (shared-engine K2b, 2026-11-25) ══════════════════════════════════
+# Read by countable_concept only (chair_concept/etc/countable.toml). The legacy chair_concept agent reads the blocks above
+# ([model.geometry], [prior.template], [prior.placement], [prior.bounds]) and none of these; no value it reads was changed.
+# Every fraction and range below is CLASS KNOWLEDGE (dining-chair size guides and listings, cited per value), written and committed
+# before any replay or live run of a chair on the countable binary. None is from the Webots SimpleChair.
+#
+# θ = (cx, cy, H, w, h, yaw) is the chair's footprint box: w = overall width, h = overall depth (front of the seat to the back of
+# the backrest), H = the top of the backrest. +y is the BACK (the backrest side), as for every countable class.
+#
+# Sources (all dining chairs; "listing" = a retailer's product sheet, a sample, not a standard):
+#   [IKEA]  IKEA, "Dining chair size guide for your home" (ikea.co.id/en/inspirations/dining-chair-size-guide-for-your-home):
+#           seat height "16–19 in (40–48 cm) from floor to seat"; seat width "about 15–20 inches (39–50 cm)"; seat depth "measured
+#           from the front edge of the seat to the backrest", "15–18 in (39–45 cm)"; overall depth "17–20 in (42–51 cm), depending on
+#           legs and backrest"; a listed height "usually means the height from the floor to the top of the backrest".
+#   [LAKE]  Lakeland Furniture, "The Ultimate Guide to Dining Chair Size, Height & Width" (lakeland-furniture.co.uk/blog/post/
+#           blog-post-dining-chair-size-height-width): "Seat height: 45–50 cm", "Overall height: 75–95 cm", "Chair width: 45–55 cm",
+#           "Seat depth: 40–50 cm".
+#   [A2Z]   The A2Z Furniture "Dexter" high-back dining chair listing (thea2zfurniture.com/products/dexter-dining-chair): 106 cm high,
+#           the tall end of the class (high-back models), above [LAKE]'s 95 cm.
+#   [CUSH]  upholstered dining-seat thickness in retailer listings (read through a web-search summary, the pages were not each
+#           opened): a bouclé chair "Seat Thickness: 5 cm"; a padded kitchen chair "6cm of plush foam" (Costway); "2.7 inches"
+#           (Nathan James bouclé seagrass chair) and "2.8 in" (17 Stories velvet chair), about 7 cm ⇒ 5–7 cm, mid 6 cm. A bare
+#           wooden seat is thinner (no source found); the slab is the upholstered seat.
+#   [LEG]   Stavros Decor, "wooden legs for a chair" (stavrosdecor.com/articles/…): hardwood dining-chair leg, square section,
+#           "32 mm" minimum, "36–40 mm" optimal ⇒ 38 mm.
+# Mid values used to turn absolute sizes into fractions of θ: w = 0.50 m (chair width 45–55 cm [LAKE]), h = 0.465 m (overall
+# depth 42–51 cm [IKEA]), H = 0.905 m (overall height 0.75–1.06 m [LAKE], [A2Z]).
+
+[shape]
+from = "nominal"
+solid = "parts"   # the [[shape.part]] rows below ARE the model's solid (camera SDF, beam parts, carve): seat, backrest, four legs
+layer_spread_m = [
+    0.02,   # cx: the layers share the backrest's back, so the narrower seat-depth layer sits about half of Δ_h forward; room-frame cx/cy
+    0.02,   # cy: as cx
+    0.0,    # H: not a layer DOF: the backrest top is the top every sensor sees
+    0.055,  # w: overall chair width (45–55 cm, mid 0.50 [LAKE]) vs seat width (39–50 cm, mid 0.445 [IKEA])
+    0.045,  # h: overall depth (42–51 cm, mid 0.465 [IKEA]) vs seat depth to the backrest (39–45 cm, mid 0.42 [IKEA])
+    0.0,    # yaw: every layer shares the chair's axes
+]
+layer_spread_source = "dining-chair size guides: IKEA (seat width 39–50 cm, seat depth to the backrest 39–45 cm, overall depth 42–51 cm) and Lakeland Furniture (chair width 45–55 cm); Δ = the difference of the mid values of the outer and the seat layer. Not from the Webots SimpleChair."
+
+# ── The parts (fractions of θ; a z boundary named "seat_top" is the class proportion below, *_off_f a fixed fraction added to it) ──
+#   seat slab : full width; depth from the front to the backrest's front face (h_f 1 − 0.097 = 0.903, y_f = −0.097/2);
+#               z from seat_top − 0.066 to seat_top. 0.066 = 6 cm [CUSH] / 0.905 m.
+#   backrest  : full width; depth 0.097 = (0.465 − 0.42)/0.465, the overall depth minus the seat depth [IKEA] mid values, at the back
+#               (y_f = 0.5 − 0.097/2 = 0.4515); z from seat_top to H. Its uprights / back legs are inside it.
+#   legs      : 38 mm square [LEG]: w_f = 0.038/0.50 = 0.076, h_f = 0.038/0.465 = 0.082, at the corners
+#               (x_f = ±(0.5 − 0.038), y_f = ±(0.5 − 0.041)); z from the floor to the seat's underside (seat_top − 0.066).
+
+[[shape.part]]
+name = "seat"
+x_f = 0.0
+y_f = -0.0485
+w_f = 1.0
+h_f = 0.903
+z0_f = "seat_top"
+z0_off_f = -0.066
+z1_f = "seat_top"
+why = "upholstered seat slab, 5–7 cm [CUSH]; depth to the backrest [IKEA]"
+
+[[shape.part]]
+name = "back"
+x_f = 0.0
+y_f = 0.4515
+w_f = 1.0
+h_f = 0.097
+z0_f = "seat_top"
+z1_f = 1.0
+why = "backrest: overall depth minus seat depth [IKEA]; from the seat top to the chair's top (H, the listed height [IKEA])"
+
+[[shape.part]]
+name = "leg_front_left"
+x_f = -0.462
+y_f = -0.459
+w_f = 0.076
+h_f = 0.082
+z0_f = 0.0
+z1_f = "seat_top"
+z1_off_f = -0.066
+why = "38 mm square hardwood leg [LEG]"
+
+[[shape.part]]
+name = "leg_front_right"
+x_f = 0.462
+y_f = -0.459
+w_f = 0.076
+h_f = 0.082
+z0_f = 0.0
+z1_f = "seat_top"
+z1_off_f = -0.066
+why = "38 mm square hardwood leg [LEG]"
+
+[[shape.part]]
+name = "leg_back_left"
+x_f = -0.462
+y_f = 0.459
+w_f = 0.076
+h_f = 0.082
+z0_f = 0.0
+z1_f = "seat_top"
+z1_off_f = -0.066
+why = "38 mm square hardwood leg [LEG]"
+
+[[shape.part]]
+name = "leg_back_right"
+x_f = 0.462
+y_f = 0.459
+w_f = 0.076
+h_f = 0.082
+z0_f = 0.0
+z1_f = "seat_top"
+z1_off_f = -0.066
+why = "38 mm square hardwood leg [LEG]"
+
+# ── The proportion (spec G4, K2a-L): the seat top as a fraction of H. It sets the seat AND the backrest's height (back = H − seat_top),
+# the two boundaries a chair genuinely varies on. Uniform over the class range ⇒ mean (lo + hi)/2, σ = (hi − lo)/√12.
+#   seat top 0.40–0.50 m (IKEA 40–48 cm, Lakeland 45–50 cm); overall height 0.75 m (Lakeland's low end) to 1.06 m (A2Z high back)
+#   ⇒ lo = 0.40 / 1.06 = 0.377 (lowest seat on the tallest chair), hi = 0.50 / 0.75 = 0.667 (highest seat on the shortest chair).
+#   Δ = 0.290, σ = 0.084, midpoint 0.522.
+[[shape.proportion]]
+name = "seat_top"
+lo = 0.377
+hi = 0.667
+source = "dining-chair seat height 40–48 cm (IKEA dining chair size guide) and 45–50 cm (Lakeland Furniture guide); overall height 75–95 cm (Lakeland) to 106 cm (A2Z Dexter high-back listing). lo = 0.40/1.06, hi = 0.50/0.75."
+
+[prior.attachment]
+kind = "wall_flush"
+face = "back"
+why = "a chair is often pushed back against a wall, never definitionally; the weight is the placement prior above (p_against_wall)"
+standoff_m = 0.05                   # the gap between the backrest and the wall when it is against one ([prior.placement] wall_gap_mean_m)
+standoff_std_m = 0.05
+standoff_source = "uncited convention: [prior.placement] wall_gap_mean_m / wall_gap_sigma_m (nominal, 2026-10-31: a guess from how rooms are furnished). Not from the Webots world."
+
+[prior.permanence]
+# The volatility's hyperprior (countable persistent path): Q is inferred around q0 = rate * dt * scale^2 (spike-and-slab).
+from = "nominal"
+move_rate_per_day = 3.0
+move_scale_m = 0.3
+move_scale_rad = 0.5
+source = "uncited convention: a dining chair is pulled out and pushed back at each meal (about 3 times a day), by about a seat depth (0.3 m) and turned up to about 30 degrees (0.5 rad). Not measured; not from the Webots world."
+
+[prior.class]
+kind = "label_reliability"
+p_label_true = 0.8
+why  = "P(a mask with this label is really this class): the same value as the other countable classes (YOLOE's median confidence on the real bed, .85, detcheck3). Not measured on chairs."
