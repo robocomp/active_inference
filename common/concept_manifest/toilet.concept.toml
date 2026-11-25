@@ -188,3 +188,24 @@ h_f = 0.29
 z0_f = 0.57
 z1_f = 1.0
 why = "class knowledge: Kohler K-3519 / K-3979 spec sheets (see the block above)"
+
+# ── Proportion latents (K2a-L, owner-approved model-level fix; spec G4): the fractions whose real-world value is uncertain ──
+# Each [[shape.proportion]] is a ρ = 1 latent of the class: mean the midpoint of [lo, hi], variance Δ²/12 (Δ = hi − lo, a uniform
+# spread over the class range), estimated from the data like any shape latent. lo/hi come from CLASS KNOWLEDGE ONLY, written down
+# before any replay (this block was committed on its own, before the code that reads it and before any evaluation with it).
+#
+# bowl_top = the bowl part's top (the seat-or-rim surface the sensors fit) as a fraction of H (the tank lid). The class covers
+# standard to chair height, with and without a seat:
+#   top of the seat: 15 in (380 mm) minimum (residential dwelling units) to 19 in (485 mm) maximum — ABA Accessibility Standards
+#     §604.4 and its Exception 2 (access-board.gov/aba/chapter/ch06; the general §604.4 range is 17-19 in);
+#   without a seat the bowl top is the rim, about 1 in lower (American Standard: bowl height 16-1/2 in without the seat, 17-1/2 in
+#     with it; the Lowe's listing cited above) ⇒ the lowest bowl top ≈ 14 in (355 mm);
+#   overall height H of a two-piece toilet: 28-1/4 in (718 mm, Gerber Ultra Flush combo 21-302: "Height 28 1/4") to 31-1/4 in
+#     (794 mm, Kohler K-3519 and K-3979 above).
+#   ⇒ lo = 355 / 794 = 0.447 (lowest bowl top on the tallest toilet), hi = 485 / 718 = 0.675 (highest seat top on the shortest).
+# Δ = 0.228 ⇒ σ = Δ/√12 = 0.066; midpoint 0.561. (The fixed 0.57 of K2a lies inside; this range was not chosen from any dump.)
+[[shape.proportion]]
+name = "bowl_top"
+lo = 0.447
+hi = 0.675
+source = "ABA Accessibility Standards 604.4 + Exception 2: seat top 15 in (380 mm, residential) to 19 in (485 mm); rim ~1 in below the seat top (American Standard listing: 16-1/2 in without seat, 17-1/2 in with); overall height 28-1/4 in (718 mm, Gerber 21-302) to 31-1/4 in (794 mm, Kohler K-3519/K-3979). lo = 355/794, hi = 485/718."
