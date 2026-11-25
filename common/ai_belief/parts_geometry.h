@@ -45,6 +45,13 @@ struct Table
     bool  solid_is_parts = false;                      // [shape] solid = "parts"
     float panel_h_m = -1.0f;                           // back panel top (m, from the floor); ≤ 0 = no panel
     float panel_t_m = 0.10f;                           // back panel thickness (m)
+    // K2a-L: the class proportions' CURRENT values (the model's latent mean, or what the engine linearises at). A row whose
+    // z0_ref / z1_ref names proportion k reads its boundary from q[k]; empty ⇒ every row reads its fixed fraction.
+    std::span<const double> q;
+    int n_q = 0;                                       // the model's proportion count (the beam parts' Jq columns); 0 ⇒ no Jq
+
+    float z0_of(const rc::manifest::ShapePart& P) const { return P.z0_ref >= 0 and std::size_t(P.z0_ref) < q.size() ? float(q[std::size_t(P.z0_ref)]) : P.z0_f; }
+    float z1_of(const rc::manifest::ShapePart& P) const { return P.z1_ref >= 0 and std::size_t(P.z1_ref) < q.size() ? float(q[std::size_t(P.z1_ref)]) : P.z1_f; }
 
     bool has_panel() const { return panel_h_m > 0.0f; }
     bool model_uses_parts() const { return solid_is_parts and not parts.empty(); }
@@ -87,10 +94,10 @@ inline float panel_sdf(const Local& q, float w, float h, const Table& T)
     return box_sdf(std::abs(q.lx) - 0.5f * w, std::abs(q.ly - yc) - 0.5f * t, std::abs(q.z - hz) - hz);
 }
 // One [[shape.part]] row on the fitted box: centre (x_f·w, y_f·h), size (w_f·w, h_f·h), z ∈ z0 + [z0_f, z1_f]·(H − z0).
-inline float part_sdf(const Local& q, const rc::manifest::ShapePart& P, float w, float h, float z0, float H)
+inline float part_sdf(const Local& q, const rc::manifest::ShapePart& P, float w, float h, float z0, float H, const Table& T)
 {
     const float dz = H - z0;
-    const float za = z0 + P.z0_f * dz, zb = z0 + P.z1_f * dz;
+    const float za = z0 + T.z0_of(P) * dz, zb = z0 + T.z1_of(P) * dz;
     const float zc = 0.5f * (za + zb), hz = 0.5f * (zb - za);
     return box_sdf(std::abs(q.lx - P.x_f * w) - 0.5f * (P.w_f * w), std::abs(q.ly - P.y_f * h) - 0.5f * (P.h_f * h),
                    std::abs(q.z - zc) - hz);
@@ -104,7 +111,7 @@ float sdf(const Eigen::Vector3f& p, float cx, float cy, float H, float w, float 
     if (T.model_uses_parts())
     {
         const float z0 = span.z0(H);
-        for (const auto& P : T.parts) d = std::min(d, part_sdf(q, P, w, h, z0, H));
+        for (const auto& P : T.parts) d = std::min(d, part_sdf(q, P, w, h, z0, H, T));
     }
     else d = envelope_sdf(q, w, h, H, span);
     return std::min(d, panel_sdf(q, w, h, T));
@@ -147,9 +154,11 @@ inline rc::ai::beam::BeamPart panel_beam_part(double cx, double cy, double w, do
 // A [[shape.part]] row: local centre (xc, yc) = (x_f·w, y_f·h), world centre (cx + cos ψ·xc − sin ψ·yc, cy + sin ψ·xc + cos ψ·yc);
 // z band z0 + [z0_f, z1_f]·(H − z0), so zc = z0 + m·(H − z0), hz = ½(z1_f − z0_f)(H − z0), m = ½(z0_f + z1_f), with
 // ∂z0/∂H = ∂zc/∂H − ∂half/∂H of the span (0 floor-anchored, 1 hanging).
+// K2a-L: Jq = ∂(…)/∂q for the rows whose boundary is a proportion: z0 = zb + f₀·dz, z1 = zb + f₁·dz ⇒ ∂zc/∂q_k = ½dz·([ref₀ = k]
+// + [ref₁ = k]) and ∂hz/∂q_k = ½dz·([ref₁ = k] − [ref₀ = k]) (rows 2 and 6); n_q = 0 ⇒ no Jq.
 template <class Span>
 rc::ai::beam::BeamPart shape_beam_part(const rc::manifest::ShapePart& S, double cx, double cy, double H, double w, double h,
-                                       double yaw, const Span& span)
+                                       double yaw, const Span& span, const Table& T)
 {
     rc::ai::beam::BeamPart P;
     P.yaw = yaw;
@@ -157,7 +166,8 @@ rc::ai::beam::BeamPart shape_beam_part(const rc::manifest::ShapePart& S, double 
     const double c = std::cos(yaw), sn = std::sin(yaw);
     const double xf = S.x_f, yf = S.y_f, xc = xf * w, yc = yf * h;
     const double z0 = span.z0(H), dz = H - z0, dz0 = span.dzc_dH() - span.dhalf_dH();
-    const double m = 0.5 * (double(S.z0_f) + double(S.z1_f)), e = 0.5 * (double(S.z1_f) - double(S.z0_f));
+    const double f0 = T.z0_of(S), f1 = T.z1_of(S);
+    const double m = 0.5 * (f0 + f1), e = 0.5 * (f1 - f0);
     P.c = {cx + c * xc - sn * yc, cy + sn * xc + c * yc, z0 + m * dz};
     P.half = {0.5 * double(S.w_f) * w, 0.5 * double(S.h_f) * h, e * dz};
     P.J(0, 0) = 1.0; P.J(0, 3) = c * xf;  P.J(0, 4) = -sn * yf; P.J(0, 5) = -sn * xc - c * yc;
@@ -167,6 +177,16 @@ rc::ai::beam::BeamPart shape_beam_part(const rc::manifest::ShapePart& S, double 
     P.J(4, 3) = 0.5 * double(S.w_f);
     P.J(5, 4) = 0.5 * double(S.h_f);
     P.J(6, 2) = e * (1.0 - dz0);
+    if (T.n_q > 0)
+    {
+        P.Jq = Eigen::Matrix<double, 7, Eigen::Dynamic>::Zero(7, T.n_q);
+        for (int k = 0; k < T.n_q; ++k)
+        {
+            const double a0 = S.z0_ref == k ? 1.0 : 0.0, a1 = S.z1_ref == k ? 1.0 : 0.0;
+            P.Jq(2, k) = 0.5 * dz * (a0 + a1);
+            P.Jq(6, k) = 0.5 * dz * (a1 - a0);
+        }
+    }
     return P;
 }
 // The model solid's convex parts, in the order the SDF takes its min: the envelope or the [[shape.part]] rows, then the panel.
@@ -177,7 +197,7 @@ std::vector<rc::ai::beam::BeamPart> beam_parts(double cx, double cy, double H, d
     std::vector<rc::ai::beam::BeamPart> out;
     out.reserve(std::size_t(T.n_model_boxes()));
     if (T.model_uses_parts())
-        for (const auto& S : T.parts) out.push_back(shape_beam_part(S, cx, cy, H, w, h, yaw, span));
+        for (const auto& S : T.parts) out.push_back(shape_beam_part(S, cx, cy, H, w, h, yaw, span, T));
     else out.push_back(envelope_beam_part(cx, cy, H, w, h, yaw, span));
     if (T.has_panel()) out.push_back(panel_beam_part(cx, cy, w, h, yaw, T));
     return out;
@@ -193,7 +213,7 @@ inline std::vector<rc::exist::BoxPart> carve_parts(float w, float h, float H, co
     const float dz = H - z0;
     if (T.parts.empty()) out.push_back({0.0f, 0.0f, w, h, z0, H});
     for (const auto& p : T.parts)
-        out.push_back({p.x_f * w, p.y_f * h, p.w_f * w, p.h_f * h, z0 + p.z0_f * dz, z0 + p.z1_f * dz});
+        out.push_back({p.x_f * w, p.y_f * h, p.w_f * w, p.h_f * h, z0 + T.z0_of(p) * dz, z0 + T.z1_of(p) * dz});
     if (T.has_panel())
     {
         const float t = std::min(T.panel_t_m, h);

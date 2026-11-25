@@ -18,6 +18,7 @@
 //   gn_cap              1 when the update's GN ran into its iteration cap without converging
 //   range_m             the camera's (else the robot's) distance to θ's centre at this update (for NEES by range bin)
 //   jump_p              P(moved | data) of the update's volatility statistic (NaN: none computed)
+//   q,std_q             the class proportion's posterior mean and σ after the update (K2a-L; NaN σ: the class declares none)
 //   pstd_cx..pstd_yaw   √ of the PREDICTED θθ diagonal this update started from (Σ̄: the class prior on the first update)
 //   dth_live            max |θ_replay − θ_live| (the live result the agent recorded; 0 ⇒ this engine reproduces the live run)
 //   dP_live             max relative |diag P_replay − diag P_live| over the joint P (θ and every latent)
@@ -117,7 +118,7 @@ int main(int argc, char** argv)
     }
     std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                 "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
-                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,range_m,jump_p,dth_live,dP_live\n");
+                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,range_m,jump_p,q,std_q,dth_live,dP_live\n");
 
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
@@ -153,7 +154,7 @@ int main(int argc, char** argv)
             char row[1024];
             std::snprintf(row, sizeof row,
                           "%ld,%lld,%d,%zu,%d,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%d,%.6g,"
-                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%.6g,%d,%.4f,%.4g",
+                          "%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%.9g,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g,%d,%.6g,%d,%.4f,%.4g,%.9g,%.6g",
                           upd, static_cast<long long>(ev.cycle), ev.gated ? 1 : 0, ev.frame.points.size(),
                           ev.frame.lidar_only ? 1 : 0, ev.frame.beam.endpoints.size(),
                           s.cx, s.cy, s.H, s.w, s.h, s.yaw, sd(0), sd(1), sd(2), sd(3), sd(4),
@@ -164,7 +165,8 @@ int main(int argc, char** argv)
                                            : std::numeric_limits<double>::quiet_NaN(),
                           (b.last_gn_iters() >= b.params().gn_iters_max and not b.last_gn_converged()) ? 1 : 0,
                           double((ev.frame.camera_xy.value_or(ev.frame.robot_xy) - Eigen::Vector2f(s.cx, s.cy)).norm()),
-                          b.last_jump_p());
+                          b.last_jump_p(), b.proportion_value(0), b.params().shape_proportions.empty()
+                                                              ? std::numeric_limits<double>::quiet_NaN() : b.proportion_std(0));
             pending = row;
         },
         [&](const rc::replay::ResultEv& live, const rc::CountableBelief& b)
@@ -174,8 +176,12 @@ int main(int argc, char** argv)
                                          std::abs(double(s.H) - live.theta.H), std::abs(double(s.w) - live.theta.w),
                                          std::abs(double(s.h) - live.theta.h), std::abs(double(s.yaw) - live.theta.yaw)});
             const auto& P = b.joint_covariance();
-            double dP = live.p_diag.size() == std::size_t(P.rows()) ? 0.0 : std::numeric_limits<double>::infinity();
-            for (int i = 0; std::isfinite(dP) and i < P.rows(); ++i)
+            // A dump recorded before K2a-L lacks the appended proportion latent(s) (the last rows of P): the common prefix is compared.
+            const std::size_t n_cmp = live.p_diag.size() == std::size_t(P.rows()) ? live.p_diag.size()
+                                    : live.p_diag.size() + std::size_t(rc::CountableEngineModel::kProportions) == std::size_t(P.rows())
+                                        ? live.p_diag.size() : 0;
+            double dP = n_cmp > 0 ? 0.0 : std::numeric_limits<double>::infinity();
+            for (int i = 0; std::isfinite(dP) and i < int(n_cmp); ++i)
             {
                 const double a = P(i, i), l = live.p_diag[std::size_t(i)], m = std::max(std::abs(a), std::abs(l));
                 if (m > 0.0) dP = std::max(dP, std::abs(a - l) / m);
@@ -222,6 +228,7 @@ int main(int argc, char** argv)
                 const std::string path = parts_manifests + "/" + rc::node_class(seed.node) + ".concept.toml";
                 seed.params.shape_parts = rc::manifest::load_shape_parts(path);   // throws on a malformed table: a stream error
                 seed.params.solid_parts = rc::manifest::load_solid_is_parts(path);
+                seed.params.shape_proportions = rc::manifest::load_shape_proportions(path);
                 std::fprintf(stderr, "replay: solid %s (%zu part(s)) from %s\n", seed.params.solid_parts ? "parts" : "box",
                              seed.params.shape_parts.size(), path.c_str());
             }
@@ -251,6 +258,11 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "replay: max std     cx %.6f cy %.6f H %.6f w %.6f h %.6f yaw %.6f (every event after the first update)\n", sd_max[0], sd_max[1],
                      sd_max[2], sd_max[3], sd_max[4], sd_max[5]);
         std::fprintf(stderr, "replay: gn steps %ld\n", gn_total);
+        if (not belief.params().shape_proportions.empty())
+            std::fprintf(stderr, "replay: final proportion %s %.6f std %.6f (prior mean %.6f std %.6f)\n",
+                         belief.params().shape_proportions[0].name.c_str(), belief.proportion_value(0), belief.proportion_std(0),
+                         0.5 * double(belief.params().shape_proportions[0].lo + belief.params().shape_proportions[0].hi),
+                         double(belief.params().shape_proportions[0].hi - belief.params().shape_proportions[0].lo) / std::sqrt(12.0));
     }
     if (neighbours_without_class > 0)
         std::fprintf(stderr, "replay: %ld recorded neighbours carry no class (a dump older than ForeignBox::cls): their size std "

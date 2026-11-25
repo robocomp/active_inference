@@ -60,12 +60,19 @@ FreshInfo<N> marginalise_fresh(const Eigen::Matrix<float, N, N>& Id,
     return out;
 }
 
-// A channel measuring θ + B b.
-template <int N, int K>
+// A channel measuring θ + B b — and, for a model with NQ > 0 shape PROPORTIONS (K2a-L), also the proportions q = q₀ + Bq b, which
+// enter the geometry directly rather than as a θ offset. Its information is then over (u, q), u = θ + B b:
+//   [[I, Iuq], [Iuqᵀ, Iqq]] and gradient (g, gq);  H_c = [[𝟙, B], [0, Bq]].
+// NQ = 0 (every model before K2a-L): the extra members do not exist and every formula below is the original one, bit for bit.
+template <int N, int K, int NQ = 0>
 struct Channel
 {
     FreshInfo<N> info;
     Eigen::Matrix<double, N, K> B = Eigen::Matrix<double, N, K>::Zero();
+    Eigen::Matrix<double, N, NQ> Iuq = Eigen::Matrix<double, N, NQ>::Zero();
+    Eigen::Matrix<double, NQ, NQ> Iqq = Eigen::Matrix<double, NQ, NQ>::Zero();
+    Eigen::Matrix<double, NQ, 1> gq  = Eigen::Matrix<double, NQ, 1>::Zero();
+    Eigen::Matrix<double, NQ, K> Bq  = Eigen::Matrix<double, NQ, K>::Zero();
 };
 
 // Predict one latent block (x offset N + off, size n; spec 7c.7 a). The latent evolves b' = R F b + w, R = diag(ρ),
@@ -94,8 +101,8 @@ void predict_block(Eigen::Matrix<double, N + K, N + K>& P,
 namespace detail
 {
 // W = Σ H_cᵀ I_c H_c + H_θᵀ I_θ H_θ and G = Σ H_cᵀ g_c + H_θᵀ g_θ, H_c = [𝟙 B_c], H_θ = [𝟙 0].
-template <int N, int K>
-void information(std::span<const Channel<N, K>> channels, const FreshInfo<N>& theta_only,
+template <int N, int K, int NQ = 0>
+void information(std::span<const Channel<N, K, NQ>> channels, const FreshInfo<N>& theta_only,
                  Eigen::Matrix<double, N + K, N + K>& W, Eigen::Matrix<double, N + K, 1>& G)
 {
     W.setZero(); G.setZero();
@@ -110,6 +117,15 @@ void information(std::span<const Channel<N, K>> channels, const FreshInfo<N>& th
         W.template bottomRightCorner<K, K>() += c.B.transpose() * IB;
         G.template head<N>()                 += c.info.g;
         G.template tail<K>()                 += c.B.transpose() * c.info.g;
+        if constexpr (NQ > 0)
+        {   // the (u, q) cross and q blocks through H_c = [[𝟙, B], [0, Bq]]
+            const Eigen::Matrix<double, N, K> IuqBq = c.Iuq * c.Bq;
+            W.template topRightCorner<N, K>()    += IuqBq;
+            W.template bottomLeftCorner<K, N>()  += IuqBq.transpose();
+            const Eigen::Matrix<double, K, K> X = c.B.transpose() * IuqBq;
+            W.template bottomRightCorner<K, K>() += X + X.transpose() + c.Bq.transpose() * c.Iqq * c.Bq;
+            G.template tail<K>()                 += c.Bq.transpose() * c.gq;
+        }
     }
 }
 }  // namespace detail
@@ -126,17 +142,17 @@ void information(std::span<const Channel<N, K>> channels, const FreshInfo<N>& th
 template <int N, int K>
 struct DampedStep { Eigen::Matrix<double, N + K, 1> delta, y; };
 
-template <int N, int K>
+template <int N, int K, int NQ = 0>
 DampedStep<N, K> joint_step_damped(const Eigen::Matrix<double, N + K, 1>& x_tilde,
                                    const Eigen::Matrix<double, N + K, 1>& x_bar,
                                    const Eigen::Matrix<double, N + K, N + K>& P_bar,
-                                   std::span<const Channel<N, K>> channels,
+                                   std::span<const Channel<N, K, NQ>> channels,
                                    const FreshInfo<N>& theta_only, double lambda, bool damp_latents = false)
 {
     using MatD = Eigen::Matrix<double, N + K, N + K>;
     using VecD = Eigen::Matrix<double, N + K, 1>;
     MatD W; VecD G;
-    detail::information<N, K>(channels, theta_only, W, G);
+    detail::information<N, K, NQ>(channels, theta_only, W, G);
     MatD Wl = W;
     const int nd = damp_latents ? N + K : N;
     for (int i = 0; i < nd; ++i) Wl(i, i) += lambda * W(i, i);
@@ -155,14 +171,14 @@ double prior_energy(const DampedStep<N, K>& s, const Eigen::Matrix<double, N + K
 }
 
 // x̃ + the undamped step.
-template <int N, int K>
+template <int N, int K, int NQ = 0>
 Eigen::Matrix<double, N + K, 1> joint_step(const Eigen::Matrix<double, N + K, 1>& x_tilde,
                                            const Eigen::Matrix<double, N + K, 1>& x_bar,
                                            const Eigen::Matrix<double, N + K, N + K>& P_bar,
-                                           std::span<const Channel<N, K>> channels,
+                                           std::span<const Channel<N, K, NQ>> channels,
                                            const FreshInfo<N>& theta_only)
 {
-    return x_tilde + joint_step_damped<N, K>(x_tilde, x_bar, P_bar, channels, theta_only, 0.0).delta;
+    return x_tilde + joint_step_damped<N, K, NQ>(x_tilde, x_bar, P_bar, channels, theta_only, 0.0).delta;
 }
 
 // The joint posterior covariance (𝟙 + P̄W)⁻¹ P̄, symmetrised. Published Σ = its θθ block.
@@ -171,15 +187,15 @@ Eigen::Matrix<double, N + K, 1> joint_step(const Eigen::Matrix<double, N + K, 1>
 // zero row / column. The direct solve gave the column exactly zero but the row only to roundoff, and the symmetrisation
 // carried that roundoff into the next prediction, where it surfaced as a −1e-35 variance (spec 7c.7 b, a Σ_pose with a
 // null coordinate).
-template <int N, int K>
+template <int N, int K, int NQ = 0>
 Eigen::Matrix<double, N + K, N + K> joint_cov(const Eigen::Matrix<double, N + K, N + K>& P_bar,
-                                              std::span<const Channel<N, K>> channels,
+                                              std::span<const Channel<N, K, NQ>> channels,
                                               const FreshInfo<N>& theta_only)
 {
     using MatD = Eigen::Matrix<double, N + K, N + K>;
     using VecD = Eigen::Matrix<double, N + K, 1>;
     MatD W; VecD G;
-    detail::information<N, K>(channels, theta_only, W, G);
+    detail::information<N, K, NQ>(channels, theta_only, W, G);
     const MatD WP = W * P_bar;
     const MatD X  = (MatD::Identity() + WP).partialPivLu().solve(WP);
     const MatD P  = P_bar - P_bar * X;

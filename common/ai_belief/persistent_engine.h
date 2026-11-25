@@ -338,6 +338,12 @@ inline JumpEvidence<N> jump_evidence(const Eigen::Matrix<double, NX, NX>& Lambda
     return out;
 }
 
+// K2a-L: the model's shape PROPORTIONS (M::kProportions; absent ⇒ 0). See the class comment at kProp.
+template <class M> constexpr int proportion_latents()
+{
+    if constexpr (requires { { M::kProportions } -> std::convertible_to<int>; }) return M::kProportions;
+    else return 0;
+}
 template <class M> constexpr int wall_latents()
 {
     if constexpr (requires { { M::kWallLatents } -> std::convertible_to<int>; }) return M::kWallLatents;
@@ -355,8 +361,21 @@ public:
     static constexpr int N = M::N;
     static constexpr int W = detail::wall_latents<M>();             // 0 or 1 wall latents (F1.4)
     static_assert(W == 0 or W == 1, "one wall latent at most");
-    static constexpr int K = 3 + 6 * N + W;
+    // K2a-L: NP shape-PROPORTION latents (M::kProportions), appended after the wall latent. A proportion is a fraction of the
+    // box a part boundary sits at (the toilet's bowl top as a fraction of H): q = q₀ + b_q, q₀ = the class range's midpoint
+    // (proportion_mean), b_q born at Δ²/12 (Δ = proportion_spread, the class range hi − lo; spec G4's uniform spread) the first
+    // time a channel measures, then carried with ρ = 1 (the view never changes the object's proportions). It enters the
+    // geometry DIRECTLY, not as a θ offset: each sensor channel carries (u, q) information (persistent_update.h Channel<N, K, NP>)
+    // from the model's ∂sdf/∂q (sdf_jacobian_q) and its beam parts' Jq. Shape, not pose: no process noise (predict_theta is θ
+    // only) and outside the move statistic (jump_evidence moves θ only). Δ = 0 keeps the latent exactly 0 with zero variance.
+    // Required hooks when NP > 0: proportion_mean(), proportion_spread() (Eigen P-vectors, double), set_proportions(q) const
+    // (the model evaluates its SDF, beam parts and carve at q from then on), proportions() (the q it evaluates at),
+    // sdf_jacobian_q(p, s, prim) (float P-vector).
+    static constexpr int NP = detail::proportion_latents<M>();
+    static constexpr int K = 3 + 6 * N + W + NP;
     static constexpr int kWall = 3 + 6 * N;                          // the wall latent's index inside b (when W = 1)
+    static constexpr int kProp = 3 + 6 * N + W;                      // the first proportion latent's index inside b (when P > 0)
+    static constexpr int NC = N + NP;                                 // a sensor channel's coordinates: θ + B b, then q
     static constexpr int kChain = 0, kCam = 3, kL = 3 + N, kFc = 3 + 2 * N, kFL = 3 + 3 * N, kSc = 3 + 4 * N, kSL = 3 + 5 * N;
     static constexpr int kYaw = M::kYaw;
     using State = typename M::State;
@@ -367,6 +386,15 @@ public:
     using MatJd = Eigen::Matrix<double, N + K, N + K>;
     using VecKd = Eigen::Matrix<double, K, 1>;
     using VecXd = Eigen::Matrix<double, N + K, 1>;
+    using VecPd = Eigen::Matrix<double, NP, 1>;
+    using Chan  = rc::ai::persistent::Channel<N, K, NP>;
+    // A sensor channel's information on q (NP > 0): the (u, q) cross block, the q block, and the q gradient (bd's sign convention).
+    struct QInfo
+    {
+        Eigen::Matrix<double, N, NP> Iuq = Eigen::Matrix<double, N, NP>::Zero();
+        Eigen::Matrix<double, NP, NP> Iqq = Eigen::Matrix<double, NP, NP>::Zero();
+        Eigen::Matrix<double, NP, 1> gq  = Eigen::Matrix<double, NP, 1>::Zero();
+    };
 
     // ── State ────────────────────────────────────────────────────────────────────────────────────────────────────────
     const MatJd& P() const { return P_; }
@@ -537,6 +565,21 @@ public:
         };
         if (camera) shape_block(kSc);
         if (lidar)  shape_block(kSL);
+        if constexpr (NP > 0)
+        {   // the shape proportions (K2a-L): born at Δ²/12 (a new source while σ_prev = 0), then ρ = 1 — the predict of a ρ = 1,
+            // F = I latent leaves its mean and every row of P unchanged, so a carried proportion is simply not touched. Both
+            // channels measure the SAME proportion (one object), so it is born whichever channel measures first.
+            const VecPd spread = m.proportion_spread();
+            for (int j = 0; j < NP; ++j)
+            {
+                const int r = N + kProp + j;
+                if (sig_prev_(kProp + j) != 0.0 or not (spread(j) > 0.0)) continue;
+                P_.row(r).setZero(); P_.col(r).setZero();
+                P_(r, r) = spread(j) * spread(j) / 12.0;
+                x(r) = 0.0;
+                sig_prev_(kProp + j) = spread(j) / std::sqrt(12.0);
+            }
+        }
         b_ = x.template tail<K>();
     }
 
@@ -561,18 +604,54 @@ public:
     // Each channel is linearised at its own state: s_th = θ_k, s_cam = θ_k + B_cam b, s_L = θ_k + B_L b. Camera (when
     // `camera`) = the points' GN information + the model's camera extra terms; LiDAR = the beam set (when `lidar`) or the
     // model's override; θ-only = the model's accumulate_extra.
+    // P > 0: the model evaluates at the proportions last set (set_q), and qc / qL receive the channels' q information.
     void accumulate_channels(const M& m, const State& s_th, const State& s_cam, const State& s_L, const Frame& f, bool camera,
-                             bool lidar, MatNf& Id_cam, VecNf& bd_cam, MatNf& Id_L, VecNf& bd_L, MatNf& Id_th, VecNf& bd_th) const
+                             bool lidar, MatNf& Id_cam, VecNf& bd_cam, MatNf& Id_L, VecNf& bd_L, MatNf& Id_th, VecNf& bd_th,
+                             QInfo* qc = nullptr, QInfo* qL = nullptr) const
     {
         Id_cam.setZero(); bd_cam.setZero(); Id_L.setZero(); bd_L.setZero(); Id_th.setZero(); bd_th.setZero();
+        if (qc) *qc = QInfo{};
+        if (qL) *qL = QInfo{};
         if (camera)
         {
-            accumulate_points(m, s_cam, f, Id_cam, bd_cam);
+            accumulate_points(m, s_cam, f, Id_cam, bd_cam, qc);
             camera_extra(m, s_cam, f, Id_cam, bd_cam, nullptr);
         }
         if (not lidar_override(m, s_L, f, &Id_L, &bd_L, nullptr) and lidar)
-            beam_.accumulate(key_of(s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), &Id_L, &bd_L);
+        {
+            if constexpr (NP == 0)
+                beam_.accumulate(key_of(m, s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), &Id_L, &bd_L);
+            else
+            {   // the beam on (θ, q): the parts carry Jq; split the NC-dimensional information into the θ and q blocks
+                Eigen::Matrix<float, NC, NC> Ic = Eigen::Matrix<float, NC, NC>::Zero();
+                Eigen::Matrix<float, NC, 1>  bc = Eigen::Matrix<float, NC, 1>::Zero();
+                beam_.accumulate(key_of(m, s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), &Ic, &bc);
+                Id_L += Ic.template topLeftCorner<N, N>();
+                bd_L += bc.template head<N>();
+                if (qL)
+                {
+                    qL->Iuq += Ic.template topRightCorner<N, NP>().template cast<double>();
+                    qL->Iqq += Ic.template bottomRightCorner<NP, NP>().template cast<double>();
+                    qL->gq  += bc.template tail<NP>().template cast<double>();
+                }
+            }
+        }
         m.accumulate_extra(s_th, f, Id_th, bd_th, nullptr);
+    }
+    // The model's proportions at the latent mean bb (NP > 0): q = q₀ + b_q. No-op for P = 0.
+    void set_q(const M& m, const VecKd& bb) const
+    {
+        if constexpr (NP > 0) m.set_proportions(VecPd(m.proportion_mean() + bb.template segment<NP>(kProp)));
+    }
+    // A sensor channel on (θ + B b, q): its q information and Bq (the q rows of H_c select b_q).
+    void add_q(Chan& c, const QInfo& qi) const
+    {
+        if constexpr (NP > 0)
+        {
+            c.Iuq = qi.Iuq; c.Iqq = qi.Iqq; c.gq = qi.gq;
+            c.Bq.setZero();
+            for (int j = 0; j < NP; ++j) c.Bq(j, kProp + j) = 1.0;
+        }
     }
 
     // The energy whose gradients accumulate_channels builds, term by term, with the same per-frame gates: the camera points'
@@ -596,7 +675,7 @@ public:
             camera_extra(m, s_cam, f, Id, bd, &E);
         }
         if (not lidar_override(m, s_L, f, nullptr, nullptr, &E) and lidar)
-            E += beam_.accumulate(key_of(s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), nullptr, nullptr);
+            E += beam_.accumulate(key_of(m, s_L), [&] { return m.beam_parts(s_L); }, m.beam_rays(f), m.beam_config(), nullptr, nullptr);
         m.accumulate_extra(s_th, f, Id, bd, &E);
         return E;
     }
@@ -666,7 +745,7 @@ public:
         FrameLatents<N> fl_used = fl;
         fl_used.lidar_measured = lidar;                                    // the latents follow the channels that measure
         predict_latents(m, fl_used);                                       // step 1, latents
-        const typename rc::ai::beam::BeamChannel<N>::Scope cache_scope(beam_);   // the beam cache lives for this update
+        const typename rc::ai::beam::BeamChannel<NC>::Scope cache_scope(beam_);   // the beam cache lives for this update
         MatJd P_bar = P_;
         VecXd x_bar; x_bar << m.state().vec().template cast<double>(), b_;
         if (not first_update_done_)
@@ -692,15 +771,18 @@ public:
         const bool consistent = not cfg.restart;
         const auto S = [](const VecNd& v) { return State::from_vec(v.template cast<float>()); };
 
-        std::vector<pu::Channel<N, K>> channels;
+        std::vector<Chan> channels;
         pu::FreshInfo<N> theta_only;
         MatN Id_cam, Id_L, Id_th; VecN bd_cam, bd_L, bd_th;
+        QInfo q_cam, q_L;
         const auto build = [&](const VecNd& th, const VecKd& bb)
         {
-            accumulate_channels(m, S(th), S(th + B_cam * bb), S(th + B_L * bb), f, camera, lidar, Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th);
+            set_q(m, bb);
+            accumulate_channels(m, S(th), S(th + B_cam * bb), S(th + B_L * bb), f, camera, lidar, Id_cam, bd_cam, Id_L, bd_L, Id_th, bd_th,
+                                &q_cam, &q_L);
             channels.clear();
-            if (camera) { pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Id_cam, bd_cam, Sf_cam); c.B = B_cam; channels.push_back(c); }
-            if (lidar)  { pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Id_L,   bd_L,   Sf_L);   c.B = B_L;   channels.push_back(c); }
+            if (camera) { Chan c; c.info = pu::marginalise_fresh<N>(Id_cam, bd_cam, Sf_cam); c.B = B_cam; add_q(c, q_cam); channels.push_back(c); }
+            if (lidar)  { Chan c; c.info = pu::marginalise_fresh<N>(Id_L,   bd_L,   Sf_L);   c.B = B_L;   add_q(c, q_L);   channels.push_back(c); }
             theta_only.I = Id_th.template cast<double>();
             theta_only.g = bd_th.template cast<double>();
             if constexpr (W > 0)
@@ -708,7 +790,7 @@ public:
                 {   // the wall priors, ONCE: a channel measuring θ + B_w b (the object relative to the TRUE wall)
                     MatN Iw = MatN::Zero(); VecN bw = VecN::Zero();
                     m.accumulate_wall_prior(S(th + B_w * bb), f, Iw, bw, nullptr);
-                    pu::Channel<N, K> c; c.info = pu::marginalise_fresh<N>(Iw, bw, MatN::Zero()); c.B = B_w; channels.push_back(c);
+                    Chan c; c.info = pu::marginalise_fresh<N>(Iw, bw, MatN::Zero()); c.B = B_w; channels.push_back(c);
                 }
         };
 
@@ -722,6 +804,7 @@ public:
         {
             const VecNd th = x.template head<N>();
             const VecKd bb = x.template tail<K>();
+            set_q(m, bb);
             double E = data_energy(m, S(th + B_cam * bb), S(th + B_L * bb), S(th), f, camera, lidar);
             if constexpr (W > 0)
                 if (wall_enter)
@@ -751,7 +834,7 @@ public:
             if constexpr (kYaw >= 0) xn(kYaw) -= 2.0 * M_PI * std::round((xn(kYaw) - x_bar(kYaw)) / (2.0 * M_PI));
             return wrapped(xn - x_tilde).template head<N>();
         };
-        const auto chans = [&] { return std::span<const pu::Channel<N, K>>(channels); };
+        const auto chans = [&] { return std::span<const Chan>(channels); };
         VecNd theta = m.state().vec().template cast<double>();            // θ₀ = the current mean (at birth: the data seed)
         VecKd b_post = b_;
         const VecNd theta0 = theta;                                        // GnTrace: the FD check at θ₀, b̄
@@ -781,9 +864,9 @@ public:
                 // tol_sigma·σ_k on every θ component (σ_k = √P_kk, P = (𝟙 + P̄W)⁻¹P̄ here) ⇒ APPLY it when J does not rise, stop.
                 undamped_checked = true;
                 VecXd x0n;
-                const auto st0 = pu::joint_step_damped<N, K>(x_tilde, x_bar, P_bar, chans(), theta_only, 0.0);
+                const auto st0 = pu::joint_step_damped<N, K, NP>(x_tilde, x_bar, P_bar, chans(), theta_only, 0.0);
                 const VecNd d0 = theta_step(x_tilde, x0n, st0);
-                const MatJd P_lin = pu::joint_cov<N, K>(P_bar, chans(), theta_only);
+                const MatJd P_lin = pu::joint_cov<N, K, NP>(P_bar, chans(), theta_only);
                 bool small = d0.allFinite();
                 for (int k = 0; k < N and small; ++k)
                     small = std::abs(d0(k)) < cfg.tol_sigma * std::sqrt(std::max(0.0, P_lin(k, k)));
@@ -812,7 +895,7 @@ public:
                 }
             }
             ++steps;
-            const auto st = pu::joint_step_damped<N, K>(x_tilde, x_bar, P_bar, chans(), theta_only, lambda, /*damp_latents*/ consistent);
+            const auto st = pu::joint_step_damped<N, K, NP>(x_tilde, x_bar, P_bar, chans(), theta_only, lambda, /*damp_latents*/ consistent);
             VecXd xn;
             const VecNd d = theta_step(x_tilde, xn, st);
             bool accept = false;
@@ -828,7 +911,7 @@ public:
                 if (consistent)
                 {   // the quadratic model's decrease: Ep_k − Ep_new + Gᵀδ − ½δᵀWδ (G, W of this linearisation, undamped)
                     MatJd Wj; VecXd Gj;
-                    pu::detail::information<N, K>(chans(), theta_only, Wj, Gj);
+                    pu::detail::information<N, K, NP>(chans(), theta_only, Wj, Gj);
                     const double pred = Ep_cur - Ep_new + Gj.dot(st.delta) - 0.5 * st.delta.dot(Wj * st.delta);
                     rho_gain = pred > 0.0 ? (J_cur - J_new) / pred : -1.0;
                     accept = rho_gain > 0.0;
@@ -850,7 +933,7 @@ public:
                     // below the tolerance (one extra solve per linearisation)
                     undamped_checked = true;
                     VecXd x0n;
-                    const auto st0 = pu::joint_step_damped<N, K>(x_tilde, x_bar, P_bar, chans(), theta_only, 0.0);
+                    const auto st0 = pu::joint_step_damped<N, K, NP>(x_tilde, x_bar, P_bar, chans(), theta_only, 0.0);
                     const VecNd d0 = theta_step(x_tilde, x0n, st0);
                     converged = d0.allFinite() and below_tol(d0);
                     if (converged) break;
@@ -896,12 +979,12 @@ public:
         // stayed fit frees them inside its own prior (the LiDAR's ego-motion latent u_L, σ 6 cm / 4°): at x̂ the same factor gives
         // log BF −3.3 / −2.5.
         MatJd Lambda_data; VecXd eta_data;
-        pu::detail::information<N, K>(chans(), theta_only, Lambda_data, eta_data);
+        pu::detail::information<N, K, NP>(chans(), theta_only, Lambda_data, eta_data);
         {
             VecXd x_hat; x_hat << theta_post, (consistent ? b_post : b_);
             eta_data += Lambda_data * wrapped(x_hat - x_bar);
         }
-        P_ = pu::joint_cov<N, K>(P_bar, chans(), theta_only);
+        P_ = pu::joint_cov<N, K, NP>(P_bar, chans(), theta_only);
         const VecNd post_var = P_.diagonal().template head<N>();          // the model's posterior, before the solver's last-step term
         P_.template topLeftCorner<N, N>() += d_last * d_last.transpose();
         if (cfg.gn_trace >= 2 or (cfg.gn_trace == 1 and not converged))
@@ -912,6 +995,7 @@ public:
             {
                 MatN Ic, IL, It; VecN gc, gL, gt;
                 const VecNd sc0 = th + B_cam * bb, sl0 = th + B_L * bb;
+                set_q(m, bb);
                 accumulate_channels(m, S(th), S(sc0), S(sl0), f, camera, lidar, Ic, gc, IL, gL, It, gt);
                 const auto mc = pu::marginalise_fresh<N>(Ic, gc, Sf_cam);
                 const auto mL = pu::marginalise_fresh<N>(IL, gL, Sf_L);
@@ -943,7 +1027,7 @@ public:
                 }
                 build(th, bb);
                 MatJd Wj; VecXd Gj;
-                pu::detail::information<N, K>(chans(), theta_only, Wj, Gj);
+                pu::detail::information<N, K, NP>(chans(), theta_only, Wj, Gj);
                 for (int k = 0; k < N; ++k)
                 {
                     const auto E = [&](double h) { VecXd x; x << th, bb; x(k) += h; return data_J(x); };
@@ -963,6 +1047,7 @@ public:
             build(theta_post, consistent ? b_post : b_);                   // restore the final linearisation for dbg_Id_* below
         }
         b_ = b_post;
+        set_q(m, b_);                                                      // the model evaluates at the posterior proportions
         m.set_covariance(Sigma_theta());
         if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, Lambda_data, eta_data, theta_post);
         steps_since_update_ = 0.0;
@@ -1150,6 +1235,7 @@ public:
         fl.camera_measured = camera;
         fl.lidar_measured = lidar;
         predict_latents_on(m, fl, P, b, sp, lev, lsp);
+        set_q(m, b);                                                       // the look is linearised at the predicted proportions
 
         MatJd P_bar = P;
         if (not first_update_done_)
@@ -1175,27 +1261,36 @@ public:
                 m.offer_look(*offer_cache_.frame, obs.points, offer_cache_.R);
                 ctx = &*offer_cache_.frame;
             }
-        std::vector<pu::Channel<N, K>> chans;
+        std::vector<Chan> chans;
         if (camera)
         {
             MatNf Id = MatNf::Zero();
             VecNf bd = VecNf::Zero();
-            accumulate_offer_points(m, s_cam, obs.points, obs.weight, obs.R, Id);
+            QInfo qi;
+            accumulate_offer_points(m, s_cam, obs.points, obs.weight, obs.R, Id, &qi);
             if (ctx != nullptr) camera_extra(m, s_cam, *ctx, Id, bd, nullptr);
-            pu::Channel<N, K> ch;
+            Chan ch;
             ch.info = pu::marginalise_fresh<N>(Id, VecNf::Zero(), MatNf::Zero());
             ch.B = B_cam;
+            add_q(ch, qi);
             chans.push_back(ch);
         }
         if (lidar)
         {
-            Eigen::Matrix<double, N, N> W = Eigen::Matrix<double, N, N>::Zero();
-            Eigen::Matrix<double, N, 1> g = Eigen::Matrix<double, N, 1>::Zero();
+            Eigen::Matrix<double, NC, NC> W = Eigen::Matrix<double, NC, NC>::Zero();
+            Eigen::Matrix<double, NC, 1> g = Eigen::Matrix<double, NC, 1>::Zero();
             const std::vector<rc::ai::beam::BeamPart> parts_L = m.beam_parts(s_L);
-            rc::ai::beam::accumulate_beam_rays<N>(parts_L, obs.rays, m.beam_config(), W, g, nullptr);   // information only
-            pu::Channel<N, K> ch;
-            ch.info = pu::marginalise_fresh<N>(MatNf(W.template cast<float>()), VecNf::Zero(), MatNf::Zero());
+            rc::ai::beam::accumulate_beam_rays<NC>(parts_L, obs.rays, m.beam_config(), W, g, nullptr);   // information only
+            Chan ch;
+            ch.info = pu::marginalise_fresh<N>(MatNf(W.template topLeftCorner<N, N>().template cast<float>()), VecNf::Zero(), MatNf::Zero());
             ch.B = B_L;
+            if constexpr (NP > 0)
+            {
+                QInfo qi;
+                qi.Iuq = W.template topRightCorner<N, NP>();
+                qi.Iqq = W.template bottomRightCorner<NP, NP>();
+                add_q(ch, qi);
+            }
             chans.push_back(ch);
         }
         pu::FreshInfo<N> theta_only;
@@ -1206,7 +1301,8 @@ public:
             m.accumulate_extra(s_th, *ctx, Id_th, bd_th, nullptr);
             theta_only.I = Id_th.template cast<double>();
         }
-        const MatJd P_after = pu::joint_cov<N, K>(P_bar, std::span<const pu::Channel<N, K>>(chans), theta_only);
+        const MatJd P_after = pu::joint_cov<N, K, NP>(P_bar, std::span<const Chan>(chans), theta_only);
+        set_q(m, b_);                                                      // back to the posterior proportions
         return H_before - half_logdet_theta(P_after);
     }
     // The θ-marginal entropy drop ½ log det Σθ_before − ½ log det Σθ_after of the last update(): what it delivered, the same
@@ -1360,7 +1456,7 @@ private:
     // The hypothetical look's camera information (G5): accumulate_points over synthesised points, point k standing for
     // weight[k] mask points of variance R (the per-point skip of accumulate_points is on one point's r/R, as there).
     void accumulate_offer_points(const M& m, const State& s, std::span<const Eigen::Vector3f> pts, std::span<const float> weight,
-                                 float R, MatNf& Id) const
+                                 float R, MatNf& Id, QInfo* qi = nullptr) const
     {
         const int n_prims = m.n_prims();
         for (std::size_t k = 0; k < pts.size(); ++k)
@@ -1374,20 +1470,29 @@ private:
                 if (w < 1e-6f) continue;
                 const VecNf J = m.sdf_jacobian(p, s, prim);
                 Id.noalias() += (wk * w) * (J * J.transpose());
+                if constexpr (NP > 0)
+                    if (qi)
+                    {
+                        const Eigen::Matrix<double, NP, 1> Jq = m.sdf_jacobian_q(p, s, prim).template cast<double>();
+                        qi->Iuq.noalias() += double(wk * w) * (J.template cast<double>() * Jq.transpose());
+                        qi->Iqq.noalias() += double(wk * w) * (Jq * Jq.transpose());
+                    }
             }
         }
     }
-    static typename rc::ai::beam::BeamChannel<N>::Key key_of(const State& s)
+    // The beam cache's key: θ, and the proportions the model evaluates at (NP > 0).
+    static typename rc::ai::beam::BeamChannel<NC>::Key key_of(const M& m, const State& s)
     {
         const VecNf v = s.vec();
-        typename rc::ai::beam::BeamChannel<N>::Key k{};
+        typename rc::ai::beam::BeamChannel<NC>::Key k{};
         for (int i = 0; i < N; ++i) k[i] = v(i);
+        if constexpr (NP > 0) for (int j = 0; j < NP; ++j) k[N + j] = float(m.proportions()(j));
         return k;
     }
 
     // The camera points' GN information (the recursive-Laplace accumulate loop, unsaturated). With neighbours each point's
     // responsibilities are scaled by the model's share ω of the neighbour mixture: the EM identity of neighbour_mix's energy.
-    void accumulate_points(const M& m, const State& s, const Frame& f, MatNf& Id, VecNf& bd) const
+    void accumulate_points(const M& m, const State& s, const Frame& f, MatNf& Id, VecNf& bd, QInfo* qi = nullptr) const
     {
         const float sig2 = m.sigma2();
         const int   n_prims = m.n_prims();
@@ -1404,6 +1509,14 @@ private:
                 const VecNf J = m.sdf_jacobian(f.points[i], s, prim);
                 Id.noalias() += w * (J * J.transpose());
                 bd.noalias() += -w * J * d;
+                if constexpr (NP > 0)
+                    if (qi)
+                    {   // ∂d/∂q beside ∂d/∂θ: the same Gauss-Newton term on the (u, q) coordinates
+                        const Eigen::Matrix<double, NP, 1> Jq = m.sdf_jacobian_q(f.points[i], s, prim).template cast<double>();
+                        qi->Iuq.noalias() += double(w) * (J.template cast<double>() * Jq.transpose());
+                        qi->Iqq.noalias() += double(w) * (Jq * Jq.transpose());
+                        qi->gq.noalias()  += -double(w) * double(d) * Jq;
+                    }
             }
         }
     }
@@ -1525,7 +1638,7 @@ private:
     bool joint_init_ = false;
     bool first_update_done_ = false;                 // the class prior at the class mean has entered
     Eigen::Matrix2f birth_pos_excess_ = Eigen::Matrix2f::Zero();
-    rc::ai::beam::BeamChannel<N> beam_;
+    rc::ai::beam::BeamChannel<NC> beam_;
     mutable bool beam_unready_logged_ = false;       // "beam not ready" printed (once per engine)
     mutable bool beam_inconsistent_logged_ = false;  // "beam ray-set refused" printed (once per engine)
     mutable std::vector<ForeignBox> nb_;              // G3: this update's usable neighbours (NeighbourScope)

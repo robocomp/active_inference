@@ -66,7 +66,12 @@ template <class V> void fields(V& v, rc::ai::beam::BeamConfig& x)
 { v("st", x.st); v("gl", x.gl); v("gl_t", x.gl_t); v("z_levels", x.z_levels); v("e_levels", x.e_levels); }
 
 template <class V> void fields(V& v, rc::manifest::ShapePart& x)
-{ v("name", x.name); v("x_f", x.x_f); v("y_f", x.y_f); v("w_f", x.w_f); v("h_f", x.h_f); v("z0_f", x.z0_f); v("z1_f", x.z1_f); }
+{
+    v("name", x.name); v("x_f", x.x_f); v("y_f", x.y_f); v("w_f", x.w_f); v("h_f", x.h_f); v("z0_f", x.z0_f); v("z1_f", x.z1_f);
+    v("z0_ref", x.z0_ref); v("z1_ref", x.z1_ref);
+}
+template <class V> void fields(V& v, rc::manifest::ShapeProportion& x)
+{ v("name", x.name); v("lo", x.lo); v("hi", x.hi); v("source", x.source); }
 
 template <class V> void fields(V& v, CountableBeliefParams& x)
 {
@@ -75,7 +80,7 @@ template <class V> void fields(V& v, CountableBeliefParams& x)
     v("prior_pos_std", x.prior_pos_std); v("prior_size_std", x.prior_size_std); v("prior_yaw_std", x.prior_yaw_std);
     v("prior_footprint_m", x.prior_footprint_m); v("prior_footprint_std", x.prior_footprint_std); v("prior_depth_std", x.prior_depth_std);
     v("vertical_extent_m", x.vertical_extent_m);
-    v("shape_parts", x.shape_parts); v("solid_parts", x.solid_parts);
+    v("shape_parts", x.shape_parts); v("solid_parts", x.solid_parts); v("shape_proportions", x.shape_proportions);
     v("prior_depth_m", x.prior_depth_m); v("prior_height_m", x.prior_height_m); v("prior_height_std", x.prior_height_std);
     v("depth_unobs_precision", x.depth_unobs_precision); v("depth_obs_band_m", x.depth_obs_band_m);
     v("headboard_h_m", x.headboard_h_m); v("headboard_t_m", x.headboard_t_m);

@@ -82,11 +82,12 @@ int main()
         const auto T = rc::countable::carve_parts_for(0.58f, 0.733f, 1.02f, ts, std::nullopt);
         CHECK(T.size() == 2);
         if (T.size() == 2)
-        {   // bowl: full length, 0.76 of the width, floor to 0.57 H; tank: full width, back 0.29 of the length, 0.57 H to H
+        {   // bowl: full length, 0.76 of the width, floor to q·H; tank: full width, back 0.29 of the length, q·H to H; q = the
+        // proportion bowl_top, here at its midpoint 0.561 (K2a-L: no q given to the carve ⇒ the row's stored midpoint)
             CHECK(near(T[0].cy, 0.0f, 0.001f) and near(T[0].sx, 0.76f * 0.58f, 0.001f) and near(T[0].sy, 0.733f, 0.001f));
-            CHECK(T[0].z0 == 0.0f and near(T[0].z1, 0.57f * 1.02f, 0.001f));
+            CHECK(T[0].z0 == 0.0f and near(T[0].z1, 0.561f * 1.02f, 0.001f));
             CHECK(near(T[1].cy, 0.355f * 0.733f, 0.001f) and near(T[1].sx, 0.58f, 0.001f) and near(T[1].sy, 0.29f * 0.733f, 0.001f));
-            CHECK(near(T[1].z0, 0.57f * 1.02f, 0.001f) and near(T[1].z1, 1.02f, 0.001f));
+            CHECK(near(T[1].z0, 0.561f * 1.02f, 0.001f) and near(T[1].z1, 1.02f, 0.001f));
             CHECK(near(T[1].cy + 0.5f * T[1].sy, 0.5f * 0.733f, 0.001f));   // the tank's back is the box's back
         }
     }

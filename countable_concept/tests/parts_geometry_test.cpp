@@ -4,7 +4,7 @@
 // What is checked, every bound derived before running (exact geometry or rounding, nothing fitted):
 //   1. the toilet manifest declares solid = "parts" with two rows, bowl and tank (class knowledge, cited in the manifest);
 //   2. the toilet's camera SDF is the STEPPED solid: on θ = (0, 0, H 1.0, w 0.58, h 0.74, yaw 0) the bowl front (y = −0.37) is a
-//      surface at z 0.30 (SDF 0); a point at that front at z 0.80 is OUTSIDE, 0.23 above the bowl top 0.57 (the tank front is
+//      surface at z 0.30 (SDF 0); a point at that front at z 0.80 is OUTSIDE, 0.239 above the bowl top 0.561 (K2a-L: the proportion bowl_top at its midpoint, no q set) (the tank front is
 //      0.5254 behind it, the nearer face wins); the tank front y = 0.37 − 0.29·0.74 = 0.1554 at z 0.80 is a surface; a point
 //      beside the bowl under the tank (x 0.27, y 0.30, z 0.30) is 0.27 − 0.76·0.29 = 0.0496 outside. Tolerance 1e-5 (float
 //      rounding of terms ≤ 1 m). One box would hold the two outside points INSIDE (negative SDF);
@@ -100,11 +100,11 @@ int main(int argc, char** argv)
     // 2. the stepped SDF
     {
         CHECK(near(tb.sdf_compound({0.0f, -0.37f, 0.30f}, ts), 0.0, 1e-5));      // bowl front
-        CHECK(near(tb.sdf_compound({0.0f, -0.37f, 0.80f}, ts), 0.23, 1e-5));     // in front of the tank, above the bowl
+        CHECK(near(tb.sdf_compound({0.0f, -0.37f, 0.80f}, ts), 0.239, 1e-5));     // in front of the tank, above the bowl
         CHECK(near(tb.sdf_compound({0.0f, 0.1554f, 0.80f}, ts), 0.0, 1e-5));     // tank front
         CHECK(near(tb.sdf_compound({0.27f, 0.30f, 0.30f}, ts), 0.0496, 1e-5));   // beside the bowl, under the tank
-        // 7 cm behind the bowl front at z 0.80: inside the envelope (sdf_box −0.07), 0.23 above the bowl in the parts solid
-        CHECK(near(tb.sdf_box({0.0f, -0.30f, 0.80f}, ts), -0.07, 1e-5) and near(tb.sdf_compound({0.0f, -0.30f, 0.80f}, ts), 0.23, 1e-5));
+        // 7 cm behind the bowl front at z 0.80: inside the envelope (sdf_box −0.07), 0.239 above the bowl in the parts solid
+        CHECK(near(tb.sdf_box({0.0f, -0.30f, 0.80f}, ts), -0.07, 1e-5) and near(tb.sdf_compound({0.0f, -0.30f, 0.80f}, ts), 0.239, 1e-5));
     }
     // 3. the beam parts are the SDF's solid
     {

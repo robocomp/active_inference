@@ -35,13 +35,13 @@ float CountableBelief::sdf_box(const Eigen::Vector3f& p, const CountableBeliefSt
 // The headboard panel: local x ∈ [−w/2, w/2], y ∈ [h/2 − t, h/2] (the back, +Y), z ∈ [0, headboard_h_m].
 float CountableBelief::sdf_headboard(const Eigen::Vector3f& p, const CountableBeliefState& s) const
 {
-    return rc::ai::parts::panel_sdf(rc::ai::parts::to_local(p, s.cx, s.cy, s.yaw), s.w, s.h, params_.parts_table());
+    return rc::ai::parts::panel_sdf(rc::ai::parts::to_local(p, s.cx, s.cy, s.yaw), s.w, s.h, parts_table());
 }
 
 // The model's solid: box ∪ panel, or the [[shape.part]] boxes ∪ panel (solid = "parts").
 float CountableBelief::sdf_compound(const Eigen::Vector3f& p, const CountableBeliefState& s) const
 {
-    return rc::ai::parts::sdf(p, s.cx, s.cy, s.H, s.w, s.h, s.yaw, params_.parts_table(), params_.span());
+    return rc::ai::parts::sdf(p, s.cx, s.cy, s.H, s.w, s.h, s.yaw, parts_table(), params_.span());
 }
 
 float CountableBelief::sdf_prim(const Eigen::Vector3f& p, const CountableBeliefState& s, int) const
@@ -204,7 +204,7 @@ Eigen::Matrix<float, 6, 1> CountableBelief::configured_process_noise() const
 Eigen::Matrix<float, 6, 1> CountableBelief::process_noise_diag() const
 {
     // Persistent path: the engine owns Q (its volatility learns from the EM statistic of each update, F1.2).
-    if (params_.persistent) return engine_.process_noise(model());
+    if (params_.persistent) return with_engine([&](const auto& e) { return e.process_noise(model_of(e)); });
     const Eigen::Matrix<float, 6, 1> q0 = configured_process_noise();
     // Q = exp(ω) once volatility is inferred. Until the first measured cycle ω is unset and we return the
     // configured constant, so a belief that never updates behaves exactly as before.
@@ -281,7 +281,7 @@ void CountableBelief::update_volatility(const Eigen::Matrix<float, 6, 1>& dtheta
 
 Eigen::Matrix<float, 6, 1> CountableBelief::log_volatility() const
 {
-    if (params_.persistent) return engine_.log_volatility(model()).cast<float>();
+    if (params_.persistent) return with_engine([&](const auto& e) { return Eigen::Matrix<float, 6, 1>(e.log_volatility(model_of(e)).template cast<float>()); });
     return omega_;
 }
 
@@ -831,7 +831,8 @@ float CountableBelief::seed_height(const std::vector<Eigen::Vector3f>& pts, floa
     return s.H;
 }
 
-float CountableBelief::wall_offset_mean(const WallRef& w) const { return float(engine_.wall_offset_mean(anchor_of(w))); }
+float CountableBelief::wall_offset_mean(const WallRef& w) const
+{ return float(with_engine([&](const auto& e) { return e.wall_offset_mean(anchor_of(w)); })); }
 
 // The wall latent's priors (F1.4), entered ONCE at the instance's first association with a wall edge, at s = θ + B_w b (the
 // object relative to the TRUE wall, staged line + δ·n). After that entry only data move θ and δ.
@@ -968,8 +969,7 @@ rc::ai::engine::SolverConfig CountableEngineModel::solver() const
 // the last Σ_pose, b = 0, ℓ kept, the class prior re-enters); both anchor flags clear so the relational prior re-enters once.
 void CountableBelief::sanitize_joint()
 {
-    CountableEngineModel m = model();
-    if (not engine_.sanitize(m)) return;
+    if (not with_engine_mut([&](auto& e) { auto m = model_of(e); return e.sanitize(m); })) return;
     axis_prior_added_ = false;
     omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();
     size_lik_ = {};
@@ -978,8 +978,7 @@ void CountableBelief::sanitize_joint()
 
 void CountableBelief::predict_theta_joint(float q_scale)
 {
-    CountableEngineModel m = model();
-    engine_.predict(m, q_scale);
+    with_engine_mut([&](auto& e) { auto m = model_of(e); e.predict(m, q_scale); });
     prior_mean_ = state_.vec();
 }
 
@@ -1038,7 +1037,52 @@ bool CountableBelief::lidar_measured(const CountableFrame& f) const
 // (K2a), from the same table as sdf_compound.
 std::vector<rc::ai::beam::BeamPart> CountableBelief::beam_parts(const CountableBeliefState& s) const
 {
-    return rc::ai::parts::beam_parts(s.cx, s.cy, s.H, s.w, s.h, s.yaw, params_.parts_table(), params_.span());
+    return rc::ai::parts::beam_parts(s.cx, s.cy, s.H, s.w, s.h, s.yaw, parts_table(), params_.span());
+}
+
+// K2a-L: the table at the current proportions; n_q = the declared count (the beam parts' Jq columns), 0 for a class with none.
+rc::ai::parts::Table CountableBelief::parts_table() const
+{
+    rc::ai::parts::Table T = params_.parts_table();
+    const auto& q = q_now();
+    T.q = std::span<const double>(q);
+    T.n_q = int(q.size());
+    return T;
+}
+
+// ─── The shape proportions (K2a-L; persistent_engine.h kProp) ─────────────────────────────────────────────────────────────
+Eigen::Matrix<double, 1, 1> CountableEngineModel::proportion_mean() const
+{
+    const auto& pr = b->params_.shape_proportions;
+    return Eigen::Matrix<double, 1, 1>(pr.empty() ? 0.0 : 0.5 * (double(pr[0].lo) + double(pr[0].hi)));
+}
+Eigen::Matrix<double, 1, 1> CountableEngineModel::proportion_spread() const
+{
+    const auto& pr = b->params_.shape_proportions;
+    return Eigen::Matrix<double, 1, 1>(pr.empty() ? 0.0 : double(pr[0].hi) - double(pr[0].lo));
+}
+Eigen::Matrix<double, 1, 1> CountableEngineModel::proportions() const
+{
+    const auto& q = b->q_now();
+    return Eigen::Matrix<double, 1, 1>(q.empty() ? 0.0 : q[0]);
+}
+void CountableEngineModel::set_proportions(const Eigen::Matrix<double, 1, 1>& q) const
+{
+    auto& v = const_cast<std::vector<double>&>(b->q_now());
+    if (not v.empty()) v[0] = q(0);
+}
+// ∂sdf/∂q by a central difference at the model's FD step (as sdf_jacobian for θ). No slope clamp: a proportion moves a part's z
+// boundary by (H − z0)·Δq, so |∂sdf/∂q| ≤ H − z0 by construction. 0 exactly when the class declares no proportion (nothing is
+// evaluated: the box classes' arithmetic is untouched).
+Eigen::Matrix<float, 1, 1> CountableEngineModel::sdf_jacobian_q(const Eigen::Vector3f& p, const State& s, int prim) const
+{
+    auto& v = const_cast<std::vector<double>&>(b->q_now());
+    if (v.empty()) return Eigen::Matrix<float, 1, 1>::Zero();
+    const double q0 = v[0], e = double(b->params_.fd_eps);
+    v[0] = q0 + e; const float dp = b->sdf_prim(p, s, prim);
+    v[0] = q0 - e; const float dm = b->sdf_prim(p, s, prim);
+    v[0] = q0;
+    return Eigen::Matrix<float, 1, 1>(float((double(dp) - double(dm)) / (2.0 * e)));
 }
 
 // update() under persistent: the engine's update with the cycle around it. The size summary is unchanged (§7c.1). ω is the
@@ -1054,8 +1098,7 @@ float CountableBelief::update_persistent_cycle(const CountableFrame& frame)
     rc::ai::engine::FrameLatents<N> fl = frame_latents(frame);
     // A point-free frame measures only as a LiDAR-only frame (spec lidar-measures §7b); otherwise it is predict-only.
     fl.lidar_measured = fl.lidar_measured and (fl.camera_measured or frame.lidar_only);
-    CountableEngineModel m = model();
-    const float fe = engine_.update(m, frame, fl);
+    const float fe = with_engine_mut([&](auto& e) { auto m = model_of(e); return e.update(m, frame, fl); });
     prior_mean_ = before;                                              // the engine's θ predict, as predict_theta_joint
     if (fl.camera_measured and not frame.lidar_only)                   // each relational anchor has entered, once
     {
@@ -1185,7 +1228,7 @@ void CountableBelief::apply_mode_rotation(int k)
         std::swap(prior_mean_(3), prior_mean_(4));
         // the persistent joint state relabels with θ: w, h of θ and of every 6-sized latent block (b_cam, b_L, u_cam, u_L, s_cam,
         // s_L); e and ℓ are room-frame, untouched (a no-op before the joint is seeded)
-        engine_.permute_theta({0, 1, 2, 4, 3, 5});
+        with_engine_mut([](auto& e) { e.permute_theta({0, 1, 2, 4, 3, 5}); });
         size_lik_.mean.tail<2>().reverseInPlace();                       // the data summary relabels with the state
         size_lik_.info.row(1).swap(size_lik_.info.row(2));
         size_lik_.info.col(1).swap(size_lik_.info.col(2));

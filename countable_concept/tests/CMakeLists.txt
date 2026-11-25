@@ -80,6 +80,14 @@ target_compile_options(parts_geometry_test PRIVATE -O2)
 target_link_libraries(parts_geometry_test PRIVATE Eigen3::Eigen)
 add_test(NAME parts_geometry_test COMMAND parts_geometry_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
 
+# K2a-L: the class shape proportion as a rho = 1 latent — its prior (Delta^2/12), the Jq column, the box classes' engine without the
+# slot, and the cliff gone (a prior-mean sweep on a synthetic stepped object moves the fit smoothly). Run: ./proportion_latent_test DIR
+add_executable(proportion_latent_test proportion_latent_test.cpp ../src/countable_belief.cpp)
+target_include_directories(proportion_latent_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(proportion_latent_test PRIVATE -O2)
+target_link_libraries(proportion_latent_test PRIVATE Eigen3::Eigen)
+add_test(NAME proportion_latent_test COMMAND proportion_latent_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
+
 # The back panel comes from the class manifest ([prior.headboard]); textual reader, no Qt. Run: LANG=es_ES.UTF-8 ./back_panel_test
 add_executable(back_panel_test back_panel_test.cpp ../src/countable_belief.cpp)
 target_include_directories(back_panel_test PRIVATE ../src ../../common ../../common/concept_manifest ../../common/media_transport)

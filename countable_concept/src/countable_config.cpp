@@ -6,6 +6,7 @@
  */
 
 #include "countable_config.h"
+#include "countable_belief.h"   // CountableEngineModel::kProportions (K2a-L)
 #include "countable_sections.h"   // rc::refuse_pre_countable_config
 #include "countable_config_error.h"   // rc::CountableConfigError — every refusal below throws it (main exits non-zero)
 
@@ -158,6 +159,10 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     {
         out.shape_parts = rc::manifest::load_shape_parts(manifest_path);
         out.solid_parts = rc::manifest::load_solid_is_parts(manifest_path);
+        out.shape_proportions = rc::manifest::load_shape_proportions(manifest_path);
+        if (out.shape_proportions.size() > std::size_t(rc::CountableEngineModel::kProportions))
+            throw std::runtime_error(std::format("{}: {} [[shape.proportion]] declared; the countable engine carries {}", manifest_path,
+                                                 out.shape_proportions.size(), rc::CountableEngineModel::kProportions));
     }
     catch (const std::exception& e)
     {

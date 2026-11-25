@@ -147,10 +147,10 @@ layer_spread_source = "plumbing-fixture dimension conventions for a real two-pie
 # 23 cm off at d2 ~ 100. solid = "parts" makes these two boxes the MODEL's solid (camera SDF and beam parts,
 # common/ai_belief/parts_geometry.h), not only the existence carve's. The fitted box (cx, cy, H, w, h, yaw) stays the
 # bowl + tank FOOTPRINT envelope (the graded quantity): w = the widest part (the tank), h = tank back to bowl front, H = tank lid.
-# The parts are FIXED fractions of that box (no extra DOF). The spread of real toilets about these fractions is NOT modelled:
-# the G4 layer spread above is per θ-DOF (and Δ_H = 0), so the vertical fractions z0_f / z1_f, and the tank depth h_f, carry no
-# uncertainty anywhere in the model. K2a replay: the estimate is bistable in the bowl-top fraction (task-K2a-report.md); the
-# model-level fix (a proportion latent or a beam shape-misfit term) is the owner's decision.
+# The bowl / tank boundary is the class PROPORTION bowl_top ([[shape.proportion]] at the end, K2a-L, owner-approved): a ρ = 1 latent
+# of the engine, mean 0.561, σ 0.066, estimated with θ (the fixed 0.57 of K2a made the estimate bistable in it,
+# task-K2a-report.md). The OTHER fractions are still fixed and their spread is NOT modelled: the G4 layer spread above is per
+# θ-DOF (Δ_H = 0), so the tank depth h_f (and y_f with it) and the bowl width w_f carry no uncertainty anywhere in the model.
 # Fractions (class knowledge, NOT the Webots mesh), from two manufacturer spec sheets of two-piece floor-mount toilets on a 12 in
 # rough-in (Kohler, "all product dimensions are nominal"):
 #   Kohler K-3519 Highline Classic: 30-1/8 in (765 mm) long x 21-1/4 in (540 mm) wide x 31-1/4 in (794 mm) high; tank 8-5/8 in
@@ -163,7 +163,8 @@ layer_spread_source = "plumbing-fixture dimension conventions for a real two-pie
 #   tank 17-21 in (43-53 cm) wide vs bowl about 14-15 in (36-39 cm) wide: the plumbing-fixture convention cited in
 #     [shape].layer_spread_source above
 # ⇒ tank depth / length = 219/765, 219/756 = 0.286, 0.290 → h_f 0.29, back-anchored (y_f = 0.5 − 0.29/2 = 0.355);
-#   bowl + seat top / height = (438 + 25)/794, (422 + 25)/794 = 0.583, 0.563 (0.559 with 419) → 0.57 (the tank stands on the bowl from there up);
+#   bowl + seat top / height = (438 + 25)/794, (422 + 25)/794 = 0.583, 0.563 (0.559 with 419): the K2a fixed value 0.57, now the
+#     proportion bowl_top (its class range, below, covers it);
 #   bowl width / tank width = 14.5/19 = 0.76.
 # The bowl spans the full length (its front is the box front; its deck runs under the tank to the back), z from the floor to the
 # seat; the tank is the full width, back-anchored, from the seat height to the lid (H). The pedestal's narrower foot is inside the
@@ -176,8 +177,8 @@ y_f = 0.0
 w_f = 0.76
 h_f = 1.0
 z0_f = 0.0
-z1_f = 0.57
-why = "class knowledge: Kohler K-3519 / K-3979 spec sheets + the seat (see the block above)"
+z1_f = "bowl_top"   # the class proportion (K2a-L)
+why = "class knowledge: Kohler K-3519 / K-3979 spec sheets; the top is the proportion bowl_top (see the blocks above)"
 
 [[shape.part]]
 name = "tank"
@@ -185,7 +186,7 @@ x_f = 0.0
 y_f = 0.355
 w_f = 1.0
 h_f = 0.29
-z0_f = 0.57
+z0_f = "bowl_top"   # the class proportion (K2a-L)
 z1_f = 1.0
 why = "class knowledge: Kohler K-3519 / K-3979 spec sheets (see the block above)"
 

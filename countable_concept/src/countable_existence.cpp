@@ -361,13 +361,8 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
             // Model.ExistenceCarveParts: carve the class's composed parts (headboard, legs, tank, …) instead of the
             // one solid fitted box. The parts depend on this cycle's fitted state, so they are laid out per instance.
             std::vector<rc::exist::BoxPart> carve_parts;
-            if (cfg_.existence_carve_parts)
-            {
-                std::optional<rc::manifest::BackPanel> panel;
-                if (cfg_.ai2_headboard_h_m > 0.0f)
-                    panel = rc::manifest::BackPanel{cfg_.ai2_headboard_h_m, cfg_.ai2_headboard_t_m};
-                carve_parts = rc::countable::carve_parts_for(bs.w, bs.h, bs.H, cfg_.shape_parts, panel, span.z0(bs.H));
-            }
+            if (cfg_.existence_carve_parts)   // the belief's own parts table at its current proportions (K2a, K2a-L): one geometry
+                carve_parts = rc::ai::parts::carve_parts(bs.w, bs.h, bs.H, inst.ai2_belief.parts_table(), span.z0(bs.H));
             rc::exist::Evidence ev = cfg_.existence_carve_parts
                 ? rc::exist::carve_parts(origin, *sweep, bs.cx, bs.cy, bs.yaw, carve_parts, surf_sigma, sm)
                 : rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,

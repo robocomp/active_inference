@@ -443,6 +443,9 @@ struct BeamPart
     double          yaw  = 0.0;                                   // about +z; local = R(−yaw)(p − c)
     Eigen::Vector3d half = Eigen::Vector3d::Zero();               // half extents along local x, y, z
     Eigen::Matrix<double, 7, 6> J = Eigen::Matrix<double, 7, 6>::Zero();   // ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ
+    // ∂(cx, cy, cz, yaw, hx, hy, hz)/∂q for the model's shape proportions q (K2a-L; parts_geometry.h). Empty (7×0) for a part
+    // that no proportion moves, and for every model without proportions: the beam's NT = 6 path never reads it.
+    Eigen::Matrix<double, 7, Eigen::Dynamic> Jq;
 };
 
 // The persistent ray-set (ranges ≥ ρ_max already clamped by staging). m_i ∈ [ε_px, 1 − ε_px].
@@ -831,54 +834,82 @@ inline Crossing cross(const PartRay& r, double delta)
 
 // A breakpoint of the composite rule: its t and dt/dθ (kind: 0 panel end, 1 ρ + G⁻¹(q_j), 2 crossing of δ_j,
 // 3 region boundary, 4 face change; j its index, for the structure signature).
-struct BeamBP
+// J^T·v of a part on the NT parameters: θ (its J, 6 columns) and, past them, the shape proportions (its Jq, NT − 6 columns; K2a-L).
+// NT = 6 is the product the code always took.
+template <int NT>
+inline Eigen::Matrix<double, NT, 1> jt(const BeamPart& part, const Vec7& v)
+{
+    if constexpr (NT == 6) return part.J.transpose() * v;
+    else
+    {
+        Eigen::Matrix<double, NT, 1> r;
+        r.template head<6>() = part.J.transpose() * v;
+        if (part.Jq.cols() == NT - 6) r.template tail<NT - 6>() = part.Jq.transpose() * v;
+        else r.template tail<NT - 6>().setZero();
+        return r;
+    }
+}
+
+template <int NT>
+struct BeamBPT
 {
     double t;
     int kind, j;
-    Vec6 dt;
+    Eigen::Matrix<double, NT, 1> dt;
 };
-struct BeamPanel
+template <int NT>
+struct BeamPanelT
 {
     int p;                 // the first-hit part
     double t0, t1;
-    Vec6 dt0, dt1;
+    Eigen::Matrix<double, NT, 1> dt0, dt1;
     int kind0, kind1;      // 0 t = 0, 1 plateau start, 2 switch root, 3 t*_p
 };
-struct BeamRayOut
+template <int NT>
+struct BeamRayOutT
 {
     double E = 0.0;
-    Vec6 g = Vec6::Zero();
-    Mat6 W = Mat6::Zero();
+    Eigen::Matrix<double, NT, 1> g = Eigen::Matrix<double, NT, 1>::Zero();
+    Eigen::Matrix<double, NT, NT> W = Eigen::Matrix<double, NT, NT>::Zero();
 };
 // Per-ray diagnostics for the tests (mass of each panel by the rule and exactly, the atom, π).
-struct BeamRayDiag
+template <int NT>
+struct BeamRayDiagT
 {
     double pi = 0.0, atom = 0.0, A = 0.0, B = 0.0;
-    Vec6 dA = Vec6::Zero(), dB = Vec6::Zero();   // filled on the derivative path
+    Eigen::Matrix<double, NT, 1> dA = Eigen::Matrix<double, NT, 1>::Zero(), dB = Eigen::Matrix<double, NT, 1>::Zero();   // filled on the derivative path
     std::vector<double> panel_mass_rule, panel_mass_exact;
 };
-struct BeamScratch
+template <int NT>
+struct BeamScratchT
 {
     std::vector<PartRay> pr;
     std::vector<Approach> ap;
-    std::vector<Vec6> dd, dts;
+    std::vector<Eigen::Matrix<double, NT, 1>> dd, dts;
     std::vector<int> present;
-    std::vector<std::vector<BeamBP>> geo;   // per part: region boundaries and face changes on [0, t*_p]
-    std::vector<BeamPanel> panels;
-    std::vector<BeamBP> bps;
+    std::vector<std::vector<BeamBPT<NT>>> geo;   // per part: region boundaries and face changes on [0, t*_p]
+    std::vector<BeamPanelT<NT>> panels;
+    std::vector<BeamBPT<NT>> bps;
     std::vector<double> samp, PA, QA, PB, QB;
     std::vector<double> mdelta, mw, mtks;   // the curvature's moment nodes (reused across rays: no allocation per ray)
 };
+using BeamBP = BeamBPT<6>;
+using BeamPanel = BeamPanelT<6>;
+using BeamRayOut = BeamRayOutT<6>;
+using BeamRayDiag = BeamRayDiagT<6>;
+using BeamScratch = BeamScratchT<6>;
 
 // Geometric breakpoints of part p on its descending branch (0, t*_p): region boundaries outside, face changes inside.
-template <bool D>
-inline void part_geometry(const PartRay& r, const Approach& A, const BeamPart& part, double sigma, std::vector<BeamBP>& out)
+template <bool D, int NT = 6>
+inline void part_geometry(const PartRay& r, const Approach& A, const BeamPart& part, double sigma, std::vector<BeamBPT<NT>>& out)
 {
+    using VecT = Eigen::Matrix<double, NT, 1>;
+    using BeamBP = BeamBPT<NT>;
     out.clear();
     const auto add = [&](double t, int kind, int j, const Vec7& dphi)
     {
-        BeamBP b{t, kind, j, Vec6::Zero()};
-        if constexpr (D) b.dt = part.J.transpose() * dphi;
+        BeamBP b{t, kind, j, VecT::Zero()};
+        if constexpr (D) b.dt = jt<NT>(part, dphi);
         out.push_back(b);
     };
     for (int k = 0; k < r.nbk; ++k)
@@ -928,12 +959,15 @@ inline bool p_f_consistent(const BeamRays& rays)
 
 // The term of ray i: E_i, its gradient and curvature (the ray-set sums them unscaled; κ ≡ 1, rev 3.3.11). false ⇔ the ray contributes exactly 0 (d > 8σ_s).
 // force_sweep: run the several-part panel sweep (switch search) even with one part present (the one-part check).
-template <bool Deriv>
+template <bool Deriv, int NT = 6>
 inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const double> cs, std::span<const double> sn,
-                          const BeamRays& rays, std::size_t i, const BeamConfig& cfg, bool force_sweep, BeamScratch& S,
-                          BeamRayOut& out, std::vector<long>* sig = nullptr, BeamRayDiag* diag = nullptr)
+                          const BeamRays& rays, std::size_t i, const BeamConfig& cfg, bool force_sweep, BeamScratchT<NT>& S,
+                          BeamRayOutT<NT>& out, std::vector<long>* sig = nullptr, BeamRayDiagT<NT>* diag = nullptr)
 {
-    out = BeamRayOut{};
+    using VecT = Eigen::Matrix<double, NT, 1>;
+    using BeamBP = BeamBPT<NT>;
+    using BeamPanel = BeamPanelT<NT>;
+    out = BeamRayOutT<NT>{};
     if (not p_f_consistent(rays) or i >= rays.endpoints.size()) return false;   // refused (D2): never read another ray's p_f
     const Eigen::Vector3d& o = rays.origin;
     const Eigen::Vector3d du = rays.endpoints[i] - o;
@@ -963,10 +997,10 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
             S.present.push_back(static_cast<int>(p));
             if constexpr (Deriv)
             {
-                S.dd[p]  = parts[p].J.transpose() * S.ap[p].dphi;
-                S.dts[p] = parts[p].J.transpose() * S.ap[p].dtphi;
+                S.dd[p]  = jt<NT>(parts[p], S.ap[p].dphi);
+                S.dts[p] = jt<NT>(parts[p], S.ap[p].dtphi);
             }
-            part_geometry<Deriv>(S.pr[p], S.ap[p], parts[p], sigma, S.geo[p]);
+            part_geometry<Deriv, NT>(S.pr[p], S.ap[p], parts[p], sigma, S.geo[p]);
         }
     if (sig)
     {
@@ -974,32 +1008,32 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
         for (int p : S.present) sig->push_back(S.ap[p].code);
     }
     const auto phi_s = [&](double x) { return std::exp(log_phi(x / sigma)) / sigma; };   // N(0, σ_s²) density
-    const auto dt_of_level = [&](int p, double t) -> Vec6   // a level crossing moves by −∂_θs/∂_ts (0 at a tangency)
+    const auto dt_of_level = [&](int p, double t) -> VecT   // a level crossing moves by −∂_θs/∂_ts (0 at a tangency)
     {
         const SEval e = seval<true>(S.pr[p], t);
-        if (e.st == 0.0) return Vec6::Zero();
-        return parts[p].J.transpose() * (-e.ds / e.st);
+        if (e.st == 0.0) return VecT::Zero();
+        return jt<NT>(parts[p], Vec7(-e.ds / e.st));
     };
 
     // ── the atom: every δ ≥ s(0) maps to t = 0 ──
     const double zd = d / sigma, pi = Phi_upper(zd), F0 = Phi_upper(s0 / sigma);
     const double St0 = st.pdf(-rho), G0 = st.cdf(-rho);
     double A = St0 * F0, B = G0 * F0;
-    Vec6 dA = Vec6::Zero(), dB = Vec6::Zero();
+    VecT dA = VecT::Zero(), dB = VecT::Zero();
     if constexpr (Deriv)
     {
-        const Vec6 ds0 = parts[ps0].J.transpose() * seval<true>(S.pr[ps0], 0.0).ds;
+        const VecT ds0 = jt<NT>(parts[ps0], seval<true>(S.pr[ps0], 0.0).ds);
         dA -= phi_s(s0) * St0 * ds0;
         dB -= phi_s(s0) * G0 * ds0;
     }
-    if (diag) { *diag = BeamRayDiag{}; diag->pi = pi; diag->atom = F0; }
+    if (diag) { *diag = BeamRayDiagT<NT>{}; diag->pi = pi; diag->atom = F0; }
 
     // ── the panels: a sweep in t over the running minimum ──
     S.panels.clear();
     {
         double t = 0.0, level = s0;
-        Vec6 level_grad = Vec6::Zero(), dt_start = Vec6::Zero();
-        if constexpr (Deriv) level_grad = parts[ps0].J.transpose() * seval<true>(S.pr[ps0], 0.0).ds;
+        VecT level_grad = VecT::Zero(), dt_start = VecT::Zero();
+        if constexpr (Deriv) level_grad = jt<NT>(parts[ps0], seval<true>(S.pr[ps0], 0.0).ds);
         int active = -1, kind_start = 0;
         for (int p : S.present)   // first hit from t = 0: the present part with s_p(0) = s(0), still descending
             if (S.pr[p].s0 == s0 and S.ap[p].t > 0.0)
@@ -1021,7 +1055,7 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
                 if constexpr (Deriv)
                 {
                     const SEval e = seval<true>(S.pr[active], t);
-                    dt_start = (e.st == 0.0) ? Vec6::Zero() : Vec6((level_grad - parts[active].J.transpose() * e.ds) / e.st);
+                    dt_start = (e.st == 0.0) ? VecT::Zero() : VecT((level_grad - jt<NT>(parts[active], e.ds)) / e.st);
                 }
             }
             const int a = active;
@@ -1067,14 +1101,14 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
                         prev = ts;
                     }
                 }
-            BeamPanel pan{a, t, t_end, dt_start, Vec6::Zero(), kind_start, next >= 0 ? 2 : 3};
+            BeamPanel pan{a, t, t_end, dt_start, VecT::Zero(), kind_start, next >= 0 ? 2 : 3};
             if constexpr (Deriv)
             {
                 if (next >= 0)
                 {   // switch root: dt = −(∂_θs_q − ∂_θs_a)/(∂_ts_q − ∂_ts_a)
                     const SEval ea = seval<true>(S.pr[a], t_end), eq = seval<true>(S.pr[next], t_end);
                     const double den = eq.st - ea.st;
-                    if (den != 0.0) pan.dt1 = -(parts[next].J.transpose() * eq.ds - parts[a].J.transpose() * ea.ds) / den;
+                    if (den != 0.0) pan.dt1 = -(jt<NT>(parts[next], eq.ds) - jt<NT>(parts[a], ea.ds)) / den;
                 }
                 else pan.dt1 = S.dts[a];
             }
@@ -1100,14 +1134,14 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
         S.bps.push_back({pan.t0, 0, pan.kind0, pan.dt0});
         S.bps.push_back({pan.t1, 0, 10 + pan.kind1, pan.dt1});
         for (std::size_t j = 0; j < cfg.e_levels.size(); ++j)
-            if (const double tb = rho + cfg.e_levels[j]; tb > pan.t0 and tb < pan.t1) S.bps.push_back({tb, 1, static_cast<int>(j), Vec6::Zero()});
+            if (const double tb = rho + cfg.e_levels[j]; tb > pan.t0 and tb < pan.t1) S.bps.push_back({tb, 1, static_cast<int>(j), VecT::Zero()});
         for (std::size_t j = 0; j < cfg.z_levels.size(); ++j)
         {
             const double dl = -sigma * cfg.z_levels[j];
             if (not (dl < s_hi and dl > s_lo)) continue;
             const double tc = cross(r, dl).t;
             if (not (tc > pan.t0 and tc < pan.t1)) continue;
-            BeamBP b{tc, 2, static_cast<int>(j), Vec6::Zero()};
+            BeamBP b{tc, 2, static_cast<int>(j), VecT::Zero()};
             if constexpr (Deriv) b.dt = dt_of_level(a, tc);
             S.bps.push_back(b);
         }
@@ -1137,9 +1171,9 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
                 A += L * wq * hS; B += L * wq * hG; mass += L * wq * hM;
                 if constexpr (Deriv)
                 {
-                    const Vec6 dsT = parts[a].J.transpose() * e.ds, dstT = parts[a].J.transpose() * e.dst;
+                    const VecT dsT = jt<NT>(parts[a], e.ds), dstT = jt<NT>(parts[a], e.dst);
                     const double dph = -e.s / (sigma * sigma) * ph;            // φ_σ′(s)
-                    const Vec6 dM_th = dph * mu * dsT - ph * dstT;             // ∂_θ(φ_σ(s)·|∂_ts|) at fixed t
+                    const VecT dM_th = dph * mu * dsT - ph * dstT;             // ∂_θ(φ_σ(s)·|∂_ts|) at fixed t
                     const double dM_t = dph * e.st * mu - ph * e.stt;          // ∂_t(φ_σ(s)·|∂_ts|)
                     const double dhS_t = fS * st.dlogpdf(x) * hM + fS * dM_t, dhG_t = fS * hM + fG * dM_t;
                     dA += (wq * L * fS) * dM_th;
@@ -1164,7 +1198,7 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
                 else
                 {
                     const double hA = S.PA[g0], hB = S.PB[g0];   // a zero-width subinterval: P = h(b)
-                    for (int c = 0; c < 6; ++c)
+                    for (int c = 0; c < NT; ++c)
                     {
                         double lo = kInf, hi = -kInf;
                         for (std::size_t k = g0; k <= g1; ++k) { lo = std::min(lo, S.bps[k].dt(c)); hi = std::max(hi, S.bps[k].dt(c)); }
@@ -1189,7 +1223,7 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
     if constexpr (not Deriv) return true;
 
     // ── gradient: −d(p/a)/(p/a), d(1 − π) = φ(z_d)/σ_s·∇d ──
-    const Vec6 dpa = (std::exp(log_phi(zd)) / sigma) * S.dd[i0] + (m / a_ref) * dA + dB;
+    const VecT dpa = (std::exp(log_phi(zd)) / sigma) * S.dd[i0] + (m / a_ref) * dA + dB;
     out.g = -dpa / pa;
 
     // ── curvature: moments on the δ-quantile nodes (K_m), Var t scaled by the truncated normal's exact variance ──
@@ -1200,13 +1234,13 @@ inline bool beam_ray_term(std::span<const BeamPart> parts, std::span<const doubl
         std::vector<double>& w = S.mw;
         quantile_nodes_log(sigma, lb, bc, cfg.gl, delta, w);
         double tbar = 0.0, dbar = 0.0;
-        Vec6 Jbar = Vec6::Zero();
+        VecT Jbar = VecT::Zero();
         std::vector<double>& tks = S.mtks;
         tks.assign(K, 0.0);
         for (std::size_t k = 0; k < K; ++k)
         {
             double tb = 0.0;
-            Vec6 Tk = Vec6::Zero();
+            VecT Tk = VecT::Zero();
             if (delta[k] < s0)
             {
                 int bp = -1;
@@ -1267,20 +1301,20 @@ template <int N>
 inline void accumulate_beam_rays(std::span<const BeamPart> parts, const BeamRays& rays, const BeamConfig& cfg,
                                  Eigen::Matrix<double, N, N>& W, Eigen::Matrix<double, N, 1>& g, double* E)
 {
-    static_assert(N == 6, "BeamPart::J maps the 6 countable parameters (cx, cy, H, w, h, yaw)");
+    static_assert(N >= 6, "BeamPart::J maps the 6 countable parameters (cx, cy, H, w, h, yaw); N − 6 more are the proportions (Jq)");
     assert(rays.m.size() == rays.endpoints.size());
     assert(detail::p_f_consistent(rays));
     assert(not cfg.e_levels.empty());   // built by BeamConfig::make
     if (parts.empty()) return;
     std::vector<double> cs, sn;
     detail::part_trig(parts, cs, sn);   // cos/sin of each part's yaw, once per build
-    detail::BeamScratch S;
-    detail::BeamRayOut ro;
+    detail::BeamScratchT<N> S;
+    detail::BeamRayOutT<N> ro;
     double Esum = 0.0;
-    detail::Vec6 gs = detail::Vec6::Zero();
-    detail::Mat6 Ws = detail::Mat6::Zero();
+    Eigen::Matrix<double, N, 1> gs = Eigen::Matrix<double, N, 1>::Zero();
+    Eigen::Matrix<double, N, N> Ws = Eigen::Matrix<double, N, N>::Zero();
     for (std::size_t i = 0; i < rays.endpoints.size(); ++i)
-        if (detail::beam_ray_term<true>(parts, cs, sn, rays, i, cfg, false, S, ro))
+        if (detail::beam_ray_term<true, N>(parts, cs, sn, rays, i, cfg, false, S, ro))
         {
             Esum += ro.E; gs += ro.g; Ws += ro.W;
         }
