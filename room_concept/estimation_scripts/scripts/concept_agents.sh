@@ -9,8 +9,8 @@
 #                                       etc/delivered.csv) to <out_dir>/<class>_offers.csv, <class>_delivered.csv (promise_delivery.py),
 #                                       and the answers to gain queries (etc/gain_query.csv, the P1 A/B/A promise) to <class>_gain_query.csv
 # THE LIST is $CONCEPT_AGENTS — a NEW concept agent (or countable class: folder + bin link, see CONCEPT_AGENT_RECIPE.md) is one word added to the default below.
-# LEGACY_AGENTS="refrigerator_concept hood_concept" runs those two on their legacy binaries (K1: by default they run as
-# countable classes, <agent>/countable/<agent> + etc/countable.toml, where that link exists). agents.txt records which.
+# LEGACY_AGENTS="refrigerator_concept hood_concept chair_concept" runs those on their legacy binaries (K1, K2b: by default they
+# run as countable classes, <agent>/countable/<agent> + etc/countable.toml, where that link exists). agents.txt records which.
 # Binary: $WT/<agent>/bin/<agent> when present (default WT = the phase0 worktree), else the main checkout's; a SYMLINK there
 # (a countable class) pins the agent to the worktree — a dangling one is reported and skipped, never replaced by main's.
 # Every agent runs from the agent directory of the checkout its binary came from ($src/<agent>: etc/ and the manifest path

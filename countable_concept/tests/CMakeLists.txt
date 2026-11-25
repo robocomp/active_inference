@@ -331,3 +331,12 @@ target_include_directories(gain_query_test PRIVATE ../src ../../common ../../com
 target_compile_options(gain_query_test PRIVATE -O2)
 target_link_libraries(gain_query_test PRIVATE Eigen3::Eigen)
 add_test(NAME gain_query_test COMMAND gain_query_test)
+
+# K2b: the chair's NBV face ranking on the countable binary (seat/backrest/legs on the seat_top proportion): seen only from the
+# front, every other face promises more and the planner's offer is not the front. Run: LANG=es_ES.UTF-8 ./chair_face_ranking_test DIR
+add_executable(chair_face_ranking_test chair_face_ranking_test.cpp ../src/countable_belief.cpp ../src/epistemic_planner.cpp
+               ../../common/robot_footprint/robot_footprint.cpp ../../common/robot_footprint/mesh_hull.cpp)
+target_include_directories(chair_face_ranking_test PRIVATE ../src ../../common ../../common/concept_manifest ../../common/media_transport)
+target_compile_options(chair_face_ranking_test PRIVATE -O2)
+target_link_libraries(chair_face_ranking_test PRIVATE Eigen3::Eigen)
+add_test(NAME chair_face_ranking_test COMMAND chair_face_ranking_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
