@@ -96,10 +96,10 @@ AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is e
 AI2PriorSizeStd = 0.30      # (legacy; the size prior is now split into footprint vs height below)
 # FOOTPRINT + HEIGHT prior: a standard chair footprint ≈ 0.60×0.60 (TIGHT std → strong pull on w,h≡depth so a
 # partial front-only view can't float the unobserved depth); HEIGHT varies a lot (BROAD std → data-driven).
-AI2PriorFootprintM = 0.47   # K2b chair: width w: uniform over seat width 0.39 (IKEA) to chair width 0.55 (Lakeland) ⇒ mean 0.47 (manifest sources)
-AI2PriorFootprintStd = 0.046   # K2b chair: (0.55 − 0.39)/√12, the same uniform
-AI2PriorDepthM = 0.45   # K2b chair: depth h: uniform over seat depth 0.39 (IKEA) to overall depth 0.51 (IKEA) ⇒ mean 0.45
-AI2PriorDepthStd = 0.035   # K2b chair: (0.51 − 0.39)/√12, the same uniform (the depth's own std, K1 key)
+AI2PriorFootprintM = 0.50   # K2b chair (fix 1): θ.w = the OVERALL width (manifest): uniform over chair width 0.45–0.55 m (Lakeland) ⇒ mean 0.50
+AI2PriorFootprintStd = 0.029   # K2b chair (fix 1): (0.55 − 0.45)/√12, the same uniform. The seat layer is the manifest's G4 layer spread, not this prior
+AI2PriorDepthM = 0.465   # K2b chair (fix 1): θ.h = the OVERALL depth (manifest): uniform over overall depth 0.42–0.51 m (IKEA) ⇒ mean 0.465
+AI2PriorDepthStd = 0.026   # K2b chair (fix 1): (0.51 − 0.42)/√12, the same uniform (the depth's own std, K1 key)
 AI2PriorHeightM = 0.905   # K2b chair: H = the backrest top: uniform over 0.75 (Lakeland) to 1.06 m (A2Z high back) ⇒ mean 0.905
 AI2PriorHeightStd = 0.089   # K2b chair: (1.06 − 0.75)/√12, the same uniform
 # DEPTH-OBSERVABILITY prior (front-only-view depth-collapse fix): depth (h) is identifiable only when the cloud spans
@@ -477,8 +477,8 @@ BirthSelfBody = true # SELF-BODY: birth evidence × fraction of the mask's point
                      # rows see the robot's top plate; YOLOE called it "chair" 0.34 → bed_5, 2026-11-14). false only for A/B.
 MergeOverlap = 0.05       # physical exclusion: collapse two instances whose oriented footprints overlap by
                           # ≥ this fraction of the smaller footprint (two chairs cannot share space). 0=off.
-BirthWidthM = 0.47   # K2b chair: = AI2PriorFootprintM
-BirthDepthM = 0.45   # K2b chair: = AI2PriorDepthM
+BirthWidthM = 0.50   # K2b chair: = AI2PriorFootprintM
+BirthDepthM = 0.465   # K2b chair: = AI2PriorDepthM
 BirthHeightM = 0.905   # K2b chair: = AI2PriorHeightM; also the LiDAR select band top (floor case), so the band covers the whole chair
 # Ricoh-360 ATTENTION gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO detection (dense ZED slices
 # have depth_var==0). It is bearing-only: it never births/associates/fits, it only raises attention

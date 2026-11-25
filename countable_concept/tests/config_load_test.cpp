@@ -77,8 +77,10 @@ int main()
         CHECK(c->solid_parts and c->shape_parts.size() == 6 and c->shape_proportions.size() == 1);
         if (c->shape_proportions.size() == 1)
             CHECK(c->shape_proportions[0].name == "seat_top" and near(c->shape_proportions[0].lo, 0.377f) and near(c->shape_proportions[0].hi, 0.667f));
-        CHECK(near(c->ai2_prior_footprint_m, 0.47f) and near(c->ai2_prior_footprint_std, 0.046f));
-        CHECK(near(c->ai2_prior_depth_m, 0.45f) and near(c->ai2_prior_depth_std, 0.035f));
+        // θ.w, θ.h are the OVERALL width and depth (fix round 1): uniforms over 0.45–0.55 (Lakeland) and 0.42–0.51 (IKEA)
+        CHECK(near(c->ai2_prior_footprint_m, 0.50f) and near(c->ai2_prior_footprint_std, 0.029f));
+        CHECK(near(c->ai2_prior_depth_m, 0.465f) and near(c->ai2_prior_depth_std, 0.026f));
+        CHECK(near(c->tracker_birth_width_m, 0.50f) and near(c->tracker_birth_depth_m, 0.465f));
         CHECK(near(c->ai2_prior_height_m, 0.905f) and near(c->ai2_prior_height_std, 0.089f));
         CHECK(near(c->ai2_wall_flush_prior, 0.5f) and c->ai2_room_axis_std_deg <= 0.0f and not c->front_detect_enabled);
         CHECK(near(c->move_rate_per_day, 3.0f) and near(c->wall_standoff_m, 0.05f) and near(c->wall_standoff_std_m, 0.05f));

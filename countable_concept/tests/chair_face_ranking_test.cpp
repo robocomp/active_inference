@@ -13,7 +13,7 @@
 // Prediction, stated before running (spec G5, the sign claim of offer_return_view_test (a)): after parked camera updates from
 // the front, the shared camera error of that view is known (ρ = 1 along a zero path), so a look from the SEEN face promises
 // less than a look from each of the other three faces, and the planner's own offer is not on the seen face.
-// Run: LANG=es_ES.UTF-8 ./chair_face_ranking_test MANIFEST_DIR
+// Run: LANG=es_ES.UTF-8 ./chair_face_ranking_test MANIFEST_DIR   (the class values: chair_concept/etc/countable.toml)
 #include <array>
 #include <clocale>
 #include <cmath>
@@ -22,8 +22,9 @@
 #include <string>
 #include "countable_belief.h"
 #include "epistemic_planner.h"
-#include "shape_parts.h"
-#include "layer_spread.h"
+#include <filesystem>
+#include "countable_config.h"
+#include <genericworker.h>   // the test stub: the real ConfigLoader (manifest_stub/)
 #include "beam_fixture.h"
 
 using namespace rc;
@@ -34,27 +35,32 @@ static int bad = 0;
 static constexpr float tx = 0.40f, ty = -0.30f, tw = 0.50f, th = 0.47f, tH = 0.95f, tq = 0.48f;
 static const Eigen::Vector2f kRobot(tx, ty - 1.6f);   // parked in front
 
+// The chair's class values come from chair_concept/etc/countable.toml through the agent's OWN loader (rc::load_countable_config,
+// the real ConfigLoader, from the class folder as cwd, under es_ES), mapped onto the belief exactly as CountableFitter::run_inference
+// maps them (fix round 1: no hand-copied values that could drift from the config). The beam config is the test fixture's.
 static CountableBeliefParams params(const std::string& dir)
 {
-    // chair_concept/etc/countable.toml's class values (config_load_test pins them)
+    std::filesystem::current_path(std::filesystem::path(REPO_DIR) / "chair_concept");
+    ConfigLoader cl;
+    cl.load("etc/countable.toml");
+    const rc::CountableConfig c = rc::load_countable_config(cl);
     CountableBeliefParams p;
-    p.prior_footprint_m = 0.47f; p.prior_footprint_std = 0.046f;
-    p.prior_depth_m = 0.45f; p.prior_depth_std = 0.035f;
-    p.prior_height_m = 0.905f; p.prior_height_std = 0.089f;
-    p.plaus_height_min = 0.60f; p.plaus_height_soft = 0.08f;
-    p.wall_flush_prior = 0.5f;
-    p.room_axis_std = 0.0f;
-    p.volatility_infer = true;
-    p.move_rate_per_day = 3.0f; p.move_scale_m = 0.3f; p.move_scale_rad = 0.5f;
-    p.wall_standoff_m = 0.05f; p.wall_standoff_std_m = 0.05f;
-    p.persistent = true;
+    p.sigma_base_m = c.ai2_sigma_base_m;
+    p.prior_footprint_m = c.ai2_prior_footprint_m; p.prior_footprint_std = c.ai2_prior_footprint_std;
+    p.prior_depth_m = c.ai2_prior_depth_m; p.prior_depth_std = c.ai2_prior_depth_std;
+    p.prior_height_m = c.ai2_prior_height_m; p.prior_height_std = c.ai2_prior_height_std;
+    p.plaus_height_min = c.plaus_height_min; p.plaus_height_soft = c.plaus_height_soft;
+    p.wall_flush_prior = c.ai2_wall_flush_prior;
+    p.room_axis_std = c.ai2_room_axis_std_deg * 0.017453293f;
+    p.volatility_infer = c.ai2_volatility_infer;
+    p.move_rate_per_day = c.move_rate_per_day; p.move_scale_m = c.move_scale_m; p.move_scale_rad = c.move_scale_rad;
+    p.wall_standoff_m = c.wall_standoff_m; p.wall_standoff_std_m = c.wall_standoff_std_m;
+    p.vertical_extent_m = c.vertical_extent_m;
+    p.shape_parts = c.shape_parts; p.solid_parts = c.solid_parts; p.shape_proportions = c.shape_proportions;
+    p.layer_spread_m = c.layer_spread_m;
+    p.persistent = c.lidar_measures_on_gated;
     p.beam = rc::test::test_beam_config();
-    const std::string mf = dir + "/chair.concept.toml";
-    p.shape_parts = rc::manifest::load_shape_parts(mf);
-    p.solid_parts = rc::manifest::load_solid_is_parts(mf);
-    p.shape_proportions = rc::manifest::load_shape_proportions(mf);
-    const auto ls = rc::manifest::layer_spread(mf, 6);
-    for (std::size_t i = 0; i < 6 and i < ls.delta_m.size(); ++i) p.layer_spread_m[i] = ls.delta_m[i];
+    (void)dir;
     return p;
 }
 
@@ -90,7 +96,7 @@ int main(int argc, char** argv)
     std::setlocale(LC_ALL, "");
     if (argc < 2) { std::printf("usage: %s MANIFEST_DIR\n", argv[0]); return 2; }
     const CountableBeliefParams p = params(argv[1]);
-    CHECK(p.shape_parts.size() == 6 and p.solid_parts and p.shape_proportions.size() == 1);
+    CHECK(p.shape_parts.size() == 6 and p.solid_parts and p.shape_proportions.size() == 1 and p.persistent);
 
     CountableBelief b(CountableBeliefState{tx + 0.03f, ty - 0.02f, 0.92f, 0.48f, 0.46f, 0.0f}, p);
     CHECK(b.uses_q());   // the parts on the seat_top proportion: the EngineQ instantiation
