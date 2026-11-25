@@ -22,7 +22,7 @@ S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); B=/home/pbustos/robocomp/compon
 RUN=${1:?usage: parked_test.sh <run_name> <object_DEF>}; DEF=${2:?usage: parked_test.sh <run_name> <object_DEF>}
 OUT=$E/crossing/$RUN
 export CONCEPT_WT=${CONCEPT_WT:-$(cd $S/../../.. && pwd)}
-export CONCEPT_AGENTS=${CONCEPT_AGENTS:-"nightstand_concept bed_concept toilet_concept refrigerator_concept hood_concept"}
+export CONCEPT_AGENTS=${CONCEPT_AGENTS:-"nightstand_concept bed_concept toilet_concept refrigerator_concept hood_concept chair_concept"}
 export DWELL_S=${DWELL_S:-60}
 WBT=${WBT_PATH:-/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt}
 [ -e $OUT ] && { echo "$OUT exists: pick a new run name"; exit 2; }
@@ -31,7 +31,9 @@ WBT=${WBT_PATH:-/home/pbustos/robocomp/components/webots-shadow/worlds/piso/thre
 # the object's room, from its Webots pose, with the warm tour's own door lines (warm_start_tour.sh DOOR1_Y / DOOR2_X)
 read -r OX OY <<< "$(python3 $S/webots_object.py get $DEF | awk '{print $1, $2}')"
 [ -n "$OY" ] || { echo "Webots: no node $DEF (is the world loaded?)"; exit 2; }
-ROOM=$(awk -v x="$OX" -v y="$OY" 'BEGIN{ if (x > -1.705) print "room_3"; else if (y > 9.3796) print "room_2"; else print "room_1" }')
+# by the world's room polygons, in the fixture's graph names (the door lines alone put CHAIR_1, a kitchen chair at x -1.449, in the
+# bathroom)
+ROOM=$(python3 $S/aba_geometry.py room_of $OX $OY) || { echo "$DEF at ($OX, $OY) lies in no room polygon"; exit 2; }
 case $ROOM in
   room_2) LEGS="room_2"; N=1;;
   room_3) LEGS="room_2 room_3"; N=2;;

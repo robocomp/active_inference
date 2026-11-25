@@ -8,6 +8,8 @@
     aba_geometry.py query_pose <sx> <sy> <cx> <cy>       a WORLD standpoint and object centre -> the standpoint in the published
                                                           room frame and the heading facing the centre (math convention, the
                                                           engine's Standpoint yaw) — the gain query's pose
+    aba_geometry.py room_of <x> <y>                      the fixture's graph room of a world point (by the room polygons)
+    aba_geometry.py choose_chair <wbt>                   the K2b visit chair by its rule (choose_chair), every chair listed
     aba_geometry.py heading_tol                          the controller's heading goal tolerance (deg, align_yaw_tol_rad)
     aba_geometry.py face <x> <y>                          the turn (deg, + = left) that points the robot (Webots pose now) at the
                                                           world point (x, y)
@@ -160,6 +162,22 @@ def footprints(wbt):
 
 
 # ------------------------------------------------------------------------------------------------ ground truth
+def chair_geometry():
+    """The Webots Chair.proto as the countable chair grades it (K2b): the OVERALL box of its visual coordinates (seat, legs,
+    backrest: (lx, ly, z0, z1, ox, oy) in the object frame, mesh_extents.box_of), the backrest's side as a local unit axis
+    (the side of the vertices above the seat top, snapped to the nearest of ±x, ±y: derived from the mesh, not a table), and
+    the seat layer box (mesh_extents' chair layer: the spec's graded seat)."""
+    import mesh_extents as M
+    t = open(M.asset('chairs/protos/Chair.proto')).read()
+    v = np.vstack([np.array(m.split(), float).reshape(-1, 3) for m in re.findall(r'coord Coordinate \{\s*point \[([^\]]*)\]', t)])
+    box = M.box_of(v)
+    seat = M.layer_box('chair')
+    above = v[v[:, 2] > seat[3]]
+    d = above[:, :2].mean(0) - np.array([box[4], box[5]])
+    back_local = max(([1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]), key=lambda a: float(np.dot(a, d)))
+    return box, back_local, seat
+
+
 def object_truth(wbt, defn, live=False):
     import furniture as F
     import mesh_extents as M
@@ -168,6 +186,13 @@ def object_truth(wbt, defn, live=False):
     if live:
         x, y, yaw, z = webots_pose(defn); pose_src = 'webots'
     b = M.layer_box(cls, node, wbt)
+    seat = None
+    if cls == 'chair':
+        # the countable chair's theta is the OVERALL footprint box (K2b, 03e44148: w, h overall), so its truth is the whole
+        # chair; the seat layer (the spec's graded quantity) is kept as a second field
+        b, back_local, seat_b = chair_geometry()
+        sx, sy = M.to_world(x, y, yaw, seat_b[4], seat_b[5])
+        seat = dict(cx=sx, cy=sy, top=z + seat_b[3], w=seat_b[1], h=seat_b[0])
     cx, cy = M.to_world(x, y, yaw, b[4], b[5])
     polys = room_polygons()
     room = next((k for k, p in polys.items() if _point_in(p, (cx, cy))), None)
@@ -187,6 +212,10 @@ def object_truth(wbt, defn, live=False):
     lx_dir = np.array([math.cos(yaw), math.sin(yaw)])
     axes = [lx_dir, -lx_dir, np.array([-math.sin(yaw), math.cos(yaw)]), np.array([math.sin(yaw), -math.cos(yaw)])]
     back = max(axes, key=lambda a: float(a @ wall_n))
+    if cls == 'chair':
+        # a chair's back is its BACKREST (backrest on +y in the countable convention), wherever the walls are
+        back = np.array([math.cos(yaw) * back_local[0] - math.sin(yaw) * back_local[1],
+                         math.sin(yaw) * back_local[0] + math.cos(yaw) * back_local[1]])
     along_x = abs(float(lx_dir @ back)) >= abs(float(np.array([-math.sin(yaw), math.cos(yaw)]) @ back))
     h_mesh, w_mesh = (b[0], b[1]) if along_x else (b[1], b[0])
     if cls == 'bed':
@@ -198,7 +227,8 @@ def object_truth(wbt, defn, live=False):
     z0 = 0.0 if cls == 'bed' else z + b[2]
     return dict(defn=defn, name=nm, cls=cls, room_poly=room, pose_src=pose_src, origin=[x, y, yaw, z], z0=z0, cx=cx, cy=cy,
                 back=[float(back[0]), float(back[1])], yaw_theta_world=math.atan2(-back[0], back[1]),
-                w=w, h=list(h), H=H, wall_gap=best[0], source=src)
+                w=w, h=list(h), H=H, wall_gap=best[0], source=src if seat is None else 'Chair.proto visual coordinates (overall box)',
+                **({'seat': seat} if seat else {}))
 
 
 # ------------------------------------------------------------------------------------------------ standpoints
@@ -246,6 +276,53 @@ def plan(wbt, defn, live=False):
     return dict(truth=T, feasible=True, r_clear=r, z0=z0, z=z, moved_m=z - z0, side=s,
                 A=[float(A[0]), float(A[1]), face(A)], B=[float(Bp[0]), float(Bp[1]), face(Bp)],
                 planned_rho=plan_rho, obstacles=[n for n, _ in obst], footprints_failed=unread)
+
+
+# ------------------------------------------------------------------------------------------------ the visit chair (K2b)
+CHAIR_DEFS = ('CHAIR_0', 'CHAIR_1', 'CHAIR_2', 'CHAIR_3', 'CHAIR_4', 'CHAIR_5')
+TABLE_NAMES = ('Table', 'Desk', 'RoundTable', 'WoodenTable')
+
+
+def table_occlusion(plan_, wbt):
+    """Fraction of the floor-plane sight lines from A and from B to 9 points of the chair's footprint (corners, edge midpoints,
+    centre) that cross a TABLE footprint (Table*, Desk, RoundTable, WoodenTable), and the same for any other footprint."""
+    from shapely.geometry import LineString
+    T = plan_['truth']
+    fps, _ = footprints(wbt)
+    me = T['name']
+    tables = [g for n, g in fps if n != me and n.startswith(TABLE_NAMES)]
+    others = [g for n, g in fps if n != me]
+    yaw = T['yaw_theta_world']; c = np.array([T['cx'], T['cy']])
+    ux = np.array([math.cos(yaw), math.sin(yaw)]); uy = np.array([-math.sin(yaw), math.cos(yaw)])
+    pts = [c + i * 0.5 * T['w'] * ux + j * 0.5 * T['h'][0] * uy for i in (-1, 0, 1) for j in (-1, 0, 1)]
+    out = {}
+    for name in ('A', 'B'):
+        s = np.array(plan_[name][:2])
+        lines = [LineString([tuple(s), tuple(p)]) for p in pts]
+        out[name] = (sum(any(l.crosses(g) or l.within(g) for g in tables) for l in lines) / len(lines),
+                     sum(any(l.crosses(g) for g in others) for l in lines) / len(lines))
+    return out
+
+
+def choose_chair(wbt):
+    """THE VISIT-CHAIR RULE, written before any run (K2b live validation):
+      1. the chair stands on the floor: its node's translation z >= 0 up to the world file's roundoff (1e-6 m). The countable
+         chair is floor-anchored; a chair sunk below the floor (CHAIR_1, CHAIR_2 at z = -0.3) is not the object it models;
+      2. A and B are both feasible under the unchanged standpoint rule (plan());
+      3. among those, the smallest mean over A and B of the fraction of sight lines crossing a table footprint
+         (table_occlusion); ties: the smaller |moved| of the standpoint range, then the DEF order.
+    Every chair is listed with its numbers; the other chairs stay in the scene (association with neighbours is tested)."""
+    rows = []
+    for d in CHAIR_DEFS:
+        p = plan(wbt, d)
+        T = p['truth']
+        on_floor = T['origin'][3] >= -1e-6
+        occ = table_occlusion(p, wbt) if p['feasible'] else None
+        rows.append(dict(defn=d, room=T['room_poly'], z=T['origin'][3], on_floor=on_floor, feasible=p['feasible'],
+                         moved=p.get('moved_m'), occ=occ, plan=p))
+    ok = [r for r in rows if r['on_floor'] and r['feasible']]
+    ok.sort(key=lambda r: (0.5 * (r['occ']['A'][0] + r['occ']['B'][0]), abs(r['moved']), r['defn']))
+    return rows, (ok[0]['defn'] if ok else None)
 
 
 # ------------------------------------------------------------------------------------------------ frames
@@ -338,6 +415,25 @@ def main(argv):
         fr = Frames(rows, read_gauge(LIVE_PROTO_ROOM), t1 - int(window_s * 1000), t1)
         px, py, _ = fr.world_to_pub(sx, sy, 0.0, t1); qx, qy, _ = fr.world_to_pub(cx, cy, 0.0, t1)
         print(f'{px:.4f} {py:.4f} {math.atan2(qy - py, qx - px):.6f}')
+        return 0
+    if cmd == 'room_of':
+        # the room a world point lies in, by the world's own room polygons (wbt_rooms), in the warm-tour fixture's GRAPH names:
+        # wbt_rooms' room_1 = room_1 (kitchen), room_3 = room_2 (bedroom), room_2 = room_3 (bathroom) (three_rooms_door0). The door
+        # lines alone (x > DOOR_2) put a kitchen point east of x = -1.705 (CHAIR_1, -1.449) in the bathroom.
+        x, y = float(argv[1]), float(argv[2])
+        graph = {'room_1': 'room_1', 'room_3': 'room_2', 'room_2': 'room_3'}
+        polys = room_polygons()
+        r = next((k for k, p in polys.items() if _point_in(p, (x, y))), None)
+        print(graph.get(r, 'none')); return 0 if r else 1
+    if cmd == 'choose_chair':
+        rows, pick = choose_chair(argv[1])
+        for r in rows:
+            o = r['occ']
+            print(f"{r['defn']}: room {r['room']} (wbt name), node z {r['z']:+.3f} -> {'on the floor' if r['on_floor'] else 'SUNK below the floor'}; "
+                  f"plan {'feasible' if r['feasible'] else 'INFEASIBLE'}"
+                  + (f", range moved {r['moved']:+.2f} m, table-occluded sight lines A {o['A'][0]:.2f} B {o['B'][0]:.2f} "
+                     f"(any furniture A {o['A'][1]:.2f} B {o['B'][1]:.2f})" if o else ''))
+        print(f'chosen: {pick}')
         return 0
     if cmd == 'heading_tol':
         # the controller's own heading goal tolerance: |yaw error| under which its goal alignment is done

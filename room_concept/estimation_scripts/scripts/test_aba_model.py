@@ -73,6 +73,7 @@ def main():
     visits()
     node_match()
     kitchen_plans()
+    chair_plan()
     print('test_aba_model: OK')
 
 
@@ -183,6 +184,30 @@ def kitchen_plans():
     assert abs(T['w'] - 1.296) < 1e-6 and abs(T['h'][0] - 0.5) < 1e-6, T
     assert h['feasible'] and h['moved_m'] < 0.0, h                                                # moved IN by the worktop
     assert 'Worktop3' in h['obstacles']
+
+
+def chair_plan():
+    # 9. K2b: the visit chair CHAIR_5 (aba_geometry.choose_chair; the rule is in its docstring). Truth = the Chair.proto's overall
+    #    visual box (w 0.50, depth 0.534, top 0.999 above the node's z), the back on the BACKREST side (derived from the vertices
+    #    above the seat, not from the walls), the seat layer kept as a second field. CHAIR_1 is sunk 0.3 m below the floor.
+    import aba_geometry as G
+    wbt = os.environ.get('WBT_PATH', '/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt')
+    if not os.path.exists(wbt):
+        print('test_aba_model: SKIP chair plan (no world file)'); return
+    box, back_local, seat = G.chair_geometry()
+    assert back_local == [-1.0, 0.0], back_local                                  # the backrest is on the proto's local -x
+    assert abs(box[0] - 0.534) < 1e-3 and abs(box[1] - 0.50) < 1e-3 and abs(box[3] - 0.999) < 1e-3, box
+    p = G.plan(wbt, 'CHAIR_5'); T = p['truth']
+    assert T['cls'] == 'chair' and T['room_poly'] == 'room_2', T                 # wbt_rooms' room_2 = the bathroom
+    assert abs(T['back'][0]) < 1e-4 and abs(T['back'][1] + 1.0) < 1e-4, T['back']   # backrest to the south (rotation -(-pi/2))
+    assert abs(T['w'] - 0.50) < 1e-3 and abs(T['h'][0] - 0.534) < 1e-3 and abs(T['H'] - 1.039) < 1e-3, T
+    assert 'seat' in T and abs(T['seat']['top'] - 0.543) < 1e-3, T['seat']
+    assert p['feasible'], p
+    c = (T['cx'], T['cy'])
+    for q in (p['A'], p['B']): assert abs(math.hypot(q[0] - c[0], q[1] - c[1]) - p['z']) < 1e-6
+    assert p['A'][1] > T['cy']                                                    # A in FRONT of the seat (north), not behind the backrest
+    t1 = G.object_truth(wbt, 'CHAIR_1')
+    assert abs(t1['origin'][3] + 0.3) < 1e-9 and abs(t1['H'] - 0.699) < 1e-3, t1  # sunk: the choice rule excludes it
 
 
 if __name__ == '__main__': main()

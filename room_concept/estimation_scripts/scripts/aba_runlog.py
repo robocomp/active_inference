@@ -131,6 +131,8 @@ def ai2_rows(run, cls):
             d['L'] = d['beam_qsum'] > 0 and (d['gated'] == 0 or d['lidar_only'] == 1)
             sx, sy, sp = d['spose']; lx, ly = d['lever']
             d['chain'] = [sx * sx + ly * ly * sp * sp, sy * sy + lx * lx * sp * sp, 0.0, 0.0, 0.0, sp * sp]
+            # a class proportion (G4, e.g. the chair's seat_top) when the log carries it: columns q_<name> / std_q_<name>
+            d['q'] = {k: float(v) for k, v in r.items() if k and (k.startswith('q_') or k.startswith('std_q_')) and v not in ('', None)}
             out.append(d)
     out.sort(key=lambda d: d['t'])
     return out

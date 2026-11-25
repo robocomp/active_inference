@@ -48,6 +48,27 @@ def flat_check(ups, t0, t1, prm):
     return out
 
 
+def context_lines(root, T, d, fr, t_ms):
+    """Context only, never a check: a class proportion's q and sigma_q if the ai2 log carries them; for a chair (K2b) the error of
+    the SEAT centre (the spec's graded chair quantity), the estimated seat being theta's centre plus the manifest's seat part
+    offset (x_f w, y_f h) in the chair's frame."""
+    if d.get('q'):
+        print('   proportion (context): ' + ' '.join(f'{k} {v:.4f}' for k, v in sorted(d['q'].items())))
+    elif T['cls'] in ('chair', 'toilet'):
+        print('   proportion (context): q / sigma_q are not in the ai2 log')
+    if 'seat' not in T: return
+    import aba_model as Mdl
+    man = Mdl._toml(os.path.join(root, 'common', 'concept_manifest', f"{T['cls']}.concept.toml"))
+    seat = next((p for p in man.get('shape', {}).get('part', []) if p.get('name') == 'seat'), None)
+    if seat is None: print('   seat centre (context): no seat part in the manifest'); return
+    cx, cy, H, w, h, yaw = d['est']
+    ox, oy = seat['x_f'] * w, seat['y_f'] * h
+    ex, ey = cx + math.cos(yaw) * ox - math.sin(yaw) * oy, cy + math.sin(yaw) * ox + math.cos(yaw) * oy
+    tx, ty, _ = fr.world_to_pub(T['seat']['cx'], T['seat']['cy'], 0.0, t_ms)
+    print(f"   seat centre (context): estimate ({ex:.3f}, {ey:.3f}), truth ({tx:.3f}, {ty:.3f}) -> error "
+          f"({ex - tx:+.4f}, {ey - ty:+.4f}) m, {math.hypot(ex - tx, ey - ty):.4f} m")
+
+
 def no_aba(run, cls_list):
     print(f'{run.name}: no aba_segments.tsv — parsing and parked-stretch extraction only; NO PASS/FAIL can come from this run '
           '(no scripted A/B/A, so there is nothing registered to predict).')
@@ -177,6 +198,7 @@ def main(arg):
             errs.append(e)
         print('   error at the end of ' + last + ': ' + ' '.join(f'{DOFS[k]} {errs[k]:+.4f} ({errs[k] / d_end["sig"][k]:+.2f} sigma)'
                                                          for k in range(6)))
+        context_lines(root, T, d_end, fr, t_end)
         for k in range(6):
             if prm['delta'][k] == 0: continue
             sp = d_end['sig'][k]

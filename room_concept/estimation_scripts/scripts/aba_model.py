@@ -115,11 +115,19 @@ def class_params(cls, root):
     if not os.path.exists(cfg): cfg = os.path.join(root, f'{cls}_concept', 'etc', 'config.toml')
     delta = [float(x) for x in man['shape']['layer_spread_m']]
     pr = man['prior']
-    fp, ht = pr['footprint'], pr['height']
-    h_std = pr['depth']['std_m'] if 'depth' in pr else fp['std_m']   # the hood states its depth prior apart ([prior.depth])
+    # the class size prior the countable binary RUNS with: the config's AI2Prior{Footprint,Depth,Height}Std (the manifest is only
+    # checked against them; the chair has its priors only there, K2b), else the manifest's [prior.footprint] / [prior.depth] /
+    # [prior.height]; the depth falls back to the footprint std (a class with one footprint std for both)
+    def prior_std(key, man_block):
+        try: return _config_float(cfg, key)
+        except KeyError: return pr[man_block]['std_m'] if man_block in pr else None
+    w_std = prior_std('AI2PriorFootprintStd', 'footprint')
+    h_std = prior_std('AI2PriorDepthStd', 'depth') or w_std
+    H_std = prior_std('AI2PriorHeightStd', 'height')
+    fp = {'std_m': w_std}
     # the room-axis prior: the manifest's [prior.alignment] where it has one, else the config's Model.RoomAxisStdDeg (K1 classes)
     yaw_std = math.radians(float(pr['alignment']['std_deg']) if 'alignment' in pr else _config_float(cfg, 'RoomAxisStdDeg'))
-    P0 = [math.inf, math.inf, ht['std_m'] ** 2, fp['std_m'] ** 2, h_std ** 2, yaw_std ** 2]
+    P0 = [math.inf, math.inf, H_std ** 2, w_std ** 2, h_std ** 2, yaw_std ** 2]
     pos, size, yaw = (_config_float(cfg, f'AI2CommonMode{k}Std') for k in ('Pos', 'Size', 'Yaw'))
     b2 = KZED_BOUNDARY_STD_M ** 2
     perm = man['prior']['permanence']; dt = _config_float(cfg, 'AI2AgeNominalDtS')
