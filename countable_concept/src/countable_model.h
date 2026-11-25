@@ -49,6 +49,7 @@ struct CountableModelParams
     // Headboard panel (same template as CountableBeliefParams): its points are ON the bed's surface, not residual.
     float headboard_h_m = -1.0f;   // <=0 = no headboard
     float headboard_t_m = 0.10f;
+    float vertical_extent_m = -1.0f;   // <=0 floor-anchored [0, H]; > 0 the box hangs, [H − e, H] (CountableBeliefParams::span)
 };
 
 // ─── CountableModel ──────────────────────────────────────────────────────────────

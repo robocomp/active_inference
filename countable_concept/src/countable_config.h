@@ -87,6 +87,10 @@ struct CountableConfig
     // the height std is broad (weak/data-driven). Split CountableBeliefParams' prior_footprint_* / prior_height_*.
     float ai2_prior_footprint_m   = 0.60f;   // mean of the w & h(depth) prior (m)
     float ai2_prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m)
+    float ai2_prior_depth_std     = -1.0f;   // depth's own std (m), Model.AI2PriorDepthStd; <=0 = the footprint std
+    // The body's vertical extent below its top when the class HANGS (manifest [model.geometry] support = "hangs", extent_m);
+    // <= 0 = floor-anchored (z ∈ [0, H]). A class fact from the manifest, no config key (CountableBeliefParams::span()).
+    float vertical_extent_m       = -1.0f;
     float ai2_headboard_h_m       = -1.0f;   // headboard panel top (m); <=0 = no headboard (plain box)
     // Class existence (spec 2026-11-14): π_cls from the manifest's [prior.class]; the rest from [Model].
     float class_p_label_true        = 0.8f;    // P(a mask with this label is really this class)

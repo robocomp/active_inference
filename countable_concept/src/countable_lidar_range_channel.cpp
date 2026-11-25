@@ -26,8 +26,14 @@ namespace rc {
 // Birth-footprint select box (rotation-agnostic radius + floor-referenced z-band). See countable_lidar_range_channel.h.
 CountableLidarRangeChannel::SelectBox CountableLidarRangeChannel::select_box() const
 {
-    const auto b = countable_select_box(cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, cfg_.tracker_birth_height_m,
-                                        cfg_.lidar_select_margin_m);
+    // Floor-anchored: [0, birth height]. Hanging (the hood): the class body [H − e, H] at the height prior — the floor band
+    // would select the worktop and the hob under it and never the body (the hood_concept clone's disjoint band).
+    const rc::countable::VerticalSpan span{cfg_.vertical_extent_m};
+    const auto b = span.hangs()
+        ? countable_select_box(cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, cfg_.ai2_prior_height_m,
+                               cfg_.lidar_select_margin_m, span.z0(cfg_.ai2_prior_height_m))
+        : countable_select_box(cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, cfg_.tracker_birth_height_m,
+                               cfg_.lidar_select_margin_m);
     return {b.radius_xy, b.z_lo, b.z_hi};
 }
 

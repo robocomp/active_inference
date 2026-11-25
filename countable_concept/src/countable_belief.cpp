@@ -37,15 +37,16 @@ float box_sdf(float dx, float dy, float dz)
 }
 }  // namespace
 
-// Signed distance to the solid, floor-anchored box: centre (cx,cy,H/2), half extents (w/2,h/2,H/2), yaw.
+// Signed distance to the solid box: centre (cx, cy, zc), half extents (w/2, h/2, half), yaw. Floor-anchored: zc = half = H/2;
+// hanging (VerticalSpan): zc = H − e/2, half = e/2.
 float CountableBelief::sdf_box(const Eigen::Vector3f& p, const CountableBeliefState& s) const
 {
     const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
     const float px = p.x() - s.cx, py = p.y() - s.cy;
     const float lx = px * c - py * sn;
     const float ly = px * sn + py * c;
-    const float half_H = 0.5f * s.H;
-    return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly) - 0.5f * s.h, std::abs(p.z() - half_H) - half_H);
+    const auto span = params_.span();
+    return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly) - 0.5f * s.h, std::abs(p.z() - span.zc(s.H)) - span.half(s.H));
 }
 
 // The headboard panel: local x ∈ [−w/2, w/2], y ∈ [h/2 − t, h/2] (the back, +Y), z ∈ [0, headboard_h_m].
@@ -206,9 +207,10 @@ Eigen::Matrix<float, 6, 1> CountableBelief::prior_cov_diag() const
 {
     const float pp = params_.prior_pos_std       * params_.prior_pos_std;
     const float hh = params_.prior_height_std    * params_.prior_height_std;     // H: BROAD (data-driven)
-    const float wd = params_.prior_footprint_std * params_.prior_footprint_std;  // w,h(depth): TIGHT
+    const float wd = params_.prior_footprint_std * params_.prior_footprint_std;  // w: TIGHT
+    const float dd = params_.depth_std() * params_.depth_std();                  // h(depth): the footprint's unless declared
     const float yy = params_.prior_yaw_std       * params_.prior_yaw_std;
-    return (Eigen::Matrix<float, 6, 1>() << pp, pp, hh, wd, wd, yy).finished();   // [cx,cy,H,w,h,yaw]
+    return (Eigen::Matrix<float, 6, 1>() << pp, pp, hh, wd, dd, yy).finished();   // [cx,cy,H,w,h,yaw]
 }
 
 Eigen::Matrix<float, 6, 1> CountableBelief::configured_process_noise() const
@@ -370,7 +372,7 @@ float CountableBelief::two_sided_fraction(const CountableBeliefState& s, const C
                 const float along = along_x ? lx : ly;               // the axis being tested
                 const float cross = along_x ? ly : lx;               // must lie within the spanning core
                 if (std::abs(cross) > half_cross + delta) continue;  // drop clutter off the side of this face pair
-                if (q.z() < 0.0f or q.z() > s.H + delta) continue;
+                if (q.z() < params_.span().z0(s.H) or q.z() > s.H + delta) continue;   // the body's band, not floor→top
                 // Clearly on one side or the other by a FIXED margin δ (NOT keyed to the current half-extent). A
                 // point straddling the centre counts as NEITHER, so a COLLAPSED slab cannot masquerade as
                 // "both faces seen" and switch the boost off — that circularity re-collapsed the extent.
@@ -563,6 +565,7 @@ void CountableBelief::accumulate_footprint(const CountableBeliefState& s, const 
     if (params_.prior_footprint_std > 0.0f and not size_prior_off_)
     {
         const float lam_wd = anchor ? 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std) : 0.0f;
+        const float lam_dd = anchor ? 1.0f / (params_.depth_std() * params_.depth_std()) : 0.0f;   // the depth's own, if declared
         // An extent is IDENTIFIABLE only when the cloud spans it — points on BOTH opposing faces, which is what
         // separates the extent from the centre. A one-face view puts points on a single face and its many points
         // still drag that extent outward (the size common-mode caps σ, not the mean), so the footprint prior must
@@ -585,7 +588,7 @@ void CountableBelief::accumulate_footprint(const CountableBeliefState& s, const 
         const float depth_unobs = 1.0f - this->two_sided_along(s, f, false);
         const float w_flush     = flush_posterior(s, f);              // 0 when no wall is staged
         const float lam_w = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(true));
-        const float lam_h = lam_wd + params_.depth_unobs_precision * depth_unobs * (1.0f - w_flush);
+        const float lam_h = lam_dd + params_.depth_unobs_precision * depth_unobs * (1.0f - w_flush);
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
         Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.depth_mean() - s.h);   // h≡depth(index 4)
         if (E)
@@ -923,7 +926,8 @@ CountableEngineModel::Vec6 CountableEngineModel::jump_var() const
     const CountableBeliefParams& P = b->params_;
     const float m2 = P.move_scale_m * P.move_scale_m, r2 = P.move_scale_rad * P.move_scale_rad;
     const float H2 = P.prior_height_std * P.prior_height_std, f2 = P.prior_footprint_std * P.prior_footprint_std;
-    return (Vec6() << m2, m2, H2, f2, f2, r2).finished();
+    const float d2 = P.depth_std() * P.depth_std();
+    return (Vec6() << m2, m2, H2, f2, d2, r2).finished();
 }
 double CountableEngineModel::jump_prob() const
 {
@@ -1049,7 +1053,8 @@ bool CountableBelief::lidar_measured(const CountableFrame& f) const
 }
 
 // ─── The smooth beam model's parts (spec 7c.8 a, R6-I1) ─────────────────────────────────────────────────────────
-// Rows of J: ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ, θ = (cx, cy, H, w, h, yaw). The box: c = (cx, cy, H/2), half = (w/2, h/2, H/2).
+// Rows of J: ∂(cx, cy, cz, yaw, hx, hy, hz)/∂θ, θ = (cx, cy, H, w, h, yaw). The box: c = (cx, cy, zc), half = (w/2, h/2, hz), with
+// (zc, hz) = (H/2, H/2) floor-anchored and (H − e/2, e/2) hanging (VerticalSpan: ∂zc/∂H = 1, ∂hz/∂H = 0).
 // The headboard (sdf_headboard): t = min(t_hb, h), local centre y_c = h/2 − t/2, so c = (cx − sin ψ·y_c, cy + cos ψ·y_c, H_hb/2),
 // half = (w/2, t/2, H_hb/2); while t_hb < h, ∂y_c/∂h = ½ and ∂t/∂h = 0; else (t = h) y_c = 0 and ∂(t/2)/∂h = ½ (one-sided at
 // t_hb = h, as the SDF's min).
@@ -1061,9 +1066,11 @@ rc::ai::beam::BeamPart CountableBelief::beam_part(const CountableBeliefState& s,
     P.J.setZero();
     if (k == 0)
     {
-        P.c = {cx, cy, 0.5 * H};
-        P.half = {0.5 * w, 0.5 * h, 0.5 * H};
-        P.J(0, 0) = 1.0; P.J(1, 1) = 1.0; P.J(2, 2) = 0.5; P.J(3, 5) = 1.0; P.J(4, 3) = 0.5; P.J(5, 4) = 0.5; P.J(6, 2) = 0.5;
+        const auto span = params_.span();
+        P.c = {cx, cy, span.zc(H)};
+        P.half = {0.5 * w, 0.5 * h, span.half(H)};
+        P.J(0, 0) = 1.0; P.J(1, 1) = 1.0; P.J(2, 2) = span.dzc_dH(); P.J(3, 5) = 1.0; P.J(4, 3) = 0.5; P.J(5, 4) = 0.5;
+        P.J(6, 2) = span.dhalf_dH();
         return P;
     }
     const double t_hb = params_.headboard_t_m, H_hb = params_.headboard_h_m;
@@ -1554,8 +1561,11 @@ float CountableBelief::candidate_plausibility(const std::vector<Eigen::Vector3f>
 {
     if (pts.size() < 12) return p.class_p_label_true;
     using namespace rc::countable;
+    // The cloud's measure of H: floor-anchored, its z-extent (its base is the floor); hanging, its robust top (its extent is
+    // the class's fixed canopy, not H).
+    const float z_meas = p.span().hangs() ? robust_z_top(pts) : robust_z_extent(pts);
     return class_probability(logit(p.class_p_label_true) +
-                             birth_height_log_evidence(robust_z_extent(pts), p.class_shape_prior(), p.birth_height_noise_m,
+                             birth_height_log_evidence(z_meas, p.class_shape_prior(), p.birth_height_noise_m,
                                                        p.birth_height_outlier_frac, p.class_alt_std_m));
 }
 

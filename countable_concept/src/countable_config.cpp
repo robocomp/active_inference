@@ -137,6 +137,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "mean of the w & h(depth) prior (m)");
     out.ai2_prior_footprint_std = getf("Model.AI2PriorFootprintStd", 0.08f,
             "TIGHT → strong footprint prior (m)");
+    out.ai2_prior_depth_std     = getf("Model.AI2PriorDepthStd", -1.0f,
+            "depth (local Y) prior std (m) when the class declares its own ([prior.depth] std_m); <=0 = the footprint std");
     // The back panel (a bed's headboard) is a CLASS fact: it comes from the manifest's [prior.headboard], absent
     // for classes without one (nightstand, toilet) = a plain box. No config key.
     bool manifest_opened = false;
@@ -550,14 +552,31 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     // ★z_top is the AI2 HEIGHT PRIOR (1.90), NOT Tracker.BirthHeightM. Birth height is deliberately 0.75 —
     // below plaus_height_min so every real bed grows INTO its size — so it is the wrong number for a
     // class-level span. Getting that backwards would declare a body half the height of the object.
+    // The support is the manifest's (K1): floor_anchored keeps the span [0, H]; hangs takes the declared extent below the top
+    // (the hood), and every z-band the agent derives asks CountableBeliefParams::span() for it. Any other support is refused:
+    // this binary has no model for it, and running it as floor-anchored would be the clone defect the manifest exists to stop.
     {
-        const auto span = rc::manifest::adopt_span(manifest_path, out.concept_class,
-                                                  rc::manifest::Support::floor_anchored,
-                                                  out.ai2_prior_height_m, out.ai2_prior_height_m);
+        const auto g = rc::manifest::load_geometry(manifest_path, out.concept_class);
+        const auto support = g.valid ? g.support : rc::manifest::Support::floor_anchored;
+        if (support == rc::manifest::Support::hangs)
+        {
+            if (not (g.extent_m > 0.0f and g.extent_m < out.ai2_prior_height_m))
+                throw CountableConfigError(std::format("{}: ★ {} declares support = hangs with extent_m = {} — it must lie in (0, the "
+                                                       "height prior {}) — refusing to start\n", out.agent_name, manifest_path,
+                                                       g.extent_m, out.ai2_prior_height_m));
+            out.vertical_extent_m = g.extent_m;
+        }
+        else if (support != rc::manifest::Support::floor_anchored)
+            throw CountableConfigError(std::format("{}: ★ {} declares support = {} — countable_concept models floor_anchored and "
+                                                   "hangs only — refusing to start\n", out.agent_name, manifest_path,
+                                                   rc::manifest::support_name(support)));
+        const float extent = out.vertical_extent_m > 0.0f ? out.vertical_extent_m : out.ai2_prior_height_m;
+        const auto span = rc::manifest::adopt_span(manifest_path, out.concept_class, support,
+                                                  out.ai2_prior_height_m, extent);
         rc::manifest::Geometry decl;
         decl.support  = span.support;
         decl.z_top_m  = out.ai2_prior_height_m;
-        decl.extent_m = out.ai2_prior_height_m;
+        decl.extent_m = extent;
         decl.valid    = true;
         bool ok_bands = true;
         ok_bands &= rc::manifest::band_contains_body(out.concept_class + " ", "lidar_select",

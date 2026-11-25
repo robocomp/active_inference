@@ -40,6 +40,8 @@ void set_class_prior(rc::CountableBeliefParams& p, const rc::CountableConfig& cf
     p.class_alt_std_m = cfg.class_alt_std_m;
     p.birth_height_noise_m = cfg.birth_height_noise_m;
     p.birth_height_outlier_frac = cfg.birth_height_outlier_frac;
+    p.prior_depth_std   = cfg.ai2_prior_depth_std;     // the depth's own std, if the class declares one
+    p.vertical_extent_m = cfg.vertical_extent_m;       // where the box stands (the birth height evidence reads it)
 }
 }
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
@@ -305,9 +307,10 @@ void SpecificWorker::run_instance_tracker()
                                                cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f};
                 const rc::exclusion::Claim* who = nullptr;
                 // A bed is born standing on the floor, so its band is [0, birth height]. A hood or a wall
-                // unit above the candidate shares its footprint and none of its volume.
-                const float unclaimed = rc::exclusion::p_unclaimed(cand, foreign_claims_, &who,
-                                                                   0.0f, cfg_.tracker_birth_height_m);
+                // unit above the candidate shares its footprint and none of its volume. A hanging class is born
+                // in its class band [H − e, H] (birth_band).
+                const auto [bz0, bz1] = birth_band();
+                const float unclaimed = rc::exclusion::p_unclaimed(cand, foreign_claims_, &who, bz0, bz1);
                 dv.birth_evidence *= unclaimed;
                 if (unclaimed < 0.99f)
                     std::print("[{}-filter] birth cand slice={} CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f} -> {:.3f}\n",
@@ -525,7 +528,7 @@ void SpecificWorker::run_instance_tracker()
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
                 it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_width_m,
                                                        cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_,
-                                                      0.0f, cfg_.tracker_birth_height_m);
+                                                      birth_band().first, birth_band().second);
             // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): captures the place AND the
             // viewpoint that produced it, so a phantom that dies young is attributable to both.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
@@ -743,7 +746,8 @@ void SpecificWorker::log_detect_probe()
         row.node     = inst.node_name;
         row.stamp_ms = inst.dbg_pkt_ts_ms;
         row.rx = rx; row.ry = ry; row.rtheta = rtheta; row.cam_z = cam_z;
-        row.ocx = s.cx; row.ocy = s.cy; row.ocz = 0.5f * s.countable_height;
+        row.ocx = s.cx; row.ocy = s.cy;
+        row.ocz = rc::countable::VerticalSpan{cfg_.vertical_extent_m}.zc(s.countable_height);
         row.range_m       = inst.last_range;
         row.roi_fill      = inst.roi_fill;
         row.roi_fill_h    = inst.roi_fill_h;

@@ -9,6 +9,7 @@
  */
 
 #pragma once
+#include "countable_vertical_span.h"
 
 #include <cstdint>
 #include <functional>
@@ -64,8 +65,8 @@ public:
     // Write the epistemic next-best-view proposal onto a bed node.
     void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
 
-    // Flat triangle list (room frame): top slab + 4 legs.
-    static std::vector<float> make_countable_mesh(const CountableState& s);
+    // Flat triangle list (room frame): one solid box, floor-anchored or hanging (span).
+    static std::vector<float> make_countable_mesh(const CountableState& s, rc::countable::VerticalSpan span = {});
 
 private:
     void write_countable_mesh(CountableInstance& inst, DSR::Node& node);

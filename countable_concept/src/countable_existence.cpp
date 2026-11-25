@@ -95,6 +95,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         inst.occ_delta_cycle = 0.0f;   // this cycle's pre-clamp existence increment (sum over every integrate below)
         rc::exist::arm(inst.existence, policy);
         const auto& bs = inst.ai2_belief.state();
+        const auto  span = inst.ai2_belief.params().span();   // the body's z-band: [0, H] or, hanging, [H − e, H]
         const auto& S  = inst.ai2_belief.covariance();
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
 
@@ -370,13 +371,13 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
             rc::exist::Evidence ev = cfg_.existence_carve_parts
                 ? rc::exist::carve_parts(origin, *sweep, bs.cx, bs.cy, bs.yaw, carve_parts, surf_sigma, sm)
                 : rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
-                                       0.0f, bs.H, surf_sigma, sm);
+                                       span.z0(bs.H), bs.H, surf_sigma, sm);
             if (sweep_bp != nullptr)   // second ray-set, own origin (occlusion-aware first-hit) — occupancy only
             {
                 const rc::exist::Evidence bp = cfg_.existence_carve_parts
                     ? rc::exist::carve_parts(origin_bp, *sweep_bp, bs.cx, bs.cy, bs.yaw, carve_parts, surf_sigma, sm)
                     : rc::exist::carve_box(origin_bp, *sweep_bp, bs.cx, bs.cy, bs.yaw,
-                                           bs.w, bs.h, 0.0f, bs.H, surf_sigma, sm);
+                                           bs.w, bs.h, span.z0(bs.H), bs.H, surf_sigma, sm);
                 ev.e_occ += bp.e_occ; ev.n_reached += bp.n_reached;
             }
             // ★MUTUAL EXCLUSION (SHARED, common/exclusion). Returns coming from a volume a SENIOR object
@@ -388,10 +389,10 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
             if (claims_)
             {
                 const auto& bs0 = inst.ai2_belief.state();
-                // A bed stands on the floor, so its band is [0, height] — which is what keeps a hood or a
-                // wall unit directly above it from reading as a claim on its volume.
+                // The body's band, [0, H] for a bed on the floor, [H − e, H] for a hood — which is what keeps a hood
+                // directly above a worktop (or a cabinet below a hood) from reading as a claim on its volume.
                 const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.w, bs0.h, bs0.yaw},
-                                                                     *claims_, 0.0f, bs0.H);
+                                                                     *claims_, span.z0(bs0.H), bs0.H);
                 if (w_excl < 1.0f)
                 {
                     ev.e_occ *= w_excl;
@@ -423,7 +424,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
                 // ★Applied to e_interior AS WELL as e_free. Only e_free was degraded before, so the interior
                 // term — the one that makes a phantom-over-a-wall die — went in at FULL strength from any
                 // distance. That was a plain bug, not a policy choice.
-                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, 0.5f * bs.H)).norm();
+                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, span.zc(bs.H))).norm();
                 const float coverage = (cfg_.lidar_coverage_n0 > 0.0f)
                                      ? std::min(1.0f, static_cast<float>(ev.n_reached) / cfg_.lidar_coverage_n0)
                                      : 1.0f;

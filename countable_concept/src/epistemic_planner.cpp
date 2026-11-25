@@ -38,7 +38,7 @@ namespace rc {
 namespace
 {
 // Samples surface points on one vertical face of the 6-DOF CountableBeliefState [cx,cy,H,w,h,yaw], for ΔI.
-std::vector<Eigen::Vector3f> sample_face_surface(const CountableBeliefState& s, int face_idx)
+std::vector<Eigen::Vector3f> sample_face_surface(const CountableBeliefState& s, int face_idx, rc::countable::VerticalSpan span)
 {
     constexpr int kTangent = 10, kVert = 6;
     const float hw = s.w * 0.5f, hh = s.h * 0.5f;
@@ -59,7 +59,7 @@ std::vector<Eigen::Vector3f> sample_face_surface(const CountableBeliefState& s, 
         const float ry = s.cy + syaw * lx + cyaw * ly;
         for (int k = 0; k < kVert; ++k)
         {
-            const float z = s.H * ((kVert > 1) ? static_cast<float>(k) / (kVert - 1) : 1.0f);
+            const float z = span.z0(s.H) + span.height(s.H) * ((kVert > 1) ? static_cast<float>(k) / (kVert - 1) : 1.0f);
             pts.emplace_back(rx, ry, z);
         }
     }
@@ -132,7 +132,7 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     rc::nbv::Target target;
     target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
     target.w  = s.w;  target.h  = s.h;
-    target.z0 = 0.0f; target.z1 = s.H;   // the box stands on the floor; z1 is what binds the vertical framing
+    target.z0 = belief.params().span().z0(s.H); target.z1 = s.H;   // the body's band (floor or hanging); z1 binds the framing
     target.sigma_pos_m    = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));
     target.sigma_extent_m = std::sqrt(std::max(0.0f, 0.5f * (S(3, 3) + S(4, 4))));
 
@@ -156,7 +156,7 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
         if (persistent) return engine_gain(face_idx, standoff);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const Eigen::Matrix<float, 6, 6> dI =
-            belief.predicted_information(sample_face_surface(s, face_idx), Ri).topLeftCorner<6, 6>();
+            belief.predicted_information(sample_face_surface(s, face_idx, belief.params().span()), Ri).topLeftCorner<6, 6>();
         return std::max(0.0f, rc::nbv::d_optimal_gain<6>(S, dI));   // single-view D-optimal info (nats)
     };
 

@@ -87,7 +87,11 @@ std::uint64_t CountableSceneGraph::create_instance_from_detection(const Eigen::V
         G_->add_or_modify_attrib_local<mesh_texture_path_att>(countable_node, *tex);
     G_->add_or_modify_attrib_local<width_m_att> (countable_node, cfg_.tracker_birth_width_m);
     G_->add_or_modify_attrib_local<depth_m_att> (countable_node, cfg_.tracker_birth_depth_m);
-    G_->add_or_modify_attrib_local<height_m_att>(countable_node, cfg_.tracker_birth_height_m);
+    // height_m is the BODY's vertical extent above the RT origin (the fleet convention: origin = base, top = z + height_m,
+    // graph_obstacles.h). Floor-anchored: the birth height from the floor. Hanging: the class extent, its origin the underside.
+    const rc::countable::VerticalSpan span{cfg_.vertical_extent_m};
+    G_->add_or_modify_attrib_local<height_m_att>(countable_node,
+                                                 span.hangs() ? span.extent_m : cfg_.tracker_birth_height_m);
     G_->add_or_modify_attrib_local<level_att>   (countable_node, 3);
     G_->add_or_modify_attrib_local<parent_att>  (countable_node, room_node_id);
     {
@@ -106,7 +110,7 @@ std::uint64_t CountableSceneGraph::create_instance_from_detection(const Eigen::V
     if (not id_opt.has_value())
         return 0;
 
-    const float z = cfg_.tracker_birth_height_m * 0.5f;
+    const float z = span.hangs() ? span.z0(cfg_.ai2_prior_height_m) : cfg_.tracker_birth_height_m * 0.5f;
     rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
                                       {centroid_room.x(), centroid_room.y(), z}, {0.0f, 0.0f, 0.0f});
 
@@ -160,7 +164,8 @@ void CountableSceneGraph::step_write_model(CountableInstance& inst, DSR::Node& n
     {
         G_->add_or_modify_attrib_local<width_m_att> (node, s.w);
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
-        G_->add_or_modify_attrib_local<height_m_att>(node, s.countable_height);
+        // the body's extent above its origin: H floor-anchored, the class extent e hanging (origin = the underside)
+        G_->add_or_modify_attrib_local<height_m_att>(node, rc::countable::VerticalSpan{cfg_.vertical_extent_m}.height(s.countable_height));
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
         write_countable_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
@@ -259,7 +264,10 @@ void CountableSceneGraph::write_rt_covariance(std::uint64_t room_id, CountableIn
     const auto& S = inst.ai2_belief.covariance();
     float vx   = scale * S(0, 0);          // cx
     float vy   = scale * S(1, 1);          // cy
-    float vz   = scale * 0.25f * S(2, 2);  // z = H/2 ⇒ var_z = var_H/4
+    // The RT z the edge carries: floor-anchored the box's mid-height z = H/2 ⇒ var_z = var_H/4 (as before); hanging the
+    // origin is the underside z = H − e ⇒ var_z = var_H (∂z/∂H = 1).
+    const bool hangs = rc::countable::VerticalSpan{cfg_.vertical_extent_m}.hangs();
+    float vz   = hangs ? scale * S(2, 2) : scale * 0.25f * S(2, 2);
     // MARGINAL yaw variance: within-mode Σ(5,5) + discrete-mode entropy p(1−p)(π/2)². A still-ambiguous
     // near-square bed publishes an honest ~45° (not the overconfident ~1° within-mode width) so the
     // controller's uncertainty governor + epistemic planner know yaw is unresolved. Collapses as evidence
@@ -281,7 +289,7 @@ void CountableSceneGraph::write_rt_covariance(std::uint64_t room_id, CountableIn
 
 // ─── Mesh ────────────────────────────────────────────────────────────────────────────────────────
 
-std::vector<float> CountableSceneGraph::make_countable_mesh(const CountableState& s)
+std::vector<float> CountableSceneGraph::make_countable_mesh(const CountableState& s, rc::countable::VerticalSpan span)
 {
     // Flat triangle list (room frame): ONE solid floor-anchored box (12 tri). A bed is a single
     // cuboid — no top slab, no legs.
@@ -313,16 +321,15 @@ std::vector<float> CountableSceneGraph::make_countable_mesh(const CountableState
         push( hw,-hd,-hh); push( hw, hd, hh); push( hw,-hd, hh);
     };
 
-    // Single solid box: centred at (cx, cy, H/2), half extents (w/2, h/2, H/2) — spans floor→H.
-    const float halfH = s.countable_height * 0.5f;
-    push_box(s.cx, s.cy, halfH, s.w * 0.5f, s.h * 0.5f, halfH);
+    // Single solid box: centred at (cx, cy, zc), half extents (w/2, h/2, half) — floor→H, or [H − e, H] when it hangs.
+    push_box(s.cx, s.cy, span.zc(s.countable_height), s.w * 0.5f, s.h * 0.5f, span.half(s.countable_height));
 
     return verts;
 }
 
 void CountableSceneGraph::write_countable_mesh(CountableInstance& inst, DSR::Node& node)
 {
-    const std::vector<float> verts = make_countable_mesh(inst.model.state());
+    const std::vector<float> verts = make_countable_mesh(inst.model.state(), rc::countable::VerticalSpan{cfg_.vertical_extent_m});
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
 }
 
@@ -356,7 +363,8 @@ void CountableSceneGraph::write_rt_pose(std::uint64_t room_id, CountableInstance
     // lookup + support decision (top = origin.z + height). Publishing z=countable_height/2 put the
     // origin at mid-height → countable_top came out as 1.5·height → bottles failed the support test,
     // parented to the room and floated. Keep the base on the floor so top = 0 + height = height.
-    const float z = 0.0f;
+    // A hanging class's origin is its BODY's underside z = H − e (graph_obstacles.h: band [z, z + height_m]), not the floor.
+    const float z = rc::countable::VerticalSpan{cfg_.vertical_extent_m}.z0(s.countable_height);
     rt_api_->insert_or_assign_edge_RT(room_opt.value(), inst.node_id,
                                       {s.cx, s.cy, z},
                                       {0.0f, 0.0f, s.yaw});

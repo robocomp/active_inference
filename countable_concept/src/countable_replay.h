@@ -70,7 +70,8 @@ template <class V> void fields(V& v, CountableBeliefParams& x)
     v("sigma_base_m", x.sigma_base_m); v("range_noise_lat_per_m", x.range_noise_lat_per_m);
     v("clutter_frac", x.clutter_frac); v("clutter_scale_m", x.clutter_scale_m); v("model_sigma_m", x.model_sigma_m);
     v("prior_pos_std", x.prior_pos_std); v("prior_size_std", x.prior_size_std); v("prior_yaw_std", x.prior_yaw_std);
-    v("prior_footprint_m", x.prior_footprint_m); v("prior_footprint_std", x.prior_footprint_std);
+    v("prior_footprint_m", x.prior_footprint_m); v("prior_footprint_std", x.prior_footprint_std); v("prior_depth_std", x.prior_depth_std);
+    v("vertical_extent_m", x.vertical_extent_m);
     v("prior_depth_m", x.prior_depth_m); v("prior_height_m", x.prior_height_m); v("prior_height_std", x.prior_height_std);
     v("depth_unobs_precision", x.depth_unobs_precision); v("depth_obs_band_m", x.depth_obs_band_m);
     v("headboard_h_m", x.headboard_h_m); v("headboard_t_m", x.headboard_t_m);

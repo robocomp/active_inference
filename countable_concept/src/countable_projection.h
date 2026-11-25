@@ -29,6 +29,7 @@
 #include "../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet — shared silhouette + its null
 
 #include "countable_instance.h"      // rc::CountableInstance, CountableState, rc::FrontCue
+#include "countable_vertical_span.h" // the body's z-band
 #include "../../common/mask_ingestor/mask_ingestor.h"
 
 namespace cv { class Mat; }             // forward-decl: OpenCV lives only in countable_projection.cpp
@@ -98,9 +99,10 @@ public:
     CountableProjection(std::shared_ptr<DSR::DSRGraph> graph,
                     DSR::InnerEigenAPI* inner_eigen,
                     MaskIngestor* mask_ingestor,
-                    std::string concept_class)
+                    std::string concept_class,
+                    rc::countable::VerticalSpan span = {})
         : G_(std::move(graph)), inner_eigen_(inner_eigen), mask_ingestor_(mask_ingestor),
-          concept_class_(std::move(concept_class)) {}
+          concept_class_(std::move(concept_class)), span_(span) {}
 
     // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
     // query); the rigid body→zed mount is always queried latest. 0 → current pose.
@@ -180,6 +182,7 @@ private:
     DSR::InnerEigenAPI*             inner_eigen_ = nullptr;
     MaskIngestor*                   mask_ingestor_ = nullptr;
     std::string                     concept_class_;   // Concept.Class: the mask label that is OURS (the rest occlude)
+    rc::countable::VerticalSpan     span_;            // where the box stands: floor-anchored [0,H] or hanging [H−e,H]
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
     std::vector<Eigen::Vector2f>    room_polygon_;  // room walls, as OCCLUDERS for the line-of-sight test
     float                           central_region_frac_ = 0.25f;

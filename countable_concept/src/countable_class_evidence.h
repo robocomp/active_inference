@@ -121,6 +121,17 @@ inline float robust_z_extent(const std::vector<Eigen::Vector3f>& pts)      // q0
     return q(0.97) - q(0.03);
 }
 
+// The robust TOP of a cloud (q0.97 of z): a HANGING class's birth height. Its mask spans the canopy, not floor→top, so its
+// z-extent measures the class's fixed vertical extent and says nothing about H; the top above the floor is what the H prior
+// (the top above the floor, θ's H) scores.
+inline float robust_z_top(const std::vector<Eigen::Vector3f>& pts)
+{
+    if (pts.empty()) return 0.0f;
+    std::vector<float> z; z.reserve(pts.size());
+    for (const auto& p : pts) z.push_back(p.z());
+    std::ranges::sort(z);
+    return z[size_t(std::lround(0.97 * double(z.size() - 1)))];
+}
 inline float class_probability(float L) { return 1.0f / (1.0f + std::exp(-L)); }
 inline float logit(float p) { return std::log(p / (1.0f - p)); }
 

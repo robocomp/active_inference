@@ -27,6 +27,7 @@
 #include <Eigen/Dense>
 
 #include "countable_class_evidence.h"
+#include "countable_vertical_span.h"                      // where the box stands: floor-anchored [0,H] or hanging [H−e,H]
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
 #include "../../common/ai_belief/persistent_update.h"    // persistent shared-error latents (lidar-measures §7c.2)
@@ -123,6 +124,10 @@ struct CountableBeliefParams
     // split the previously-uniform size entry of prior_cov_diag() into footprint (tight) vs height (broad).
     float prior_footprint_m   = 0.60f;   // mean of the w and h (depth) prior (m)
     float prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m); λ = 1/std² folded into accumulate_extra
+    // DEPTH std when the class declares its own ([prior.depth] std_m: a hood's depth spreads less than its width). ≤0 = the
+    // footprint std (one std for both axes, every class before the hood).
+    float prior_depth_std     = -1.0f;
+    float depth_std() const { return prior_depth_std > 0.0f ? prior_depth_std : prior_footprint_std; }
     // DEPTH mean (local Y, front-to-back) when the class is NOT square in plan — a bed is 1.75 wide and 2.1 long,
     // a toilet 0.58 × 0.73. ≤0 = the same as prior_footprint_m (the refrigerator parent's square footprint).
     // The asymmetry is also evidence about the 90° yaw mode: only one of the two w↔h assignments fits it.
@@ -148,6 +153,10 @@ struct CountableBeliefParams
     // the template is the manifest's. headboard_h_m <= 0 = a plain box (the refrigerator parent's model).
     float headboard_h_m = -1.0f;
     float headboard_t_m = 0.10f;
+    // VERTICAL SPAN (K1): the box's base. ≤0 = floor-anchored, z ∈ [0, H] (every class before the hood); > 0 = the box HANGS
+    // with this vertical extent below its top H, z ∈ [H − e, H] — the manifest's [model.geometry] support = "hangs" extent_m.
+    float vertical_extent_m = -1.0f;
+    rc::countable::VerticalSpan span() const { return {vertical_extent_m}; }
 
     // ── CLASS EXISTENCE (spec 2026-11-14 countable class existence) ──────────────────────────────────────
     // π_cls: P(a mask carrying this class's label is really this class), from the manifest's [prior.class]. The
@@ -166,7 +175,7 @@ struct CountableBeliefParams
         rc::countable::ClassShapePrior c;
         c.H_mean = prior_height_m;   c.H_std = prior_height_std;
         c.w_mean = prior_footprint_m; c.w_std = prior_footprint_std;
-        c.h_mean = depth_mean();      c.h_std = prior_footprint_std;
+        c.h_mean = depth_mean();      c.h_std = depth_std();
         c.H_top  = headboard_h_m > prior_height_m ? headboard_h_m : prior_height_m;
         c.p_label_true = class_p_label_true;
         c.H_fit_std = class_fit_H_m; c.w_fit_std = class_fit_w_m; c.h_fit_std = class_fit_h_m;

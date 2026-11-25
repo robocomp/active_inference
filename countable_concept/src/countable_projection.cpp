@@ -207,7 +207,7 @@ void CountableProjection::compute_projected_roi(CountableInstance& inst)
     int in_front = 0;
     for (const int ix : {-1, 1})
         for (const int iy : {-1, 1})
-            for (const float z : {0.0f, s.countable_height})
+            for (const float z : {span_.z0(s.countable_height), s.countable_height})
             {
                 const float lx = static_cast<float>(ix) * hw, ly = static_cast<float>(iy) * hh;
                 const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, z, 1.0);
@@ -395,7 +395,7 @@ SilhouetteExistence CountableProjection::compute_silhouette_existence(const Coun
     constexpr int NU = 16, NV = 20;   // across the face × up the height
     // Sample the side face whose outward normal is ±local-x (normal_along_x) or ±local-y, at sign `sgn`: the
     // face sits at that half-extent, the free lateral coordinate spans the OTHER half-extent, and the vertical
-    // spans the full box height [0, H].
+    // spans the full box height [z0, H] (z0 = 0 floor-anchored, H − e hanging).
     const auto sample_face = [&](bool normal_along_x, float sgn)
     {
         const float half_lat = normal_along_x ? hd : hw;
@@ -405,7 +405,7 @@ SilhouetteExistence CountableProjection::compute_silhouette_existence(const Coun
             const float lx = normal_along_x ? sgn * hw : t;
             const float ly = normal_along_x ? t        : sgn * hd;
             for (int iv = 0; iv < NV; ++iv)
-                classify(lx, ly, s.H * (iv + 0.5f) / NV);
+                classify(lx, ly, span_.z0(s.H) + span_.height(s.H) * (iv + 0.5f) / NV);
         }
     };
     if (cam_lx >  hw) sample_face(true,  +1.0f);
@@ -417,6 +417,12 @@ SilhouetteExistence CountableProjection::compute_silhouette_existence(const Coun
         for (int iu = 0; iu < NU; ++iu)
             for (int iv = 0; iv < NV; ++iv)
                 classify((-1.0f + 2.0f * (iu + 0.5f) / NU) * hw, (-1.0f + 2.0f * (iv + 0.5f) / NV) * hd, s.H);
+    // BOTTOM face only when the camera is genuinely below it: a HANGING body (a hood above the ZED) shows its underside. A
+    // floor-anchored one's underside is the floor (z0 = 0), never above the camera, so this adds nothing there.
+    if (span_.hangs() and cam_lz < span_.z0(s.H))
+        for (int iu = 0; iu < NU; ++iu)
+            for (int iv = 0; iv < NV; ++iv)
+                classify((-1.0f + 2.0f * (iu + 0.5f) / NU) * hw, (-1.0f + 2.0f * (iv + 0.5f) / NV) * hd, span_.z0(s.H));
     // No face qualified ⇒ the camera is inside the footprint (degenerate) ⇒ n_total==0 ⇒ the caller HOLDs.
     if (out.n_detectable > 0)
         out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
@@ -474,7 +480,7 @@ rc::edges::ContourSet CountableProjection::compute_contour_set(const CountableIn
     rc::edges::BoxFootprint box;
     box.cx = s.cx; box.cy = s.cy; box.yaw = s.yaw;
     box.w  = s.w;  box.d  = s.h;                 // ★`h` here is the footprint DEPTH; the HEIGHT is `H`
-    box.z_min = 0.0f; box.z_max = s.H;                 // ai2_belief state names the height H
+    box.z_min = span_.z0(s.H); box.z_max = s.H;        // ai2_belief state names the top H; the base is the span's
     return rc::edges::project_box_face(box, cam_pos_room, project);
 }
 
@@ -550,7 +556,7 @@ std::optional<FrontCue> CountableProjection::detect_front(const CountableState& 
     const float sy = static_cast<float>(rgb.rows) / H;
 
     const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
-    const float hw = 0.5f * s.w, hd = 0.5f * s.h, boxH = s.countable_height;
+    const float hw = 0.5f * s.w, hd = 0.5f * s.h, boxH = s.countable_height, boxZ0 = span_.z0(s.countable_height);
 
     // Local→room for a footprint point (lx,ly) at height lz.
     const auto to_room = [&](float lx, float ly, float lz) -> Eigen::Vector3d
@@ -584,13 +590,13 @@ std::optional<FrontCue> CountableProjection::detect_front(const CountableState& 
     {
         // Camera-facing: the outward normal must point toward the camera ⇒ nr·(cam − face_centre) > 0.
         const Eigen::Vector3d nr(c * f.nx - sn * f.ny, sn * f.nx + c * f.ny, 0.0);
-        const Eigen::Vector3d fc = to_room(0.5f * (f.ax + f.bx), 0.5f * (f.ay + f.by), 0.5f * boxH);
+        const Eigen::Vector3d fc = to_room(0.5f * (f.ax + f.bx), 0.5f * (f.ay + f.by), span_.zc(boxH));
         if (nr.dot(cam_pos_room - fc) <= 0.0)
             continue;                                          // back-facing → not visible
 
         // Project the 4 quad corners: bottom_a, bottom_b, top_b, top_a (consistent winding for the warp).
-        const auto p0 = project(to_room(f.ax, f.ay, 0.0f));
-        const auto p1 = project(to_room(f.bx, f.by, 0.0f));
+        const auto p0 = project(to_room(f.ax, f.ay, boxZ0));
+        const auto p1 = project(to_room(f.bx, f.by, boxZ0));
         const auto p2 = project(to_room(f.bx, f.by, boxH));
         const auto p3 = project(to_room(f.ax, f.ay, boxH));
         if (not (p0 and p1 and p2 and p3))

@@ -6,6 +6,7 @@
  */
 
 #include "countable_model.h"
+#include "countable_vertical_span.h"
 
 #include <algorithm>
 #include <cmath>
@@ -84,16 +85,16 @@ float CountableModel::sdf_point_at(const Eigen::Vector3f& p, const CountableStat
     const float local_z = p.z();
     (void) leg_length;   // no legs on a bed (single solid box); field kept inert for compatibility
 
-    // ── SOLID FLOOR-ANCHORED BOX ─────────────────────────────────────────────
-    // A bed is one free-standing cuboid spanning z∈[0, countable_height]; centre at half-height,
-    // half extents (w/2, h/2, countable_height/2). No top slab, no legs.
+    // ── SOLID BOX ────────────────────────────────────────────────────────────
+    // One cuboid spanning z∈[0, countable_height] (floor-anchored: centre at half-height, half extents (w/2, h/2,
+    // countable_height/2)), or z∈[H − e, H] when the class hangs (VerticalSpan). No top slab, no legs.
     const float half_w = w * 0.5f;
     const float half_h = h * 0.5f;
-    const float half_H = countable_height * 0.5f;
+    const rc::countable::VerticalSpan span{params_.vertical_extent_m};
 
     const float dx = std::abs(local_x) - half_w;
     const float dy = std::abs(local_y) - half_h;
-    const float dz = std::abs(local_z - half_H) - half_H;
+    const float dz = std::abs(local_z - span.zc(countable_height)) - span.half(countable_height);
 
     const float d_box = box_sdf(dx, dy, dz);
     if (params_.headboard_h_m <= 0.0f) return d_box;

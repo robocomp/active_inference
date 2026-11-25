@@ -221,6 +221,14 @@ private:
     // window). Distinct from masks_stream_ready() (node-exists, which persists after the producer dies) —
     // admitting on node-exists causes an instant re-stall flap. Requires refresh() to be pumped while Waiting.
     bool masks_stream_live() const;
+    // A birth candidate's vertical band for the exclusion test: [0, Tracker.BirthHeightM] for a floor-anchored class, the class
+    // body [H − e, H] at the height prior for a hanging one (the hood). The class fact is CountableConfig::vertical_extent_m.
+    std::pair<float, float> birth_band() const
+    {
+        const rc::countable::VerticalSpan span{cfg_.vertical_extent_m};
+        if (span.hangs()) return {span.z0(cfg_.ai2_prior_height_m), cfg_.ai2_prior_height_m};
+        return {0.0f, cfg_.tracker_birth_height_m};
+    }
 
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;

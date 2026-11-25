@@ -33,11 +33,12 @@
 
 namespace rc {
 
-// The countable select box: rotation-agnostic circumscribed radius of the BIRTH footprint + margin, floor-referenced z-band
-// [−margin, birth_H + margin] (spans the legs and the rim). CountableLidarRangeChannel::select_box reads this.
-inline rc::lidar_select::Box countable_select_box(float birth_w, float birth_d, float birth_H, float margin)
+// The countable select box: rotation-agnostic circumscribed radius of the BIRTH footprint + margin, z-band
+// [z_base − margin, top + margin]: floor-referenced (z_base = 0, top = the birth height; spans the legs and the rim) for a
+// floor-anchored class, the class body [H − e, H] for a hanging one. CountableLidarRangeChannel::select_box reads this.
+inline rc::lidar_select::Box countable_select_box(float birth_w, float birth_d, float top, float margin, float z_base = 0.0f)
 {
-    return {0.5f * std::sqrt(birth_w * birth_w + birth_d * birth_d) + margin, -margin, birth_H + margin};
+    return {0.5f * std::sqrt(birth_w * birth_w + birth_d * birth_d) + margin, z_base - margin, top + margin};
 }
 
 // The label select_rays_beam consumes: {m, q} per return, nullopt = no camera information.

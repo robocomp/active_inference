@@ -56,7 +56,8 @@ CountableFitter::CountableFitter(std::shared_ptr<DSR::DSRGraph> graph,
                          CountableSceneGraph* scene_graph)
     : G_(graph), inner_eigen_(inner_eigen), cfg_(cfg),
       mask_ingestor_(mask_ingestor), scene_graph_(scene_graph),
-      projection_(std::make_unique<CountableProjection>(graph, inner_eigen, mask_ingestor, cfg.concept_class))
+      projection_(std::make_unique<CountableProjection>(graph, inner_eigen, mask_ingestor, cfg.concept_class,
+                                                               rc::countable::VerticalSpan{cfg.vertical_extent_m}))
 {
     CountableBeliefState::use_quotient = cfg.quotient_chart;   // C2v symmetry-quotient optimisation chart (global mode)
     projection_->set_central_region_frac(cfg.central_region_frac);
@@ -278,14 +279,18 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
             if (w_perp > 0.0f) rho_cam = rc::rho_camera(inst.path_cam, z, w_perp);   // degenerate geometry ⇒ parked
         }
     }
-    // LiDAR: lateral DOFs and yaw by the ring gap; H by the ring ε that grazes the top moving over it with range.
+    // LiDAR: lateral DOFs and yaw by the ring gap; H by the ring ε that grazes the edge which tells H, moving over it with
+    // range. A floor-anchored box: its top (z = H). A hanging one (hood): the rings strike its UNDERSIDE from below, and with
+    // the extent a class parameter the underside z = H − e is what places H (box_engine_model.h's kHeight note).
     float rho_lat = 1.0f, rho_H = 1.0f;
     if (helios_ring_gap_rad_ > 0.0f and have_helios_)
     {
         const float zl = (helios_now_.head<2>() - c).norm();
         rho_lat = rc::rho_lidar_lateral(inst.path_L, helios_ring_gap_rad_);
+        const auto span = inst.ai2_belief.params().span();
+        const float z_edge = span.hangs() ? span.z0(s.H) : s.H;
         if (zl > 0.0f)
-            rho_H = rc::rho_lidar_height(inst.path_L, zl, std::atan2(s.H - helios_now_.z(), zl), helios_ring_gap_rad_);
+            rho_H = rc::rho_lidar_height(inst.path_L, zl, std::atan2(z_edge - helios_now_.z(), zl), helios_ring_gap_rad_);
     }
     else if (helios_ring_gap_rad_ <= 0.0f and not inst.dbg_rhoL_absent_logged)
     {
@@ -815,6 +820,9 @@ bool CountableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_
     if (auto v = G_->get_attrib_by_name<width_m_att> (node); v.has_value()) init_state.w            = v.value();
     if (auto v = G_->get_attrib_by_name<depth_m_att> (node); v.has_value()) init_state.h            = v.value();
     if (auto v = G_->get_attrib_by_name<height_m_att>(node); v.has_value()) init_state.countable_height = v.value();
+    // A hanging class's height_m is its body's EXTENT, not its top: start from the class's top prior; the RT origin (the
+    // underside) refines it below.
+    if (rc::countable::VerticalSpan{cfg_.vertical_extent_m}.hangs()) init_state.countable_height = cfg_.ai2_prior_height_m;
 
     // Read RT pose from room→bed edge
     if (room_node_id_ != 0)
@@ -825,6 +833,10 @@ bool CountableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_
             {
                 const auto& tvec = tr.value().get();
                 if (tvec.size() >= 2) { init_state.cx = tvec[0]; init_state.cy = tvec[1]; }
+                // A hanging class's node carries its BODY: origin = the underside, height_m = the extent, so its top
+                // H = z + height_m (floor-anchored: origin z = 0 and height_m IS H, unchanged).
+                if (const rc::countable::VerticalSpan span{cfg_.vertical_extent_m}; span.hangs())
+                    init_state.countable_height = (tvec.size() >= 3 ? tvec[2] : 0.0f) + span.extent_m;
             }
             if (const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value()); rot.has_value())
             {
@@ -1182,8 +1194,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
                 pts.insert(pts.end(), observation.residual_pts.begin(), observation.residual_pts.end());
                 // Body band: the full observed height minus the floor-contact and above-top over-segmentation
                 // tails, which are cloud ARTEFACTS (not bed surface) and would bias the footprint outward.
+                // The band's base is the body's underside: the floor for a floor-anchored class, H − e for a hanging one (a
+                // point under a hood is the hob or the worktop, not the hood).
                 const float z_hi = s0.H + 3.0f * cfg_.ai2_sigma_base_m;
-                const float z_lo = 3.0f * cfg_.ai2_sigma_base_m;
+                const float z_lo = rc::countable::VerticalSpan{cfg_.vertical_extent_m}.z0(s0.H) + 3.0f * cfg_.ai2_sigma_base_m;
                 if (const auto mom = CountableBelief::footprint_moment(pts, z_lo, z_hi); mom.ok)
                 {
                     s0.cx = mom.cx; s0.cy = mom.cy;
@@ -1221,7 +1235,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.prior_size_std  = cfg_.ai2_prior_size_std;
         p.prior_footprint_m   = cfg_.ai2_prior_footprint_m;
         p.prior_footprint_std = cfg_.ai2_prior_footprint_std;
+        p.prior_depth_std     = cfg_.ai2_prior_depth_std;
         p.prior_depth_m       = cfg_.ai2_prior_depth_m;
+        p.vertical_extent_m   = cfg_.vertical_extent_m;   // the manifest's support: floor-anchored or hanging (K1)
         p.wall_flush_prior    = cfg_.ai2_wall_flush_prior;
         p.room_axis_std       = cfg_.ai2_room_axis_std_deg * 0.017453293f;
         p.headboard_h_m       = cfg_.ai2_headboard_h_m;
@@ -2182,6 +2198,7 @@ CountableModelParams CountableFitter::make_model_params() const
     p.headboard_h_m = cfg_.ai2_headboard_h_m;
     p.headboard_t_m = cfg_.ai2_headboard_t_m;
     p.sigma_obs = cfg_.sigma_obs;   // top/leg SDF split band for the candidate/residual classification
+    p.vertical_extent_m = cfg_.vertical_extent_m;   // floor-anchored or hanging, as the belief
     return p;
 }
 

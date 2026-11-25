@@ -7,6 +7,7 @@
  */
 
 #pragma once
+#include "countable_vertical_span.h"
 
 #include <cmath>
 #include <algorithm>
@@ -32,10 +33,11 @@ inline std::pair<Extent, Params> extent_of(const CountableInstance& inst, const 
     prm.quantization_m  = cfg.support_bank_quantization_m;
     prm.max_points      = cfg.support_bank_max_points;
     // A bed is FLOOR-ANCHORED, so the bank spans the whole occupied column [0, H] and its underside is a
-    // HARD bound — the floor — needing only the sensor-noise allowance, not model slack.
+    // HARD bound — the floor — needing only the sensor-noise allowance, not model slack. A hanging class (hood) spans
+    // [H − e, H]: its underside is the crisp edge over the hob, the same sensor-noise allowance below it.
     e.cx = s.cx; e.cy = s.cy;
     e.half_diag_m = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);
-    e.z0_m = 0.0f;
+    e.z0_m = rc::countable::VerticalSpan{cfg.vertical_extent_m}.z0(s.countable_height);
     e.z1_m = s.countable_height;
     prm.below_m = 0.05f;
     return {e, prm};

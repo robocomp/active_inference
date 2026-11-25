@@ -5,6 +5,7 @@
 #pragma once
 
 #include "countable_config.h"
+#include "countable_vertical_span.h"
 #include "../../common/perception_card/card.h"
 
 namespace rc
@@ -20,7 +21,10 @@ inline card::Card make_card(const CountableConfig& cfg)
                   {"helios", card::Role::Occupancy, true},
                   {"ricoh", card::Role::Identity, false}};
     // etc/config.toml AI2PriorFootprintM / AI2PriorHeightM (= manifest prior.footprint / prior.height): floor-anchored [0, H].
-    c.geometry = {cfg.ai2_prior_footprint_m, cfg.ai2_prior_depth_m > 0.0f ? cfg.ai2_prior_depth_m : cfg.ai2_prior_footprint_m, cfg.ai2_prior_height_m, 0.0f, cfg.ai2_prior_height_m};
+    // The body's vertical extent and band: [0, H] floor-anchored; [H − e, H] for a hanging class (the hood), extent e.
+    const rc::countable::VerticalSpan span{cfg.vertical_extent_m};
+    c.geometry = {cfg.ai2_prior_footprint_m, cfg.ai2_prior_depth_m > 0.0f ? cfg.ai2_prior_depth_m : cfg.ai2_prior_footprint_m,
+                  span.height(cfg.ai2_prior_height_m), span.z0(cfg.ai2_prior_height_m), cfg.ai2_prior_height_m};
     // Level 1: countable_projection.cpp's walls_block(cam, sample, polygon, kCountableOwnWallSkipM): LINE walls
     // (thickness 0), own-wall radius 0.70 m.
     c.walls = card::WallOcclusion{kCountableOwnWallSkipM, -1.0f, 0.0f};
