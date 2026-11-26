@@ -95,6 +95,43 @@ int main()
                     c->shape_proportions.empty() ? "-" : c->shape_proportions[0].name.c_str(), c->ai2_prior_height_m);
     }
     else CHECK(false);
+    // K2c: the table, floor-anchored, top + four legs on the top_under proportion, symmetry c2v (every term invariant)
+    if (const auto c = load("table", "etc/countable.toml"); c)
+    {
+        CHECK(c->concept_class == "table" and c->agent_name == "table_concept");
+        CHECK(c->vertical_extent_m <= 0.0f);
+        CHECK(c->solid_parts and c->shape_parts.size() == 5 and c->shape_proportions.size() == 1 and c->shape_symmetric);
+        if (c->shape_proportions.size() == 1)
+            CHECK(c->shape_proportions[0].name == "top_under" and near(c->shape_proportions[0].lo, 0.883f) and near(c->shape_proportions[0].hi, 0.975f));
+        // θ.w, θ.h: the top's extents, ONE unlabelled distribution (uniform 0.457–2.438 m); H uniform 0.381–0.762 m
+        CHECK(near(c->ai2_prior_footprint_m, 1.448f) and near(c->ai2_prior_footprint_std, 0.572f));
+        CHECK(near(c->ai2_prior_depth_m, 1.448f) and near(c->ai2_prior_depth_std, 0.572f));
+        CHECK(near(c->ai2_prior_height_m, 0.572f) and near(c->ai2_prior_height_std, 0.110f));
+        CHECK(near(c->tracker_birth_width_m, 1.448f) and near(c->tracker_birth_depth_m, 1.448f) and near(c->tracker_birth_height_m, 0.762f));
+        CHECK(near(c->ai2_wall_flush_prior, 0.0f) and c->ai2_room_axis_std_deg <= 0.0f and not c->front_detect_enabled);
+        CHECK(near(c->move_rate_per_day, 0.14f) and c->wall_standoff_std_m <= 0.0f);
+        CHECK(near(c->layer_spread_m[3], 0.10f) and near(c->layer_spread_m[4], 0.10f) and c->layer_spread_m[0] == 0.0f and c->layer_spread_m[5] == 0.0f);
+        CHECK(near(c->mask_pixel_error_rate, 0.118f));
+        // the consumers' channels the legacy table published (K2c spike); front-reading channels off (symmetry)
+        CHECK(c->look_attrs == "table" and c->appearance_enabled and not c->publish_exist_prob and not c->thumbnails_enabled);
+        CHECK(not c->approach_enabled and c->epistemic_offer_enabled and not c->changed_object_enabled and c->mesh_path.empty());
+        CHECK(near(c->recall_pi_move, 0.5f) and near(c->tracker_birth_min_sep_m, 0.60f));
+        CHECK(rc::symmetric_config_violation(*c).empty());
+        std::printf("table: LOADED, floor-anchored, %zu parts on '%s', symmetric, H %.3f\n", c->shape_parts.size(),
+                    c->shape_proportions.empty() ? "-" : c->shape_proportions[0].name.c_str(), c->ai2_prior_height_m);
+        // each non-invariant term is refused, by name (the check the loader runs on a c2v class)
+        auto v = *c; v.ai2_prior_depth_m = 0.9f;       CHECK(rc::symmetric_config_violation(v).contains("AI2PriorDepthM"));
+        v = *c; v.ai2_prior_depth_std = 0.3f;          CHECK(rc::symmetric_config_violation(v).contains("AI2PriorDepthStd"));
+        v = *c; v.ai2_prior_depth_m = -1.0f; v.ai2_prior_depth_std = -1.0f; CHECK(rc::symmetric_config_violation(v).empty());
+        v = *c; v.ai2_wall_flush_prior = 0.5f;         CHECK(rc::symmetric_config_violation(v).contains("WallFlushPrior"));
+        v = *c; v.front_detect_enabled = true;         CHECK(rc::symmetric_config_violation(v).contains("FrontDetectEnabled"));
+        v = *c; v.approach_enabled = true;             CHECK(rc::symmetric_config_violation(v).contains("ApproachEnabled"));
+        v = *c; v.thumbnails_enabled = true;           CHECK(rc::symmetric_config_violation(v).contains("ThumbnailsEnabled"));
+    }
+    else CHECK(false);
+    for (const char* cls : {"bed", "nightstand", "toilet"})   // the other classes stay asymmetric
+        if (const auto c = load(cls, "etc/config.toml"); c) CHECK(not c->shape_symmetric);
+    if (const auto c = load("chair", "etc/countable.toml"); c) CHECK(not c->shape_symmetric);
     std::printf(bad ? "config_load_test FAILED (%d)\n" : "config_load_test OK\n", bad);
     return bad ? 1 : 0;
 }

@@ -344,3 +344,26 @@ target_compile_options(chair_face_ranking_test PRIVATE -O2)
 target_link_libraries(chair_face_ranking_test PRIVATE Eigen3::Eigen)
 add_test(NAME chair_face_ranking_test COMMAND chair_face_ranking_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
 set_tests_properties(chair_face_ranking_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+
+# K2c: the table's symmetry (no quotient chart needed): the manifest's c2v and its invariance check, the parts SDF invariant under
+# the group, the symmetric belief's point-mass mode posterior and within-sheet yaw variance. Run: LANG=es_ES.UTF-8 ./table_symmetry_test
+add_executable(table_symmetry_test table_symmetry_test.cpp ../src/countable_belief.cpp)
+target_include_directories(table_symmetry_test PRIVATE ../src ../../common ../../common/concept_manifest ../../common/media_transport)
+target_compile_definitions(table_symmetry_test PRIVATE MANIFEST_DIR="${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest")
+target_compile_options(table_symmetry_test PRIVATE -O2)
+target_link_libraries(table_symmetry_test PRIVATE Eigen3::Eigen)
+add_test(NAME table_symmetry_test COMMAND table_symmetry_test)
+set_tests_properties(table_symmetry_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+
+# K2c: the table's NBV face ranking on the countable binary (top + legs on the top_under proportion, symmetry c2v): seen only from
+# the −y face, every other face promises more and the planner's offer is not the seen face. Run: LANG=es_ES.UTF-8 ./table_face_ranking_test DIR
+add_executable(table_face_ranking_test table_face_ranking_test.cpp ../src/countable_belief.cpp ../src/epistemic_planner.cpp
+               ../src/countable_config.cpp $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp
+               ../../common/robot_footprint/robot_footprint.cpp ../../common/robot_footprint/mesh_hull.cpp)
+target_include_directories(table_face_ranking_test PRIVATE manifest_stub ../src ../../common ../../common/concept_manifest
+                           ../../common/config_report ../../common/media_transport $ENV{ROBOCOMP}/classes)
+target_compile_definitions(table_face_ranking_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+target_compile_options(table_face_ranking_test PRIVATE -O2)
+target_link_libraries(table_face_ranking_test PRIVATE Eigen3::Eigen)
+add_test(NAME table_face_ranking_test COMMAND table_face_ranking_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
+set_tests_properties(table_face_ranking_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")

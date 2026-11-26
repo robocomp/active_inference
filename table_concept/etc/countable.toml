@@ -1,0 +1,500 @@
+# table_concept/etc/countable.toml — the table as a CLASS of the countable_concept binary (shared-engine K2c, 2026-11-26).
+#
+# Generated from chair_concept/etc/countable.toml (K2b, itself from bed_concept/etc/config.toml: the countable binary's config
+# contract), with the table's class values. The legacy table_concept agent keeps etc/config.toml and its own binary, untouched;
+# concept_agents.sh launches THIS config with table_concept/countable/table_concept (a link to countable_concept/bin/countable_concept)
+# unless LEGACY_AGENTS names table_concept. Class knowledge (the top and legs, the top_under proportion, symmetry c2v, permanence,
+# layer spread) is the manifest's, common/concept_manifest/table.concept.toml, with its sources; the [Model] size keys below restate
+# the same sources. Comments below that say "table" were written for the bed/chair and renamed; the values marked K2c are this
+# class's.
+#
+# SYMMETRY (K2c): the manifest declares [shape] symmetry = "c2v" (no front, no labelled sides), and the binary REFUSES to start unless
+# every term is invariant under it: one size prior for w and h, WallFlushPrior 0, no front cue, no fronted approach, no yaw-binned
+# thumbnails (rc::symmetric_config_violation). The published (width_m, depth_m, yaw) is then ONE representative of the table:
+# (w, h, yaw), (w, h, yaw + π), (h, w, yaw ± π/2) are the same table.
+
+
+# --- Common Agent Data ---
+[Agent]
+id = 7   # K2c table: the legacy table_concept's [Agent].id, so object uids and etc/instance_identity.csv stay continuous across binaries
+name = "table_concept"   # K2c table: the agent name (comm / pgrep -x table_concept work as for the legacy binary)
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = ""
+domain = 0
+tree = false
+graph = false 
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = ""
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+# instance names: etc/instance_identity.csv (common/instance_identity) keeps the last table_<N> issued across restarts;
+# delete it to restart numbering (the live graph still bounds it from below).
+[Owns]
+# "table*" matches every table this agent births/scaffolds (table_1, table_2, …) so none survive a
+# restart as a stale node (mirrors bottle_concept owning "bottle*").
+nodes = ["table_concept 7", "table_*"]   # K2c table: id must match [Agent].id
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+# ── Primary-input (masks) stream gate — LIFECYCLE liveness, not a belief knob ──────────────────────────
+# Demote Operating→Degraded→Waiting when the retina's `masks` node stops advancing its mask_frame_id for
+# this long (producer dead/stalled) — don't integrate stale evidence; re-admit automatically when it returns
+# (peers stay intact, so the agent never shuts down). Orthogonal to AI2AgeNominalDtS (belief-axis Σ-aging).
+# MUST exceed the retina HOLD_ENTER_S so a legitimately empty scene (counter still advancing) never trips.
+[Media]
+MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
+
+# ── AI2 belief (BED.md): full-covariance recursive filter; legs derived, soft mixture ──
+# This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
+[Model]
+SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
+                            # face is attributed to the slab (candidate) vs a leg — used for the mask split.
+SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-surface (candidate) vs residual
+AI2CsvPath = "etc/ai2_log.csv"  # per-cycle AI2 log (state + Σ diag + mask R/bias); empty disables
+BirthSurpriseProbe = true    # EXPERIMENTAL read-only: read residual_concept's `grid` node as a surprise (unexplained-occupancy) field, cluster it, log uncovered high-surprise regions vs the tracker's births → etc/birth_surprise.csv. true to test; no fit/graph effect
+AI2SigmaBaseM = 0.03        # base on-surface obs noise std (m); R = σ² + mask_motion_var per frame
+PixelSigmaOverF = 0.0015    # σ_px/focal → transverse position std per metre of range
+DepthSigma0M = 0.006        # depth std floor (m)
+DepthSigmaRangeCoef = 0.004 # depth std growth (m per m² of range): σ_d = σ0 + coef·range²
+ModelSigmaM = 0.010         # residual model/surface std floor (m)
+# a1′+a2′ (PRECISION_AS_INFORMATION.md): weighted 2-D footprint residual + shared per-frame depth-affine nuisance.
+# THE grazing-yaw fix — models yaw where it lives (the footprint) and marginalizes the common depth bias/scale
+# that aliases into yaw at grazing. REPLACES the footprint-moment channel when on. depth_*_std = ZED depth priors.
+FootprintResidual = false   # true to enable (needs the ray geometry; supersedes the FootprintMoment* + obliquity yaw knobs)
+QuotientChart = false       # C2v symmetry-quotient chart [s,a1,a2] (Stage 3): kills 90°/180° yaw snaps + honest near-square σ_yaw; retires the fold/flip machinery. Pair with FootprintResidual
+LidarMeasuresOnGated = true  # camera attributes, LiDAR measures: persistent shared errors + mask-attributed LiDAR-only updates (spec docs/superpowers/specs/2026-11-15-lidar-measures-design.md §7c)
+LabelDumpEnabled = false      # measurement only (spec 7c.8 a0, plan Task 15b): true writes label_dump.csv next to ai2_log.csv; controller turns off afterwards
+LabelDumpMarginM = 0.6       # measurement only: dump region = select box grown by this many metres (far tail of eps_px); controller turns off afterwards
+ReplayDump = false            # diagnostic only (shared-engine plan rev 2, Task R1): true writes each persistent belief's seed + every update's complete input to etc/replay/<node>_<run>_<serial>.bin (~0.6 MB per table update) for countable_concept/tests/build/replay
+MaskPixelErrorRate = 0.118   # K2c table: eps_px MEASURED on tables (docs/superpowers/results/2026-11-24-step0.md, 44 masks): an UPPER bound (the graded box includes the legs and the space between them)
+FloorSigmaM = 0.005           # the floor as a known surface in the beam foreign density p_f (spec 7c.8 rev 3.3.8): its sigma (m); required > 0 with LidarMeasuresOnGated
+DepthTiltStd = 0.020        # shared per-frame depth TILT prior std (m/rad) — the azimuth-odd mode that aliases into yaw
+DepthBiasStd = 0.015        # shared per-frame depth bias prior std (m)   — extent/pos nuisance (future)
+DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) — extent nuisance (future)
+AI2ClutterFrac = 0.10       # ε: prior weight of the uniform clutter mixture component
+AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is explained by clutter
+AI2PriorSizeStd = 0.30      # (legacy; the size prior is now split into footprint vs height below)
+# FOOTPRINT + HEIGHT prior: a standard table footprint ≈ 0.60×0.60 (TIGHT std → strong pull on w,h≡depth so a
+# partial front-only view can't float the unobserved depth); HEIGHT varies a lot (BROAD std → data-driven).
+AI2PriorFootprintM = 1.448   # K2c table: θ.w = the top's extent along local x, unlabelled (manifest): uniform over 0.457–2.438 m (18 in coffee-table width, Bassett chart .. 96 in dining length, Raymour & Flanigan) ⇒ mean 1.448
+AI2PriorFootprintStd = 0.572   # K2c table: (2.438 − 0.457)/√12, the same uniform
+AI2PriorDepthM = 1.448   # K2c table: θ.h = the top's other extent: the SAME distribution as w (symmetry c2v: no labelled sides; the binary refuses a different one)
+AI2PriorDepthStd = 0.572   # K2c table: = AI2PriorFootprintStd (symmetry c2v)
+AI2PriorHeightM = 0.572   # K2c table: H = the top surface: uniform over 0.381 (15 in coffee table, Bassett guide) to 0.762 m (30 in dining, Raymour & Flanigan) ⇒ mean 0.5715
+AI2PriorHeightStd = 0.110   # K2c table: (0.762 − 0.381)/√12, the same uniform
+# DEPTH-OBSERVABILITY prior (front-only-view depth-collapse fix): depth (h) is identifiable only when the cloud spans
+# the depth extent (front AND back seen). A front-only view is a thin ly-slab; its many points still drag depth to the
+# 0.10 clamp (the size common-mode caps σ, not the mean). Extra depth precision applied ∝ (1 − observed_depth_extent /
+# footprint): a single-face view holds depth at AI2PriorFootprintM; relaxes to data-driven once an orbit reveals the back.
+AI2DepthUnobsPrecision = 20000.0 # extra 1/m² on depth when the depth extent is unobserved (single face) — DOMINANT so the footprint prior WINS over the spurious front-face pull (~1300); relaxes when the back face is seen. 0 = OFF
+AI2DepthObsBandM = 0.10         # ly-spread (m) below which the cloud counts as a single depth face
+# TOP anchor: the floor-anchored box top is a "free" upper boundary — extending it ABOVE the cloud costs nothing so H
+# ratchets up on the over-segmentation junk tail above the table (observed H→2.37 for a ~1.9 m mask). A firm TWO-SIDED
+# anchor pins H to the observed robust top (z-p97); the junk tail is separately faded via per-point R (below). Data
+# still sets the LOWER bound (front points force H ≥ real top). So H settles at the true mask top.
+AI2TopNoFloatPrecision = 10000.0 # firm two-sided anchor pinning H → observed robust cloud top (1/m²). 0 = OFF
+AI2TopNoFloatMarginM = 0.02     # upward allowance (m) added to the observed top as the anchor target
+AI2TopOversegSigmaPerM = 2.0    # R inflation (σ per m) for points ABOVE the robust top — fades the mask over-segmentation junk tail so it can't ratchet H up. 0 = OFF
+# "IS THIS REALLY A BED?" model-evidence mis-detection filter (rejects e.g. a 70 cm elongated cabinet
+# mislabelled "table"). BIRTH is scored by the class evidence of the cloud's robust height (no admission gate); the class evidence Λ (manifest [prior.class] +
+# these size priors) is the CLASS factor of existence (existence = occupancy × class); a SOFT singleton lets a stronger table inhibit weaker
+# duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: Concept.FilterEnabled.
+AspectScale = 0.45   # K2c table: uncited convention: the class's largest cited aspect |w−h|/(w+h) (96x40 in dining 0.41, 48x18 in coffee 0.45), so an in-class top is not called implausible. Read by countable_plausibility only (no caller on the running path)
+SizeScale = 0.572   # K2c table: uncited convention: = the size prior std (the class spread). Read by countable_plausibility only (no caller on the running path)
+HeightPlausibleMin = 0.23   # K2c table: uncited convention (the chair's rule): 15 cm below the class's lowest height (0.381 m, a coffee table)
+HeightSoft = 0.08   # K2c table: uncited convention: the chair's / toilet's value
+FeRef = 2.0                 # "healthy table fit" FE reference — NEEDS LIVE TUNING (≈ a good table's mean_energy)
+FeScale = 1.0               # fit_ok = exp(−max(0, FE−FeRef)/FeScale): a poor data fit lowers plausibility
+PlausHeightPriorGain = 2000.0 # short-height prior precision (1/m²) per (deficit/HeightSoft) below HeightPlausibleMin; nudges H up so a 70 cm cloud fits worse; 0 = OFF
+SingletonInhibition = 1.0   # mutual-inhibition: a STRONGER table subtracts this·P(exists) from a weaker one's class L (soft, bounded)
+# WALL-FLUSH + WALL-PARALLEL factor (a table's back face rests against a room wall; ported from cabinet_concept).
+# Precision = marginal of a {flush, free-standing} mixture keyed on the back-to-wall gap ⇒ decays CONTINUOUSLY to 0
+# for a genuine mid-room table (no proximity gate). 0 = OFF.
+AI2WallPrecision = 400.0         # 1/m² at zero gap (back face → wall line)
+AI2WallParallelPrecision = 200.0 # back face parallel to the wall (width-axis · wall-normal → 0)
+AI2WallReachM = 0.15             # gap scale (m) over which the flush hypothesis loses its weight
+WallFlushPrior = 0.0   # K2c table: OFF, REQUIRED by symmetry c2v (the flush puts the +y face on a wall); the manifest declares no attachment: a table is free-standing
+                        # holds it; was 0 (the fridge parent never assumed a wall), so front-only views felt no wall at all
+RoomAxisStdDeg = 0.0   # K2c table: OFF: no cited class knowledge, and the legacy table had none (the 4-fold room-axis term would be invariant under c2v, so this is a choice, not a requirement)
+# WALL AS A COMPETING EXPLANATION (per-point mixture component) — the principled form of "don't detect a table
+# where a wall already is". NOT an exclusion zone: the room's already-inferred wall surface joins the SAME
+# per-point mixture as box/clutter, so a mask point lying on it (i) has its BOX responsibility collapse ⇒ exerts
+# zero pull on the fitted geometry, and (ii) is already explained WITHOUT a table ⇒ the box earns no evidence
+# there (box_log_evidence_gain ≈ 0). A real table is untouched: its visible faces stand a depth off the wall
+# plane. Inert unless a room polygon has been pushed. 0 = OFF (mixture reverts to box+clutter).
+# Door CLEARANCE prior: nats of preference, at full flush, for the door mode facing INTO the room over one
+# facing into the wall it is attached to. The ONLY thing that resolves the 180° front/back ambiguity, since a
+# half-turn swaps front/back but moves nothing the camera can see. Scaled by the flush mixture weight, so it
+# vanishes on its own for a genuine mid-room table. 0 = OFF. A precision, not a gate.
+AI2DoorClearanceGain = 3.0
+# ── INFERRED VOLATILITY (MODEL_HISTORY.md §3) — the HISTORY stage ─────────────────────────────────────────
+# Q stops being a per-frame constant and becomes exp(ω), a per-DOF latent inferred from how much the belief
+# actually MOVES. With a fixed Q, evidence is discarded exactly as fast as it is acquired (σ_steady=(q/i)^¼,
+# a ratio of two RATES — elapsed time never appears), so hours of touring leave the belief where seconds
+# would, and an unobserved table's σ_w walks back to the prior in ~6 minutes. Inferring ω repairs BOTH:
+# retention τ=Σ/exp(ω) grows AND the precision floor falls. Stiffness is then EARNED by evidence instead of
+# imposed by a clamp, and the hyperprior pull-back keeps it recoverable — shove the table and ω climbs, so
+# it re-adapts in seconds. self_test: static → retention x7.2, moved → x0.04. Watch omega_w/tau_w in ai2_log.
+# ── DETECTOR ENVELOPE (common/detectability) — the YOLO inverse model ────────────────────────────────────
+# P(detect | geometry) is UNIMODAL in projected fill, not monotonic in range: below MinFill the object is too
+# few pixels to segment; above MaxFill it overflows the frame, the mask truncates and the network loses the
+# whole-object context. ONE model with TWO consumers — the epistemic planner puts the stand-off at its argmax,
+# and the removal channel weights absence by it, so a missing mask from nose-to-nose range reads as EXPECTED
+# rather than as evidence the table is gone (at 0.82 m: fill 0.80 -> P(detect) 0.035).
+# ★CALIBRATED 2026-08-08 from a deliberate approach/retreat tour (2296 rows, range 0.67–5.41 m, roi_fill
+# 0.22–1.81, label = a fresh mask that cycle, trials weighted by P(exists)). Weighted-MLE fit of the upper
+# shoulder with a detection CEILING (YOLO does not fire every cycle even when the framing is ideal — the
+# observed plateau is 0.889, which is frame timing, not geometry; folding it into the shoulder would drag
+# max_fill down). Replaces the previous prior 0.10 / 0.60 / 0.06, which was wrong by more than 2x:
+#     max_fill  1.317   95% CI [1.21, 1.49]      (was 0.60 — the table was being pushed ~1 m too far back)
+#     soft      0.258   95% CI [0.175, 0.51]     (was 0.06 — the real shoulder is gradual, not a cliff)
+# MinFill is NOT a measurement. This tour never went far enough for the table to become too SMALL to
+# segment: at the smallest fill sampled the mask rate was still 0.94, so the lower shoulder lies below the
+# measured range and is only bounded from above. 0.10 was actively wrong — holding it there made the fit
+# diverge, because the model then had to explain 94% detection at a fill it calls undetectable. Set to 0
+# meaning "inactive over this object's operating range", NOT "measured as 0". A tour that backs off until
+# the table stops being detected is what would measure it.
+# ⚠ ONE `soft` serves BOTH shoulders, and this object needs them different (a likelihood-ratio test on the
+# earlier dataset rejected the shared width at p<0.05). With soft=0.258 the inactive lower shoulder still
+# suppresses long range by ~40%, which is the residual model error here — the fix is separate soft_min/
+# soft_max in common/detectability, not further tuning of these three numbers.
+# ★table (2026-11-14): DetectMinFill/MaxFill/Soft REMOVED. They were the refrigerator's FITTED envelope
+# (0.0 / 1.32 / 0.26), inherited by the scaffold; a measured envelope for another object looks calibrated
+# and is worse than the class prior. The fleet prior applies (common/detectability) until this table's own
+# ai2_log is fitted (common/detectability/tools/fit_envelope).
+AI2VolatilityInfer = true    # ON 08-03 for the A/B tour. Watch omega_w/tau_w in ai2_log.csv
+AI2VolatilityLr = 0.02       # gradient step on ω per MEASURED cycle (predict-only cycles never touch it)
+AI2VolatilitySigma = 2.0     # hyperprior width σ_ω: how far evidence may pull ω from the configured Q
+AI2WallExplainFrac = 0.25        # π_wall: prior weight of "this point belongs to a known room wall"
+AI2WallExplainSigmaM = 0.05      # extra wall-plane std (m): room-polygon + localization slack (adds to WallRef σ)
+# WALL NO-CROSS (one-sided): the flush factor is TWO-SIDED (drives gap→0) and its weight decays away from the wall,
+# so a fit can end up CROSSING the wall (back past it into the wall/exterior). This one-sided term resists penetration
+# ONLY — active when gap=(back_centre−wall.p)·(inward normal) goes negative (crossed) or within the margin; precision
+# GROWS with how far past, leaving flush (gap≈0) untouched. STRONG (a wall is a hard boundary), continuous. 0 = OFF.
+WallNoCrossPrecision = 2000.0    # 1/m² per m of penetration past the wall (>> the flush precision)
+WallNoCrossMarginM = 0.0         # interior offset (m) inside which the constraint activates
+AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
+AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
+AI2AgeNominalDtS = 0.1      # stale-belief aging: mask stream nominal period (s, 10 Hz masks). Σ inflates by Q·(dt/this) while the feed is silent (measurement-age→covariance) — completes the frozen-frame fix: a stale capture stamp now AGES the belief instead of freezing it. 0 = freeze on stale (historic).
+AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of the mask silhouette is on the image border (truncated → biased)
+# Static range weighting (motion-free): common-mode error grows with view distance so a far, vague mask
+# can confirm existence but NOT resolve pose/orientation (can't rotate a converged table). Continuous, no gate.
+AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range) → feeds the per-point R (and the flag-off path's position common-mode)
+# AI2RangeNoiseYawPerM / AI2RangeNoiseSizePerM removed (shared-engine Task 5): the persistent path's camera shared error is
+# the constant AI2CommonMode* stds below; the range growth now only lives in the flag-off path, at the loader's defaults.
+AI2GnIters = 4              # Gauss-Newton iterations per frame
+# Per-frame SHARED-ERROR common-mode stds — the information-saturation FLOORS (CLAUDE.md "encode the effect as a
+# continuous covariance"): N correlated points from one frame cannot collapse Σ below these. LOAD-BEARING. They
+# were previously read from these getters with the keys ABSENT from config (silent defaults) — now exposed. A NEW
+# concept agent must expose its own equivalents.
+AI2CommonModePosStd  = 0.03  # shared position (cx,cy) error floor (m)
+AI2CommonModeSizeStd = 0.02  # shared size (w,h,H) error floor (m)
+AI2CommonModeYawStd  = 0.03  # shared yaw error floor (rad)
+
+# ── Ego-motion "be-still-to-update" (ported 1:1 from table_concept) ────────────────────────────────────────────
+# motion_magnitude = max(|motion_dotd|, ego_lin_mps + AI2AngLeverM·ego_ang_radps): a producer-INDEPENDENT motion
+# signal built from the robot's OWN camera speed (transform chain). It scales the continuous common-mode (MotionCm*)
+# AND drives the discrete confirm-only gate below. Geometry updates thus concentrate at STILLNESS.
+MotionCmPosGain  = 0.10      # position (cx,cy) shared-error std per m/s of motion — anti-DRIFT
+MotionCmSizeGain = 0.20      # extent (w,h,H) shared-error std per m/s — the anti-RESHAPE lever
+MotionCmYawGain  = 0.12      # yaw shared-error std (rad) per m/s — the anti-ROTATE lever
+AI2AngLeverM = 2.0           # rad/s → m/s lever (tangential speed of a table ~this far away) for ego-motion
+AI2PeriphRef = 0.50          # centroid radius (focal-norm) at which the off-axis periphery penalty → 1
+ClassAltStdM = 1.0            # 'some other furniture' size std (m) per variable, about the class mean (class evidence; pi_cls is in the manifest [prior.class])
+BirthHeightNoiseM = 0.05      # birth height noise sigma_z (m): robust cloud z-extent measures the object height with this std
+BirthHeightOutlierFrac = 0.05 # birth mask-bleed outlier fraction (person / wall above the object)
+AI2MotionRefMps = 0.60       # motion magnitude (m/s) at which a fully-peripheral frame is fully unreliable
+# Discrete confirm-only gate ("only update if the robot is still"): true ⇒ CONFIRM but do NOT move the geometry mean
+# (predict-only) when MOVING (ego lin/ang OR motion_dotd above its still-level) AND the mask is off-centre. A
+# well-centred mask (centroid radius ≤ AI2MovingUpdateCenterRadius) is trusted even while moving → still updates.
+AI2MotionConfirmOnly = true
+AI2StillLinMps = 0.05        # camera linear speed (m/s) below which the robot counts as "still"
+AI2StillAngRadps = 0.10      # camera angular speed (rad/s) below which the robot counts as "still"
+AI2StillDotd = 0.05          # per-mask ego-motion corruption speed (m/s) still-level
+AI2MovingUpdateCenterRadius = 0.35  # mask centroid radius below which a moving update is still allowed
+
+# ── YOLO-INDEPENDENT LiDAR first-hit range channel (common/ai_belief/lidar_ray_factor.h) ──────────────────
+# Second, sensor-INDEPENDENT evidence: lidar3D returns on the table's LEGS + RIM pin the extent/centre in
+# METRIC range along the viewing ray. Its error mechanism is uncorrelated with the YOLO segmentation, so it
+# attacks the mask-erosion extent UNDER-SIZE (~6cm) the mask cannot self-correct. Consumes the lidar3D media
+# plane (BedLidarIngestor); the media subscriber is created only while this is > 0.
+# ON at 2500 (load-bearing): ≈1/σ²@2cm = depth-point scale → w/h under-size shrinks and extent σ tightens.
+LidarPrecision = 2500.0          # per-ray range precision (1/m², ≈1/σ²@2cm=2500 when load-bearing). 0=OFF
+# A/B: use the LOW 'bpearl' LiDAR as a SEPARATE per-device ray-set (own origin, occlusion-aware first-hit) — it sees
+# the LEGS / lower extent the high 'helios' grazes over. Summed into the SAME GN as helios (NOT merged: each keeps its
+# origin), and feeds the existence leg-occupancy carve from its own origin. Try ~2500 to match helios. 0=OFF (helios only).
+LidarBpearlPrecision = 0.0
+LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
+LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, floor..birth_H vert
+LidarCoverageN0 = 60.0        # LiDAR ray count for full weight; fewer → proportionally down-weighted (sparse-safe)
+LidarCoverageAngPower = 1.0    # ANGULAR-coverage weight precision×=(1−R)^p (R=mean-resultant of return bearings):
+                               # down-weights ONE-SIDED sweeps that over-commit the near-square w↔h mode from a
+                               # single view. 0=off (flat), 1=pure circular variance. Belief still accrues over orbit.
+MaxStepM = 1.0                 # divergence guard: reject a GN centre step > this (m) in one frame (static table)
+# Coverage / traction (EXISTENCE_BELIEF_PLAN.md): on-plane mask points the mixture ceded to CLUTTER exert a
+# GROW-ONLY pull on the top slab, so a model under-covering a large mask grows to explain it (fixes bed_1.png:
+# green mask far outside the box, no traction). Self-bounded + on-plane-gated. STAGED — OFF (0.0) by default;
+# try 500 (≈ mask-point scale) and watch w/h grow to the mask extent without over-growing. Anti-contamination
+# bound = free-space carve (not yet wired) → keep modest until then.
+CoveragePrecision = 0.0          # DEBUG BASELINE: OFF (was 500). Re-add after the ZED+LiDAR pair is calibrated.
+CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outside fade out (stray-point guard)
+
+# Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the SHRINK-only counter-force that BOUNDS CoveragePrecision.
+# A LiDAR beam that passes THROUGH the top-slab band and exits the far side proves that crossing is empty → pull the
+# extent back IN (occupy-where-masked + vacate-where-through settle the extent where camera & LiDAR agree, so coverage
+# can no longer inflate onto clutter). Uses the same sweep as LidarPrecision (auto-staged when either is > 0). Beams
+# that RETURN inside the slab (occupancy) are ignored, so a real bedtop is untouched. Runs SOLO at 500 here
+# (CoveragePrecision is off), bounding the extent from LiDAR through-beams alone.
+FreeSpacePrecision = 500.0         # shrink-only free-space pull strength (per through-beam, ~1/σ²). 0=OFF
+
+# Footprint SECOND-MOMENT factor (bed_belief.h): measures (w,h,yaw) from the top-band cloud's 2D inertia
+# tensor and folds it as a linear Gaussian factor into the GN update — the escape from the clutter-trap that
+# leaves a DENSE, bigger/yawed mask unable to rotate/resize the box (the beds_5.png "stuck yaw"). The
+# per-point SDF mixture can't do this: interior top points have ∂sdf/∂yaw≈∂sdf/∂w≈0, and the outboard rim/leg
+# points that carry the signal fall outside the box → routed to clutter. This global statistic uses them all.
+# Also seeds (w,h,yaw) at birth so the box starts near-right. yaw pull scales with extent anisotropy (a square
+# gives none); per-frame authority capped by the range-driven common-mode (far view can't rotate a converged
+# table — no manual gate). NOT applied to cx,cy (partial-view centroid bias; the mixture handles position).
+FootprintMomentPrecision = 2000.0   # A/B: try ~2000 on the right table; 0=OFF (baseline births/fits unchanged)
+
+# Orientation w↔h mode: pure sequential-Bayesian evidence on the TRUE free energy (−log mixture likelihood).
+# No hysteresis/leak/discriminability knobs — those were band-aids for a BROKEN energy readout (clutter silently
+# zeroed misfit → FE≈0 → the mode comparison was noise → periodic 90° flips). With a real FE the evidence is
+# decisive and a near-square table rests at the honest ambiguity on its own.
+# Footprint-moment per-frame covariance: the moment's measurement variance is 1/FootprintMomentPrecision (a static
+# noise FLOOR) + ego-motion mask corruption (motion_var) + (FootprintMomentRangePerM·range)². The extra terms make
+# the moment ACCUMULATE over frames and back off while the robot is moving / far, instead of snapping the belief to
+# each frame's noisy footprint (the live yaw/extent wander). The range coeff is << AI2RangeNoiseSizePerM because a
+# GLOBAL footprint fit is far more range-robust than a single boundary point. Raise to trust the moment less per frame.
+FootprintMomentRangePerM = 0.03
+
+# FE ATTENTION / SURPRISE (active-perception trigger). fe_surprise = smoothed positive gap FE−baseline. The
+# baseline is the "well-fit" free-energy level: it tracks DOWN fast (consolidate a better fit) and UP SLOW so a
+# SUSTAINED mismatch — the table was moved — stays surprising long enough for the robot to attend and dwell until
+# the fit re-converges (FE→baseline → surprise→0). Watch fe_surprise in ai2_log.csv: move a table → spike → decay.
+FeBaselineAdaptDown = 0.05
+FeBaselineAdaptUp   = 0.005
+FeSurpriseSmooth    = 0.10
+
+# Ego-motion coupling (your observation: all misalignments arrive on going-away/rotation frames, where masks are
+# degraded/split). moment variance += (FootprintMomentMotionGain·motion_dotd)² so a moving frame CANNOT reshape the
+# established fit; the w↔h mode accumulator is halved at motion_dotd=OrientationMotionRef so a split mask can't flip
+# it. Both continuous (no gate); static frames (dotd≈0) are unaffected. Raise the gain to freeze harder while moving.
+FootprintMomentMotionGain = 0.30
+OrientationMotionRef = 0.50
+
+# Grazing-view yaw stability (CSV rogue-rotation fix). The bedtop is viewed nearly edge-on (obliquity_cos≈0.09),
+# so yaw is weakly observable and the per-point GN snaps between the box's symmetric orientations (±180° r_π /
+# ±90° w↔h). The continuity fold + per-point obliquity yaw cap were validated live 2026-07-11 and are now ALWAYS
+# ON (no flags): the fold lives in canonicalize(), the cap is kObliquityYawGain in bed_fitter.cpp.
+
+# MOMENT-channel yaw stability (CSV rogue-rotation fix, part 2). The per-point caps above do NOT touch the footprint
+# MOMENT factor, but the live rogue rotations came in on the MOMENT channel (dyaw_moment) — a partial/foreshortened
+# view yields a fragmentary footprint whose 2D inertia is spuriously anisotropic, so r_yaw=r_base/aniso² becomes
+# razor-sharp and SNAPS yaw the wrong way (ai2_log.csv cyc1244: completeness≈0.01, aniso≈0.8, dyaw_moment≈-0.57).
+# Both terms inflate moment_extra_var as continuous covariance — no gate. self_test (m): dyaw 0.52→0.02 rad.
+FootprintMomentCompletenessGain = 0.5   # moment var += (gain·(1/completeness−1))², completeness=observed/believed footprint area → a partial-view sliver can no longer rotate a converged table. completeness≥1 (full/larger view) unchanged. 0=OFF
+FootprintMomentMinCompleteness  = 0.02  # clamp floor for 1/completeness in the term above (caps the inflation of
+                                        # a near-zero-completeness sliver). Active whenever the gain is >0 — was a
+                                        # hidden default while its PAIR above was configurable; now exposed.
+ObliquityMomentGain = 0.05              # grazing-view cap on the MOMENT channel: moment var += (gain·(1/|cosθ|−1))². Mirrors ObliquityYawGain (which only guards per-point). 0=OFF
+
+
+# ── Existence / removal (common/existence_belief.h) ───────────────────────────────────────────────────────
+# Each cycle the LiDAR sweep is carved against every table footprint: beams RETURNING inside → occupancy, beams
+# passing THROUGH to beyond → free-space (absence). A per-table occupancy log-odds accrues (common-mode tanh
+# saturated; HOLD when not looked at; free-evidence suppressed while the table is actively seen = hollow guard),
+# and the table is removed when P(occupied) < ExistenceRemovalProb. Evidence-based, NOT a miss counter. STAGED —
+# OFF by default (a mis-removal deletes furniture). Enable + watch the console "[existence] L=..." before trusting.
+ExistenceRemovalEnabled = true    # ON (fit calibrated). Optimizer-orthogonal: writes only inst.existence log-odds, at
+                                  # most delete_node — never touches θ/Σ. Silhouette channel HOLDs on occlusion (non-table
+                                  # mask over the pixels) AND out-of-FoV (in_fov_frac≈0), so an unseen/occluded table is
+                                  # NEVER falsely removed — it removes only when the camera LOOKS and sees empty.
+ExistenceCarveParts = true   # carve the composed parts, not the solid box (docs/superpowers/results/2026-11-15-carve-replay.md)
+ExistenceRemovalProb = 0.12    # remove when L < log(p/(1−p)); lower = more conservative
+ExistenceOutOfRoomGain = 1.5   # |dL| per evidence cycle while the centre is outside the room (table's Existence.OutOfRoomGain)
+ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recoverable
+ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
+ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anyway) — spurious rate
+ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split
+ExistenceRemoveFrames = 15     # debounce: require the removal decision for this many CONSECUTIVE cycles before
+                               # deleting (a transient association/fit hiccup can't delete a real table)
+
+# ABSENCE evidence degradation vs range + occlusion (no gate). "Predicted-visible but no mask/return there" is
+# weak removal evidence when the sensor likely couldn't resolve the table anyway — far away (tiny projection /
+# sparse beams) or largely occluded. The FREE half of both channels is scaled by (RangeRef/range)^Power (≤1) ×
+# visible_fraction; OCCUPANCY stays fully informative (a distant detection still confirms). Power=0 disables.
+ExistenceAbsenceRangeRefM = 2.5   # range (m) below which absence is trusted at full weight
+ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/range²)
+
+# Verification-gated removal (active inference): a predicted-visible-but-absent observation is only evidence of
+# REMOVAL in proportion to P(detect | present, geometry) = range_conf × in_fov_frac × central_frac. The REMAINING
+# absence (from a far / peripheral / edge-on view that CAN'T resolve the table) is epistemic surprise, not removal:
+# it feeds a decayed go-VERIFY accumulator. Above ExistenceVerifySurprise the table is flagged wants_verification
+# and gets an epistemic pull (ExistenceVerifyGain nats) so the controller drives to a resolving ZED view — absence
+# never deletes a table the robot never properly looked at; it sends the robot to look (confirm-or-remove).
+ExistenceVerifySurprise = 20.0    # decayed un-resolvable-absence surprise above which a table wants verification
+ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification table gets (drives a resolving view)
+
+# LiDAR carve geometry — NO CONFIG KEY: it is the model's own geometry, nothing to choose. The carve covers the
+# WHOLE SOLID BOX z∈[0,H] from each available ray-set (helios + the low bpearl, each with its own origin), because
+# a table is one solid cuboid and every ring that reaches it strikes real surface at whatever height it sweeps.
+# (Was the table-concept [H−3cm, H] top slab + four 2.5 cm corner "leg" columns — a sliver at 1.9 m the horizontal
+# rings almost never intersect, so the table's solid body contributed NO confirmation and ex_locc swung 0.03…70.)
+# Still OCCUPANCY-ONLY: free-space is model-consistent for a solid box now (the thin-plate objection that refuted
+# it for tables does not apply), but removal deliberately stays the camera silhouette's job — the silhouette HOLDs
+# out-of-FoV, so a table the robot is not looking at can never be deleted.
+
+[Concept]
+Class = "table"   # K2c table: REQUIRED (countable_concept): YOLO label (the retina maps "dining table" and "coffee table" to it), node-name prefix, manifest common/concept_manifest/table.concept.toml
+# ── K2c: the graph consumers' channels the legacy table agent published (spike: .superpowers/sdd/2026-11-23-shared-engine/task-K2c-report.md) ──
+LookAttrs = "table"   # K2c table: table_roi_* / table_detection_* / table_frames_since_detection — the family the legacy table wrote (controller look contract; room_concept's object anchor reads table_frames_since_detection)
+AppearanceEnabled = true   # K2c table: colour belief → mesh_color_rgb (viewer tint, as the legacy table published); ALSO color_name / color_prob, which the legacy table did not publish (additive)
+PublishExistProb = false   # K2c table: the legacy table did not publish obj_exist_prob
+ThumbnailsEnabled = false   # K2c table: the legacy table had no thumbnails; REQUIRED off by symmetry c2v (binned on the yaw, a representative)
+ApproachEnabled = false   # K2c table: the legacy table had no approach affordance; REQUIRED off by symmetry c2v (fronted)
+EpistemicOfferEnabled = true   # K2c table: the viewpoint offer (epistemic_* on the node, aff_table_N), as the legacy table published
+ChangedObjectEnabled = false   # K2c table: the legacy table had no ghosts / same_as_* link
+# Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
+# StateEps / KStable / DetectionAliveMaxFrames were read by getters with the keys ABSENT from config (silent
+# defaults) — now exposed; a NEW concept agent must expose its own. MatchedFramesBeforeAging / CentralRegionFrac
+# were bare magic numbers in the code, promoted for the same reason.
+StateEps = 0.04             # Σ|Δstate| (m+rad) below which a cycle counts as converged
+KStable = 30                # consecutive converged cycles before the belief is declared model_stable
+DetectionAliveMaxFrames = 40 # cycles without a fresh mask before detection_alive → false
+MatchedFramesBeforeAging = 5 # a barely-born belief (fewer matched frames) is not aged by a stale no-mask cycle
+CentralRegionFrac = 0.25    # central image box [f,1-f]²; a detectable sample inside counts toward p_detect (removal)
+FilterEnabled = true  # master switch for the "is this really a table?" plausibility filter (see [Model] Aspect/Size/Height/Fe* keys)
+FilterLog = false     # log per-instance class evidence Λ, occupancy L, class L, p + the birth-candidate scores
+# Appearance-based FRONT (door) detection + yaw resolver. A square-ish, wall-flush table is yaw-ambiguous; the
+# door is an APPEARANCE feature (handle + seams = strong vertical lines). Project the FITTED box into the live ZED
+# RGB, score vertical-edge energy per face, fold the winner's bearing into the belief's door-mode resolver. Works
+# even when the robot is too close for YOLO (uses the belief's own box, not the mask). NEEDS LIVE TUNING: the edge
+# metric is lighting/texture dependent — FrontMinConfidence gates how decisive a face margin must be to count.
+FrontDetectEnabled = false   # K2c table: no front to detect; REQUIRED off by symmetry c2v
+
+# ─── Classifier-free EXISTENCE channel (common/contour_edge) ───────────────────────────────────────────
+# The channel that still carries information when the DETECTOR goes blind — which is the failure that
+# removes tables that are plainly there. Every other existence channel here ends at YOLO, so when the
+# robot closes in and the label collapses, "no mask on these pixels" is charged as absence of the BED
+# rather than absence of the LABEL. (Measured on door_concept 2026-09-09: P(door) 0.995 → 0.138 → 0.048 on
+# approach while the network called it `wall` at 0.676.)
+# Two questions, no network in either — RGB: is there a boundary along the projected face, more than along
+# the same face slid sideways along the wall? DEPTH: is there a surface at the predicted distance, with
+# space behind its edge? The second is what separates a table from a table-shaped region of a wall.
+# Brings up the ZED RGB + DEPTH media planes; logged per cycle as ct_* in ai2_log.csv.
+ContourCheckEnabled = true
+FrontMinFaceAreaPx = 900.0  # min projected face area (px²) to score for door-ness (rejects tiny grazing slivers)
+FrontMinConfidence = 0.10   # min door-ness margin (max−second)/(max+eps) for a cue to be emitted (else nullopt)
+FrontLog = true             # log each adopted door-mode flip / accepted appearance cue. ON for the door-cue
+                            # diagnosis: with a square footprint (|w−h|≈8 mm live) yaw is unobservable mod 90°,
+                            # so this resolver is the ONLY thing that can pick the quarter-turn. Pair with the
+                            # new ai2_log columns front_mode/front_conf/cue_conf/cue_bearing.
+LogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
+ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
+# ObsDistance removed 2026-08-07: the epistemic stand-off is no longer a preference. It is the argmax of the
+# detector envelope over BOTH image axes (DetectMinFill/DetectMaxFill below, via common/nbv), so a comfort
+# distance here could only have fought the sensor model. Tune the envelope instead — that is the real knob.
+EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)
+SupportBankMaxPoints = 4000   # max number of table-owned support points kept in memory
+SupportBankQuantizationM = 0.02 # dedup grid (m) for support-bank hashing
+SupportSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
+SupportSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned points
+DumpCloudPath = "/tmp/round_table.xyz"   # K2c table: diagnostic one-shot dump path
+RtCovScale = 1.0            # scales the belief Σ → published room→table RT covariance (calibrate toward NEES≈1)
+# z_o is the RAW camera-frame mask centroid carried to the base frame by the STATIC body<-zed extrinsic,
+# NOT the fitted room-frame pose: it must be independent of the pose the localizer is estimating, or the
+# factor just re-anchors to the last pose and the residual is ~0 at the current estimate. Position-only
+# (a single view's yaw is biased), with an anisotropic R_o whose loose axis lies along the viewing ray.
+# 2026-08-10: this has been true all along, but nothing consumed it -- room_concept's anchor reader only
+# admitted tables. It now admits "table" (room's ObjectAnchor.subtypes) and the table becomes the
+# localizer's first non-corner landmark.
+PublishObjectObs = true     # publish per-frame ROBOT-frame fit z_o (obj_obs_robot) → room's object-anchor factor
+ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room's LIDAR_ROBOT_FRAME)
+
+[Tracker]
+# Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path —
+# prior-scaffold + greedy nearest-mask were removed in Stage 2). "table" masks are associated to instances
+# by a covariance-gated global 1-to-1; an unexplained mask spawns a new table; overlapping tables merge
+# (two can't share space); a table is NEVER retired by occlusion (a long occlusion is not absence).
+GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
+GateFallbackM = 0.50   # K2c table: the legacy table tracker's value
+DetectionNoiseM = 0.35   # K2c table: the legacy table tracker's value
+                          # vs fitted-centre offset of a partially-viewed table (~0.2–0.5 m), else the
+                          # overconfident fit rejects its own detection. Beds are far apart → safe.
+# Evidence a mask must accumulate, while staying unexplained, before spawning a table. The unit is ONE
+# ideal observation: a perfect mask (confidence 1, untruncated, centred, within AI2PriorFootprint range) is worth
+# 1.0, and every real mask is worth less in proportion to its measured quality (see the birth-quality block in
+# specificworker_lifecycle.cpp: confidence · (1−trunc_frac) · periphery · range). A STALE cycle is worth 0 — the
+# candidate stays alive but does not accrue — so this counts genuine OBSERVATIONS, not compute cycles.
+# VALUE UNCHANGED (8). The tightening comes from valuing each observation correctly, not from raising the bar:
+# with a stale cycle worth 0 and every mask scaled by its measured quality, 8 now means 8 IDEAL observations,
+# which the same detection has to work much harder to reach. Worked examples at this unchanged 8:
+#   clean table at 1.5 m, conf 0.90, centred  → ~0.89/frame ⇒ ~9 mask frames (~0.9 s)  — unchanged in practice
+#   the `table 0.53` wall blob at 2.5 m → ~0.36/frame ⇒ ~23 frames of a SUSTAINED, unexplained blob
+#   anything at 7 m (q_range = (2.5/7)² = 0.13) → ~0.11/frame ⇒ ~73 frames — a distant blob cannot birth
+RecallPiMove = 0.5   # K2c table: the legacy table's value (a GUESS there: tables get moved)
+RecallLogPriorNew = 0.0  # ltom recall: log prior of "a NEW table" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
+BirthFrames = 8
+# NO ADMISSION GATE (final review I1, 2026-11-14). The burst plausibility read as a decision (code default 0.35) is now a
+# two-sided HEIGHT gate on the class probability: a table taller or shorter than the class would be refused forever. The class
+# factor of existence (existence = occupancy x class) removes what its shape argues against, continuously; no gate
+# (CLAUDE.md). 0 = off.
+BirthAdmitPlausibility = 0.0
+# FUSED BIRTH: residual-grid surprise mass under a detection accelerates its birth (independent geometric
+# corroboration). birth_evidence = (1 + Gain·m/(m+MassRef)) · quality. Needs residual_concept.
+BirthFusion = true         # true to enable; needs BirthSurpriseProbe infra (reads the `grid` node)
+BirthFusionGain = 6.0      # max extra evidence/frame at full corroboration (0 ⇒ baseline birth timing)
+BirthFusionMassRef = 8.0   # residual mass at which corroboration is half-saturated
+BirthFusionRadiusM = 0.50   # K2c table: the legacy table's value
+BirthMinSepM = 0.60   # K2c table: the legacy table tracker's value
+BirthSelfBody = true # SELF-BODY: birth evidence × fraction of the mask's points OUTSIDE the robot's own body (the ZED's bottom
+                     # rows see the robot's top plate; YOLOE called it "table" 0.34 → bed_5, 2026-11-14). false only for A/B.
+MergeOverlap = 0.05       # physical exclusion: collapse two instances whose oriented footprints overlap by
+                          # ≥ this fraction of the smaller footprint (two tables cannot share space). 0=off.
+BirthWidthM = 1.448   # K2c table: = AI2PriorFootprintM (the seed, and the LiDAR select radius: covers a top up to ~2.0 x 1.0 m)
+BirthDepthM = 1.448   # K2c table: = AI2PriorDepthM (symmetry c2v)
+BirthHeightM = 0.762   # K2c table: the class's TALLEST top (not the mean): also the LiDAR select band top (floor case, + LidarSelectMarginM), so the band covers every table of the class; the fit pulls the seed down to the observed top
+# Ricoh-360 ATTENTION gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO detection (dense ZED slices
+# have depth_var==0). It is bearing-only: it never births/associates/fits, it only raises attention
+# (process_ricoh_bearings) so the robot seeks a good ZED view.
+RicohAttentionConf = 0.60         # min YOLO confidence for a ricoh detection to raise attention
+
+# Ricoh peripheral attention (process_ricoh_bearings) is always on (validated live): ricoh (depth_var>0)
+# detections raise attention targets but never fit — the ZED fits. NOTE: ricoh depth is reliable only for FRONTAL
+# views; lateral/back views smear the mask cloud, which is why ricoh is attention-only, never a fit source.
+# Ricoh attention association gates: small margins on the physical angular size / range roughness when deciding
+# whether an unassigned ricoh bearing already matches a known table (process_ricoh_bearings).
+RicohAttentionAngleMargin = 0.05  # extra angular tolerance (rad) on the table's angular half-size
+RicohAttentionRangeBandM  = 1.0   # extra range band (m); ricoh range is rough/indicative
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
