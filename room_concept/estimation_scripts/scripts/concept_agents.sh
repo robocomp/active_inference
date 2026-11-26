@@ -8,9 +8,19 @@
 #                                       and, where the agent wrote them, its promise/delivery log (shared-engine G5: etc/offers.csv,
 #                                       etc/delivered.csv) to <out_dir>/<class>_offers.csv, <class>_delivered.csv (promise_delivery.py),
 #                                       and the answers to gain queries (etc/gain_query.csv, the P1 A/B/A promise) to <class>_gain_query.csv
+#   concept_agents.sh resolve           PRINT ONLY: for every agent in the list, "<agent> <mode> <binary> <config>" as `start` would
+#                                       launch it (mode countable|legacy|missing|none); starts nothing. Tested by test_concept_agents_resolve.sh.
 # THE LIST is $CONCEPT_AGENTS — a NEW concept agent (or countable class: folder + bin link, see CONCEPT_AGENT_RECIPE.md) is one word added to the default below.
-# LEGACY_AGENTS="refrigerator_concept hood_concept chair_concept table_concept" runs those on their legacy binaries (K1, K2b, K2c: by default they
-# run as countable classes, <agent>/countable/<agent> + etc/countable.toml, where that link exists). agents.txt records which.
+# WHICH BINARY (shared-engine part 1, final fix wave 2026-11-26) — two switches, OPT-IN to the countable engine per class:
+#   * nightstand, bed, toilet: bin/<agent> IS a link to countable_concept (they have no legacy binary) -> countable, always.
+#   * chair, table, hood, refrigerator: have BOTH a legacy bin/<agent> and a countable link <agent>/countable/<agent>.
+#     DEFAULT = LEGACY (bin/<agent> + etc/config.toml), as on main.
+#     COUNTABLE_AGENTS="chair_concept hood_concept refrigerator_concept" turns a class onto its countable link
+#     (<agent>/countable/<agent> + etc/countable.toml), where that link exists in the checkout.
+#     LEGACY_AGENTS="…" is an OVERRIDE: a class it names runs legacy even if COUNTABLE_AGENTS also names it.
+#   * table_concept: the countable table is CUT from part 1 (K2c live: table_2 d² 263; see table_concept/countable/README.md).
+#     COUNTABLE_AGENTS naming it is refused loudly and the legacy table runs.
+#   agents.txt records which binary each agent ran.
 # Binary: $WT/<agent>/bin/<agent> when present (default WT = the phase0 worktree), else the main checkout's; a SYMLINK there
 # (a countable class) pins the agent to the worktree — a dangling one is reported and skipped, never replaced by main's.
 # Every agent runs from the agent directory of the checkout its binary came from ($src/<agent>: etc/ and the manifest path
@@ -24,30 +34,48 @@ CONCEPT_AGENTS=${CONCEPT_AGENTS:-"chair_concept table_concept bottle_concept hoo
 ALL="$CONCEPT_AGENTS"; [ -n "$LTOM" ] && ALL="$ALL ltom_agent"
 comm_of() { echo "${1:0:15}"; }   # the kernel's process name is the first 15 characters (pgrep/pkill -x match it)
 
+in_list() { [[ " $2 " == *" $1 "* ]]; }   # in_list <word> "<list>"
+# resolve <agent>: sets exe (path | missing | ""), cfg, src, mode — the ONE rule both `start` and `resolve` use.
+resolve() {
+  local a=$1 r l c
+  exe=""; cfg=""; src=""; mode=none
+  if [ $a = table_concept ] && in_list $a "$COUNTABLE_AGENTS" && ! in_list $a "$LEGACY_AGENTS"; then
+    echo "$a: COUNTABLE_AGENTS names the table, but the countable table is CUT from part 1 (K2c live d² 263) — running LEGACY" >&2
+  fi
+  # countable classes (nightstand, bed, toilet): bin/<a> is a SYMLINK to countable_concept/bin/countable_concept. Execute the LINK
+  # path (never its target) so comm = <a> and pgrep -x stays per class. A link in a checkout decides for that checkout: a
+  # dangling worktree link means countable_concept is not built THERE, and falling back to main's binary would silently run
+  # other code against the worktree's class folders — so it is reported and skipped.
+  for r in $WT $B; do
+    l=$r/$a/bin/$a; c=$r/$a/etc/config.toml
+    # K1/K2b (shared-engine): an agent that ALSO has a legacy binary (chair, hood, refrigerator) runs as a countable class through
+    # <a>/countable/<a> (a link to countable_concept, same basename so comm stays <a>) with <a>/etc/countable.toml ONLY when
+    # COUNTABLE_AGENTS names it and LEGACY_AGENTS does not; otherwise its own bin/<a> and etc/config.toml. Never the table.
+    if [ -L "$r/$a/countable/$a" ] && [ $a != table_concept ] && in_list $a "$COUNTABLE_AGENTS" && ! in_list $a "$LEGACY_AGENTS"; then
+      l=$r/$a/countable/$a; c=$r/$a/etc/countable.toml
+    fi
+    if [ -L "$l" ]; then
+      if [ -e "$l" ] && [ -x "$l" ]; then exe=$l; cfg=$c; src=$r
+      elif [ ! -e "$l" ]; then echo "$a: link target missing — build countable_concept ($l -> $(readlink "$l"))" >&2; exe=missing
+      else echo "$a: link target not executable ($l -> $(readlink -f "$l")) — skipped" >&2; exe=missing; fi
+      break
+    elif [ -x "$l" ]; then exe=$l; cfg=$c; src=$r; break; fi
+  done
+  if [ "$exe" = missing ]; then mode=missing
+  elif [ -n "$exe" ]; then
+    if [ -L "$exe" ] && [ "$(basename "$(readlink -f "$exe")")" = countable_concept ]; then mode=countable; else mode=legacy; fi
+  fi
+}
+
 case "${1:-}" in
+  resolve)
+    for a in $ALL; do resolve $a; printf '%s\t%s\t%s\t%s\n' $a $mode "${exe:--}" "${cfg:--}"; done;;
   start)
     OUT=$(readlink -f "${2:-$B/room_concept/estimation_scripts/crossing/concept_agents}"); mkdir -p $OUT/logs
     : > $OUT/agents.txt
     for a in $ALL; do
       if pgrep -x "$(comm_of $a)" > /dev/null; then echo "$a: already running"; continue; fi
-      exe=""; cfg=""; src=""
-      # countable classes (nightstand, bed, toilet): bin/<a> is a SYMLINK to countable_concept/bin/countable_concept. Execute the LINK
-      # path (never its target) so comm = <a> and pgrep -x stays per class. A link in a checkout decides for that checkout: a
-      # dangling worktree link means countable_concept is not built THERE, and falling back to main's binary would silently run
-      # other code against the worktree's class folders — so it is reported and skipped.
-      for r in $WT $B; do
-        l=$r/$a/bin/$a; c=$r/$a/etc/config.toml
-        # K1 (shared-engine): an agent that ALSO has a legacy binary (refrigerator, hood) runs as a countable class through
-        # <a>/countable/<a> (a link to countable_concept, same basename so comm stays <a>) with <a>/etc/countable.toml,
-        # unless LEGACY_AGENTS names it — then its own bin/<a> and etc/config.toml, untouched. The link decides per checkout.
-        if [ -L "$r/$a/countable/$a" ] && [[ " $LEGACY_AGENTS " != *" $a "* ]]; then l=$r/$a/countable/$a; c=$r/$a/etc/countable.toml; fi
-        if [ -L "$l" ]; then
-          if [ -e "$l" ] && [ -x "$l" ]; then exe=$l; cfg=$c; src=$r
-          elif [ ! -e "$l" ]; then echo "$a: link target missing — build countable_concept ($l -> $(readlink "$l"))"; exe=missing
-          else echo "$a: link target not executable ($l -> $(readlink -f "$l")) — skipped"; exe=missing; fi
-          break
-        elif [ -x "$l" ]; then exe=$l; cfg=$c; src=$r; break; fi
-      done
+      resolve $a
       [ "$exe" = missing ] && continue
       if [ -z "$exe" ]; then echo "$a: NO BINARY (not in $WT/$a/bin nor $B/$a/bin) — skipped"; continue; fi
       # Every line is prefixed with wall-clock seconds (ms), so recall / birth TIMING can be read off the logs (ltom_agent
@@ -104,5 +132,5 @@ case "${1:-}" in
     for a in $ALL; do
       if pgrep -x "$(comm_of $a)" > /dev/null; then echo "$a: running"; else echo "$a: not running"; fi
     done;;
-  *) echo "usage: [LTOM=1] [CONCEPT_WT=<worktree>] [CONCEPT_AGENTS=\"…\"] [LEGACY_AGENTS=\"…\"] $0 start [out_dir] | stop | status | harvest <out_dir>"; exit 2;;
+  *) echo "usage: [LTOM=1] [CONCEPT_WT=<worktree>] [CONCEPT_AGENTS=\"…\"] [LEGACY_AGENTS=\"…\"] [COUNTABLE_AGENTS=\"…\"] $0 start [out_dir] | resolve | stop | status | harvest <out_dir>"; exit 2;;
 esac
