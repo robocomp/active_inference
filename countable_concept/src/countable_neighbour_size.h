@@ -1,4 +1,7 @@
 /*
+ * S1 DONE: the published `size_std_m` attribute (countable_size_std.h) is now the primary source; this file stays as the FALLBACK for a
+ * neighbour that does not publish it (a legacy agent), logged once per class. The text below describes that fallback.
+ *
  * countable_neighbour_size.h — the interim size std of a neighbour's published box (plan rev 2 F1.7; Fable order review §2.6).
  *
  * A neighbour's belief enters the update as a foreign density (G3, foreign_box.h) with a std per DOF. Position and yaw come from

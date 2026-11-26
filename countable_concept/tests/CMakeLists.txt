@@ -381,3 +381,11 @@ target_compile_options(birth_seed_rule_test PRIVATE -O2)
 target_link_libraries(birth_seed_rule_test PRIVATE Eigen3::Eigen)
 add_test(NAME birth_seed_rule_test COMMAND birth_seed_rule_test)
 set_tests_properties(birth_seed_rule_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+
+# S1: the published size std (size_std_m) against the belief's covariance for a floor, a hanging and a c2v class, and the
+# neighbour reader's mapping + fallback. Run: ./size_std_test
+add_executable(size_std_test size_std_test.cpp ../src/countable_belief.cpp)
+target_include_directories(size_std_test PRIVATE ../src ../../common ../../common/media_transport ../../common/concept_manifest)
+target_compile_options(size_std_test PRIVATE -O2)
+target_link_libraries(size_std_test PRIVATE Eigen3::Eigen)
+add_test(NAME size_std_test COMMAND size_std_test)

@@ -24,7 +24,8 @@
 #include "countable_mask_membership.h"   // rc::MaskMembership, make_membership (lidar-measures G2)
 #include "countable_viewpoint.h"         // ρ from odometry (lidar-measures §7c.2)
 #include "countable_config_error.h"     // rc::CountableConfigError (beam config refusal)
-#include "countable_neighbour_size.h"   // rc::node_class, rc::neighbour_size_std (F1.7)
+#include "countable_neighbour_size.h"
+#include "countable_size_std.h"   // rc::neighbour_footprint_std (S1)
 #include "countable_replay.h"           // Model.ReplayDump (shared-engine plan rev 2, Task R1)
 #include "../../common/place_memory/place_map.h"   // rc::place::inv_se2 (the robot in the room from T(robot←room))
 
@@ -358,8 +359,8 @@ void CountableFitter::consume_paths(CountableInstance& inst, const CountableFram
 //   std  = from the edge's rt_covariance (rc::rtcov layout, 6×6 over x y z roll pitch yaw): σ_cx = √C[0][0], σ_cy = √C[1][1],
 //          σ_yaw = √C[5][5], σ_H = 2√C[2][2] (the fleet publishes z = H/2 ⇒ var_z = var_H/4: countable, table, refrigerator,
 //          hood; chair publishes its floor std there and cabinet (z0 + z1)/2, so for those σ_H is that quantity, not var_H).
-//          σ_w = σ_h = 0: NO agent publishes a size std (cortex has no such attribute; adding one is the owner's call), so a
-//          neighbour's faces spread by its position and yaw std only.
+//          σ_w, σ_h = the neighbour's published size_std_m (S1) on its width_m / depth_m axes; a legacy agent that does not publish
+//          it keeps the manifest interim (countable_neighbour_size.h).
 // Skipped (logged once per node): no RT edge from the current room, no size attributes, no rt_covariance, or a position /
 // yaw variance that is missing, zero or not finite (Review Focus 5: an unseeded belief is not a zero-width surface).
 void CountableFitter::refresh_neighbours()
@@ -415,18 +416,27 @@ void CountableFitter::refresh_neighbours()
             b.yaw = r[3 * newest + 2];
             b.w = w.value(); b.h = d.value(); b.H = H.value();
             b.cls = rc::node_class(n.name());
-            // Size std (F1.7, interim until the published attribute, S1): the neighbour class's layer spread Δ/√12 on w and h,
-            // from its manifest (countable_neighbour_size.h); 0 when its class declares none (logged once per class).
-            const std::string cls = rc::node_class(n.name());
-            auto it = neighbour_size_std_.find(cls);
-            if (it == neighbour_size_std_.end())
+            // Size std (S1): the neighbour's PUBLISHED size_std_m on its footprint axes (width_m, depth_m). A legacy agent that
+            // does not publish it keeps the interim: the class's manifest layer spread Δ/√12 (countable_neighbour_size.h), logged
+            // once per class; 0 when the class declares none either.
+            std::array<float, 2> sz{0.0f, 0.0f};
+            const auto published = G_->get_attrib_by_name<size_std_m_att>(n);
+            if (const auto fp = published.has_value() ? rc::neighbour_footprint_std(*published) : std::nullopt; fp.has_value())
+                sz = *fp;
+            else
             {
-                const auto sd = rc::neighbour_size_std(rc::countable_manifest_path(cls));
-                if (not sd.has_value())
-                    std::print("[{}] [neighbours] class '{}' declares no layer spread: its size std stays 0\n", cfg_.concept_class, cls);
-                it = neighbour_size_std_.emplace(cls, sd.value_or(std::array<float, 2>{0.0f, 0.0f})).first;
+                const std::string cls = rc::node_class(n.name());
+                auto it = neighbour_size_std_.find(cls);
+                if (it == neighbour_size_std_.end())
+                {
+                    const auto sd = rc::neighbour_size_std(rc::countable_manifest_path(cls));
+                    std::print("[{}] [neighbours] class '{}' publishes no size_std_m; {}\n", cfg_.concept_class, cls,
+                               sd.has_value() ? "using its manifest layer spread" : "it declares no layer spread either: its size std stays 0");
+                    it = neighbour_size_std_.emplace(cls, sd.value_or(std::array<float, 2>{0.0f, 0.0f})).first;
+                }
+                sz = it->second;
             }
-            b.std << std::sqrt(vx), std::sqrt(vy), 2.0f * std::sqrt(vz), it->second[0], it->second[1], std::sqrt(vyaw);
+            b.std << std::sqrt(vx), std::sqrt(vy), 2.0f * std::sqrt(vz), sz[0], sz[1], std::sqrt(vyaw);
             if (not rc::ai::beam::usable(b)) { skip(n.name(), "degenerate box or std"); continue; }
             neighbours_.emplace_back(n.id(), b);
         }

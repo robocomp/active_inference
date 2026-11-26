@@ -9,6 +9,7 @@
  */
 
 #include "countable_scene_graph.h"
+#include "countable_size_std.h"
 
 #include "../../common/rt_covariance/rt_covariance.h"   // rc::rtcov::publish (SHARED)
 
@@ -167,6 +168,10 @@ void CountableSceneGraph::step_write_model(CountableInstance& inst, DSR::Node& n
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
         // the body's extent above its origin: H floor-anchored, the class extent e hanging (origin = the underside)
         G_->add_or_modify_attrib_local<height_m_att>(node, rc::countable::VerticalSpan{cfg_.vertical_extent_m}.height(s.countable_height));
+        // the 1-σ of the three extents just written, same dead-band so the value and its std never disagree (S1)
+        if (inst.ai2_initialized)
+            G_->add_or_modify_attrib_local<size_std_m_att>(node, rc::published_size_std(inst.ai2_belief.covariance(),
+                                                           rc::countable::VerticalSpan{cfg_.vertical_extent_m}));
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
         write_countable_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
