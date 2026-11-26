@@ -27,7 +27,7 @@
 #include <Eigen/LU>
 
 #include "viewpoint_score.h"
-#include "standpoint_free.h"
+#include "../standpoint/standpoint_oracle.h"   // G6: the shared standpoint oracle (K3)
 #include "../ai_belief/dof_spec.h"
 
 namespace rc::nbv
@@ -55,9 +55,10 @@ struct CountableInputs
     float                             robot_radius_m = 0.0f;
     std::span<const Obstacle>         obstacles;
     std::span<const Eigen::Vector2f>  room_polygon;
-    // G6: can the body stand at an offered standpoint (standpoint_free.h)? Absent ⇒ no scaling. A countable offer ends in a turn
-    // in place (every non-Reach contract), so it is judged through all headings.
-    const StandWorld*                 stand = nullptr;
+    // G6: P(the body can stand at an offered standpoint and turn in place there), from the shared standpoint oracle
+    // (common/standpoint/standpoint_oracle.h — the controller's own occupancy model and fit). Absent ⇒ no scaling. A countable
+    // offer ends in a turn in place (every non-Reach contract), so it is judged through all headings.
+    const rc::standpoint::Oracle*     stand = nullptr;
 };
 
 // `plan` is returned so each agent keeps its own diagnostic log line.
@@ -65,7 +66,8 @@ struct CountableResult
 {
     CountableProposal proposal;
     Plan              plan;
-    float             p_stand = 1.0f;    // the winning face's standpoint verdict (0 or 1); 1 when no world was given
+    float             p_stand = 1.0f;    // the winning face's P(stand and turn) ∈ [0, 1]; 1 when no world was given. NOT applied to
+                                         // proposal.epistemic_gain: the step applies it once, after the floor (epistemic_step.h)
     bool              refused_no_usable_face = false;
 };
 
@@ -110,17 +112,20 @@ template <class RawGainFn, class UsefulFn>
 CountableResult plan_countable(const Target& t, const CountableInputs& in, RawGainFn&& raw_gain_of, UsefulFn&& useful)
 {
     CountableResult r;
-    // ★G6: an offer is worth what it is worth IF the robot can stand there. p_stand ∈ {0,1} is the controller's own feasibility
-    // verdict at the face's standpoint — the pose plan_faces scores and publishes — so the RANKING sees it (a blocked face loses to a
-    // free one). The PUBLISHED gain is scaled again after the verification floor (epistemic_step), because a floor placed under a
-    // blocked standpoint would otherwise re-offer it at full value. `useful` and face_raw_gains keep the unscaled belief gain.
+    // ★G6: an offer is worth what it is worth IF the robot can stand there. p_stand = P(stand and turn) at the face's standpoint —
+    // the pose plan_faces scores and publishes — from the shared oracle the controller decides with (K3): 0 under a hard cell (the
+    // controller hands such a standpoint back), exp(−soft nats) under residual cells it would only price. So the RANKING sees it
+    // (a blocked face loses to a free one, a doubtful one to a clear one); face_gains, the published per-face ranking, carry it.
+    // The PUBLISHED gain gets it from the step, once, after the verification floor (epistemic_step), because a floor placed under a
+    // blocked standpoint would otherwise re-offer it at full value — so the proposal's own gain does NOT include it (below).
+    // `useful` and face_raw_gains keep the unscaled belief gain.
     std::array<float, 4> unscaled{};
     std::array<float, 4> p_face{1.0f, 1.0f, 1.0f, 1.0f};
     const auto reachable_gain = [&](int face, float standoff_m) -> float
     {
         const float raw = raw_gain_of(face, standoff_m);
         const FaceViewpoint v = face_viewpoint(t, face, standoff_m);
-        const float p = in.stand != nullptr ? static_cast<float>(p_stand(*in.stand, v.pos, v.yaw, /*turn=*/true)) : 1.0f;
+        const float p = in.stand != nullptr ? static_cast<float>(in.stand->p_stand_and_turn(v.pos)) : 1.0f;
         unscaled[static_cast<std::size_t>(face)] = raw;
         p_face[static_cast<std::size_t>(face)] = p;
         return raw * p;
@@ -153,7 +158,13 @@ CountableResult plan_countable(const Target& t, const CountableInputs& in, RawGa
     }
     const int   best = r.plan.best_face;
     r.p_stand = p_face[static_cast<std::size_t>(best)];
-    const float gain = r.plan.face_gains[best] * useful(unscaled[static_cast<std::size_t>(best)]) * r.p_stand;
+    // ★p_stand ENTERS THE PUBLISHED GAIN ONCE (K3). The proposal carries the offer's value GIVEN the robot can stand there —
+    // P(detect)·raw·useful, i.e. face_gains[best] with p_stand taken back out, computed from the unscaled raw so no division —
+    // and p_stand beside it; the step multiplies them AFTER the verification floor (epistemic_step.h). While p_stand ∈ {0,1}
+    // (Task 8) the old `face_gains[best]·useful·p_stand` gave the same published number; with a continuous P it would square p
+    // here and the step would cube it.
+    const auto bi = static_cast<std::size_t>(best);
+    const float gain = r.plan.face_p_detect[bi] * std::max(0.0f, unscaled[bi]) * useful(unscaled[bi]);
     const CountableProposal p{r.plan.best_pos.x(), r.plan.best_pos.y(), r.plan.best_yaw, gain, true};
     if (p.is_finite())
         r.proposal = p;

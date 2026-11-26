@@ -12,13 +12,8 @@ find_package(Eigen3 REQUIRED)
 add_library(nbv_test_footprint STATIC ../../robot_footprint/robot_footprint.cpp ../../robot_footprint/mesh_hull.cpp)
 target_link_libraries(nbv_test_footprint PUBLIC Eigen3::Eigen)
 
-foreach(t standpoint_free_test)
-  add_executable(${t} ${t}.cpp)
-  target_compile_options(${t} PRIVATE -O1 -Wall)
-  target_link_libraries(${t} PRIVATE Eigen3::Eigen nbv_test_footprint)
-  add_test(NAME ${t} COMMAND ${t})
-endforeach()
-# countable_planner.h includes standpoint_free.h, so the planner test links the footprint too.
+# (standpoint_free_test moved to common/standpoint/tests/task8_mirror_test.cpp in K3.)
+# countable_planner.h includes the shared standpoint oracle (common/standpoint), so the planner test links the footprint too.
 add_executable(countable_planner_test ../countable_planner_test.cpp)
 target_include_directories(countable_planner_test PRIVATE ..)
 target_compile_options(countable_planner_test PRIVATE -O1)

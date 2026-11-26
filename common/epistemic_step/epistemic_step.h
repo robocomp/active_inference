@@ -139,7 +139,8 @@ void step(Inst& inst, Graph& G, const StepInputs& in, const StepHooks<Proposal>&
         prop.epistemic_gain = std::max(prop.epistemic_gain, in.verify_gain_floor);
     // G6: a standpoint the body cannot stand at is no offer, however much a verification floor wants the look. Applied AFTER the
     // floor (a floor under a blocked standpoint would re-offer it at full value) and to the PUBLISHED gain: the best face is still
-    // published, at gain 0 — no offer value, not a skip.
+    // published, at gain 0 — no offer value, not a skip. K3: p_stand is P(stand and turn) ∈ [0, 1] from the shared standpoint
+    // oracle, and this is the ONE place it multiplies the published gain (the planner's proposal gain does not carry it).
     if constexpr (requires { prop.p_stand; })
         prop.epistemic_gain *= prop.p_stand;
 

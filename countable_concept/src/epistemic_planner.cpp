@@ -76,7 +76,7 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
                                             const std::vector<EpistemicPlanner::Obstacle>& obstacles,
                                             const std::vector<Eigen::Vector2f>& room_polygon,
                                             const std::optional<rc::ai::offer::OfferLidar>& offer_lidar,
-                                            const rc::nbv::OccupiedCells* occupied) const
+                                            const rc::OccupiedCells* occupied) const
 {
     // The robot's own silhouette (a robot property; SHADOW's — another robot needs its own polygon). Its circumscribed radius is the
     // wall/object clearance, replacing the 0.30 m constant this path carried (the other agents' planners keep theirs until their ports).
@@ -169,15 +169,26 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
     // stand in the wall and the controller would repair it to the floor at the object), scale the winner by the
     // useful fraction of its raw information (adequacy gap to Σ*), refuse a non-finite result.
-    // G6: the controller's own feasibility test at each offered standpoint, on the same data (standpoint_free.h).
-    rc::nbv::StandWorld stand_world;
-    if (occupied != nullptr and occupied->cell_m > 0.0f)
+    // G6: P(the body stands and turns at each offered standpoint) from the SHARED standpoint oracle (K3) — the controller's own
+    // rasterisation and fit (common/standpoint/standpoint_oracle.h), on the inputs this agent holds: the room polygon, the obstacle
+    // boxes, residual's cells priced by its published field. What differs from the controller is the INPUT, not the model:
+    //   · cell = residual's grid_cell_size and margin 0 — the controller's Planner.CellSize and FootprintSafetyMarginM are its own
+    //     config, not readable here (spec: no constant beyond the robot footprint), so this side is slightly more permissive;
+    //   · obstacles = the graph's object boxes; the controller's are its tracker's polygons (+ temporary/virtual obstacles);
+    //   · no passages (the controller's crossing corridor) and no live LiDAR hardening — the Planning-stage verdict the controller
+    //     makes on an offered standpoint also ignores live-only cells (persistent_only).
+    bool stand = false;
+    if (occupied != nullptr and occupied->cell_size_m > 0.0f)
     {
-        if (stand_body_.cell_m != occupied->cell_m) stand_body_ = rc::nbv::StandBody::of(body, occupied->cell_m);
-        stand_world = {&stand_body_, occupied, room_polygon, obstacles};
+        if (stand_oracle_.cell() != occupied->cell_size_m) stand_oracle_.configure(body, occupied->cell_size_m, /*margin_m=*/0.0f);
+        std::vector<std::vector<Eigen::Vector2f>> boxes;
+        boxes.reserve(obstacles.size());
+        for (const auto& o : obstacles) boxes.push_back(rc::standpoint::box_polygon(o.cx, o.cy, o.w, o.h, o.yaw));
+        stand_oracle_.set_world(room_polygon, {}, boxes, *occupied);
+        stand = stand_oracle_.has_world();
     }
     rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon};
-    if (stand_world.valid()) in.stand = &stand_world;
+    if (stand) in.stand = &stand_oracle_;
     // ★NO CONSUMER ⇒ NO EPISTEMIC BID (owner ruling for hood, 2026-11-13, applied to this clone 2026-11-14):
     // countable_dof.h declares no σ*, so useful = 0. The pose and the per-face ranking are still planned and
     // published; only the scalar gain is 0, so this agent never out-bids one whose gain is gap-bounded.

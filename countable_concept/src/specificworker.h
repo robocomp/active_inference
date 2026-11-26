@@ -320,7 +320,7 @@ private:
     void read_occupied_cells();                         // G6: residual `grid` HARD latched cells → occupied_cells_ (stamp-keyed)
     bool read_residual_field();                         // snapshot residual_concept's `grid` node → residual_field_
     void log_birth_surprise();                          // EXPERIMENTAL read-only probe (cfg_.birth_surprise_probe)
-    rc::nbv::OccupiedCells occupied_cells_;             // G6: for the standpoint check
+    rc::OccupiedCells    occupied_cells_;               // G6: residual's cells priced by its field, for the standpoint oracle
     std::uint64_t        occupied_stamp_cells_ = 0, occupied_stamp_prob_ = 0;
     rc::GridField        residual_field_;               // this cycle's residual (surprise) field; read at compute head
     // The birth-surprise / birth-fusion probe: two CSVs and two counters, bundled so a new agent cannot

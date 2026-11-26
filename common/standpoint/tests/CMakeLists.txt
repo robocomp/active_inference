@@ -25,3 +25,16 @@ target_include_directories(standpoint_oracle_parity PRIVATE ${CTRL}/src)
 target_compile_options(standpoint_oracle_parity PRIVATE -O2 -Wall -Wextra)
 target_link_libraries(standpoint_oracle_parity PRIVATE Eigen3::Eigen standpoint_test_footprint)
 add_test(NAME standpoint_oracle_parity COMMAND standpoint_oracle_parity ${CTRL}/tests/data/standpoint_oracle_golden.txt)
+
+# Task 8's object-side mirror (the reference the countables' p_stand switch is measured against) and its own pins.
+add_executable(task8_mirror_test task8_mirror_test.cpp)
+target_compile_options(task8_mirror_test PRIVATE -O1 -Wall)
+target_link_libraries(task8_mirror_test PRIVATE Eigen3::Eigen standpoint_test_footprint)
+add_test(NAME task8_mirror_test COMMAND task8_mirror_test)
+
+# p_stand: the shared oracle vs the Task 8 mirror (and, for the record, vs the controller at its live config).
+add_executable(p_stand_parity_test p_stand_parity_test.cpp ${CTRL}/src/grid_planner.cpp ${CTRL}/src/local_policy/cost_to_go.cpp)
+target_include_directories(p_stand_parity_test PRIVATE ${CTRL}/src)
+target_compile_options(p_stand_parity_test PRIVATE -O2 -Wall -Wextra)
+target_link_libraries(p_stand_parity_test PRIVATE Eigen3::Eigen standpoint_test_footprint)
+add_test(NAME p_stand_parity_test COMMAND p_stand_parity_test)

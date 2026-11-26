@@ -59,8 +59,9 @@ struct EpistemicProposal
     // scaling — on the persistent path the engine's predicted θ-marginal entropy drop, the quantity <class>_delivered.csv
     // logs per update (shared-engine G5, promise/delivery log).
     float promised_nats     = 0.0f;
-    // G6: 1 if the controller's own test says the body can stand at the winning standpoint (through a turn in place), else 0. The
-    // step multiplies the PUBLISHED gain by it AFTER the verification floor, so a floor cannot re-offer a blocked standpoint.
+    // G6: P(the body stands at the winning standpoint and turns in place there) ∈ [0, 1], from the shared standpoint oracle (K3).
+    // NOT in epistemic_gain: the step multiplies the PUBLISHED gain by it once, AFTER the verification floor, so a floor cannot
+    // re-offer a blocked standpoint.
     float p_stand           = 1.0f;
 
     bool is_finite() const
@@ -95,9 +96,10 @@ public:
     /// EXPECT TO GET, so `rc::nbv` weights it by P(detect | framing) and places each face at its own stand-off.
     /// A low but finite gain is NOT withdrawn here; the controller's EFE selection simply won't pick it.
     ///
-    /// @param occupied   G6: residual's latched occupied cells. With the room polygon and the obstacles, they decide p_stand — the
-    ///                   controller's own verdict on whether the body can stand at an offered standpoint (standpoint_free.h).
-    ///                   nullptr ⇒ no cell size, no belief, no veto.
+    /// @param occupied   G6: residual's latched cells, priced by its published belief field (rc::standpoint::cells_from_xyz).
+    ///                   With the room polygon and the obstacles they give p_stand = P(the body stands and turns at an offered
+    ///                   standpoint), from the shared standpoint oracle the controller decides with (K3).
+    ///                   nullptr or no cell size ⇒ no belief, no veto.
     /// @param sensor     the camera's REAL FoVs (h = 2·atan(W/2fx), v = 2·atan(H/2fy)) and mount height above
     ///                   the floor datum. The VERTICAL channel is not optional for a bed: a 1.7 m box
     ///                   overflows the frame vertically at 1.2 m, where it still fills only a quarter of it
@@ -121,7 +123,7 @@ public:
                               const std::vector<Obstacle>& obstacles = {},
                               const std::vector<Eigen::Vector2f>& room_polygon = {},
                               const std::optional<rc::ai::offer::OfferLidar>& offer_lidar = std::nullopt,
-                              const rc::nbv::OccupiedCells* occupied = nullptr) const;
+                              const rc::OccupiedCells* occupied = nullptr) const;
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
     // the one where the detector is most likely to fire — the same model the removal channel weights absence by.
@@ -147,7 +149,9 @@ private:
     rc::nbv::Sensor with_envelope(const rc::nbv::Sensor& in) const { rc::nbv::Sensor s = in; s.env = det_env_; return s; }
 
     rc::detect::DetectorEnvelope det_env_{};
-    mutable rc::nbv::StandBody   stand_body_{};   // G6: the body's covered cells per heading, rebuilt when residual's cell size changes
+    // G6: the shared standpoint oracle (K3). Reconfigured when residual's cell size changes; its world is re-rasterised only when
+    // the room, the obstacle boxes or residual's priced cells changed (bit-identical inputs skip, Oracle::set_world).
+    mutable rc::standpoint::Oracle stand_oracle_{};
     std::string                  agent_name_ = "countable_concept";
 };
 

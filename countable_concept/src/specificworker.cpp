@@ -636,9 +636,9 @@ void SpecificWorker::compute()
 // Log, per cycle, the regions NOT already covered by a believed bed alongside the tracker's actual birth count,
 // so we can see whether surprise flags a real new bed cleanly (and stays quiet on phantoms) BEFORE letting it
 // drive the lifecycle. Never writes the graph; never births. See [[bed-birth-surprise-probe]].
-// G6: residual_concept's latched occupied cells (grid_occupied_cells + grid_cell_size) split into HARD and soft exactly as the
-// controller splits them: through the published belief field (grid_occupancy_prob / _var / _meta, via rc::read_residual_field) and
-// the controller's own residual_risk::risks_from_field. Keyed on the publish stamps of the cells and the field, like the
+// G6: residual_concept's latched occupied cells (grid_occupied_cells + grid_cell_size) priced exactly as the controller prices
+// them: through the published belief field (grid_occupancy_prob / _var / _meta, via rc::read_residual_field) and the controller's
+// own residual_risk::risks_from_field (+inf = hard, finite = soft nats) — the input of the shared standpoint oracle (K3). Keyed on the publish stamps of the cells and the field, like the
 // controller's obstacle tracker: the publisher writes ~2 Hz and unchanged stamps mean what we hold is still the truth. A vanished
 // node empties it (no belief, no veto); a missing field makes every cell hard, as there. Main thread.
 void SpecificWorker::read_occupied_cells()
@@ -662,7 +662,7 @@ void SpecificWorker::read_occupied_cells()
         bf.xmin = field.xmin; bf.ymin = field.ymin; bf.cell = field.cell;
         bf.width = field.width; bf.height = field.height;
     }
-    occupied_cells_ = rc::nbv::OccupiedCells::from_xyz(cells.value().get(), cs.value(), bf);
+    occupied_cells_ = rc::standpoint::cells_from_xyz(cells.value().get(), cs.value(), bf);
 }
 
 // Snapshot residual_concept's `grid` node (published under room ~2 Hz) into residual_field_ — the dense

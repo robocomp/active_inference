@@ -106,39 +106,38 @@ int main()
         CHECK(fv.pos == r.plan.best_pos and fv.yaw == r.plan.best_yaw, "face_viewpoint is plan_faces' pose");
     }
 
-    {   // G6: an offer's standpoint the body cannot stand at loses the ranking; all blocked ⇒ the best face, p_stand 0; no world ⇒ nothing.
+    {   // G6 (K3: the shared standpoint oracle): an offer's standpoint the body cannot stand at loses the ranking; all blocked ⇒ the best
+        // face, p_stand 0; a soft (priced) residual cell scales the offer by exp(−nats); no world ⇒ nothing.
         const auto room = rect(-8.0f, 8.0f, -8.0f, 8.0f);
         const auto prefer_plus_y = [](int face, float) { return face == 2 ? 2.0f : 1.0f; };
         const rc::RobotFootprint shadow = rc::RobotFootprint::shadow();
-        const rc::nbv::StandBody body = rc::nbv::StandBody::of(shadow, 0.05f);
         rc::nbv::CountableInputs in{camera(), 0.3f, no_obstacles, room};
         const auto base = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
         CHECK(base.proposal.valid and base.plan.best_face == 2 and base.p_stand == 1.0f, "G6: without a world the +y face wins, p_stand 1");
 
-        const auto block = [&](const std::vector<int>& faces) {   // latch a cell under each listed face's standpoint
+        const auto latch = [&](const std::vector<int>& faces) {   // one residual cell under each listed face's standpoint
             std::vector<float> f;
             for (const int face : faces)
             {
                 const auto v = rc::nbv::face_viewpoint(unit_box(), face, face == 2 ? base.plan.best_standoff_m : base.plan.face_standoff_m[face]);
                 f.insert(f.end(), {v.pos.x(), v.pos.y(), 0.02f});
             }
-            return rc::nbv::OccupiedCells::from_xyz(f, 0.05f, rc::residual_risk::BeliefField{});   // no field: cells hard
+            return f;
         };
-        const rc::nbv::OccupiedCells none;
-        rc::nbv::StandWorld clear{&body, &none, room, {}};
+        const std::vector<std::vector<Eigen::Vector2f>> none;
+        const auto world = [&](const rc::OccupiedCells& c) { rc::standpoint::Oracle o(shadow, 0.05f, 0.0f); o.set_world(room, none, none, c); return o; };
+        const auto clear = world(rc::OccupiedCells{});
         in.stand = &clear;
         const auto free = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
         CHECK(free.proposal.epistemic_gain == base.proposal.epistemic_gain and free.p_stand == 1.0f, "G6: an empty world changes nothing");
 
-        const auto cells = block({2});
-        rc::nbv::StandWorld w{&body, &cells, room, {}};
+        const auto w = world(rc::standpoint::cells_from_xyz(latch({2}), 0.05f, rc::residual_risk::BeliefField{}));   // no field: hard
         in.stand = &w;
         const auto blocked = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
         CHECK(blocked.proposal.valid and blocked.plan.best_face != 2 and blocked.p_stand == 1.0f, "G6: a blocked standpoint loses to a free one");
         CHECK(blocked.plan.face_raw_gains[2] == 2.0f, "G6: face_raw_gains stays the belief's UNSCALED gain");
 
-        const auto all = block({0, 1, 2, 3});
-        rc::nbv::StandWorld wa{&body, &all, room, {}};
+        const auto wa = world(rc::standpoint::cells_from_xyz(latch({0, 1, 2, 3}), 0.05f, rc::residual_risk::BeliefField{}));
         in.stand = &wa;
         const auto none_free = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
         CHECK(none_free.proposal.valid and not none_free.refused_no_usable_face, "G6: every standpoint blocked: the best face is still proposed");
@@ -146,7 +145,20 @@ int main()
         const auto best_raw = std::max_element(none_free.plan.face_raw_gains.begin(), none_free.plan.face_raw_gains.end());
         CHECK(none_free.plan.best_face == static_cast<int>(best_raw - none_free.plan.face_raw_gains.begin()) and none_free.plan.best_face == 2,
               "G6: ... and it is the belief's raw-best face (+y here)");
-        CHECK(none_free.p_stand == 0.0f and none_free.proposal.epistemic_gain == 0.0f, "G6: ... at gain 0 with p_stand 0 (no offer value, not a skip)");
+        CHECK(none_free.p_stand == 0.0f and none_free.proposal.epistemic_gain == base.proposal.epistemic_gain,
+              "G6: ... with p_stand 0 beside the belief's gain (the step publishes gain x p_stand = 0: no offer value, not a skip)");
+
+        // a SOFT cell (priced 0.4 nats, as residual's field would) under the +y standpoint: still the winner (2·e^−0.4 > 1), offered at
+        // e^−0.4 of its value — the controller would serve it and price it, so the offer is neither vetoed nor at full value.
+        rc::OccupiedCells soft;
+        soft.cell_size_m = 0.05f;
+        { const auto f = latch({2}); soft.centres.emplace_back(f[0], f[1]); soft.risk_nats = {0.4f}; }
+        const auto ws = world(soft);
+        in.stand = &ws;
+        const auto priced = rc::nbv::plan_countable(unit_box(), in, prefer_plus_y, kOne);
+        CHECK(priced.plan.best_face == 2 and std::abs(priced.p_stand - std::exp(-0.4f)) < 1e-6f, "G6: a soft cell: p_stand = exp(-nats), continuous");
+        CHECK(priced.proposal.epistemic_gain == base.proposal.epistemic_gain, "G6: ... carried BESIDE the gain, not folded in (applied once, by the step)");
+        CHECK(std::abs(priced.plan.face_gains[2] - base.plan.face_gains[2] * priced.p_stand) < 1e-6f, "G6: ... while the face ranking carries it once");
     }
 
     std::printf(fails == 0 ? "countable_planner_test: PASS\n" : "countable_planner_test: %d FAIL\n", fails);

@@ -68,7 +68,7 @@ The owner chose approach A in the objects session on 11-23. The paper session as
    - Leakage from a neighbour's mask is handled by a per-point foreign-membership mixture whose foreign density includes the other objects' beliefs, not only walls and floor. This was candidate 2 in the 11-22 analysis.
 4. **G4. Shape misfit as a persistent latent.** A single box (or the chair template) cannot say which layer of a real object it means: the bed is 1.57 m at the mattress and 1.73–1.77 m at the frame and blanket. Each class manifest gets a per-DOF shape-spread σ (class knowledge), carried as a latent that never decorrelates with the view (ρ = 1). Its value comes from the class's part spread: (Δ)²/12 for a uniform spread over the layer range Δ.
 5. **G5. Offers under the same cap.** The epistemic gain of a candidate standpoint is the expected entropy reduction under the engine's own joint covariance update (`joint_cov`), with the latents predicted for that standpoint's ρ. So a return to a seen view promises little and a new view promises a lot. The chair and table self_test face-ranking checks must keep passing. Each offer logs promised and delivered nats per visit (AuRo test b).
-6. **G6. Occupancy check on offered standpoints.** Before publishing, the standpoint's robot footprint is scored against the occupancy belief, and the offer's value is multiplied by P(footprint free). This is continuous, with no threshold.
+6. **G6. Occupancy check on offered standpoints.** Before publishing, the standpoint's robot footprint is scored against the occupancy belief, and the offer's value is multiplied by P(stand and turn): the probability that every cell the body covers through the turn in place it ends with is free. It comes from ONE shared standpoint oracle (`common/standpoint/standpoint_oracle.h`, K3), the same code the controller decides with. (Amended by K3, 2026-11-26; see the amendment at the end.)
    - Step 0 reads the AuRo claim logs to confirm why half the no-update claims are refused: the auro report says the view lies under the robot's own body.
    - If the cause is geometric rather than occupancy (a standpoint inside the robot's current footprint), the check is that geometry, stated in the spec before coding.
 
@@ -237,3 +237,33 @@ Why:
   future class without a stand-off gets the old flush form once (mean 0) and no no-cross; if it needs one, it declares a stand-off.
 - For T14: `WallNoCrossPrecision` / `WallNoCrossMarginM` do not vanish — they remain the legacy path's terms; on the persistent
   path the wall's containment knowledge moved into the stand-off prior and the wall latent.
+
+## Amendment (K3, 2026-11-26): G6 as built — one shared standpoint oracle
+
+G6 now reads (item 6 above): the offer's value is multiplied by **P(stand and turn)** from the shared oracle
+`common/standpoint/standpoint_oracle.h`. What that means exactly:
+
+- **The quantity.** P = exp(−Σ risk(c)) over the union of the eight heading footprints of the robot body at the standpoint (each
+  cell once), and P = 0 if any covered cell is hard. risk(c) = −log Pr(θ_c < ½ | residual's Beta) for a residual cell with a belief
+  behind it (`residual_risk.h cell_risk_nats`, now in `common/standpoint/`), 0 for a collapsed cell and for unlatched ground.
+  Hard = outside the room (and every passage), inside an object polygon, a residual cell with no belief behind it, or (controller
+  only, and not at the Planning stage) a cell a live LiDAR return lands in. It is continuous in the belief and has no threshold;
+  the 0 is the belief's own statement (no Beta behind a cell, or a measurement of contact), not a bar on P.
+- **One model, not a mirror.** The oracle holds the rasterisation `GridPlanner::set_world` did and the fit kernel
+  `GridPlanner::fit_nats_*` did; the controller now calls them. Its decisions are unchanged (golden recorded at aea54896:
+  `controller/tests/test_standpoint_oracle_parity.cpp`): it hands an object standpoint back iff P = 0 (`standpoint_fit.h`), and
+  `pose_free` / `can_turn_here` are P > 0 at one / all headings. The binary decisions are the controller's, as consumers of P.
+- **No constant beyond the robot footprint.** The footprint is the robot's. The lattice cell and the margin are the CALLER's: the
+  controller passes `Planner.CellSize` and `Controller.FootprintSafetyMarginM`; a countable, which cannot read another agent's
+  config, passes residual's own `grid_cell_size` and margin 0. Measured on synthetic cluttered worlds
+  (`common/standpoint/tests/p_stand_parity_test.cpp`): the agent side stands where the controller would hand back at 9.5 % of
+  standpoints, never the reverse; with the controller's margin on the agent's lattice it is 4.6 % (the lattice). Publishing the
+  margin (and the planner cell) as a robot property would remove it; that is an owner decision.
+- **Applied once.** The countable planner ranks faces by p·gain, carries p beside the proposal's gain, and the epistemic step
+  multiplies the PUBLISHED gain by p once, after the verification floor (so a floor never re-offers a blocked standpoint).
+- **This supersedes Task 8's ruling** (p_stand ∈ {0,1} by an object-side mirror of the controller's test). That ruling rejected a
+  product over `grid_occupancy_prob` (P(occupied ∧ ¬explained) with a Beta-mean floor: 0.33 at best, ~1e-27 over unexplored
+  ground). The oracle does not use that product: it prices only latched residual cells, by the controller's own surprisal, so
+  free and unexplored floor cost 0. With no priced cell under the turn, P is 0/1 exactly as the mirror was; under priced cells it
+  is exp(−nats), where the mirror read 1. Decision differences from the mirror are confined to the lattice boundary (3.6 % of
+  standpoints, each within one cell of a flip).

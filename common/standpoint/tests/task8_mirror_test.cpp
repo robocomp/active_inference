@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "../standpoint_free.h"
+#include "task8_mirror.h"   // the Task 8 mirror, kept as the K3 parity reference
 
 static int fails = 0;
 #define CHECK(cond, msg) do { const bool ok_ = (cond); std::printf("  %-70s %s\n", msg, ok_ ? "ok" : "FAIL"); if (not ok_) ++fails; } while (0)

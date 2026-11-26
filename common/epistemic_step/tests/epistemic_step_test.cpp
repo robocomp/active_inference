@@ -52,6 +52,9 @@ int main()
     { FakeInst i; CHECK(run<ProposalWith>(0.3f, 5.0f, 1.0f, i) == 5.0f, "free standpoint: the floor applies, published 5"); }
     { FakeInst i; CHECK(run<ProposalWith>(0.3f, 0.0f, 1.0f, i) == 0.3f, "free, no floor: the planner's gain"); }
     { FakeInst i; CHECK(run<ProposalWithout>(0.3f, 5.0f, 1.0f, i) == 5.0f, "a proposal without p_stand is untouched"); }
+    // K3: p_stand is a probability; it scales the published gain once, floored or not
+    { FakeInst i; CHECK(run<ProposalWith>(0.3f, 5.0f, 0.25f, i) == 1.25f, "K3: P(stand) 0.25 under a floor of 5: published 1.25"); }
+    { FakeInst i; CHECK(run<ProposalWith>(0.8f, 0.0f, 0.25f, i) == 0.2f, "K3: P(stand) 0.25, no floor: published 0.8 x 0.25 once"); }
     std::printf("%s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }

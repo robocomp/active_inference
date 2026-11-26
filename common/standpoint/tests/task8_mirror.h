@@ -1,4 +1,9 @@
 /*
+ * ★ TEST REFERENCE ONLY (K3, 2026-11-26). This was common/nbv/standpoint_free.h, Task 8's object-side MIRROR of the controller's
+ * feasibility test. No agent includes it any more: the countables' p_stand now calls the SHARED standpoint oracle
+ * (common/standpoint/standpoint_oracle.h), which IS the controller's rasterisation and fit. It is kept, unchanged below this note,
+ * as the reference p_stand_parity_test.cpp measures the switch against.
+ *
  * common/nbv/standpoint_free.h — can the robot's BODY stand at an offered standpoint? (G6)  p_stand ∈ {0, 1}.
  *
  * WHY. The controller hands back an epistemic standpoint when "a wall, object or unbelieved residual cell lies under the
@@ -38,9 +43,9 @@
 
 #include <Eigen/Core>
 
-#include "viewpoint_score.h"                          // Obstacle, stands_inside, detail::point_in_polygon
-#include "../robot_footprint/robot_footprint.h"        // rc::RobotFootprint
-#include "../../controller/src/residual_risk.h"      // rc::residual_risk — the controller's own cell_risk_nats / risks_from_field (pure std+Eigen)
+#include "../../nbv/viewpoint_score.h"                  // Obstacle, stands_inside, detail::point_in_polygon
+#include "../../robot_footprint/robot_footprint.h"     // rc::RobotFootprint
+#include "../residual_risk.h"                         // rc::residual_risk — the controller's own cell_risk_nats / risks_from_field (pure std+Eigen)
 
 namespace rc::nbv
 {
