@@ -1079,7 +1079,11 @@ static void first_update_converges_on(const char* nm, const CountableFrame& f, b
     for (const auto& v : b.dbg_iterates())
         std::printf("    iterate cx %.5f cy %.5f H %.5f w %.5f h %.5f yaw %+.5f\n", v(0), v(1), v(2), v(3), v(4), v(5));
     CountableBeliefParams q = shifted_params();
-    q.gn_iters_max = 200; q.gn_tol_m = 0.0; q.gn_tol_rad = 0.0; q.gn_tol_sigma = 0.0;
+    // The reference: the fixed point, solved 100× tighter than the stop rule (undamped step ≤ 0.001σ instead of 0.1σ), so that
+    // it STOPS there. F1 round 9 (b): an update that ends at its iteration cap without meeting its stop rule carries the PRIOR
+    // moment (its Laplace Σ is not a posterior), so the old reference — tol_sigma 0, which can never be met and always ran to
+    // the 200-step cap — would now return P̄ and no longer be a reference for Σ.
+    q.gn_iters_max = 200; q.gn_tol_m = 0.0; q.gn_tol_rad = 0.0; q.gn_tol_sigma = 1e-3;
     CountableBelief r = born_on_priors(q);
     r.update(f);
     double dyaw = 0.0;

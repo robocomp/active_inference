@@ -1004,7 +1004,8 @@ public:
         const VecNd theta_post = m.state().vec().template cast<double>();
 
         // Step 4 at the returned θ (consistent: at θ + B b_post; restart: b̄), plus the last ACCEPTED step's outer product on θθ
-        // (zero if none): a frame that stopped while still moving carries its last move as uncertainty.
+        // (zero if none): a frame that stopped while still moving carries its last move as uncertainty. Unconverged: the prior
+        // moment (F1 round 9 b, below).
         build(theta_post, consistent ? b_post : b_);
         // The jump statistic's view of this update's data (learn_volatility, F1 round 7 A1): the data as a Gaussian factor on the
         // joint x, LINEARISED AT THE STAYED POSTERIOR MODE x̂ = (θ̂, b̂) — the Laplace point of the stayed evidence — and written as a
@@ -1023,8 +1024,21 @@ public:
             eta_data += Lambda_data * wrapped(x_hat - x_bar);
         }
         P_ = pu::joint_cov<N, K, NP>(P_bar, chans(), theta_only);
+        // F1 round 9 (b): an update that did NOT reach a mode carries the PRIOR moment, not the Laplace one. joint_cov's P is
+        // (𝟙 + P̄W)⁻¹P̄, the inverse curvature of the energy AT THE POINT REACHED; it is a posterior covariance only where that
+        // point is the energy's minimum (the stop rule's condition, `converged`). At an unconverged point (the iteration cap) it
+        // is the curvature on a slope, and it collapsed Σ around a fit the solver had not finished: k2c_table's table_2 ran 25
+        // steps unconverged and took σ_cx 0.30 → 0.033 and σ_h 0.572 → 0.036, after which same-view frames (ρ ≈ 1) added
+        // almost nothing and the bad fit froze. The update therefore keeps the point it reached (x̂ is lower in energy than x̄:
+        // every accepted step lowered J, so it is the better start for the next frame) and the predicted covariance P̄: the
+        // frame's information is not counted as absorbed until a frame's fit reaches its mode, and the next frame of the same
+        // view can still move the estimate. Measured alternative, rejected: P + δ₀δ₀ᵀ with δ₀ the remaining undamped step (the
+        // local quadratic's second moment about x̂) — at a non-mode δ₀ is the quadratic's extrapolation, metres on p1r8_bed's
+        // capped updates (refuted rays), and the bed ran away (cx −0.31 → −2.15). Converged updates are unchanged (P plus the
+        // last accepted step's outer product on θθ, round 6).
+        if (not converged) P_ = P_bar;
         const VecNd post_var = P_.diagonal().template head<N>();          // the model's posterior, before the solver's last-step term
-        P_.template topLeftCorner<N, N>() += d_last * d_last.transpose();
+        if (converged) P_.template topLeftCorner<N, N>() += d_last * d_last.transpose();
         if (cfg.gn_trace >= 2 or (cfg.gn_trace == 1 and not converged))
         {   // GnTrace: does the solver's G / W match the energy J it accepts against? Per channel, the raw −bd, the
             // marginalised −g, central differences of data_energy with only that channel's state perturbed, and the
