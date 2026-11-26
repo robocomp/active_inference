@@ -54,7 +54,7 @@ def context_lines(root, T, d, fr, t_ms):
     offset (x_f w, y_f h) in the chair's frame."""
     if d.get('q'):
         print('   proportion (context): ' + ' '.join(f'{k} {v:.4f}' for k, v in sorted(d['q'].items())))
-    elif T['cls'] in ('chair', 'toilet'):
+    elif T['cls'] in ('chair', 'toilet', 'table'):
         print('   proportion (context): q / sigma_q are not in the ai2 log')
     if 'seat' not in T: return
     import aba_model as Mdl
@@ -189,20 +189,15 @@ def main(arg):
         print(f'   ground truth (published frame, fit n={fr.n} rms {fr.rms:.3f} m): ' +
               ' '.join(f'{DOFS[k]} {truth[k] if k != 4 else T["h"][0]:.3f}' for k in range(6)) +
               (f' (h {T["h"][0]:.3f}..{T["h"][1]:.3f})' if T['h'][0] != T['h'][1] else ''))
-        errs = []
-        for k in range(6):
-            x = d_end['est'][k]
-            if k == 4: e = 0.0 if T['h'][0] <= x <= T['h'][1] else min(x - T['h'][0], x - T['h'][1], key=abs)
-            elif k == 5: e = wrap(x - truth[5])
-            else: e = x - truth[k]
-            errs.append(e)
-        print('   error at the end of ' + last + ': ' + ' '.join(f'{DOFS[k]} {errs[k]:+.4f} ({errs[k] / d_end["sig"][k]:+.2f} sigma)'
-                                                         for k in range(6)))
+        errs, esig, perm = R.graded_errors(d_end['est'], d_end['sig'], T, (px, py, pyaw))
+        print('   error at the end of ' + last + ': ' + ' '.join(f'{DOFS[k]} {errs[k]:+.4f} ({errs[k] / esig[k]:+.2f} sigma)'
+                                                         for k in range(6))
+              + ('' if perm == (0, 1, 2, 3, 4, 5) else '  [c2v image: the estimate\'s w and h swapped]'))
         context_lines(root, T, d_end, fr, t_end)
         for k in range(6):
             if prm['delta'][k] == 0: continue
-            sp = d_end['sig'][k]
-            ss = sp * pred[last]['hi']['S'][k] / pred[last]['hi']['PC'][k]
+            sp = esig[k]
+            ss = sp * pred[last]['hi']['S'][perm[k]] / pred[last]['hi']['PC'][perm[k]]
             llr += (-math.log(ss) - 0.5 * (errs[k] / ss) ** 2) - (-math.log(sp) - 0.5 * (errs[k] / sp) ** 2); llr_n += 1
     print('== summary (registered checks; a DOF with Delta = 0 has no floor check)')
     for h in Mdl.HYPS:

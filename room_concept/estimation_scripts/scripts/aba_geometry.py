@@ -8,6 +8,7 @@
     aba_geometry.py query_pose <sx> <sy> <cx> <cy>       a WORLD standpoint and object centre -> the standpoint in the published
                                                           room frame and the heading facing the centre (math convention, the
                                                           engine's Standpoint yaw) — the gain query's pose
+    aba_geometry.py choose_table <wbt>                   the K2c visit table by its rule (choose_table), every table listed
     aba_geometry.py room_of <x> <y>                      the fixture's graph room of a world point (by the room polygons)
     aba_geometry.py choose_chair <wbt>                   the K2b visit chair by its rule (choose_chair), every chair listed
     aba_geometry.py heading_tol                          the controller's heading goal tolerance (deg, align_yaw_tol_rad)
@@ -224,11 +225,25 @@ def object_truth(wbt, defn, live=False):
         w, h, H, src = w_mesh, (h_mesh, h_mesh), z + b[3], f'mesh layer ({M.__name__}.layer_box)'
     # vertical span as the engine publishes it (countable_vertical_span.h): H = the body's TOP above the floor for every class;
     # z0 = its underside (0 for a floor-standing object; the canopy's underside for the hood, whose node hangs at origin z)
-    z0 = 0.0 if cls == 'bed' else z + b[2]
+    z0 = 0.0 if cls in ('bed', 'table') else z + b[2]
+    extra = {}
+    if seat: extra['seat'] = seat
+    if cls == 'table':
+        # the table stands on the floor: z0 = 0; its graded layer is the TOP slab (mesh_extents: the vertices above the largest
+        # z gap), so H = the top surface and the slab's underside gives the top_under proportion the engine infers (context)
+        extra['top'] = dict(z_under=z + b[2], top_under=(z + b[2]) / (z + b[3]))
+    # [shape] symmetry from the class manifest (the table: "c2v" — the reports score the minimum over its four descriptions)
+    try:
+        import tomllib
+        with open(os.path.join(HERE, '..', '..', '..', 'common', 'concept_manifest', f'{cls}.concept.toml'), 'rb') as fh:
+            sym = tomllib.load(fh).get('shape', {}).get('symmetry', 'none')
+    except (OSError, ValueError):
+        sym = 'none'
+    extra['symmetry'] = sym
     return dict(defn=defn, name=nm, cls=cls, room_poly=room, pose_src=pose_src, origin=[x, y, yaw, z], z0=z0, cx=cx, cy=cy,
                 back=[float(back[0]), float(back[1])], yaw_theta_world=math.atan2(-back[0], back[1]),
                 w=w, h=list(h), H=H, wall_gap=best[0], source=src if seat is None else 'Chair.proto visual coordinates (overall box)',
-                **({'seat': seat} if seat else {}))
+                **extra)
 
 
 # ------------------------------------------------------------------------------------------------ standpoints
@@ -325,6 +340,66 @@ def choose_chair(wbt):
     return rows, (ok[0]['defn'] if ok else None)
 
 
+# ------------------------------------------------------------------------------------------------ the visit table (K2c)
+def world_tables(wbt):
+    """[(DEF or '', name, type, x, y, z)] of every Table / Desk / RoundTable node of the world (top level and inside Groups)."""
+    import furniture as F
+    t = F.tokens(open(wbt).read()); out = []
+
+    def name(n):
+        v = n.get('name')
+        while isinstance(v, list) and v: v = v[0]
+        return v.strip('"') if isinstance(v, str) else n['_type']
+
+    def visit(n, d):
+        if n['_type'] == 'Group':
+            for c in n.get('children', []):
+                if isinstance(c, dict): visit(c, '')
+            return
+        nm = name(n)
+        if n['_type'] == 'Desk' or nm.startswith(TABLE_NAMES):
+            x, y, z, _ = F.T(n); out.append((d, nm, n['_type'], x, y, z))
+    i = 0
+    while i < len(t):
+        if t[i] == 'EXTERNPROTO': i += 2; continue
+        if t[i] == 'DEF' and i + 3 < len(t) and t[i + 3] == '{': d = t[i + 1]; i += 2
+        else: d = ''
+        if i + 1 < len(t) and t[i + 1] == '{': n, i = F.parse_node(t, i); visit(n, d)
+        else: i += 1
+    return out
+
+
+def choose_table(wbt):
+    """THE VISIT-TABLE RULE, written before any run (K2c live validation):
+      1. a BOX-topped table: the class fits a box (top + four legs, c2v). A round top (RoundTable: cylinder top) has no box truth —
+         every yaw of the same box fits it, a symmetry the c2v group does not hold — so it is excluded, not scored;
+      2. it has a DEF (the live pose is read with webots_object.py get; the Desk PROTO has none);
+      3. it stands on the floor (node translation z >= 0 up to the world file's roundoff, 1e-6 m);
+      4. A and B are both feasible under the unchanged standpoint rule;
+      5. among those, the smallest mean over A and B of the fraction of floor-plane sight lines to 9 points of its top crossing
+         ANY other footprint (a table's occluders are the chairs round it, not other tables); ties: the smaller |moved|, then DEF."""
+    rows = []
+    # DEF names of nodes nested in Groups are dropped by the furniture parser: find them by name (mesh_extents.graded resolves a DEF)
+    import mesh_extents as M
+    def_of = {}
+    for d in re.findall(r'DEF (\w+) \w+ \{', open(wbt).read()):
+        try: def_of[M.graded(wbt, d)[0]] = d
+        except Exception: pass
+    for d, nm, ty, x, y, z in world_tables(wbt):
+        d = d or def_of.get(nm, '')
+        r = dict(defn=d or '(no DEF)', name=nm, type=ty, xy=(x, y), z=z, box=not nm.startswith('RoundTable'), has_def=bool(d),
+                 on_floor=z >= -1e-6, feasible=None, moved=None, occ=None)
+        if r['box'] and r['has_def']:
+            p = plan(wbt, d)
+            r['feasible'] = p['feasible']
+            if p['feasible']:
+                r['moved'] = p['moved_m']; r['occ'] = table_occlusion(p, wbt)
+        rows.append(r)
+    ok = [r for r in rows if r['box'] and r['has_def'] and r['on_floor'] and r['feasible']]
+    ok.sort(key=lambda r: (0.5 * (r['occ']['A'][1] + r['occ']['B'][1]), abs(r['moved']), r['defn']))
+    return rows, (ok[0]['defn'] if ok else None)
+
+
 # ------------------------------------------------------------------------------------------------ frames
 def read_gt_error(path):
     rows = []
@@ -415,6 +490,16 @@ def main(argv):
         fr = Frames(rows, read_gauge(LIVE_PROTO_ROOM), t1 - int(window_s * 1000), t1)
         px, py, _ = fr.world_to_pub(sx, sy, 0.0, t1); qx, qy, _ = fr.world_to_pub(cx, cy, 0.0, t1)
         print(f'{px:.4f} {py:.4f} {math.atan2(qy - py, qx - px):.6f}')
+        return 0
+    if cmd == 'choose_table':
+        rows, pick = choose_table(argv[1])
+        for r in rows:
+            why = ('ROUND top: excluded (no box truth)' if not r['box'] else 'no DEF: excluded' if not r['has_def']
+                   else 'SUNK below the floor' if not r['on_floor'] else 'plan INFEASIBLE' if not r['feasible'] else
+                   f"feasible, range moved {r['moved']:+.2f} m, occluded sight lines (any furniture) A {r['occ']['A'][1]:.2f} "
+                   f"B {r['occ']['B'][1]:.2f} (tables A {r['occ']['A'][0]:.2f} B {r['occ']['B'][0]:.2f})")
+            print(f"{r['defn']} ({r['name']}, {r['type']}) at ({r['xy'][0]:.3f}, {r['xy'][1]:.3f}) z {r['z']:+.3f}: {why}")
+        print(f'chosen: {pick}')
         return 0
     if cmd == 'room_of':
         # the room a world point lies in, by the world's own room polygons (wbt_rooms), in the warm-tour fixture's GRAPH names:

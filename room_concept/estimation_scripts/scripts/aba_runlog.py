@@ -150,6 +150,39 @@ def match_node(rows, t0, t1):
     return max(n.items(), key=lambda kv: kv[1]) if n else (None, 0)
 
 
+def _wrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def c2v_images(est, sig):
+    """The four descriptions of one c2v object (a table: no front, no labelled sides): (w, h, yaw), (w, h, yaw + pi),
+    (h, w, yaw + pi/2), (h, w, yaw - pi/2), each with its sigmas (w <-> h swapped with the sizes) and the permutation
+    perm[k] = the index of the estimate's DOF that stands for DOF k in that image."""
+    cx, cy, H, w, h, yaw = est; scx, scy, sH, sw, sh, syaw = sig
+    same, swap = (0, 1, 2, 3, 4, 5), (0, 1, 2, 4, 3, 5)
+    return [((cx, cy, H, w, h, yaw), (scx, scy, sH, sw, sh, syaw), same),
+            ((cx, cy, H, w, h, _wrap(yaw + math.pi)), (scx, scy, sH, sw, sh, syaw), same),
+            ((cx, cy, H, h, w, _wrap(yaw + math.pi / 2)), (scx, scy, sH, sh, sw, syaw), swap),
+            ((cx, cy, H, h, w, _wrap(yaw - math.pi / 2)), (scx, scy, sH, sh, sw, syaw), swap)]
+
+
+def graded_errors(est, sig, T, truth_pub):
+    """THE ONE place a ground-truth error is computed (parked_report, sbs_compare; the node match uses the centre, which every
+    group image shares). truth_pub = (cx, cy, yaw) of the truth in the published frame; T = the plan's truth (H, w, h, and h as
+    an interval for the bed). For a class whose manifest declares [shape] symmetry = "c2v" (the table) the estimate's four
+    equivalent descriptions are scored and the one with the smallest normalised (w, h, yaw) error is reported (the error is the
+    minimum over the group); every other class is scored as it is. Returns (errors, sigmas, perm) in the TRUTH's DOF labels."""
+    images = c2v_images(est, sig) if T.get('symmetry') == 'c2v' else [(tuple(est), tuple(sig), (0, 1, 2, 3, 4, 5))]
+    best = None
+    for e_, s_, perm in images:
+        h0, h1 = T['h']
+        err = [e_[0] - truth_pub[0], e_[1] - truth_pub[1], e_[2] - T['H'], e_[3] - T['w'],
+               0.0 if h0 <= e_[4] <= h1 else min(e_[4] - h0, e_[4] - h1, key=abs), _wrap(e_[5] - truth_pub[2])]
+        cost = sum((err[k] / s_[k]) ** 2 if s_[k] > 0 else math.inf for k in (3, 4, 5))
+        if best is None or cost < best[0]: best = (cost, err, list(s_), perm)
+    return best[1], best[2], best[3]
+
+
 CHI2_2_99 = -2.0 * math.log(0.01)   # chi-square with 2 dof at 99 %: 9.2103 (the 2-D Gaussian's tail is exp(-d2/2))
 
 
@@ -159,7 +192,8 @@ def match_node_to_truth(run, rows, S, T):
     sigmas; the truth's centre taken to the published room frame by the visit's frame fit (gt_error over A1 claim .. A2 end,
     the gauge at the A1 dwell end). d2 = sum over x, y of (est - truth)^2 / (sigma^2 + fit_rms^2): the node's own covariance
     (the x-y cross term is not logged) plus the frame fit's error, which is in the comparison too. The match is the smallest d2,
-    and only if d2 <= chi2_2(99 %); else no node is the object (NO VERDICT). Returns a dict: node (or None), d2, runner, runner_d2,
+    and only if d2 <= chi2_2(99 %); else no node is the object (NO VERDICT). The centre is the same in every c2v group image (a
+    table's four descriptions), so the match needs no symmetry handling. Returns a dict: node (or None), d2, runner, runner_d2,
     truth (px, py), fit_rms, fit_n, frames, why."""
     from aba_geometry import Frames, read_gauge, read_gt_error
     t1 = S['A1']['t_dwell1_ms']

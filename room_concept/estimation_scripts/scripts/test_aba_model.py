@@ -74,6 +74,8 @@ def main():
     node_match()
     kitchen_plans()
     chair_plan()
+    c2v_errors()
+    table_plan()
     print('test_aba_model: OK')
 
 
@@ -208,6 +210,42 @@ def chair_plan():
     assert p['A'][1] > T['cy']                                                    # A in FRONT of the seat (north), not behind the backrest
     t1 = G.object_truth(wbt, 'CHAIR_1')
     assert abs(t1['origin'][3] + 0.3) < 1e-9 and abs(t1['H'] - 0.699) < 1e-3, t1  # sunk: the choice rule excludes it
+
+
+def c2v_errors():
+    # 10. K2c: the symmetry-aware ground-truth error. A c2v truth and each of its four group images score ZERO; a non-c2v class
+    #     keeps its plain error (an image is NOT equivalent there); a swapped image reports the truth's labels and sigmas.
+    T = dict(cls='table', symmetry='c2v', H=0.73, w=1.8, h=[0.8, 0.8])
+    truth = (-1.84, 4.43, 0.3)
+    sig = (0.02, 0.03, 0.01, 0.05, 0.04, 0.02)
+    est = (-1.84, 4.43, 0.73, 1.8, 0.8, 0.3)
+    for e_, s_, perm in R.c2v_images(est, sig):
+        err, es, pm = R.graded_errors(e_, s_, T, truth)
+        assert max(abs(x) for x in err) < 1e-12, (e_, err)
+        assert es[3] == 0.05 and es[4] == 0.04, es                  # back in the truth's labels: sigma_w, sigma_h
+    err, _, pm = R.graded_errors((-1.84, 4.43, 0.73, 0.8, 1.8, 0.3 + math.pi / 2), sig, T, truth)
+    assert max(abs(x) for x in err) < 1e-12 and pm == (0, 1, 2, 4, 3, 5), (err, pm)
+    Tn = dict(T, symmetry='none', cls='nightstand')
+    err, _, _ = R.graded_errors((-1.84, 4.43, 0.73, 1.8, 0.8, 0.3 + math.pi), sig, Tn, truth)
+    assert abs(abs(err[5]) - math.pi) < 1e-9, err                    # a nightstand turned round is wrong by pi
+
+
+def table_plan():
+    # 11. K2c: the visit table TABLE_1 (aba_geometry.choose_table; the rule is in its docstring). Truth = the top slab of
+    #     table1.dae (1.8 x 0.8, top 0.730 above the floor), c2v from the manifest; it stands on the floor (z0 = 0).
+    import aba_geometry as G
+    wbt = os.environ.get('WBT_PATH', '/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt')
+    if not os.path.exists(wbt):
+        print('test_aba_model: SKIP table plan (no world file)'); return
+    p = G.plan(wbt, 'TABLE_1'); T = p['truth']
+    assert T['cls'] == 'table' and T['symmetry'] == 'c2v' and T['room_poly'] == 'room_1', T
+    assert {round(T['w'], 3), round(T['h'][0], 3)} == {1.8, 0.8} and abs(T['H'] - 0.7298) < 1e-3 and T['z0'] == 0.0, T
+    assert abs(T['top']['top_under'] - 0.824) < 1e-3, T['top']
+    assert p['feasible'], p
+    c = (T['cx'], T['cy'])
+    for q in (p['A'], p['B']): assert abs(math.hypot(q[0] - c[0], q[1] - c[1]) - p['z']) < 1e-6
+    names = [n for _, n, _, _, _, _ in G.world_tables(wbt)]
+    assert 'RoundTable' in names and 'Desk' in names, names              # every table node is listed by the choice rule
 
 
 if __name__ == '__main__': main()

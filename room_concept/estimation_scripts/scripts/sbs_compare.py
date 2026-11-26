@@ -20,16 +20,11 @@ from aba_geometry import wrap
 DOFS = ('cx', 'cy', 'H', 'w', 'h', 'yaw')
 
 
-def errors(est, T, fr, t):
+def errors(est, sig, T, fr, t):
+    """(errors, sigmas) in the truth's DOF labels: aba_runlog.graded_errors (the c2v minimum over a table's group images)."""
     px, py, pyaw = fr.world_to_pub(T['cx'], T['cy'], T['yaw_theta_world'], t)
-    truth = [px, py, T['H'], T['w'], None, pyaw]
-    e = []
-    for k in range(6):
-        x = est[k]
-        if k == 4: e.append(0.0 if T['h'][0] <= x <= T['h'][1] else min(x - T['h'][0], x - T['h'][1], key=abs))
-        elif k == 5: e.append(wrap(x - truth[5]))
-        else: e.append(x - truth[k])
-    return e
+    e, s, _ = R.graded_errors(est, sig, T, (px, py, pyaw))
+    return e, s
 
 
 def one(run):
@@ -51,10 +46,10 @@ def one(run):
         ups = R.updates(rows, node)
         t_end = segs['A2']['t_dwell1_ms']
         d = R.last_before(ups, t_end)
-        e = errors(d['est'], T, fr, t_end)
-        print('   final ' + ' '.join(f'{DOFS[k]} {e[k]:+.4f} ({e[k] / d["sig"][k]:+.2f}s)' for k in range(6)))
+        e, es = errors(d['est'], d['sig'], T, fr, t_end)
+        print('   final ' + ' '.join(f'{DOFS[k]} {e[k]:+.4f} ({e[k] / es[k]:+.2f}s)' for k in range(6)))
         dw = [(segs[s]['t_dwell0_ms'], segs[s]['t_dwell1_ms']) for s in R.SEGS]
-        q = [sum((ek / sk) ** 2 for ek, sk in zip(errors(u['est'], T, fr, u['t']), u['sig'])) / 6
+        q = [sum((ek / sk) ** 2 for ek, sk in zip(*errors(u['est'], u['sig'], T, fr, u['t']))) / 6
              for u in ups if any(a <= u['t'] <= b for a, b in dw)]
         print(f'   NEES/DOF over the dwells: {sum(q) / len(q):.2f} (n={len(q)}, honest ~1)' if q else '   NEES: no dwell updates')
         logs = list((run / 'logs').glob(f'{cls}_concept*')) if (run / 'logs').exists() else []

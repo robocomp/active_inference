@@ -22,7 +22,7 @@ S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); B=/home/pbustos/robocomp/compon
 RUN=${1:?usage: parked_test.sh <run_name> <object_DEF>}; DEF=${2:?usage: parked_test.sh <run_name> <object_DEF>}
 OUT=$E/crossing/$RUN
 export CONCEPT_WT=${CONCEPT_WT:-$(cd $S/../../.. && pwd)}
-export CONCEPT_AGENTS=${CONCEPT_AGENTS:-"nightstand_concept bed_concept toilet_concept refrigerator_concept hood_concept chair_concept"}
+export CONCEPT_AGENTS=${CONCEPT_AGENTS:-"nightstand_concept bed_concept toilet_concept refrigerator_concept hood_concept chair_concept table_concept"}
 export DWELL_S=${DWELL_S:-60}
 WBT=${WBT_PATH:-/home/pbustos/robocomp/components/webots-shadow/worlds/piso/threerooms-piso.wbt}
 [ -e $OUT ] && { echo "$OUT exists: pick a new run name"; exit 2; }
