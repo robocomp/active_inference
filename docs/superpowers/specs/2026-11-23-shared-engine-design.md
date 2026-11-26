@@ -247,8 +247,15 @@ G6 now reads (item 6 above): the offer's value is multiplied by **P(stand and tu
   cell once), and P = 0 if any covered cell is hard. risk(c) = −log Pr(θ_c < ½ | residual's Beta) for a residual cell with a belief
   behind it (`residual_risk.h cell_risk_nats`, now in `common/standpoint/`), 0 for a collapsed cell and for unlatched ground.
   Hard = outside the room (and every passage), inside an object polygon, a residual cell with no belief behind it, or (controller
-  only, and not at the Planning stage) a cell a live LiDAR return lands in. It is continuous in the belief and has no threshold;
-  the 0 is the belief's own statement (no Beta behind a cell, or a measurement of contact), not a bar on P.
+  only, and not at the Planning stage) a cell a live LiDAR return lands in. It is continuous in the belief and has no threshold
+  of its own. The hard 0 is of two kinds: BELIEF-BACKED (a live return = a measurement of contact; an object polygon, treated as
+  certain; the room's wall) and NO BELIEF (a residual cell with no usable Beta: the field is absent, does not cover it, or its
+  moments are unusable) — the latter is the absence of a belief mapped to hard by residual_risk.h's inherited conservative
+  convention, not a statement of the belief. Consequence: if a consumer cannot read residual's field (`read_residual_field`
+  fails), every latched cell becomes hard and every standpoint with one under its turn gets P = 0.
+- **A threshold moved, not added.** The rasteriser keeps GridPlanner's room-mask guard: a room polygon marking ≥ 95 % of the
+  lattice outside is discarded (degraded mode: obstacles only). It is a pre-existing threshold, flagged ⚠ in the header, kept
+  because K3 must not change the controller's decisions; a model-level replacement needs a belief over the polygon's validity.
 - **One model, not a mirror.** The oracle holds the rasterisation `GridPlanner::set_world` did and the fit kernel
   `GridPlanner::fit_nats_*` did; the controller now calls them. Its decisions are unchanged (golden recorded at aea54896:
   `controller/tests/test_standpoint_oracle_parity.cpp`): it hands an object standpoint back iff P = 0 (`standpoint_fit.h`), and

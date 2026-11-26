@@ -11,6 +11,7 @@
  *   · HARD (P = 0): a cell outside the room (and outside every passage), inside an object polygon, a residual cell with no
  *     belief behind it, or one a live LiDAR return lands in this cycle (residual_risk.h harden_corroborated) — the last only
  *     when the caller does not ask for `persistent_only` (a cause that comes and goes).
+ *     The no-belief case is a conservative default, not a belief (see "CONTINUOUS, NO THRESHOLD" below).
  *   · The body is the robot's own footprint (RobotFootprint, a robot property) grown by the caller's margin, rasterised per
  *     heading exactly as GridPlanner always has; a footprint leaving the lattice is hard ("off the map == unsafe").
  *   This is EXACTLY GridPlanner::fit_nats_turning (and, at one heading, fit_nats_some_heading / state_risk), which now calls
@@ -21,8 +22,15 @@
  *   The probability has no cut-off and no constant of its own: the ½ in risk(c) is the Bernoulli rate's symmetric decision
  *   boundary (residual_risk.h), the footprint is the robot's, and the margin and lattice are the CALLER's (the controller passes
  *   its own; an agent that cannot read them passes margin 0 and its data's own resolution — see "Who calls it").
- *   HARD cells give exactly 0, which is the belief's own statement (no Beta behind the cell, or a measurement of contact), not a
- *   bar on the probability.
+ *   HARD cells give exactly 0, and they are of TWO kinds, which must not be confused:
+ *     · BELIEF-BACKED hard: a cell a live LiDAR return lands in this cycle (a measurement of contact), an object polygon (a modelled
+ *       object, treated as certain), outside the room polygon (the room's wall). Here 0 is a statement the model makes.
+ *     · NO BELIEF: a residual cell with no usable Beta behind it (the field is absent, does not cover the cell, or its moments are
+ *       unusable). Here 0 is NOT a statement of the belief — it is the ABSENCE of one, mapped to hard by the conservative
+ *       convention inherited from residual_risk.h ("keep the old behaviour exactly where we have nothing better to say").
+ *       ⚠ Consequence: if the consumer cannot read residual's field (rc::read_residual_field fails, e.g. the grid node lacks
+ *       grid_occupancy_prob / _var / _meta for a cycle), EVERY latched residual cell becomes hard, and every standpoint with a
+ *       latched cell anywhere under its turn gets P = 0 — in the controller (hand-back) and in the countables (offer × 0) alike.
  *
  * ── WHERE A BINARY DECISION IS NEEDED, THE CONSUMER MAKES IT ──────────────────────────────────────────────────────────────
  *   The controller hands a standpoint back iff P = 0 (standpoint_fit.h verdict: isfinite(nats)); pose_free / can_turn_here are
@@ -202,7 +210,13 @@ inline Raster rasterise(std::span<const Eigen::Vector2f> room, std::span<const s
         for (int ix = 0; ix < W; ++ix)
             if (not inside_room_or_passage(room, passages, centre(ix, iy)))
             { at(ix, iy) = 1; ++r.outside; }
-    r.room_mask_usable = r.outside < static_cast<long>(0.95 * W * H);   // GridPlanner's degraded-mode guard, unchanged
+    // ⚠ THRESHOLD (pre-existing, moved unchanged from GridPlanner::set_world in K3; flagged, not justified by a model term).
+    //   What it guards: a room polygon that marks >= 95 % of the padded lattice outside is taken to be broken (live: 27018 of 27018
+    //   cells once) and the mask is DISCARDED — planning continues on obstacles alone instead of every pose reading infeasible and
+    //   the robot never moving again. Why kept for now: it is the controller's degraded-mode guard and K3 must not change the
+    //   controller's decisions (golden parity); the model-level replacement would be a belief over the room polygon's validity
+    //   (room_concept's own fit quality), which no consumer has yet. Note it now applies to every Oracle user too.
+    r.room_mask_usable = r.outside < static_cast<long>(0.95 * W * H);
     if (not r.room_mask_usable) std::fill(r.occ.begin(), r.occ.end(), 0);
 
     for (const auto& poly : obstacles)
