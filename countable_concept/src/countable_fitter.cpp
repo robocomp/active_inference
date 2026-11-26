@@ -2077,10 +2077,14 @@ bool CountableFitter::open_g5_csv(std::ofstream& out, std::string_view name, std
     return true;
 }
 
-void CountableFitter::log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats)
+// p_stand (final fix wave F7, appended LAST so positional readers keep their columns): P(stand and turn) at the offered standpoint
+// from the shared standpoint oracle (K3) — the factor the step multiplies the published gain by, so soft-cell suppression can be
+// read off the log.
+void CountableFitter::log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats, float p_stand)
 {
-    if (not open_g5_csv(offers_csv_, "offers.csv", "t_ms,node,standpoint_x,standpoint_y,standpoint_yaw,promised_nats")) return;
-    offers_csv_ << wall_ms() << ',' << inst.node_name << ',' << x << ',' << y << ',' << yaw << ',' << promised_nats << '\n';
+    if (not open_g5_csv(offers_csv_, "offers.csv", "t_ms,node,standpoint_x,standpoint_y,standpoint_yaw,promised_nats,p_stand")) return;
+    offers_csv_ << wall_ms() << ',' << inst.node_name << ',' << x << ',' << y << ',' << yaw << ',' << promised_nats << ',' << p_stand
+                << '\n';
     offers_csv_.flush();
 }
 

@@ -189,7 +189,7 @@ public:
     // offers.csv row per published offer — the standpoint and the nats it promises — and one delivered.csv row per accepted
     // persistent update (log_delivered) — the θ-marginal entropy drop of the published Σ, the same quantity. Both beside the
     // ai2 log; concept_agents.sh harvest copies them as <class>_offers.csv / <class>_delivered.csv. Classic locale.
-    void log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats);
+    void log_offer(const CountableInstance& inst, float x, float y, float yaw, float promised_nats, float p_stand);
     // The answer to one external gain query (countable_gain_query.h; P1 A/B/A visit): gain_query.csv beside offers.csv, one row per
     // (request, instance) — the engine's gain at the requested standpoint, the instance's update serial, and, when the offer cache
     // holds a proposal of this same serial, that proposal's promised_nats beside the gain recomputed at its standpoint (a live

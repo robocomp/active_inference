@@ -1051,9 +1051,9 @@ void SpecificWorker::step_epistemic(rc::CountableInstance& inst, DSR::Node& node
         inst.dbg_nbv_target_y = published.epistemic_target_y_m;
         inst.dbg_nbv_pdetect  = published.chosen_p_detect;
         inst.dbg_nbv_vfov     = published.sensor_vfov_rad;
-        // G5: the promise, beside the delivery the fitter logs per update (persistent path; offers.csv)
+        // G5: the promise, beside the delivery the fitter logs per update (persistent path; offers.csv), and its p_stand (F7)
         fitter_->log_offer(inst, published.epistemic_target_x_m, published.epistemic_target_y_m,
-                           published.epistemic_target_yaw_rad, published.promised_nats);
+                           published.epistemic_target_yaw_rad, published.promised_nats, published.p_stand);
         // Write attributes to the bed node (read by legacy consumers)
         scene_graph_->write_epistemic_proposal(node, published);
     };
