@@ -168,10 +168,6 @@ void CountableSceneGraph::step_write_model(CountableInstance& inst, DSR::Node& n
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
         // the body's extent above its origin: H floor-anchored, the class extent e hanging (origin = the underside)
         G_->add_or_modify_attrib_local<height_m_att>(node, rc::countable::VerticalSpan{cfg_.vertical_extent_m}.height(s.countable_height));
-        // the 1-σ of the three extents just written, same dead-band so the value and its std never disagree (S1)
-        if (inst.ai2_initialized)
-            G_->add_or_modify_attrib_local<size_std_m_att>(node, rc::published_size_std(inst.ai2_belief.covariance(),
-                                                           rc::countable::VerticalSpan{cfg_.vertical_extent_m}));
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
         write_countable_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
@@ -346,7 +342,19 @@ void CountableSceneGraph::write_rt_covariance(std::uint64_t room_id, CountableIn
     // and the readout — is the SHARED publisher (common/rt_covariance/rt_covariance.h). What stays above is
     // the only part that is genuinely this object's: the mapping from its own DOF to the six variances.
     const rc::rtcov::Se3Var v{vx, vy, vz, rc::rtcov::kFlatRollPitchVar, rc::rtcov::kFlatRollPitchVar, vyaw};
-    rc::rtcov::publish(*G_, room_id, inst.node_id, v, inst.last_pub_cov_trace, force, inst.node_name);
+    const bool cov_published = rc::rtcov::publish(*G_, room_id, inst.node_id, v, inst.last_pub_cov_trace, force, inst.node_name);
+
+    // size_std_m rides the SAME gate (S1 fix round 1): the σ of the extents is the posterior at the LAST COVARIANCE PUBLISH, so it
+    // is republished whenever rt_covariance is (the trace gate in rtcov::publish — no new threshold), and once on the first call
+    // after the belief is seeded even when the geometry has settled. It is NOT tied to the extents' dead-band: Σ keeps shrinking
+    // while the extents sit inside 3 mm, and a σ frozen at its last-geometry-change value would be the largest one it ever had.
+    if (const auto sd = rc::size_std_to_publish(cov_published, inst.size_std_published, S,
+                                                rc::countable::VerticalSpan{cfg_.vertical_extent_m}); sd.has_value())
+        if (auto node = G_->get_node(inst.node_id); node.has_value())
+        {
+            G_->add_or_modify_attrib_local<size_std_m_att>(node.value(), *sd);
+            G_->update_node(node.value());
+        }
 }
 
 // ─── Mesh ────────────────────────────────────────────────────────────────────────────────────────

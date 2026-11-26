@@ -43,6 +43,19 @@ int main()
     // a rounding-negative variance is a zero std, not NaN
     { Eigen::Matrix<float, 6, 6> S = Eigen::Matrix<float, 6, 6>::Zero(); S(3, 3) = -1e-12f;
       CHECK(rc::published_size_std(S, VerticalSpan{})[0] == 0.0f); }
+    // publish policy (fix round 1): once after seeding even when the covariance gate did not fire; then only with the gate; σ follows Σ
+    {
+        const auto b = make(-1.0f, false);
+        Eigen::Matrix<float, 6, 6> S = b.covariance();
+        bool ever = false;
+        const auto first = rc::size_std_to_publish(false, ever, S, VerticalSpan{});    // geometry settled, gate silent
+        CHECK(first.has_value() and ever);
+        CHECK(not rc::size_std_to_publish(false, ever, S, VerticalSpan{}).has_value()); // nothing moved ⇒ nothing written
+        S(3, 3) *= 0.25f; S(4, 4) *= 0.25f; S(2, 2) *= 0.25f;                          // Σ shrinks, extents static; the gate fires
+        const auto again = rc::size_std_to_publish(true, ever, S, VerticalSpan{});
+        CHECK(again.has_value());
+        CHECK(again and std::abs((*again)[0] - 0.5f * (*first)[0]) < 1e-6f and std::abs((*again)[2] - 0.5f * (*first)[2]) < 1e-6f);
+    }
     // reader mapping and fallback
     { const auto f = rc::neighbour_footprint_std({0.07f, 0.03f, 0.04f}); CHECK(f and (*f)[0] == 0.07f and (*f)[1] == 0.03f); }
     CHECK(not rc::neighbour_footprint_std({}));                                  // legacy agent: nothing published

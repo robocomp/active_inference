@@ -165,6 +165,7 @@ struct CountableInstance
     float last_pub_yaw = std::numeric_limits<float>::max();
     // Trace of the last RT-edge covariance published, so a stationary-but-still-tightening bed refreshes its
     // edge covariance on a meaningful uncertainty change (not only on a pose move).
+    bool  size_std_published = false;   // size_std_m has been written once since the belief was seeded (S1)
     float last_pub_cov_trace = std::numeric_limits<float>::quiet_NaN();
 
     // ── Countable-owned support-point memory bank (room frame), independent of per-frame uploads ──────────────

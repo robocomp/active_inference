@@ -7,6 +7,13 @@
  *   a parameter, not a DOF). Σ is the belief's θθ block: with the persistent latents on it is the joint's θθ marginal, so the shape
  *   and wall latents are already integrated in — the published extents are θ's mean (no latent added to the mean), so this is
  *   exactly their marginal. A c2v class publishes the state's own w, h and so the std of those same two entries.
+ * MEANING / SCALE: σ is the posterior at the LAST COVARIANCE PUBLISH (it moves with rt_covariance, not with the extents' 3 mm
+ * dead-band). It is the RAW √Σ — rt_covariance carries cfg.rt_cov_scale·Σ (a controller-governor inflation), size_std_m does not.
+ * HOOD: height σ is 0 (height_m is the constant e) while rt_covariance z carries H's variance (z = H − e, ∂z/∂H = 1): the two are
+ * different quantities by design. LATENTS: Σ is the θθ block the belief carries. With params.persistent on it is the joint's θθ
+ * marginal (latents integrated); with it off it is the per-frame Σ with its common-mode floor folded in (countable_belief.h) —
+ * the same Σ rt_covariance publishes, so the two agree either way; nothing is guarded because nothing is wrong, only differently
+ * derived.
  * Reader: a neighbour's footprint axes are its width_m / depth_m, so {σ_w, σ_h} = the attribute's first two entries. An absent,
  * malformed or non-finite attribute (a legacy agent) is nullopt and the caller keeps the manifest interim (countable_neighbour_size.h).
  */
@@ -27,6 +34,16 @@ inline std::vector<float> published_size_std(const Eigen::Matrix<float, 6, 6>& S
 {
     const auto sd = [&](int i) { return std::sqrt(std::max(S(i, i), 0.0f)); };   // a variance is ≥ 0: a rounding negative is 0, not NaN
     return {sd(3), sd(4), span.hangs() ? 0.0f : sd(2)};
+}
+
+// WHEN it is published (S1 fix round 1): with rt_covariance, on the rtcov::publish gate (`cov_published` = its return), and once
+// when the belief is first seeded (`ever` false ⇒ due, then set). Pure so the policy is testable without a graph.
+inline std::optional<std::vector<float>> size_std_to_publish(bool cov_published, bool& ever, const Eigen::Matrix<float, 6, 6>& S,
+                                                             rc::countable::VerticalSpan span)
+{
+    if (not (cov_published or not ever)) return std::nullopt;
+    ever = true;
+    return published_size_std(S, span);
 }
 
 // {σ_w, σ_h} of a neighbour's footprint from its published size_std_m; nullopt when it is not a usable {w, d, height} std.

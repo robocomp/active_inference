@@ -1,0 +1,15 @@
+# Task S1 report
+Status: DONE (CPU only, no fleet).
+- Publisher: countable_scene_graph.cpp step_write_model, inside the `geometry_changed` block (same 3 mm dead-band as width_m/depth_m/height_m), writes size_std_m = {sqrt S(3,3), sqrt S(4,4), hangs ? 0 : sqrt S(2,2)} from ai2_belief.covariance() (the joint's theta-theta marginal, so latents are already integrated; the published extents are theta's mean with no latent added to the mean, so this is exactly their marginal). Hanging: height_m is the constant e, so sigma 0. c2v: the state's own w,h, same entries. Skipped until ai2_initialized (reader falls back).
+- Reader: countable_fitter.cpp refresh_neighbours reads get_attrib_by_name<size_std_m_att>, {w,d} map straight to the neighbour footprint axes (b.w=width_m, b.h=depth_m). Fallback to the manifest interim (countable_neighbour_size.h kept as fallback, header says S1 done), logged once per class.
+- New header countable_size_std.h (published_size_std, neighbour_footprint_std); test tests/size_std_test.cpp (floor/hanging/c2v vs engine Sigma; reader mapping + fallback). Before the change it cannot compile (header/attribute absent).
+- ctest: 47/47 pass (incl. size_std_test); agent builds.
+- Replays: replay dumps record the beam inputs, so S1 does not change them (all replay/golden tests pass). The reader changes neighbour foreign density only live (published std replaces the manifest delta/sqrt12); sbs_compare on p1r8_bed/nightstand/k1_fridge/k2b_chair not run (needs a live fleet). 
+Concerns: (1) footprint std is now Sigma's, which can be larger than delta/sqrt12 early in life; first live run should check the neighbour effect. (2) size_std_m is only written when geometry_changed, so a node whose geometry settles before ai2_initialized has none until it moves (fallback covers it).
+
+## Fix round 1
+- I1: size_std_m moved out of the geometry_changed block into write_rt_covariance, riding rtcov::publish's trace gate (its return value) plus one forced publish on the first call after seeding (`inst.size_std_published`). Pure policy: rc::size_std_to_publish (countable_size_std.h). Meaning documented: the posterior at the last covariance publish.
+- I2: not guarded; documented. With persistent on, Sigma is the joint's theta-theta marginal; off, it is the per-frame Sigma with the common-mode floor, the same Sigma rt_covariance publishes, so the two agree either way.
+- Documented: hood height sigma 0 vs rt_covariance z carrying H's variance; raw sqrt(Sigma) vs rt_cov_scale*Sigma.
+- Test: size_std_test publish-policy block (published once with a silent gate; silent when nothing moved; follows a shrunk Sigma when the gate fires). Fails on dcda5532 (function absent, does not compile). A graph-level test is not possible CPU-only (needs a DSR graph); the gate itself is rtcov::publish, exercised by the agent, not by this test.
+- Verification: `make -C build -j8` (agent) OK; `cd tests/build && make -j8 && /usr/bin/ctest` -> "100% tests passed, 0 tests failed out of 47, Total Test time 539.23 sec".
