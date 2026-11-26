@@ -4690,3 +4690,246 @@ Breakdown (patch total / ambiguous):
 
 The growth from addendum 1 comes from the newly counted common/ files. Most are labelled `excluded` or `?` (affordance, planner, display, calibration code on the object path); the patch total moves little. Which of the `?` rows are patch is left to the blind referee.
 
+
+
+---
+
+## After part 1 (shared engine, Task G1x, 2026-11-26)
+
+### How this count was made
+
+- **Tree.** Counted on the tree of `cf65a471` (`5c0029ab522691fb4747d2e7215493162f13f0b0`), branch feat/shared-engine, the end
+  of K3. That is the code the batch builds (see `2026-11-26-part1-grading.md`).
+- **Rule.** Addendum 2's rule, verbatim, on the **same five targets**: `chair_concept`, `table_concept`,
+  `refrigerator_concept`, `hood_concept` and `countable_concept`.
+  - For each target: `cmake -S <agent> -B <scratch>/deps/<agent> -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (nothing built).
+  - Every translation unit was rerun with `-MM -MG`, 8 at a time. The lists were filtered to the worktree's `common/` and
+    the agent's own directory. Generated files were dropped (38 per target, as before), and so were the 13 `mocs_compilation`
+    units per target that return nothing.
+- **Labels and definition.** Unchanged. An existing row is relabelled only where its role in the code changed; each such row
+  is listed below as "moved".
+- **Incremental, not a re-inventory.** Files that are byte-identical since `535d57ec` (the tree addendum 2 counted) keep their
+  rows. Files that changed or entered the scope were rescanned on their diff `535d57ec..cf65a471`:
+  - added lines: every new named constant, and every numeric literal outside comments, logs and tests, read in context;
+  - removed lines: checked for baseline rows that disappeared.
+
+  Config files were diffed key by key against the baseline rows, by name. The loader's key set was diffed against the toml
+  (hidden defaults).
+- **Limit.** As before, the last step is manual, so the src rows are a careful sample, not a proof. The config rows are
+  exact.
+
+### Files pulled in per target
+
+| target | TU | own-dir files (was) | common/ files (was) | added since addendum 2 | dropped |
+|---|---|---|---|---|---|
+| chair_concept | 68 | 27 (27) | 141 (138) | `concept_manifest/manifest_toml.h`, `standpoint/residual_risk.h`, `standpoint/standpoint_oracle.h` | — |
+| table_concept | 71 | 30 (30) | 144 (141) | the same three | — |
+| refrigerator_concept | 71 | 28 (28) | 151 (139) | the same three, plus `ai_belief/{beam_channel,beam_room,box_engine_model,foreign_box,offer_view,persistent_engine,persistent_update,viewpoint}.h` and `place_memory/place_map.h` (T10a's legacy-side adapter) | — |
+| hood_concept | 71 | 28 (28) | 153 (141) | the same as refrigerator | — |
+| countable_concept | 73 | 50 (43) | 164 (145) | the three, plus `ai_belief/{beam_channel,foreign_box,offer_view,parts_geometry,persistent_engine,viewpoint}.h`, `appearance_belief/{appearance_belief,colour_name,colour_terms}.h`, `concept_manifest/{layer_spread,permanence,wall_standoff}.h`, `epistemic_step/offer_cache.h`, `recall_match/identity_link.h`, `thumbs/{thumb_select,thumb_wire}.h`; own: `countable_{birth_seed,gain_query,latent_inputs,neighbour_size,replay,size_std,vertical_span}.h`, `specificworker_consumers.cpp` | `countable_viewpoint.cpp` (moved into `common/ai_belief/viewpoint.h`) |
+
+Two of the three files every target gained are not new constants. `common/standpoint/residual_risk.h` and the GridPlanner
+kernels in `standpoint_oracle.h` were moved by K3 from `controller/`, which is outside every concept target's scope. They are
+in the count now because they sit in `common/`.
+
+### Which target each class runs (this changed)
+
+| class | baseline binary | binary now (as launched by `concept_agents.sh`) |
+|---|---|---|
+| nightstand, bed, toilet | countable_concept | countable_concept (own `etc/config.toml`) |
+| refrigerator, hood | refrigerator_concept, hood_concept | **countable_concept** (`<cls>/countable/<cls>` + `etc/countable.toml`, K1). The legacy binary is still built and selectable (`LEGACY_AGENTS`) |
+| chair | chair_concept | **countable_concept** (`chair_concept/countable/chair_concept` + `etc/countable.toml`, K2b). Legacy still built |
+| table | table_concept | **cut from part 1** (owner 11-26). The batch runs the legacy `table_concept`. `concept_agents.sh` would otherwise launch the K2c countable link, so the batch must set `LEGACY_AGENTS="table_concept"` |
+
+So for six classes the "after" row is a countable row, whichever target the class started on.
+
+### Disposition of the registered-prediction rows (spec "Registered prediction for test (c)")
+
+There are 51 registered rows on the countable path: 47 config rows of the nightstand / bed / toilet configs (the K1/K2b
+configs carry the same keys), and 4 countable src rows. The same 51 apply to refrigerator, hood and chair, which now run
+countable_concept.
+
+| row(s) | spec item | disposition on countable_concept (6 classes) | evidence |
+|---|---|---|---|
+| `AI2CommonModePosStd`, `AI2CommonModeSizeStd`, `AI2CommonModeYawStd` | G1 | **moved**, patch → sensor? (counted ambiguous, best label sensor) | On the persistent path the camera's shared-error marginal on cx, cy, H, w, h is the MEASURED `kZedYoloBoundaryStdM` 0.0289 m (`countable_latent_inputs.h:38`, F1.6). The three keys remain the LiDAR latent's marginals and the camera's yaw marginal, still at the old tuned values (0.03 / 0.02 / 0.03), unmeasured (`:51-53`). The role is the sensor's; the value is not measured. |
+| `AI2RangeNoiseYawPerM`, `AI2RangeNoiseSizePerM` | G1 | **kept** (toml key deleted in T5, loader default 0.03 / 0.08 still read, `countable_config.cpp:334-337`; used on the flag-off path only, `countable_fitter.cpp:1362-1363`) | Under the build rule a hidden default is a row. It is inert on the graded path, but it is not removed. |
+| `MotionCmPosGain`, `MotionCmSizeGain`, `MotionCmYawGain` | G1 | **kept** (fresh ego-motion share) | T5 ruling: τ was not measured (progress.md:33, :48) |
+| `AI2PeriphRef`, `AI2AngLeverM`, `AI2MotionRefMps` | G1 | **kept** | Taken out of the persistent sig2_cam in T5, but still read by `motion_magnitude` / `periphery_penalty` (`countable_fitter.cpp:601, :608`), which feed the fresh share and the confirm-only gate |
+| `AI2MotionConfirmOnly`, `AI2StillLinMps`, `AI2StillAngRadps`, `AI2StillDotd`, `AI2MovingUpdateCenterRadius` | G1 | **kept** | The F1.8 gate audit kept the confirm-only gate, counted as a patch (`countable_fitter.cpp:1395-1404`; progress.md:112) |
+| `kFrontClamp`, `front_view_budget_`, `ShapeEvidenceClamp` | G1 | **kept** | `countable_belief.cpp:1380`, `countable_belief.h:1019` |
+| `AI2DepthUnobsPrecision`, `AI2DepthObsBandM` | G2 | **kept** | F1.5: the wall boost was dropped on the persistent path, but the footprint share was KEPT on replay evidence (`countable_belief.cpp:757-773`). See the closed-list check, V2. |
+| `FreeSpacePrecision`, `CoveragePrecision`, `CoverageRobustCM`, `LidarCoverageAngPower`, `LidarCoverageN0` | G2 | **kept** | still read: `countable_lidar_range_channel.cpp:79, 109, 172`; `countable_fitter.cpp:1272-1274` |
+| `FootprintMomentCompletenessGain`, `FootprintMomentMinCompleteness` | G2 | **kept** | `countable_fitter.cpp:1276-1277` |
+| `WallNoCrossPrecision`, `WallNoCrossMarginM` | G2 | **kept** (in scope, read by the legacy path) | The persistent no-cross was deleted by the F1 spec amendment. The containment knowledge moved into the stand-off prior and the wall latent, which are class and world rows. The keys stay, and so do the rows. |
+| `AI2WallExplainFrac`, `AI2WallExplainSigmaM` | G2 | **kept** | the wall component of the persistent point mixture (`countable_belief.cpp:744-754`) |
+| `AI2WallPrecision`, `AI2WallParallelPrecision`, `AI2WallReachM` | G2 (to sensor or class) | **kept** (label patch? unchanged) | On the persistent path, with a stand-off declared (every countable class except the c2v table), `AI2WallPrecision` is only the on/off switch: λ = 1/standoff_std² from the manifest (`countable_belief.cpp:860-866`). `AI2WallParallelPrecision` is only a fallback: λ = 1/(σ_wall/L)² from the room's published covariance (`:416-417`). The legacy path uses both values as before, so the rows stay. |
+| `AI2TopNoFloatPrecision`, `AI2TopNoFloatMarginM`, `AI2TopOversegSigmaPerM` | G3 | **kept** | `countable_belief.cpp:609` and every camera frame (closed-list V1) |
+| `AI2ClutterFrac`, `AI2ClutterScaleM` | G3 | **kept** | `countable_belief.cpp:747-752` |
+| `AI2SigmaBaseM` | G3 | **kept** (sensor?) | still the per-point R base. The measured boundary error went into the camera LATENT, not into R. |
+| `SdfThresholdForStorage` | G3 | **kept** | `countable_fitter.cpp:986` |
+| `LidarPrecision` | G3 (to sensor σ) | **kept** (sensor?) | still sets the beam density's p0 (`countable_fitter.cpp:78`). σ is the sensor's `kHeliosRangeSigmaM`, but the weight remains. |
+| `ObliquityMomentGain`, `FootprintMomentPrecision`, `FootprintMomentRangePerM`, `FootprintMomentMotionGain` | G4 | **kept** | `countable_fitter.cpp:1700-1714`; whether the graded path reads them was not re-verified |
+| `kObliquityYawGain`, obliquity cos clamp | G4 | **kept** (flag-off path only since T5) | `countable_fitter.cpp:1686-1688` |
+| `PlausHeightPriorGain` | G4 | **kept** | the short-height prior, at fixed precision, on every persistent update (closed-list V3) |
+| `EpistemicCooldownCycles` | G5 | **kept** (excluded?) | — |
+| G6 "no constant beyond the robot footprint" | G6 | **fails by the letter** | K3 brought into every target's scope: the 95 % room-mask guard (a flagged threshold); residual_risk's ½ occupancy boundary and its Beta floor; the no-belief ⇒ hard convention (see "Rows added"). The margin and lattice cell are the caller's (countable: margin 0, residual's cell). |
+
+**Totals on countable_concept: removed 0, moved 3, kept 48 of 51.**
+- Of the 48 kept, 6 are inert on the graded path: the two RangeNoise defaults, the two WallNoCross keys, kObliquityYawGain
+  and its cos clamp.
+- 2 more changed role on the graded path without leaving the scope: AI2WallPrecision and AI2WallParallelPrecision.
+- Nothing is truly removed. The nearest case is not a registered row: the literal `kRobotRadiusM` 0.30
+  (`epistemic_planner.cpp:78`) is now read from the robot's footprint (`rc::RobotFootprint::shadow()`,
+  `epistemic_planner.cpp:83`). Its baseline row "planner kRobotRadiusM / kRef" (excluded?) stays, because `kRef` 0.10 remains
+  (`:218`).
+
+**Legacy targets** (`chair_concept`, `table_concept`, and `refrigerator_concept` / `hood_concept` behind `LEGACY_AGENTS`):
+their own src and config are unchanged since the baseline (T10a's fridge and hood adapters are bit-exact behind a switch),
+so every registered row there is **kept**.
+
+**Chair:** the chair's own legacy rows left the chair's graded scope when it moved to countable_concept. These are:
+- the `Fixation*` gates (10 rows);
+- `kFlipClamp`, `AI2ViewBudget`, `AI2ModeSatBackPts`, `AI2ClutterStructureGain`;
+- `ChairModel.AI2ObliquityYawGain`.
+
+But the chair now carries the countable rows instead, including some it never had:
+- `AI2DepthUnobs*`, `AI2TopNoFloat*`, `WallNoCross*`, `PlausHeightPriorGain`, `kFrontClamp`;
+- `AI2MotionConfirmOnly = true` (`chair_concept/etc/countable.toml:230`; it was `false` on the legacy chair).
+
+The net effect is in the totals below.
+
+### Rows added by part 1 (by honest category)
+
+**Flagged thresholds**, each counted as patch:
+| row | value | where | note |
+|---|---|---|---|
+| F1r9 cap switch: `gn_tol_sigma`, which now decides absorbed (Laplace Σ) or not absorbed (P̄) | 0.1 | `countable_belief.h:332` → `persistent_engine.h:98, :1039` | **moved**, excluded → patch: the baseline row "gn_tol_sigma, GN convergence tolerance, excluded" got an estimation role in F1 round 9. Flagged ⚠ THRESHOLD, justified in the ledger (progress.md:245). `iters_max` 25 (`persistent_engine.h:95`), which makes an update cap, stays excluded. |
+| room-mask guard | ≥ 95 % of the lattice outside ⇒ polygon discarded | `common/standpoint/standpoint_oracle.h:219` | **moved into scope** by K3 (it was `GridPlanner::set_world` in controller/). Flagged ⚠ THRESHOLD, not justified by a model term (`:213`). Counted in all five targets. |
+
+**Unflagged threshold found by this count** (patch, NEW):
+| row | value | where | note |
+|---|---|---|---|
+| wall-identity gate | χ² d² ≤ 9.0 on (offset, angle) | `common/ai_belief/persistent_engine.h:286` (`same_wall`, F1 round 6 "geometric wall identity") | A hard 3σ gate that decides whether a staged wall is the same physical wall: same latent and priors not re-entered, or a new source. It is not flagged in the code. **It should be**: flag it, or replace it by a model term. |
+
+**Other new or newly counted patch rows:**
+| row | value | where | label |
+|---|---|---|---|
+| Σ capped at the class prior on every predict | Σ_ii ≤ Σ₀,ii | `persistent_engine.h:1514-1520` | patch: pre-existing (moved from `countable_belief.cpp:856`); the baseline literal scan missed it; **first counted now**. Closed-list V5. |
+| `Tracker.GhostEvidenceGain` | 0.15 | `countable_config.cpp:430` (all countable classes; toml in chair) | patch: the legacy chair's `Existence.EvidenceGain`, ported unchanged (K2b) |
+| ghost `ExistenceBelief` L_max copy | 4.0 | `countable_concept/src/specificworker.h:250` | patch: a second literal copy of the log-odds cap (K2b) |
+| engine volatility memory | 0.995 | `persistent_engine.h:116` | patch?: a second copy of `kLambda` (the countable copy stays, `countable_belief.cpp:268`) |
+| birth seed-height quantile | 0.95 of the box-explained cloud | `countable_belief.cpp:829` (F1 round 6) | patch?: an uncommented quantile (F1 minor, progress.md:127) |
+| residual_risk occupancy boundary | Pr(θ_c < ½) | `common/standpoint/residual_risk.h:126` | patch?: moved into scope by K3; "free" is defined by a ½ cut on the occupancy rate |
+| residual_risk Beta floor | α, β ≥ 0.5 | `residual_risk.h:114-115` | patch?: moved into scope by K3 |
+| no belief ⇒ hard | a residual cell with no usable Beta blocks | `residual_risk.h` / `standpoint_oracle.h:14` | patch?: the inherited conservative convention (spec K3 amendment) |
+| beam gap-ray count | P(inside) > 0.99, 5c behind | `common/ai_belief/beam_channel.h:83` | patch?: **moved** from `countable_belief.cpp:1013` (baseline row "wall-hit count margin"); not new |
+
+**Measured sensor rows:**
+| row | value | where | note |
+|---|---|---|---|
+| ZED YOLO-seg boundary error, metric | 0.0289 m | `countable_latent_inputs.h:38` | NEW, sensor, measured (step 0, refrigerator, n = 66). It replaces AI2CommonModePos/Size on the camera latent (see "moved"). |
+| `Model.MaskPixelErrorRate` (ε_px) | ns 0.094, bed 0.085, toilet 0.001, fridge 0.066, hood 0.066, chair 0.066, table-countable 0.118 | each class config, `:79`–`:94` | NOT a new row (it existed as sensor). Measured for fridge (0.066) and table (0.118, an upper bound). **Borrowed** from the fridge for hood and chair, which were never measured: those rows are labelled sensor here, but their values are not measurements. The toilet keeps the owner-decided 0.001 against a measured 0.009 (T6 ruling). |
+| offer staging defaults | ρ_max 6.0, σ_s 0.01, range_max 6.0 | `common/ai_belief/offer_view.h:74-75` | sensor? (copies of the BeamRays defaults), 2 rows |
+
+**Class rows:**
+| row | value | where |
+|---|---|---|
+| `Model.AI2PriorDepthStd` | −1 (off) or the class's depth std | `countable_config.cpp:141` (K1) |
+| `Tracker.LinkPiMove` / `LinkPiGone` / `LinkLambdaNew` | 0.10 each | `countable_config.cpp:427-429` (K2b; the loader's own text: "a GUESS"). Labelled class to match the baseline's `identity_link.h` row. |
+| `recall_match/identity_link.h` LinkParams | 0.10 each | newly pulled by countable (the baseline's row) |
+| parts panel thickness default | 0.10 m | `common/ai_belief/parts_geometry.h:47` (a copy of headboard_t_m's default) |
+
+**Cited and uncited class constants in the manifests.** The baseline rule leaves manifests uncounted, as class knowledge. They
+are listed here so the referee can see what part 1 added:
+- **wall stand-offs:** `standoff_m` / `standoff_std_m` for nightstand, bed, toilet, refrigerator, hood and chair: 12 numbers.
+  - cited: fridge (Bosch, Liebherr); toilet (weak: TOTO, forum reports);
+  - uncited convention: nightstand, bed, hood, chair.
+- **`[prior.permanence]`** (move rate, move scale m / rad): 7 classes × 3 numbers. Every one is an uncited convention.
+- **layer spreads Δ (G4):** in each manifest's `[shape]` (toilet Δ_H = 0; hood Δ from a cited canopy).
+- **proportion ranges:** toilet bowl_top [0.447, 0.675] (ABA §604.4, Gerber/Kohler); chair seat_top [0.377, 0.667]; table
+  top_under [0.883, 0.975]. All cited.
+- **K2b/K2c class priors** from cited uniform ranges: chair w, h, H; table w, h, H. Some of the K1 hood priors are marked
+  uncited.
+
+**Excluded rows added:**
+- engine: GN cap, restart tolerances, Nielsen and LM constants, offer path chords, finite-difference steps
+  (`persistent_engine.h`);
+- guards: FOV clamp, degenerate-geometry guards (`offer_view.h`, `viewpoint.h:39`);
+- residual_risk numerics (κ = 1e6, continued-fraction caps);
+- the oracle's default cell 0.1 (the caller passes it);
+- `kEmIters` 10, `kPublishPeriod` 1 s;
+- `Model.ReplayDump`, `Concept.LookAttrs`, `Concept.MeshPath`.
+
+In all, excluded +15: these 16 rows, less the `gn_tol_sigma` row moved to patch.
+
+**Switches (other):** `Concept.AppearanceEnabled`, `PublishExistProb`, `ThumbnailsEnabled`, `ApproachEnabled`,
+`EpistemicOfferEnabled`, `ChangedObjectEnabled` (K2b consumer channels, read for every countable class).
+
+**Newly pulled library rows:** `appearance_belief`, 6 rows (class? 3, patch? 2, sensor? 1).
+
+### Combined totals per class after part 1 (build rule)
+
+Each row is the addendum-2 row of the target the class now runs, plus the deltas above:
+
+| target | class | sensor | patch | switches (patch) | ? | excluded | switches (other) | total |
+|---|---|---|---|---|---|---|---|---|
+| countable | +6 | +1 | +3 | 0 | +17 | +15 | +6 | +48 |
+| legacy table and chair | 0 | 0 | +1 | 0 | +3 | +3 | 0 | +7 |
+
+The countable patch delta of +3 is made of:
+- +6 new or newly counted: the room guard, the tol_sigma relabel, the wall χ² gate, the Σ cap, GhostEvidenceGain, the ghost
+  L_max;
+- −3 for the AI2CommonMode* rows moved to sensor?.
+
+| class (binary it runs) | class | sensor | patch | switches (patch) | ambiguous (?) | excluded | switches (other) | **patch total** | total rows | baseline patch total (addendum 2) | change |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| nightstand (countable) | 19 | 21 | 123 | 11 | 117 | 95 | 10 | **134** | 396 | 131 | **+3** |
+| bed (countable) | 19 | 21 | 123 | 11 | 117 | 95 | 10 | **134** | 396 | 131 | **+3** |
+| toilet (countable) | 19 | 21 | 123 | 11 | 117 | 95 | 10 | **134** | 396 | 131 | **+3** |
+| refrigerator (countable, K1) | 19 | 21 | 123 | 11 | 117 | 95 | 10 | **134** | 396 | 129 | **+5** |
+| hood (countable, K1) | 19 | 21 | 123 | 11 | 117 | 95 | 10 | **134** | 396 | 128 | **+6** |
+| chair (countable, K2b) | 19 | 21 | 123 | 11 | 117 | 95 | 10 | **134** | 396 | 110 | **+24** |
+| table (legacy, cut) | 5 | 16 | 108 | 13 | 92 | 74 | 3 | **121** | 311 | 120 | **+1** |
+
+Notes:
+- **The six countable classes now have identical rows.** Their configs share one key set (`ReplayDump` added; the two
+  RangeNoise keys are now hidden defaults, not gone; K1/K2b added nothing the loader does not read for every class). The
+  class differences are values and manifests.
+- **Not one class went down.** The chair went up most (+24): it traded its own legacy rows (patch total 110) for the
+  countable rows (131 at baseline).
+- **Ambiguous rows went up by 17.** 9 of them are code moved into scope from the controller or newly pulled libraries; 3 are
+  the AI2CommonMode* rows; 5 are new.
+- **The legacy refrigerator and hood binaries** (selectable, not graded) gained the engine files through T10a's adapter, and
+  `place_map.h`. Their patch totals by the same deltas are 129 → 134 (fridge) and 128 → 133 (hood). This is approximate: the
+  adapter's guard literals are counted excluded.
+
+### Registered predictions against the result
+
+- **G1, G2, G3, G4, G5 — FAIL.**
+  - The spec registered about 40 rows for removal from the countable classes (G1–G4) and the offer-side gains for G5.
+  - None was removed under the build rule. Three were moved (AI2CommonMode*, patch → sensor?).
+  - Six became inert on the graded path while staying in scope. Under the rule ("every source file each class binary
+    compiles"), inert rows are counted, because the flag-off path is compiled and selectable (the spec keeps it for the
+    arXiv v1 rebuild and C3 non-regression until grading).
+  - The terms that do act on the graded path are KEPT, each with a recorded reason or none:
+    - the top anchor (none);
+    - the depth-unobs footprint share (replay evidence);
+    - the short-height prior (none);
+    - the confirm-only gate (F1.8 audit);
+    - MotionCm (τ unmeasured).
+- **G6 — FAIL by the letter.**
+  - G6 was to add no constant beyond the robot footprint.
+  - The shared oracle brought the 95 % room-mask guard (flagged), the ½ occupancy boundary, the Beta floor and the no-belief
+    convention into every target's scope. They are pre-existing in the controller, not new to the system, but new to the
+    class count.
+  - The countable side runs with margin 0, a caller's choice (owner item: publish it as a robot property).
+- **"Not expected to move"** (existence and plausibility, process noise, birth seeds, the room's 0.35): did not move.
+  - As expected, except that process noise moved from a constant to the class permanence prior (owner ruling, F1 round 6).
+    This is new manifest class knowledge. The old `AI2ProcessStd*` rows remain, read by the legacy path.
+
+**Headline (countable classes):**
+- registered rows: removed 0, moved 3, kept 48;
+- new rows +48, of which patch +6, two of them flagged thresholds plus one unflagged threshold found here;
+- patch total 131 → 134 for nightstand, bed and toilet, and up for every class that moved onto the binary.
+
+**The count went up, not down. Test (c) fails as registered.**
