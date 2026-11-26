@@ -10,6 +10,7 @@
  */
 
 #include "countable_fitter.h"
+#include "countable_birth_seed.h"
 #include "../../common/detectability/detectability.h"   // rc::detect::p_detect (K2b ghost_p_vis)
 
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
@@ -1029,42 +1030,6 @@ std::optional<float> CountableFitter::room_axis() const
     return static_cast<float>(0.25 * std::atan2(sy, sx));
 }
 
-// BIRTH ON THE PRIORS. A wall-standing object's first view is its FRONT; the principal-axis yaw of that view is
-// noise on a near-square footprint and the depth is unseen. So the birth takes what the priors already know
-// (spec 7c.8 rev 3.3.14, rc::birth_footprint):
-//  · the wall: the one nearest the cloud (the class prior says it stands against one — WallFlushPrior);
-//  · yaw: back face onto that wall, front into the room (local +Y = back = −n);
-//  · width/depth: the CLASS MEANS. The cloud's extent is not the object's: a mask that took in a neighbour
-//    (live14fixA: 2.46 m for a 0.51 m nightstand) seeded a 2.13 m-deep box under the old depth-band rule;
-//  · centre: the cloud's middle along the wall, half the class depth in from it;
-//  · the cloud's extent widens the first update's POSITION covariance instead (F1.3): along the wall (w̄ − E)²/12 for
-//    either sign (a cloud wider than the class, or one clipped/partial and shorter); across it max(0, E − h̄)²/12 (the
-//    centre across is set by the wall, so only a cloud reaching deeper than the class says the object may stand off);
-//  · H: NOT here — re-derived after the belief is built (CountableBelief::seed_height, F1 round 6.2: the class-prior MAP
-//    with the top of the points the box explains, box-vs-headboard shares at this born pose).
-// Not a gate on the fit: the belief starts here and the data then moves and sizes it.
-std::optional<Eigen::Matrix2f> CountableFitter::birth_on_priors(CountableBeliefState& s0, const std::vector<Eigen::Vector3f>& pts,
-                                                                float z_lo, float z_hi, const std::string& name) const
-{
-    std::vector<Eigen::Vector2f> xy;
-    for (const auto& p : pts) if (p.z() >= z_lo and p.z() <= z_hi) xy.emplace_back(p.x(), p.y());
-    if (xy.size() < 10) return std::nullopt;
-    Eigen::Vector2f c = Eigen::Vector2f::Zero();
-    for (const auto& q : xy) c += q;
-    c /= static_cast<float>(xy.size());
-    const WallRef w = nearest_wall(c);
-    if (not w.ok) return std::nullopt;
-    const float prior_d = cfg_.ai2_prior_depth_m > 0.0f ? cfg_.ai2_prior_depth_m : cfg_.ai2_prior_footprint_m;
-    const rc::BirthFootprint bf = rc::birth_footprint(xy, w.p, w.n, cfg_.ai2_prior_footprint_m, prior_d, 0.0f);   // the EXCESS; the belief adds its σ_pos²
-    if (not bf.ok) return std::nullopt;
-    s0.w = bf.w; s0.h = bf.h; s0.yaw = bf.yaw;
-    s0.cx = bf.centre.x(); s0.cy = bf.centre.y();
-    std::print("[{}] birth on priors: wall n=({:.2f},{:.2f}) → yaw={:.1f}° w={:.2f} h={:.2f} (class means) centre ({:.2f},{:.2f}) "
-               "[cloud centre ({:.2f},{:.2f}), extent along {:.2f} across {:.2f} → extra pos std along {:.3f} across {:.3f}]\n",
-               name, w.n.x(), w.n.y(), s0.yaw * 57.29578f, s0.w, s0.h, s0.cx, s0.cy, c.x(), c.y(), bf.extent_t, bf.extent_n,
-               std::sqrt(bf.var_t), std::sqrt(bf.var_n));
-    return bf.pos_cov;
-}
 
 WallRef CountableFitter::nearest_wall(const Eigen::Vector2f& q) const
 {
@@ -1230,7 +1195,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
                         s0.yaw = mom.phi;
                     // ★BORN ON THE FURNITURE PRIORS (owner 2026-11-14): room-axis yaw, back on the nearest wall — for a class that
                     // declares a back-face attachment only (F1 round 9 a, rc::birth_on_wall); any other keeps this cold-start seed.
-                    if (have_room_geometry_ and rc::birth_on_wall(cfg_)) birth_pos_cov = birth_on_priors(s0, pts, z_lo, z_hi, inst.node_name);
+                    birth_pos_cov = rc::seed_birth(s0, pts, z_lo, z_hi, cfg_, have_room_geometry_,
+                                                   [this](const Eigen::Vector2f& q) { return nearest_wall(q); }, inst.node_name);
                 }
             }
         }

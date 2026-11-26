@@ -7,13 +7,19 @@
 //   table 1.0–1.3 m off its detection cloud).
 // And the contract: a c2v config that declared a flush prior is refused by rc::symmetric_config_violation AND is still not
 // wall-seeded.
+// Behaviour (rc::seed_birth, F1 round 9 fix round 1): a table cloud 1 m from a wall keeps its moment centre; a nightstand cloud
+// is snapped onto the wall. With BASE's decision (the wall seed whenever room geometry is known) the table case fails.
 // Run: LANG=es_ES.UTF-8 ./birth_seed_rule_test
 #include <clocale>
 #include <cstdio>
 #include <filesystem>
+#include <cmath>
+#include <limits>
 #include <string>
+#include <vector>
 
 #include <genericworker.h>   // the test stub: the real ConfigLoader (manifest_stub/)
+#include "countable_birth_seed.h"
 #include "countable_config.h"
 
 static int bad = 0;
@@ -47,6 +53,39 @@ int main()
     t.ai2_wall_flush_prior = 0.9f;                                   // a c2v class declaring a flush prior
     CHECK(not rc::symmetric_config_violation(t).empty());
     CHECK(not rc::birth_on_wall(t));
+    // Behaviour (rc::seed_birth, the fitter's branch): a wall at y = 0 (normal +y into the room) and a box cloud whose front is
+    // 1 m from it. The table keeps its cold-start seed (the cloud's moment centre) exactly; the nightstand is snapped onto the wall
+    // (centre half its class depth in from it).
+    const rc::NearestWall wall = [](const Eigen::Vector2f&) { rc::WallRef w; w.ok = true; w.p = {0.f, 0.f}; w.n = {0.f, 1.f}; w.length_m = 6.f; return w; };
+    const auto cloud = [](float cx, float cy, float w, float h, float H)
+    {
+        std::vector<Eigen::Vector3f> pts;
+        for (int i = 0; i <= 20; ++i) for (int j = 0; j <= 10; ++j)
+            pts.emplace_back(cx - 0.5f * w + w * i / 20.f, cy - 0.5f * h + h * j / 10.f, H);   // the top
+        for (int i = 0; i <= 20; ++i) for (int k = 0; k <= 10; ++k)
+            pts.emplace_back(cx - 0.5f * w + w * i / 20.f, cy - 0.5f * h, H * k / 10.f);         // the front face
+        return pts;
+    };
+    {
+        const rc::CountableConfig tc = load("table_concept", "etc/countable.toml");
+        rc::CountableBeliefState s0; s0.cx = 0.f; s0.cy = 1.4f; s0.w = 1.8f; s0.h = 0.8f; s0.H = 0.73f; s0.yaw = 0.f;
+        const rc::CountableBeliefState before = s0;
+        const auto pc = rc::seed_birth(s0, cloud(0.f, 1.4f, 1.8f, 0.8f, 0.73f), 0.f, 1.f, tc, true, wall, "table_test");
+        std::printf("  table cloud 1 m off the wall: seed (%.3f, %.3f) -> (%.3f, %.3f), wall-placed %d\n", before.cx, before.cy, s0.cx,
+                    s0.cy, int(pc.has_value()));
+        CHECK(not pc.has_value());
+        CHECK(s0.cx == before.cx and s0.cy == before.cy and s0.w == before.w and s0.h == before.h and s0.yaw == before.yaw);
+    }
+    {
+        const rc::CountableConfig nc = load("nightstand_concept", "etc/config.toml");
+        rc::CountableBeliefState s0; s0.cx = 0.f; s0.cy = 1.2f; s0.w = 0.5f; s0.h = 0.4f; s0.H = 0.55f; s0.yaw = 0.f;
+        const auto pc = rc::seed_birth(s0, cloud(0.f, 1.2f, 0.5f, 0.4f, 0.55f), 0.f, 1.f, nc, true, wall, "nightstand_test");
+        const float class_d = nc.ai2_prior_depth_m > 0.f ? nc.ai2_prior_depth_m : nc.ai2_prior_footprint_m;
+        std::printf("  nightstand cloud 1 m off the wall: seed -> (%.3f, %.3f), wall-placed %d; centre to wall %.4f = half the class depth %.4f\n",
+                    s0.cx, s0.cy, int(pc.has_value()), s0.cy, 0.5f * class_d);
+        CHECK(pc.has_value());
+        CHECK(std::abs(s0.cy - 0.5f * class_d) <= 4.f * std::numeric_limits<float>::epsilon() * std::max(1.f, class_d));
+    }
     std::printf(bad ? "birth_seed_rule_test: %d FAILED\n" : "birth_seed_rule_test: OK\n", bad);
     return bad != 0;
 }
