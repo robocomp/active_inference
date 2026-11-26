@@ -49,4 +49,21 @@ inline std::optional<WallStandoff> wall_standoff(const std::string& path)
     return WallStandoff{static_cast<float>(*mean), static_cast<float>(*sd), *src};
 }
 
+// [prior.placement] (chair): the placement MIXTURE's weight of "against a wall", p_against_wall / (p_free + p_against_wall) — the
+// two weights are normalised by the reader, as the manifest says. Absent (neither key) ⇒ nullopt: a class with a flush prior or
+// a stand-off and no placement mixture stands against its wall with p = 1 implied. Malformed (one key without the other, a
+// non-finite or negative weight, both zero) ⇒ throws std::runtime_error naming the file.
+inline std::optional<float> placement_p_against_wall(const std::string& path)
+{
+    const toml::table m = parse_manifest(path);
+    const auto pf = m.at_path("prior.placement.p_free").value<double>();
+    const auto pw = m.at_path("prior.placement.p_against_wall").value<double>();
+    if (not pf and not pw) return std::nullopt;
+    if (not pf or not pw)
+        throw std::runtime_error(std::format("{}: [prior.placement] needs both p_free and p_against_wall", path));
+    if (not std::isfinite(*pf) or not std::isfinite(*pw) or *pf < 0.0 or *pw < 0.0 or not (*pf + *pw > 0.0))
+        throw std::runtime_error(std::format("{}: [prior.placement] p_free / p_against_wall must be finite, non-negative, not both 0", path));
+    return static_cast<float>(*pw / (*pf + *pw));
+}
+
 }  // namespace rc::manifest

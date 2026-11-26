@@ -197,6 +197,10 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         }
         else
             std::print("[manifest] {} declares no [prior.attachment] stand-off — the flush prior keeps its old form\n", out.concept_class);
+        out.placement_p_against_wall = rc::manifest::placement_p_against_wall(manifest_path);
+        if (out.placement_p_against_wall)
+            std::print("[manifest] {} placement mixture: P(against a wall) = {:.3f} — the birth seed is the mixture's MAP\n",
+                       out.concept_class, *out.placement_p_against_wall);
     }
     catch (const std::exception& e)
     {

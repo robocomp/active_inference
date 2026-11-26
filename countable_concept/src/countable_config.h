@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 #include "../../common/concept_manifest/shape_parts.h"
@@ -165,6 +166,9 @@ struct CountableConfig
     // [prior.attachment] stand-off (manifest; F1.4): the back face's typical real distance off its wall, mean and std (m).
     float wall_standoff_m     = 0.0f;
     float wall_standoff_std_m = 0.0f;   // 0 ⇒ none declared: the flush prior keeps its old form
+    // [prior.placement] (manifest; final fix wave F2): the placement mixture's P(against a wall), normalised. nullopt ⇒ not
+    // declared: a class that declares a flush prior or a stand-off is against its wall with p = 1 implied (rc::seed_birth).
+    std::optional<float> placement_p_against_wall;
     // [prior.permanence] (manifest; F1 round 6): the volatility's hyperprior on the persistent path
     float move_rate_per_day = 0.0f, move_scale_m = 0.0f, move_scale_rad = 0.0f;
     float ai2_process_std_m   = 0.005f;  // predict process-noise std, length DOFs (m/frame)

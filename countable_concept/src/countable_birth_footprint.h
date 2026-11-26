@@ -25,6 +25,7 @@ struct BirthFootprint
     float w = 0.0f, h = 0.0f, yaw = 0.0f;              // seed size (class means) and yaw (back on the wall)
     Eigen::Vector2f centre = Eigen::Vector2f::Zero();  // room frame: the cloud's middle along the wall, h/2 in from it
     float extent_t = 0.0f, extent_n = 0.0f;            // the cloud's full extent along / across the wall, (p95 − p5)/0.9
+    float mid_n = 0.0f;                                // the cloud's middle ACROSS the wall, (p5 + p95)/2, from the wall (F2)
     float var_t = 0.0f, var_n = 0.0f;                  // position variance along / across the wall
     Eigen::Matrix2f pos_cov = Eigen::Matrix2f::Zero(); // the same, rotated into the room frame
 };
@@ -53,6 +54,7 @@ inline BirthFootprint birth_footprint(std::span<const Eigen::Vector2f> xy, const
     out.centre = wall_p + t * (0.5f * (a0 + a1)) + n * (0.5f * class_d);
     out.extent_t = (a1 - a0) / 0.9f;                      // p5–p95 holds 90 % of a uniform spread
     out.extent_n = (b1 - b0) / 0.9f;
+    out.mid_n = 0.5f * (b0 + b1);
     const float ex_t = out.extent_t - class_w, ex_n = std::max(0.0f, out.extent_n - class_d);
     const float pp = pos_std * pos_std;
     out.var_t = pp + ex_t * ex_t / 12.0f;
