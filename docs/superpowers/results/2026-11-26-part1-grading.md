@@ -155,8 +155,11 @@ BUILD
     from this commit too), table_concept (legacy, for the cut table); the rest of the fleet as usual.
   Cortex: installed from development >= 54c6508 (size_std_m, Task S1).
 CLASSES
-  nightstand, bed, toilet, refrigerator, hood, chair on the countable binary (the default links <cls>/countable/<cls>);
-  table on its LEGACY binary: LEGACY_AGENTS="table_concept" on every run below (else concept_agents.sh launches K2c's link).
+  nightstand, bed, toilet, refrigerator, hood, chair on the countable binary; table on its LEGACY binary. Since the fix wave
+  (17f13198) the launcher defaults fridge/hood/chair to LEGACY, so EVERY run below sets
+  COUNTABLE_AGENTS="refrigerator_concept hood_concept chair_concept" LEGACY_AGENTS="table_concept", and CONCEPT_WT explicitly
+  (its default is the phase0 worktree, which has no countable links: the opt-ins would silently fall back to legacy).
+  Check before each run: `concept_agents.sh resolve` = 6 countable (fridge/hood/chair from <cls>/countable/) + 1 legacy table.
   CONCEPT_AGENTS="nightstand_concept bed_concept toilet_concept refrigerator_concept hood_concept chair_concept table_concept"
   CONCEPT_WT=<the pinned worktree>. Part 3 is not built (nothing to switch off).
 PART A — test (a), first visits: 12 tours, the graded start set (main bd1dfa70:
@@ -171,11 +174,11 @@ PART A — test (a), first visits: 12 tours, the graded start set (main bd1dfa70
       main's room_concept/estimation_scripts/scripts/warm_start_tour.sh g1x_tour_SNN crossing/fixtures/three_rooms_door0
     then concept_agents.sh stop; concept_agents.sh harvest <out>; move the run's replay dumps into <out>/replay/.
   Output: room_concept/estimation_scripts/crossing/g1x_tour_S01 … g1x_tour_S12 (with replay/).
-  Scoring: NOT yet scriptable as registered — no scorer computes 6-DOF full-covariance first-visit NEES over tours for all
-  seven classes (tools/step0/nees_persistent.py covers nightstand/bed/toilet, cx/cy only, diagonal). The runs are recorded
-  now; the scorer is written after (it reads ai2 logs + replay dumps; it must not be tuned on these runs' results).
+  Scoring: room_concept/estimation_scripts/scripts/first_visit_nees.py (G1a, f2d456a3; written and reviewed before any batch
+  result was seen): python3 -I first_visit_nees.py crossing/g1x_tour_S* > crossing/g1x_tour_nees.txt, with the replay tool
+  built from the batch commit (make -C countable_concept/tests/build replay).
 PART B — test (b), scripted A/B/A: 6 objects x 2 repeats = 12 runs, from CONCEPT_WT:
-    LEGACY_AGENTS="table_concept" DWELL_S=60 \
+    COUNTABLE_AGENTS="refrigerator_concept hood_concept chair_concept" LEGACY_AGENTS="table_concept" DWELL_S=60 \
       $CONCEPT_WT/room_concept/estimation_scripts/scripts/parked_test.sh g1x_aba_<obj>_<k> <DEF>
     <DEF> in NIGHTSTAND_R, BED_1, TOILET_1, FRIDGE_0, HOOD_0, CHAIR_5; k = 1, 2 (<obj> = nightstand, bed, toilet, fridge,
     hood, chair). parked_test.sh turns ReplayDump on, runs aba_visit.sh, parked_report.py and aba_report.py itself.
