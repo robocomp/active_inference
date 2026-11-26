@@ -4,14 +4,11 @@
 # You will
 #
 # 1. fit a wall to a LiDAR scan as a **Laplace belief**, a Gaussian whose covariance is the inverse
-#    curvature of the free energy (frames 18--23);
-# 4. lower the same free energy by **perception** and by **action**, and see where each one stops
-#    (frames 24--27).
+#    curvature of the free energy (frames 16--21; about 25 min);
+# 2. check whether that covariance is right, and fix it when it is not (backup slide; 15 min);
+# 3. use the **free energy** to choose between two models of the same wall (backup slide; 15 min).
 #
-# Do parts 1 and 4 first. Parts 2 and 3 go with the two backup slides: do them if you have time.
-#
-# 2. check whether that covariance is right, and fix it when it is not;
-# 3. use the **free energy** to choose between two models of the same wall.
+# About an hour in all. Lowering $F$ by perception and by action is Day 4's lab.
 
 # %%
 import sys
@@ -32,12 +29,12 @@ world = two_room_apartment()
 # %% [markdown]
 # # A wall as a belief
 #
-# Choosing *where to look next* is Day 5, once action has its own functional. Today the robot knows
-# its own pose exactly, and we cheat on *which* LiDAR points belong to the wall. Day 4 removes both
-# cheats.
+# Perception, action and choosing *where to look next* come on Day 4.
+# Today the robot knows its own pose exactly, and we cheat on *which* LiDAR points belong to the
+# wall. Day 4 removes both cheats.
 
 # %% [markdown]
-# ## 0. Meet the world
+# ## 0. Meet the world (5 min)
 #
 # Two rooms, a door, a table, a bottle and a chair. The sensor today is a forward-looking LiDAR
 # with a 90° field of view: 90 beams, 2 cm of independent range noise per beam.
@@ -76,7 +73,7 @@ pts0, bear0 = wall_points(scan0)
 print(f"{len(pts0)} points on the north wall, spanning x = {pts0[:, 0].min():.2f} .. {pts0[:, 0].max():.2f} m")
 
 # %% [markdown]
-# ## 1. A wall as a Laplace belief
+# ## 1. A wall as a Laplace belief (25 min)
 #
 # Model the wall as an infinite line with unit normal $n(\alpha) = (\cos\alpha, \sin\alpha)$ at
 # distance $d$ from the origin. A point $p$ lies on it when $n(\alpha)^\top p = d$, so the
@@ -145,7 +142,7 @@ ax.set_xlim(-0.5, 6.5); ax.set_ylim(3.0, 4.6); ax.set_title("belief samples (sd 
 # centroid and the information matrix becomes diagonal.
 
 # %% [markdown]
-# ## 2. Is the covariance right? (if you have time; backup slide)
+# ## 2. Is the covariance right? (15 min; backup slide)
 #
 # $\Sigma = H^{-1}$ is a **claim** about how far the fit would wander if you scanned again. Test the
 # claim: scan 500 times from the same pose, fit each scan, and compare the spread of the fits with
@@ -204,7 +201,7 @@ fit0 = laplace(residual(pts0), [np.pi / 2, 4.0], incidence_sigma(pts0, bear0), j
 wall0 = fit0.belief
 
 # %% [markdown]
-# ## 3. Free energy as the price of a model (if you have time; backup slide)
+# ## 3. Free energy as the price of a model (15 min; backup slide)
 #
 # Rooms are mostly rectilinear. A **Manhattan** model of this wall fixes $\alpha = 90°$ and has a
 # single parameter, $d$. The **free** model keeps both parameters, with a prior
@@ -261,80 +258,9 @@ print(f"tilted wall: F_free - F_Manhattan = {f_t.free_energy - m_t.free_energy:+
 # of **no thresholds**: the decision falls out of comparing two free energies.
 
 # %% [markdown]
-# ## 4. Perception and action lower the same $F$
-#
-# The robot of frames 25--27. $s$: its distance to the wall. We write the likelihood
-# $p(o \mid s) = \mathcal N(o;\, s,\, 0.2^2)$ and, as the prior, the **goal**
-# $p(s) = \mathcal N(1.0,\, 0.5^2)$: where we want the robot to be. With the Laplace belief
-# $q = \mathcal N(\mu, \sigma^2)$ and $\sigma$ at its best value, up to constants,
-#
-# $$F(\mu, o) = \tfrac12\,25\,(o-\mu)^2 + \tfrac12\,4\,(\mu-1)^2, \qquad 25 = 1/0.2^2,\; 4 = 1/0.5^2.$$
-#
-# **Exercise 7 (perception).** Hold the reading fixed at $o = 1.5$. Start at $\mu = 1.0$ and step
-# $\mu \leftarrow \mu - \eta\,\partial F/\partial\mu$ with $\eta = 0.01$ until it stops moving.
-# Where does $\mu$ stop, and what is $F$ there? Repeat for $o = 1.0,\ 1.25,\ 2.0$ and compare
-# each final $F$ with $\tfrac12\,(o-1)^2/0.29$, which is the surprise $-\ln p(o)$ without its
-# constant: $p(o) = \mathcal N(o;\, 1,\, 0.2^2 + 0.5^2)$.
-
-# %%
-def F_wall(mu, o):
-    return 0.5 * 25 * (o - mu) ** 2 + 0.5 * 4 * (mu - 1) ** 2
-
-
-for o in (1.0, 1.25, 1.5, 2.0):
-    mu = 1.0
-    # BEGIN SOLUTION
-    for _ in range(2000):
-        mu -= 0.01 * (-25 * (o - mu) + 4 * (mu - 1))
-    # END SOLUTION
-    print(f"o = {o:.2f}: mu stops at {mu:.3f}, F = {F_wall(mu, o):.3f}, "
-          f"surprise without constant = {0.5 * (o - 1) ** 2 / 0.29:.3f}")
-
-# %% [markdown] solution
-# $\mu$ stops at $(25\,o + 4\cdot1)/29$, and the final $F$ equals the surprise every time
-# (0.431 for $o = 1.5$). Perception can lower $F$ down to the surprise and no further: the surprise
-# depends only on $o$, and no belief changes $o$.
-
-# %% [markdown]
-# **Exercise 8 (action).** Now the robot drives. It starts at $s = 2.6$ m with $\mu = 2.6$ and speed
-# $a = 0$. Every 0.1 s: read $o = s + $ noise (use 0.03 m, the real LiDAR); take both slopes of $F$ at the current
-# $\mu$, then step $\mu$ as above with $\eta = 0.04$ and step the speed $a \leftarrow a - 2.0\,\dfrac{\partial F}{\partial o}\,
-# \dfrac{\partial o}{\partial a}$, where driving at $a$ for 0.1 s moves the robot by $a \cdot 0.1$,
-# so $\partial o/\partial a = 0.1$ s; then move, $s \leftarrow s + 0.1\,a$. Run 5 s. Plot $s$,
-# $\mu$ and $F$ against time, and the surprise $\tfrac12\,(o-1)^2/0.29$ next to $F$.
-
-# %%
-rng_a = np.random.default_rng(3)
-s_true, mu, a = 2.6, 2.6, 0.0
-log = []
-for _ in range(50):
-    o = s_true + rng_a.normal(0, 0.03)
-    # BEGIN SOLUTION
-    dF_dmu = -25 * (o - mu) + 4 * (mu - 1)      # both slopes at the current mu
-    dF_do = 25 * (o - mu)
-    mu -= 0.04 * dF_dmu
-    a -= 2.0 * dF_do * 0.1
-    s_true += 0.1 * a
-    # END SOLUTION
-    log.append((s_true, mu, F_wall(mu, o), 0.5 * (o - 1) ** 2 / 0.29))
-log = np.array(log); t = 0.1 * np.arange(len(log))
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 4.2), sharex=True)
-ax1.plot(t, log[:, 0], label="true distance $s$"); ax1.plot(t, log[:, 1], label=r"belief $\mu$")
-ax1.axhline(1.0, ls="--", color="k", lw=0.8); ax1.set_ylabel("m"); ax1.legend()
-ax2.plot(t, log[:, 2], label="$F$"); ax2.plot(t, log[:, 3], ls="--", label="surprise (no constant)")
-ax2.set_ylabel("nats"); ax2.set_xlabel("time (s)"); ax2.legend()
-
-# %% [markdown] solution
-# $F$ sits just above the surprise the whole time: perception keeps it there. The surprise itself
-# falls only because the robot drives, which changes $o$. Both reach about 0 when the robot is at
-# 1 m, the goal. Nobody wrote "drive to 1 m": the goal is a prior, and lowering $F$ makes it true.
-
-# %% [markdown]
 # ## Take-aways
 # - A belief is a mean **and** a covariance. The covariance is the curvature of the free energy,
 #   and it is only as right as the likelihood.
-# - Perception lowers $F$ down to the surprise $-\ln p(o)$; only action, by changing $o$, lowers
-#   the surprise itself. Put the goal in the prior and the robot drives until it comes true.
 # - Model choice is free-energy comparison: complexity against accuracy, in nats, with no
 #   threshold.
 # - On Day 4 the robot loses its known pose and its labelled points. The wall becomes four walls,

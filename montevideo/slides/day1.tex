@@ -373,7 +373,7 @@
 \end{frame}
 
 % The marginal frame's picture with both marginals; the gap column stretched to width 1.
-\begin{frame}{Conditioning: how evidence enters a belief}
+\begin{frame}{Conditioning: how a reading enters a belief}
   \begin{center}\large $\displaystyle p(S\given O) \mathrel{:=} \frac{p(S, O)}{p(O)}$\end{center}
   \centering
   \begin{tikzpicture}[scale=1.15, lab/.style={font=\small}, tgt/.style={draw=accent, very thick}]
@@ -587,7 +587,7 @@
   \lesson{For a density, marginalising integrates over the variable you drop.}
 \end{frame}
 
-\begin{frame}{Conditioning: how evidence enters a belief}
+\begin{frame}{Conditioning: how a reading enters a belief}
   \begin{center}\large $\displaystyle p(s\given o) \mathrel{:=} \frac{p(s, o)}{p(o)}$\end{center}
   \centering
   \includegraphics[height=0.66\textheight]{d1_cond_generic.pdf}
@@ -739,10 +739,11 @@
   \end{tikzpicture}
 
   \vfill
-  \lesson{Always true, because it assumes nothing. So it saves nothing yet.}
+  \lesson{It holds for any joint, so on its own it simplifies nothing.}
 \end{frame}
 
 \begin{frame}{Two variables: one joint, $2! = 2$ factorisations}
+  \label{d1f:twovar}
   \begin{center}
     \textcolor{cool!80!black}{$S$: state} (door open?) \quad
     \textcolor{good!70!black}{$O$: observation} (gap seen?)
@@ -775,7 +776,7 @@
   \vspace{0.3em}
   {\small an arrow $X \to Y$: the factor of $Y$ is conditioned on $X$\par}
   \vfill
-  \lesson{Both orders rebuild the same joint; only the generative one can produce a reading.}
+  \lesson{Both orders rebuild the same joint; only the generative one says what reading each door state produces.}
 \end{frame}
 
 \begin{frame}{Three variables: one joint, $3! = 6$ factorisations}
@@ -1059,12 +1060,12 @@
   \begin{tabular}{@{}l c c@{}}
     \toprule
      & controller, model-free RL & \alert{generative model} \\
-     & $p(a\given o)$ & $p(s)\,p(a)\,p(o\given s,a)$ \\
+     & $p(A\given O)$ & $p(S)\,p(A)\,p(O\given S,A)$ \\
     \midrule
     acts, in the world it was tuned in & $\checkmark$ & $\checkmark$ \\
     says what it expects to see        & $\times$ & $\checkmark$ \\
     notices it is surprised            & $\times$ & $\checkmark$ \\
-    knows what it does not know        & $\times$ & $\checkmark$ \\
+    says how sure it is about the door & $\times$ & $\checkmark$ \\
     survives a sensor swap             & $\times$ & $\checkmark$ \\
     \bottomrule
   \end{tabular}
@@ -1073,6 +1074,59 @@
 \end{frame}
 
 % =================================================================================================
+\begin{frame}{Injecting knowledge about the problem simplifies the model}
+  \label{d1f:inject}
+  \centering
+  % two kinds of knowledge we can write into the model; each removes numbers we must fill in
+  \begin{tikzpicture}[
+      ax/.style={-{Stealth[length=1.3mm]}, thin, muted},
+      el/.style={draw=accent, thick, fill=accent!12},
+      lb/.style={font=\footnotesize, align=center, anchor=north},
+      hd/.style={font=\small\bfseries, anchor=west},
+      go/.style={-{Stealth[length=2.5mm]}, very thick, accent}]
+    % ---- row 1: independence
+    \begin{scope}
+      \draw[ax] (0,0) -- (2.2,0) node[right, font=\scriptsize] {$s$};
+      \draw[ax] (0,0) -- (0,1.7) node[left, font=\scriptsize] {$o$};
+      \draw[el] (1.1,0.85) ellipse[x radius=0.85, y radius=0.22, rotate=38];
+      \draw[accent, thick] (1.1,0.85) ellipse[x radius=0.45, y radius=0.1, rotate=38];
+      \node[lb] at (1.1,-0.15) {$p(s,o) = p(s)\,p(o\given s)$\\ covariance: 3 numbers};
+    \end{scope}
+    \draw[go] (2.8,0.85) -- node[above, align=center, font=\footnotesize, text=black] {\textbf{\small assume independence}\\ $o$ does not depend on $s$} (6.0,0.85);
+    \node[font=\footnotesize, text=muted] at (4.4,0.5) {$p(o\given s) = p(o)$};
+    \begin{scope}[xshift=6.6cm]
+      \draw[ax] (0,0) -- (2.2,0) node[right, font=\scriptsize] {$s$};
+      \draw[ax] (0,0) -- (0,1.7) node[left, font=\scriptsize] {$o$};
+      \draw[el] (1.1,0.85) ellipse[x radius=0.7, y radius=0.45];
+      \draw[accent, thick] (1.1,0.85) ellipse[x radius=0.35, y radius=0.22];
+      \draw[cool!80!black, very thick] plot[domain=0.3:1.9, samples=40] (\x,{0.35*exp(-(\x-1.1)^2/(2*0.3^2))});
+      \draw[good!70!black, very thick] plot[domain=0.25:1.45, samples=40] ({0.35*exp(-(\x-0.85)^2/(2*0.2^2))},\x);
+      \node[lb] at (1.1,-0.15) {$p(s)\,p(o)$: two separate curves\\ covariance: 2 numbers};
+    \end{scope}
+    % ---- row 2: a known value
+    \begin{scope}[yshift=-2.9cm]
+      \draw[ax] (0,0) -- (2.2,0) node[right, font=\scriptsize] {$s$};
+      \draw[ax] (0,0) -- (0,1.7) node[left, font=\scriptsize] {$o$};
+      \draw[el] (1.1,0.85) ellipse[x radius=0.85, y radius=0.22, rotate=38];
+      \draw[accent, thick] (1.1,0.85) ellipse[x radius=0.45, y radius=0.1, rotate=38];
+      \draw[black!70, thick, dashed] (1.1,0) -- (1.1,1.6);
+      \node[lb] at (1.1,-0.15) {$p(s)\,p(o\given s)$\\ two variables};
+      \draw[go] (2.8,0.85) -- node[above, align=center, font=\footnotesize, text=black] {\textbf{\small know a value}\\ $s = 2.0$\,m} (6.0,0.85);
+      \node[font=\footnotesize, text=muted] at (4.4,0.5) {all the probability of $s$ at that value};
+      \begin{scope}[xshift=6.6cm]
+        \draw[ax] (0,0) -- (2.2,0) node[right, font=\scriptsize] {$o$};
+        \fill[good!15] plot[domain=0.3:1.9, samples=40] (\x,{1.3*exp(-(\x-1.1)^2/(2*0.22^2))}) -- (1.9,0) -- (0.3,0) -- cycle;
+        \draw[good!70!black, very thick] plot[domain=0.3:1.9, samples=40] (\x,{1.3*exp(-(\x-1.1)^2/(2*0.22^2))});
+        \node[lb] at (1.1,-0.15) {$p(o\given s = 2.0)$: one curve\\ one variable};
+      \end{scope}
+    \end{scope}
+  \end{tikzpicture}
+
+  \vfill
+  {\footnotesize\color{muted} the price: if the assumption is false, the model is wrong, and no amount of data fixes it\par}
+  \lesson{Each piece of knowledge removes an arrow or a variable: fewer numbers to fill in.}
+\end{frame}
+
 \section{Introducing time}
 % =================================================================================================
 
@@ -1092,9 +1146,66 @@
   \end{tikzpicture}
 
   \vspace{0.6em}
-  {\large $\displaystyle p(o_{1:T}\given s_{1:T}) = \prod_{t=1}^{T} p(o_t\given s_t)$}
+  {\large $\displaystyle p(o_{1:T}\given s_{1:T}) = \prod_{t=1}^{T} p(o_t\given s_t)$}\quad{\footnotesize\color{muted} assumed: each reading depends only on its own state (next frame)}
   \vfill
-  \lesson{A subscript is a time; $a{:}b$ means every step from $a$ to $b$.}
+  \lesson{A subscript is a time; $a{:}b$: every step from $a$ to $b$; $<t$: before now; $\le t$: up to now.}
+\end{frame}
+
+\begin{frame}{The Markov assumption: the current state carries what the next step needs}
+  \label{d1f:markov}
+  \centering
+  % left: the chain rule gives every factor the whole past; right: Markov keeps one step of it
+  \begin{tikzpicture}[yscale=0.85, 
+      v/.style={draw, circle, minimum size=0.75cm, font=\scriptsize, inner sep=0pt},
+      s/.style={v, draw=cool!80!black, fill=cool!15}, o/.style={v, draw=good!70!black, fill=good!15},
+      a/.style={v, draw=black!60, fill=black!8},
+      ins/.style={-{Stealth[length=1.6mm]}, thick, accent},
+      ino/.style={-{Stealth[length=1.6mm]}, thick, good!70!black},
+      hd/.style={font=\small\bfseries}]
+    \foreach \sh/\nm in {0/L, 6.4/R} {
+      \begin{scope}[xshift=\sh cm]
+        \node[s] (s0\nm) at (0,0) {$s_{t-2}$}; \node[s] (s1\nm) at (1.7,0) {$s_{t-1}$}; \node[s] (s2\nm) at (3.4,0) {$s_t$};
+        \node[o] (o0\nm) at (0,-1.6) {$o_{t-2}$}; \node[o] (o1\nm) at (1.7,-1.6) {$o_{t-1}$}; \node[o] (o2\nm) at (3.4,-1.6) {$o_t$};
+        \node[a] (a2\nm) at (2.55,1.3) {$a_t$};
+      \end{scope}
+    }
+    % left: everything before points in
+    \node[hd] at (1.7,2.1) {chain rule: the whole past};
+    \foreach \src in {s1L, o0L, o1L, a2L} \draw[ins] (\src) -- (s2L);
+    \draw[ins] (s0L) to[bend left=28] (s2L);
+    \foreach \src in {s0L, s1L, s2L, o1L} \draw[ino] (\src) -- (o2L);
+    \draw[ino] (o0L) to[bend right=28] (o2L);
+    % right: Markov
+    \node[hd, text=accent] at (8.1,2.1) {Markov: one step back};
+    \draw[ins] (s1R) -- (s2R); \draw[ins] (a2R) -- (s2R);
+    \draw[ino] (s2R) -- (o2R);
+    \node[font=\Large] at (4.9,-0.6) {$\Rightarrow$};
+    % factors
+    \node[font=\footnotesize, align=center] at (1.7,-2.8) {$p(s_t\given s_{0:t-1}, o_{1:t-1}, a_{1:t})$\\ $p(o_t\given s_{0:t}, o_{1:t-1}, a_{1:t})$};
+    \node[font=\footnotesize, align=center] at (8.1,-2.8) {$p(s_t\given s_{t-1}, a_t)$ \;\textcolor{muted}{motion model}\\ $p(o_t\given s_t)$ \;\textcolor{muted}{sensor model}};
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  {\footnotesize\color{muted} knowledge we inject (frame~\ref{d1f:inject}); it fails if something that persists is left out of $s$, like a wheel bias (Day~4)\par}
+  \vfill
+  \lesson{Markov: the next state needs only $s_{t-1}$ and $a_t$; a reading needs only $s_t$.}
+\end{frame}
+
+\begin{frame}{Markov keeps the belief small: one state, not the whole past}
+  \centering
+  \vspace{0pt plus 1filll}
+  {\normalsize
+  \renewcommand{\arraystretch}{1.5}
+  \begin{tabular}{@{}lcc@{}}
+    & keep $N$ past states & Markov \\ \hline
+    belief the robot carries & over $s_{t-N:t}$:\ $(N{+}1)\,d$ dimensions & over $s_t$:\ $d$ dimensions \\
+  \end{tabular}\par}
+  \vspace{0.3em}
+  {\small $d$: the dimension of one state\par}
+  \vspace{1.2em}
+  {\normalsize Markov is about the states, not the belief:\\ $p(s_t\given o_{<t})$ still depends on every reading, but carried in $d$ dimensions\par}
+  \vspace{0pt plus 1filll}
+  \lesson{The robot carries one state's belief, whatever the length of its past.}
 \end{frame}
 
 \begin{frame}{The robot acts on what it sees, not on the world}
@@ -1163,68 +1274,390 @@
     \underbrace{\textcolor{cool!80!black}{p(s_t\given s_{t-1}, a_t)}}_{\text{motion model}}\,
     \underbrace{\textcolor{good!70!black}{p(o_t\given s_t)}}_{\text{sensor model}}
   \]
-  {\footnotesize\color{muted} Here $A$ moves the robot; in the door example, $A$ only chose where to look.}
+  {\footnotesize\color{muted} Here $a_t$ moves the robot; in the door example, $A$ only chose where to look.}
   \vfill
   \lesson{The generative model: one prior, and the same three factors at every step.}
 \end{frame}
 
-\begin{frame}{Bayes' rule is the three operations in a row}
-  \begin{center}\large
-  $\displaystyle
-    \underbrace{\textcolor{accent}{p(s\given o)}}_{\text{posterior}}
-    \;=\;
-    \frac{\overbrace{\textcolor{good!70!black}{p(o\given s)}}^{\text{sensor model}}\;\overbrace{\textcolor{cool!80!black}{p(s)}}^{\text{prior}}}
-         {\underbrace{\textcolor{muted}{p(o)}}_{\text{evidence}}}$
-  \end{center}
-  \vspace{-0.6em}
-  \begin{center}\small
-  $\textcolor{muted}{p(o)} = \sum_s \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$:\;
-  how likely this reading would be \textcolor{good!70!black}{if the world were $s$},
-  weighted by the \textcolor{cool!80!black}{prior}
-  \end{center}
-  \vspace{-0.6em}
+\def\polcol{muted}
+\begin{frame}{Filling in the model: a form and numbers for each factor}
   \centering
-  \includegraphics[width=0.9\textwidth]{d1_bayes_ops.pdf}
+  {\small the wall example: $s$ is the distance to the wall, $a_t$ the distance driven towards it, $o_t$ the LiDAR reading\par}
+  \vspace{0.6em}
+  % one card per factor of the joint: what we write (form) and where its numbers come from
+  \begin{tikzpicture}[
+      card/.style={very thick, rounded corners=4pt, minimum width=2.85cm, minimum height=3.5cm, anchor=north},
+      hd/.style={font=\small\bfseries, anchor=north},
+      fm/.style={font=\small, anchor=north},
+      lb/.style={font={\scriptsize\hyphenpenalty=10000\relax}, text=muted, anchor=north, text width=2.6cm, align=center},
+      src/.style={font={\scriptsize\hyphenpenalty=10000\relax}, anchor=north, text width=2.6cm, align=center}]
+    \foreach \x/\col/\name/\fac/\form/\from in {
+        0/cool!80!black/prior/{$p(s_0)$}/{$\N(2.0,\ 0.5^2)$}/{what we know before looking: the plan, the last run},
+        3.2/cool!80!black/motion model/{$p(s_t\given s_{t-1},a_t)$}/{$\N(s_{t-1}-a_t,\ 0.2^2)$}/{drive known distances, measure the wheels' error},
+        6.4/good!70!black/sensor model/{$p(o_t\given s_t)$}/{$\N(s_t,\ 0.2^2)$}/{read a wall at known distances, measure the LiDAR's error},
+        9.6/muted/policy/{$p(a_t\given o_{<t})$}/{a rule, or a plan}/{a human sets the target, or the robot chooses (Day~2)}} {
+      \node[card, draw=\col, fill=\col!8] at (\x,0) {};
+      \node[hd, text=\col] at (\x,-0.12) {\name};
+      \node[fm] at (\x,-0.6) {\fac};
+      \node[lb] at (\x,-1.15) {form we write};
+      \node[fm] at (\x,-1.45) {\form};
+      \node[lb] at (\x,-2.0) {\ifx\col\polcol comes from\else numbers from\fi};
+      \node[src] at (\x,-2.3) {\from};
+    }
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  {\small These are the numbers of the Gaussian video and of the recursion frame.\par}
   \vfill
-  \lesson{Step 2, the area $p(o)$, is what a real robot cannot compute; tomorrow we find a way around it.}
+  \lesson{Each factor: a form we write, numbers we measure. The policy: a rule, or a plan.}
 \end{frame}
 
-\begin{frame}{The same factors give a recursion: yesterday's belief, one motion, one reading}
+% transition: from writing the model to using it
+\begin{frame}[plain]
+  \centering\vfill
+  {\fontsize{30}{34}\selectfont\bfseries\color{accent} Inference\par}
+  \vfill
+\end{frame}
+
+\begin{frame}{The goal of inference: a belief about what the robot cannot see}
+  \centering
+  {\small\color{accent} given the joint we wrote and the readings it has, what should the robot believe about the hidden state?\par}
+  \vspace{0.3em}
+  % the robot's joint, every variable sorted into: seen (fixed), wanted, summed out
+  \begin{tikzpicture}[yscale=0.75,
+      v/.style={draw, circle, minimum size=0.8cm, font=\small},
+      seen/.style={v, draw=black!70, fill=black!25, double, double distance=0.6pt},
+      want/.style={v, draw=accent, very thick, fill=accent!15},
+      gone/.style={v, draw=muted, densely dashed, fill=white, text=muted},
+      arr/.style={-{Stealth}, thick, black!60}]
+    \foreach \t/\x in {0/0, 1/2.4, 2/4.8} \node[gone] (s\t) at (\x,0) {$s_{\t}$};
+    \node[want] (s3) at (7.2,0) {$s_3$};
+    \foreach \t/\x in {1/2.4, 2/4.8, 3/7.2} {
+      \node[seen] (o\t) at (\x,-1.7) {$o_{\t}$};
+      \node[seen] (a\t) at (\x-1.2,1.5) {$a_{\t}$};
+      \draw[arr] (s\t) -- (o\t); \draw[arr] (a\t) -- (s\t);
+    }
+    \draw[arr] (s0) -- (s1); \draw[arr] (s1) -- (s2); \draw[arr] (s2) -- (s3);
+    % legend
+    \begin{scope}[shift={(9.6,1.3)}]
+      \node[seen, minimum size=0.5cm] at (0,0) {}; \node[right, font=\small] at (0.35,0) {seen: fixed to its value};
+      \node[want, minimum size=0.5cm] at (0,-1.3) {}; \node[right, font=\small, text=accent] at (0.35,-1.3) {wanted};
+      \node[gone, minimum size=0.5cm] at (0,-2.6) {}; \node[right, font=\small, text=muted] at (0.35,-2.6) {not asked: summed out};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  \begin{tikzpicture}[x=1.4cm, y=1.1cm]
+    \node[anchor=east, font=\Large] at (0.1,0.45) {$p(\textcolor{accent}{\text{wanted}}\given \text{seen})
+      \;=\; p(\textcolor{accent}{s_3}\given o_{1:3}, a_{1:3})\;\;=$};
+    \draw[-{Stealth[length=1.5mm]}, thin, muted] (0.4,0) -- (2.4,0) node[right, font=\small] {$s_3$};
+    \fill[accent!15] plot[domain=0.6:2.05, samples=60] (\x,{exp(-(\x-1.32)^2/(2*0.19^2))}) -- (2.05,0) -- (0.6,0) -- cycle;
+    \draw[very thick, accent] plot[domain=0.6:2.05, samples=60] (\x,{exp(-(\x-1.32)^2/(2*0.19^2))});
+    \node[font=\small, text=accent, anchor=west] at (1.65,0.75) {posterior};
+  \end{tikzpicture}
+  \vfill
+  \lesson{Inference: a belief about what is hidden, given what was seen. We call it the \emph{posterior}.}
+\end{frame}
+
+\begin{frame}{Why the robot needs the posterior: four things it does with it}
+  \centering
+  {\small the wall after one step: $p(s\given o_{\le t}) = \N(1.32,\ 0.19^2)$, $s$ the distance to the wall in m \textcolor{muted}{(frame~\ref{d1f:effect})}\par}
+  \vspace{0.4em}
+  % four panels, the same posterior used four ways
+  \begin{tikzpicture}[x=1.55cm, y=1.75cm,
+      ax/.style={-{Stealth[length=1.5mm]}, thin, muted},
+      hd/.style={font=\small\bfseries, anchor=south},
+      cp/.style={font={\scriptsize\hyphenpenalty=10000\relax}, text width=2.9cm, align=center, anchor=north},
+      post/.style={very thick, accent}]
+    % 1: a guess and how sure
+    \begin{scope}[shift={(0,0)}]
+      \node[hd] at (1.35,1.25) {1. a guess, and how sure};
+      \draw[ax] (0.5,0) -- (2.25,0) node[right, font=\scriptsize] {$s$};
+      \fill[accent!15] plot[domain=0.6:2.05, samples=60] (\x,{exp(-(\x-1.32)^2/(2*0.19^2))}) -- (2.05,0) -- (0.6,0) -- cycle;
+      \draw[post] plot[domain=0.6:2.05, samples=60] (\x,{exp(-(\x-1.32)^2/(2*0.19^2))});
+      \draw[dashed, black!70] (1.32,0) -- (1.32,1.0);
+      \draw[|-|, black!70] (1.13,0.3) -- (1.51,0.3) node[right, font=\scriptsize] {$\pm0.19$};
+      \node[cp] at (1.35,-0.15) {best guess 1.32\,m; the spread says whether to look again first};
+    \end{scope}
+    % 2: decide
+    \begin{scope}[shift={(2.25,0)}]
+      \node[hd] at (1.35,1.25) {2. decide};
+      \draw[ax] (0.5,0) -- (2.25,0) node[right, font=\scriptsize] {$s$};
+      \fill[accent!45] plot[domain=0.6:1.0, samples=30] (\x,{exp(-(\x-1.32)^2/(2*0.19^2))}) -- (1.0,0) -- (0.6,0) -- cycle;
+      \draw[post] plot[domain=0.6:2.05, samples=60] (\x,{exp(-(\x-1.32)^2/(2*0.19^2))});
+      \draw[black!70, thick] (1.0,0) -- (1.0,1.0) node[above, font=\scriptsize] {1.0\,m};
+      \node[font=\scriptsize, text=accent, anchor=east] at (0.95,0.35) {0.05};
+      \node[cp] at (1.35,-0.15) {the wall is nearer than 1.0\,m with probability 0.05};
+    \end{scope}
+    % 3: memory
+    \begin{scope}[shift={(4.5,0)}]
+      \node[hd] at (1.35,1.25) {3. remember};
+      \foreach \y/\lab in {0.9/o_1, 0.6/o_2, 0.1/o_t} \node[font=\scriptsize, draw=good!70!black, fill=good!15, rounded corners=2pt, inner sep=2pt] (r\lab) at (0.65,\y) {$\lab$};
+      \node[font=\scriptsize] at (0.65,0.38) {$\vdots$};
+      \node[draw=accent, very thick, fill=accent!10, rounded corners=3pt, font=\scriptsize, align=center] (bel) at (1.85,0.5) {one belief\\$\N(1.32, 0.19^2)$};
+      \foreach \lab in {o_1, o_2, o_t} \draw[-{Stealth[length=1.5mm]}, thin, muted] (r\lab) -- (bel.west);
+      \node[cp] at (1.35,-0.15) {every past reading, kept in two numbers; the next step needs only these};
+    \end{scope}
+    % 4: predict the next reading
+    \begin{scope}[shift={(6.75,0)}]
+      \node[hd] at (1.35,1.25) {4. predict};
+      \draw[ax] (0.5,0) -- (2.25,0) node[right, font=\scriptsize] {$o$};
+      \draw[very thick, good!70!black] plot[domain=0.6:2.1, samples=60] (\x,{0.69*exp(-(\x-1.32)^2/(2*0.276^2))});
+      \draw[black!70, thick] (1.95,0) -- (1.95,0.55) node[above, font=\scriptsize, text=accent] {surprise};
+      \node[anchor=north, font=\small] at (1.35,-0.15) {$\displaystyle\int p(o\given s)\,p(s\given o_{\le t})\,ds$};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vfill
+  \lesson{With the posterior the robot knows how sure it is, decides, remembers and predicts.}
+\end{frame}
+
+\begin{frame}{Bayes' rule: solve the model we wrote for the belief we want}
+  \centering
+  \vspace{0pt plus 1filll}
+  % the two orders of frame 23: we wrote S -> O, inference needs O -> S
+  \begin{tikzpicture}[scale=1.15, every node/.style={transform shape},
+      vs/.style={draw=cool!80!black, circle, minimum size=0.9cm, fill=cool!15},
+      vo/.style={draw=good!70!black, circle, minimum size=0.9cm, fill=good!15},
+      ar/.style={-{Stealth[length=2.4mm]}, very thick}]
+    \begin{scope}
+      \node[font=\small\bfseries, text=good!70!black] at (0,1.1) {what we wrote: generative};
+      \node[vs] (S0) at (-1,0) {$s$}; \node[vo] (O0) at (1,0) {$o$};
+      \draw[ar] (S0) -- (O0);
+      \node at (0,-0.9) {$\textcolor{cool!80!black}{p(s)}\,\textcolor{good!70!black}{p(o\given s)}$};
+    \end{scope}
+    \begin{scope}[xshift=6cm]
+      \node[font=\small\bfseries, text=accent] at (0,1.1) {what inference needs};
+      \node[vs] (S1) at (-1,0) {$s$}; \node[vo] (O1) at (1,0) {$o$};
+      \draw[ar] (O1) -- (S1);
+      \node at (0,-0.9) {$\textcolor{muted}{p(o)}\,\textcolor{accent}{p(s\given o)}$};
+    \end{scope}
+    \draw[-{Stealth[length=2.5mm]}, very thick, accent] (1.8,0) -- node[above, font=\small] {invert the arrow} (4.2,0);
+  \end{tikzpicture}
+
+  \vspace{1.0em}
+  {\large both products are the same joint, our model: \textcolor{muted}{\small(frame~\ref{d1f:twovar})}\\[0.3em]
+   $\textcolor{cool!80!black}{p(s)}\,\textcolor{good!70!black}{p(o\given s)} = p(s,o) = \textcolor{muted}{p(o)}\,\textcolor{accent}{p(s\given o)}$\par}
+  \vspace{0.8em}
+  {\small\color{muted} a static robot: we leave the action out for now, so the model is only $s \to o$\par}
+
+  \vfill
+  \lesson{Bayes' rule inverts the model: from the factors we wrote, it solves for the belief we want.}
+\end{frame}
+
+\begin{frame}{Bayes' rule}
+  \vspace{0pt plus 1filll}
+  \begin{center}\LARGE
+  \tikz\node[draw=accent, very thick, rounded corners=6pt, inner sep=6pt, fill=accent!4]{$\displaystyle
+    \underbrace{\textcolor{accent}{p(s\given o)}}_{\text{\normalsize posterior}}
+    \;=\;
+    \frac{\overbrace{\textcolor{good!70!black}{p(o\given s)}}^{\text{\normalsize\shortstack{likelihood\\ (sensor model)}}}\;\overbrace{\textcolor{cool!80!black}{p(s)}}^{\text{\normalsize prior}}}
+         {\underbrace{\textcolor{muted}{p(o)}}_{\text{\normalsize evidence}}}$};
+  \end{center}
+  \vspace{-0.4em}
+  \centering
+  {\large $\textcolor{muted}{p(o)} = \displaystyle\int \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}\,ds$\par}
+  \vspace{0.3em}
+  {\small\color{accent} the evidence needs every possible $s$: this is the part that will be hard if $s$ is very large or continuous\par}
+  \vfill
+  \lesson{The belief after the reading: likelihood times prior, divided by the evidence.}
+\end{frame}
+
+\begin{frame}{Why we cannot apply exact Bayes, $p(s\given o) = p(o\given s)\,p(s)\,/\,p(o)$}
+  \begin{center}\large $\displaystyle \textcolor{muted}{p(o)} = \sum_{\text{every } s} \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$
+  \quad{\normalsize one product per grid point, then add them all}\end{center}
+  \centering
+  \begin{tikzpicture}[hd/.style={font=\small\bfseries, align=center},
+      cnt/.style={font=\normalsize, text=prob!90!black}, tm/.style={font=\large\bfseries}]
+    % panel 1: one number -> a line of points
+    \foreach \i in {0,...,14} \fill[cool!70] (-4.6+\i*0.12,0) circle (1.3pt);
+    \node[hd] at (-3.75,1.3) {one wall distance\\(1 number)};
+    \node[font=\scriptsize, muted] at (-4.6,-0.3) {0\,m}; \node[font=\scriptsize, muted] at (-2.92,-0.3) {4\,m};
+    \node[font=\scriptsize, muted] at (-3.75,0.3) {every 2\,mm};
+    % panel 2: three numbers -> a cube of points
+    \begin{scope}[shift={(-0.55,-0.55)}]
+      \foreach \x in {0,...,5} \foreach \y in {0,...,5} \foreach \z in {0,...,5}
+        \fill[cool!70, opacity=0.55] (\x*0.2+\z*0.1, \y*0.2+\z*0.08) circle (1.1pt);
+    \end{scope}
+    \node[hd] at (0,1.3) {robot pose $x,y,\theta$\\(3 numbers)};
+    % panel 3: eleven numbers -> cannot be drawn
+    \node[font=\Huge, text=cool!70] at (3.9,0) {?};
+    \node[hd] at (3.9,1.3) {pose + the room around it\\(3 + 4 walls $\times$ 2 = 11 numbers)};
+    \draw[-{Stealth[length=2.5mm]}, thick, prob!90!black] (-2.3,0) -- node[above, font=\small] {$\times 2001^{2}$} (-1.0,0);
+    \draw[-{Stealth[length=2.5mm]}, thick, prob!90!black] (1.0,0) -- node[above, font=\small] {$\times 2001^{8}$} (3.2,0);
+    % counts and times
+    \node[cnt] at (-3.75,-1.0) {2001 values}; \node[tm, text=good!70!black] at (-3.75,-1.6) {2 $\mu$s};
+    \node[cnt] at (0,-1.0) {$8\times10^{9}$ points};     \node[tm, text=prob!90!black] at (0,-1.6) {8 s};
+    \node[cnt] at (3.9,-1.0) {$2\times10^{36}$ points};  \node[tm, text=accent] at (3.9,-1.6) {$6\times10^{19}$ years};
+    \foreach \x/\g in {-3.75/{the wall}, 0/{localisation}, 3.9/{the robot in its room}}
+      \node[font=\footnotesize\itshape, muted] at (\x,-2.15) {\g};
+  \end{tikzpicture}
+
+  {\footnotesize\color{muted} 2001 values for every number, $10^9$ products per second}\\[0.1em]
+  {\small The universe is $1.4\times10^{10}$ years old; the robot needs a new answer every 0.1\,s.}
+  \vfill
+  \lesson{Exact Bayes needs $p(o)$: easy for one wall, impossible for a robot in its room.}
+\end{frame}
+
+\begin{frame}{Bayes' rule with the action: $a$ is known, so it stays on the right of every bar}
+  \centering
+  \vspace{0pt plus 1filll}
+  \begin{tikzpicture}[scale=0.75,
+      vs/.style={draw=accent, very thick, circle, minimum size=0.8cm, fill=accent!15},
+      vo/.style={draw=black!70, circle, minimum size=0.8cm, fill=black!25, double, double distance=0.6pt},
+      ar/.style={-{Stealth[length=2.4mm]}, very thick}]
+    \node[vs] (S) at (0,0) {$s$}; \node[vo] (A) at (2.6,0) {$a$}; \node[vo] (O) at (1.3,-1.4) {$o$};
+    \draw[ar] (S) -- (O); \draw[ar] (A) -- (O);
+    \node[font=\footnotesize, align=left, anchor=west] at (3.3,-0.6) {\textcolor{muted}{first step: the aim is chosen without seeing $s$}\\[2pt]
+      \textcolor{muted}{grey: seen;\ \ }\textcolor{accent}{red: wanted}};
+  \end{tikzpicture}
+
+  \vspace{0pt plus 1filll}
+  \renewcommand{\arraystretch}{1.5}
+  \begin{tabular}{r@{\;\;}l}
+    \small two orders, one joint: &
+    {\large $\underbrace{\textcolor{cool!80!black}{p(s)}\,p(a)\,\textcolor{good!70!black}{p(o\given s,a)}}_{\text{\scriptsize causal: what we wrote}}
+     \;=\; \underbrace{p(a)\,\textcolor{muted}{p(o\given a)}\,\textcolor{accent}{p(s\given o,a)}}_{\text{\scriptsize $a, o$ first: what we want}}$} \\[0.5em]
+    \small divide by $p(a)\,p(o\given a)$: &
+    {\Large $\displaystyle
+    \underbrace{\textcolor{accent}{p(s\given o, a)}}_{\text{\normalsize posterior}}
+    = \frac{\overbrace{\textcolor{good!70!black}{p(o\given s, a)}}^{\text{\normalsize likelihood}}\;\overbrace{\textcolor{cool!80!black}{p(s)}}^{\text{\normalsize prior}}}
+         {\underbrace{\textcolor{muted}{p(o\given a)}}_{\text{\normalsize evidence}}}$} \\
+  \end{tabular}
+
+  {\small $\textcolor{muted}{p(o\given a)} = \sum_s \textcolor{good!70!black}{p(o\given s,a)}\,\textcolor{cool!80!black}{p(s)}$:
+   knowing $a$ does not shorten the sum; it still runs over every $s$\\
+   \textcolor{muted}{two values for a door; for a whole room, too many to add up (Day~2)}\par}
+  \vspace{0pt plus 1filll}
+  \lesson{The action is not inferred: it is given, like the reading, and the rule keeps its shape.}
+\end{frame}
+
+% transition: from one Bayes update to a loop over time
+\begin{frame}[plain]
+  \centering\vfill
+  {\fontsize{30}{34}\selectfont\bfseries\color{accent} Making inference recursive\par}
+  \vfill
+\end{frame}
+
+\begin{frame}{One step: the robot drives 0.5\,m towards the wall, then reads}
+  \centering
+  \vspace{0pt plus 1filll}
+  \begin{tikzpicture}[x=3.2cm, y=0.95cm, lab/.style={font=\small, align=center}]
+    % scene
+    \begin{scope}[yshift=-0.66cm]
+    \fill[black!25] (-0.12,2.6) rectangle (0,4.0);
+    \draw[very thick] (0,2.6) -- (0,4.0);
+    \node[lab, anchor=south] at (0,4.0) {wall};
+    \draw[muted] (-0.1,2.6) -- (3.4,2.6);
+    \draw[cool!80!black, densely dashed, fill=cool!5] (2.0,2.92) circle (0.3cm);
+    \node[lab, text=cool!80!black, anchor=west] at (2.13,2.92) {before};
+    \draw[black!70, thick, fill=black!12] (1.5,2.92) circle (0.3cm);
+    \fill[black!70] ($(1.5,2.92)+(-0.3cm,0)$) circle (1.5pt);
+    \draw[-{Stealth[length=2mm]}, very thick, black!70] (2.0,3.45) -- node[above, lab, text=black!70] {drive 0.5\,m} (1.5,3.45);
+    \draw[good!70!black, thick, densely dashed, -{Stealth[length=1.5mm]}] ($(1.5,2.92)+(-0.32cm,0)$) -- (0.02,2.92)
+      node[midway, above, lab, text=good!70!black] {LiDAR reads $o_t = 1.3$\,m};
+    \end{scope}
+    \draw[-{Stealth[length=1.5mm]}, muted] (0,1.55) -- (3.4,1.55) node[below, lab, text=black] {$s$ (m)};
+    \foreach \t in {0,1,2,3} \node[lab, below, font=\scriptsize] at (\t,1.55) {\t};
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  \renewcommand{\arraystretch}{1.15}
+  \begin{tabular}{lll}\small
+    \textcolor{cool!80!black}{before} & believes it is at $2.0 \pm 0.5$\,m & \textcolor{muted}{prior} \\
+    \textcolor{black!70}{drive} & commands 0.5\,m; the wheels err by $\pm 0.2$\,m & \textcolor{muted}{motion model} \\
+    \textcolor{good!70!black}{read} &
+      \begin{tikzpicture}[x=1.3cm, y=0.95cm, baseline=(base)]
+        \coordinate (base) at (0,0.4);
+        \draw[-{Stealth[length=1.2mm]}, muted] (0,0) -- (2.7,0) node[right, font=\scriptsize, text=black] {$s$};
+        \fill[good!15] plot[domain=0.5:2.1, samples=50] (\x,{exp(-(\x-1.3)^2/(2*0.04))}) -- (2.1,0) -- (0.5,0) -- cycle;
+        \draw[good!70!black, thick] plot[domain=0.5:2.1, samples=50] (\x,{exp(-(\x-1.3)^2/(2*0.04))});
+        \draw[good!70!black] (1.3,0) -- (1.3,-0.12) node[below, font=\scriptsize] {1.3};
+        \node[font=\footnotesize, align=left, anchor=west] at (2.95,0.5) {LiDAR returns $o_t = 1.3$\,m\\
+          $p(o_t\given s) \propto \exp\!\big(-(o_t - \hat o(s))^2 / (2\cdot 0.2^2)\big)$\\
+          $\hat o(s) = s$: the reading the model predicts at $s$};
+      \end{tikzpicture} & \textcolor{muted}{likelihood} \\
+  \end{tabular}
+  \vspace{0pt plus 1filll}
+  \lesson{Every step is the same two events: the robot moves, then it reads.}
+\end{frame}
+
+\begin{frame}{The same factors give a recursion: the last belief, one motion, one reading}
   \begin{columns}[c]
-    \begin{column}{0.47\textwidth}
+    \begin{column}{0.40\textwidth}
       \centering
-      \begin{tikzpicture}[bx/.style={draw, rounded corners=3pt, align=center, font=\footnotesize, inner sep=3pt, minimum width=4.6cm},
+      \begin{tikzpicture}[bx/.style={draw, rounded corners=3pt, align=center, font=\footnotesize, inner sep=3pt, minimum width=4.2cm},
                           ar/.style={-{Stealth[length=2mm]}, thick}]
         \node[bx, draw=cool!80!black, fill=cool!10] (b0) at (0,0) {belief at $t-1$\\ $p(s_{t-1}\given o_{<t})$};
-        \node[bx, draw=muted, fill=muted!10] (pr) at (0,-1.25) {\textbf{predict}: marginalise $s_{t-1}$\\ with the motion model $p(s_t\given s_{t-1},a_t)$};
-        \node[bx, draw=good!70!black, fill=good!10] (up) at (0,-2.5) {\textbf{update}: condition on $o_t$\\ with the sensor model $p(o_t\given s_t)$};
+        \node[bx, draw=muted, fill=muted!10] (pr) at (0,-1.25) {\textbf{predict}\\ with the motion model};
+        \node[bx, draw=good!70!black, fill=good!10] (up) at (0,-2.5) {\textbf{update}\\ with the reading $o_t$};
         \node[bx, draw=accent, fill=accent!10] (b1) at (0,-3.75) {belief at $t$\\ $p(s_t\given o_{\le t})$};
         \draw[ar] (b0) -- (pr); \draw[ar] (pr) -- (up); \draw[ar] (up) -- (b1);
         \draw[ar, accent] (b1.west) -- ++(-0.35,0) |- node[pos=0.25, left, font=\scriptsize, text=accent, align=right] {next\\step} (b0.west);
       \end{tikzpicture}
     \end{column}
-    \begin{column}{0.51\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1.45cm, y=1.0cm, lab/.style={font=\scriptsize, align=center}]
-        \draw[-{Stealth[length=1.5mm]}, muted] (0.3,0) -- (3.4,0) node[below, lab, text=black] {$s$ (m)};
-        \foreach \t in {1,2,3} \node[lab, below] at (\t,0) {\t};
-        \draw[cool!80!black, thick, domain=0.4:3.3, samples=70, smooth] plot (\x, {exp(-(\x-2.0)*(\x-2.0)/(2*0.25))/sqrt(2*pi*0.25)});
-        \draw[muted, thick, densely dashed, domain=0.3:3.0, samples=70, smooth] plot (\x, {exp(-(\x-1.5)*(\x-1.5)/(2*0.29))/sqrt(2*pi*0.29)});
-        \fill[accent!20, domain=0.75:1.9, samples=60, smooth] plot (\x, {exp(-(\x-1.3242)*(\x-1.3242)/(2*0.03515))/sqrt(2*pi*0.03515)}) -- (1.9,0) -- (0.75,0) -- cycle;
-        \draw[accent, thick, domain=0.75:1.9, samples=60, smooth] plot (\x, {exp(-(\x-1.3242)*(\x-1.3242)/(2*0.03515))/sqrt(2*pi*0.03515)});
-        \draw[good!70!black, very thick] (1.3,-0.08) -- (1.3,2.3) node[above, lab, text=good!70!black] {reading $o_t = 1.3$};
-        \node[lab, text=cool!80!black, anchor=west] at (2.25,0.75) {before: $2.00 \pm 0.50$};
-        \node[lab, text=muted, anchor=east] at (0.95,0.72) {predicted:\\$1.50 \pm 0.54$};
-        \node[lab, text=accent, anchor=west] at (1.55,2.0) {after: $1.32 \pm 0.19$};
-        \draw[-{Stealth[length=1.5mm]}, muted, thick] (2.0,-0.55) -- (1.5,-0.55) node[left, lab, text=muted] {drive 0.5\,m};
-      \end{tikzpicture}\\[0.3em]
-      {\footnotesize predict: the belief moves with the robot and \textbf{widens} (motion noise $0.2$\,m)\\
-       update: the reading ($\pm 0.2$\,m) \textbf{narrows} it}
+    \begin{column}{0.58\textwidth}
+      {\small\textbf{predict}: marginalise the last state, with the motion model\par}
+      \[\textcolor{muted}{p(s_t\given o_{<t})} = \int \textcolor{cool!80!black}{p(s_t\given s_{t-1},a_t)}\;\textcolor{cool!80!black}{p(s_{t-1}\given o_{<t})}\;ds_{t-1}\]
+      \vspace{0.4em}
+      {\small\textbf{update}: Bayes' rule, with the predicted belief as the prior\par}
+      \[\textcolor{accent}{p(s_t\given o_{\le t})} = \frac{\textcolor{good!70!black}{p(o_t\given s_t)}\;\textcolor{muted}{p(s_t\given o_{<t})}}{p(o_t\given o_{<t})}\]
+      \vspace{-0.5em}{\centering\footnotesize the denominator is the evidence\par}
     \end{column}
   \end{columns}
   \vfill
-  {\footnotesize\color{muted} This belief is the one the robot plans on (frame~\ref{d1f:acts}); with Gaussians the loop is the Kalman filter.\par}
+  {\small It works because the model is Markov (frame~\ref{d1f:markov}): predict needs only $s_{t-1}$ and $a_t$; update needs only $s_t$.\par}
+  \vspace{0.3em}
+  {\footnotesize\color{muted} This belief is the one the robot plans on (frame~\ref{d1f:acts}); actions, like readings, are known and left out of the bars.\par}
   \lesson{Each step needs only the last belief, one motion and one reading.}
+\end{frame}
+
+\begin{frame}{Gaussian and linear: the integrals become a few lines of arithmetic}
+  \centering
+  \vspace{0pt plus 1filll}
+  {\large \textbf{assume}\par}
+  \vspace{0.3em}
+  $p(s) = \N(\mu, \sigma^2)$ \qquad
+  $s_t = s_{t-1} - a_t + w,\ w \sim \N(0, \sigma_w^2)$ \qquad
+  $o_t = s_t + v,\ v \sim \N(0, \sigma_v^2)$
+  \vspace{1.2em}
+
+  {\large \textbf{then}: \textcolor{accent}{the Kalman filter}\par}
+  \vspace{0.3em}
+  \renewcommand{\arraystretch}{1.6}
+  \begin{tabular}{@{}r@{\qquad}l@{\qquad}l@{\qquad}l@{}}
+    predict & $\mu_- = \mu - a_t$ & $\sigma_-^2 = \sigma^2 + \sigma_w^2$ & \\
+    update & $\mu = \mu_- + k\,(o_t - \mu_-)$ & $\sigma^2 = (1 - k)\,\sigma_-^2$ & $k = \dfrac{\sigma_-^2}{\sigma_-^2 + \sigma_v^2}$ \\
+  \end{tabular}
+  \vspace{0pt plus 1filll}
+  \lesson{The robot never integrates: it updates a mean and a variance.}
+\end{frame}
+
+\begin{frame}{The effect on the belief: moving spreads it, reading sharpens it}
+  \label{d1f:effect}
+  \centering
+  \vspace{0pt plus 1filll}
+  \begin{tikzpicture}[x=2.7cm, y=1.15cm, lab/.style={font=\scriptsize, align=center}]
+    % beliefs
+    \draw[-{Stealth[length=1.5mm]}, muted] (0,0) -- (3.4,0) node[below, lab, text=black] {$s$ (m)};
+    \foreach \t in {0,1,2,3} \node[lab, below] at (\t,0) {\t};
+    \draw[cool!80!black, thick, domain=0.4:3.3, samples=70, smooth] plot (\x, {exp(-(\x-2.0)*(\x-2.0)/(2*0.25))/sqrt(2*pi*0.25)});
+    \draw[muted, thick, densely dashed, domain=0.2:3.0, samples=70, smooth] plot (\x, {exp(-(\x-1.5)*(\x-1.5)/(2*0.29))/sqrt(2*pi*0.29)});
+    \fill[accent!20, domain=0.75:1.9, samples=60, smooth] plot (\x, {exp(-(\x-1.3242)*(\x-1.3242)/(2*0.03515))/sqrt(2*pi*0.03515)}) -- (1.9,0) -- (0.75,0) -- cycle;
+    \draw[accent, thick, domain=0.75:1.9, samples=60, smooth] plot (\x, {exp(-(\x-1.3242)*(\x-1.3242)/(2*0.03515))/sqrt(2*pi*0.03515)});
+    \draw[good!70!black, thick] (1.3,0) -- (1.3,2.25);
+    \node[lab, text=cool!80!black, anchor=west] at (2.3,0.75) {before: $2.00 \pm 0.50$};
+    \node[lab, text=muted, anchor=east] at (0.75,0.72) {predicted:\\$1.50 \pm 0.54$};
+    \node[lab, text=accent, anchor=west] at (1.55,1.9) {after the reading: $1.32 \pm 0.19$};
+    \draw[-{Stealth[length=1.5mm]}, black!70, thick] (2.0,-0.6) -- (1.5,-0.6) node[left, lab, text=black!70] {drive 0.5\,m};
+    \node[lab, text=good!70!black, anchor=south] at (1.3,2.25) {reading $o_t = 1.3$\,m};
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\footnotesize \textbf{predict}: the belief moves with the robot and \textbf{widens} (motion noise $0.2$\,m)\\
+   \textbf{update}: the reading ($\pm 0.2$\,m) \textbf{narrows} it\par}
+  \vfill
+  \lesson{Moving spreads the belief; reading sharpens it.}
 \end{frame}
 
 
@@ -1289,7 +1722,7 @@
 \begin{frame}{Tomorrow}
   \centering
   {\Large Today: a belief, a joint, and the three operations on it.}\\[1.2em]
-  {\large Tomorrow: the robot cannot compute Bayes' rule.\\ It computes \alert{free energy} instead, and lowers it by perceiving and by acting.}
+  {\large Tomorrow: for a whole room, the robot cannot compute Bayes' rule.\\ It computes \alert{free energy} instead, and lowers it by perceiving and by acting.}
   \vfill
   \lesson{Tomorrow's lab: a wall from a LiDAR scan, held as a belief.}
 \end{frame}

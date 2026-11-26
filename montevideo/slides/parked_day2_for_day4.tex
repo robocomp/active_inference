@@ -1,0 +1,338 @@
+% Frames taken out of Day 2 on 2026-11-26 (Day 2 now ends at free energy under Laplace).
+% Gauss-Newton is left out of the course; the perception/action and EFE frames are for Day 4.
+% Not built: copy what Day 4 needs.
+
+% =================================================================================================
+\section{\texorpdfstring{Finding the bottom of $F$ in practice\\[0.4em]{\normalsize\mdseries\color{muted} Gauss--Newton, then a real wall}}{Finding the bottom of F in practice}}
+% =================================================================================================
+
+\begin{frame}{The starting point: frame \ref{d2f:13}'s landmark, read from far away, and its bowl}
+  \label{d2f:18}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.4cm, y=0.9cm, lab/.style={font=\scriptsize}]
+        \draw[muted, thick] (-0.3,0) -- (2.4,0) node[below left, lab, text=black, inner sep=1pt] {track};
+        \node[star, star points=5, star point ratio=2.2, fill=prob, draw=prob!70!black, inner sep=1.4pt] (L) at (0,0.8) {};
+        \node[lab, left] at (L.west) {landmark};
+        \draw[muted, dashed] (0,0) -- (0,0.8) node[midway, left, lab, text=black] {0.8\,m};
+        \fill[black!75] (1.9,0) circle (0.07);
+        \node[lab, anchor=south west, align=left, inner sep=1pt] at (1.97,0.06) {robot reads\\$o = 2.0$\,m};
+        \draw[good!70!black, thick] (1.9,0) -- (L) node[pos=0.45, above, sloped, lab, inner sep=1pt] {range $h(s)$};
+        \draw[{Stealth[length=1.5mm]}-{Stealth[length=1.5mm]}] (0,-0.2) -- (1.9,-0.2) node[midway, below, lab] {$s$: the unknown distance};
+      \end{tikzpicture}
+
+      \vspace{0.2em}
+      \raggedright\small
+      \textbf{we write} (frame \ref{d2f:13})\\
+      likelihood: \textcolor{good!70!black}{$p(o\given s) = \N\big(o;\, h(s),\, 0.2^2\big)$}\\
+      \hspace*{1em}$h(s) = \sqrt{s^2+0.8^2}$\\
+      prior: \textcolor{cool!80!black}{$p(s) = \N(s;\, 1.0,\, 0.5^2)$}
+    \end{column}
+    \begin{column}{0.54\textwidth}
+      \centering
+      \includegraphics[width=0.82\textwidth]{d1_gn_bowl.pdf}
+    \end{column}
+  \end{columns}
+  \vspace{-0.4em}
+  \[
+    F(\mu,\sigma) \approx \underbrace{-\ln p(o,\mu)}_{\text{bowl}(\mu)\text{: only the mean moves it}}
+      + \underbrace{\tfrac12\Hess\sigma^2 - \tfrac12\ln\sigma^2}_{\text{with } \Hess \text{ held fixed, only the spread moves it}} + \text{const}
+    \qquad\text{\small (frame \ref{d2f:17})}
+  \]
+  \vspace{-0.8em}
+  \[
+    \text{bowl}(s) = -\ln p(o,s) = -\ln \textcolor{good!70!black}{p(o\given s)} - \ln \textcolor{cool!80!black}{p(s)}
+      = \underbrace{\tfrac12\,\textcolor{good!70!black}{25}\,\big(o-h(s)\big)^2}_{\textcolor{good!70!black}{\substack{-\ln \text{ of the likelihood}\\ \text{precision: } 1/0.2^2 = 25}}} + \underbrace{\tfrac12\,\textcolor{cool!80!black}{4}\,(s-1)^2}_{\textcolor{cool!80!black}{\substack{-\ln \text{ of the prior}\\ \text{precision: } 1/0.5^2 = 4}}} + \text{const}
+  \]
+  \vfill
+  \lesson{$h$ is not a straight line, so the bowl is not a parabola: no formula gives its bottom.}
+\end{frame}
+
+\begin{frame}{Gauss--Newton: find the bottom of the bowl one parabola at a time}
+  \label{d2f:19}
+  \centering
+  \begin{columns}[c]
+    \begin{column}{0.40\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d1_gauss_newton.pdf}
+    \end{column}
+    \begin{column}{0.58\textwidth}
+      \begin{tikzpicture}
+        \node[inner sep=0pt] (alg) {\begin{minipage}{0.93\linewidth}
+      \begin{enumerate}
+        \item at the guess $s_k$, read the bowl's height and slope $b_k$, and a curvature $\Hess_k$ that is always $>0$ (frame \ref{d2f:20})\\[0.4em]
+        \item $P_k$: a parabola with that height, slope and curvature at $s_k$\\[0.2em]
+              {\small $P_k(s) = \text{bowl}(s_k) + b_k\,(s-s_k) + \tfrac12\Hess_k\,(s-s_k)^2$}\\[0.4em]
+        \item jump to the bottom of $P_k$ (not of the bowl):\\[0.2em]
+              {\small $P_k'(s) = b_k + \Hess_k\,(s-s_k) = 0$\\[0.1em]
+              solving for $s$:\; $s_{k+1} = s_k - b_k/\Hess_k$}\\[0.1em]
+        \item repeat until the jump is tiny
+      \end{enumerate}
+        \end{minipage}};
+        \draw[decorate, decoration={brace, amplitude=7pt, mirror}, very thick, accent]
+          ([xshift=-4pt]alg.north west) -- ([xshift=-4pt]alg.south west)
+          node[midway, xshift=-12pt, rotate=90, anchor=south, font=\small\bfseries, text=accent] {algorithm};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+  \vfill
+  \lesson{The bowl never changes; each step builds a new parabola $P_k$ and jumps to its bottom.}
+\end{frame}
+
+\begin{frame}[t]{Gauss--Newton in numbers: the last parabola is the belief}
+  \label{d2f:20}
+  \centering
+  \vspace{-1.6em}
+  \[ \begin{gathered}
+    \text{bowl}(s) = \tfrac12\,\textcolor{good!70!black}{25}\,\big(o-h(s)\big)^2 + \tfrac12\,\textcolor{cool!80!black}{4}\,(s-1)^2 + \text{const} \qquad \text{\small (frame \ref{d2f:18})}
+  \\[0.05em]
+    \text{slope:}\;\; b_k = -\textcolor{good!70!black}{25}\,J_k\,\big(o-h(s_k)\big) + \textcolor{cool!80!black}{4}\,(s_k-1)
+  \\[0.05em]
+    \text{curvature:}\;\; \text{bowl}''(s_k) = \underbrace{\textcolor{good!70!black}{25}\,J_k^2 + \textcolor{cool!80!black}{4}}_{\Hess_k\text{: Gauss--Newton keeps}}
+      \;\underbrace{-\;\textcolor{good!70!black}{25}\,\big(o-h(s_k)\big)\,h''(s_k)}_{\text{and drops, so } \Hess_k > 0}
+  \end{gathered} \]
+  \vspace{-0.2em}
+  {\footnotesize \textcolor{good!70!black}{$25 = 1/0.2^2$}, \textcolor{cool!80!black}{$4 = 1/0.5^2$}: the two precisions.\;
+   $J_k = h'(s_k)$: slope of $h$; $J_k^2$: that slope \emph{squared}; $h''(s_k)$: curvature of $h$.\par}\vspace{0.3em}
+  \renewcommand{\arraystretch}{1.0}
+  \begin{tabular}{@{}l@{\qquad}c@{\qquad}c@{\qquad}c@{\qquad}c@{\qquad}c@{\qquad}l@{}}
+    \toprule
+    & $s_k$ & $\text{bowl}(s_k)$ & $b_k$ & $\Hess_k$ & exact $\text{bowl}''$ & bottom \\
+    \midrule
+    \textcolor{accent}{$P_0$} & 0.60 & 12.8 & $-16.6$ & 13.0 & \textcolor{accent}{$-3.0$} & 1.88\\
+    \textcolor{prob}{$P_1$} & 1.88 & 1.56 & 4.4 & 25.2 & 25.3 & 1.70\\
+    \textcolor{cool!80!black}{$P_2$} & 1.70 & 1.16 & 0.07 & 24.5 & 24.2 & 1.70, stop\\
+    \bottomrule
+  \end{tabular}\par\vspace{0.05em}
+  {\footnotesize At $s_0$ the bowl bends down ($-3.0$): its exact Taylor parabola has no bottom to jump to.\par}
+  \vfill
+  \lesson{The jumps stop at $\mu = 1.70$; there $\sigma^2 = 1/\Hess = 1/24.5$, so $\sigma = 0.20$.}
+\end{frame}
+
+
+
+% =================================================================================================
+\section{\texorpdfstring{Lowering $F$ gives perception and action\\[0.4em]{\normalsize\mdseries\color{muted} Differentiate $F$ and follow its slope, in $\mu$ and in $a$}}{Lowering F gives perception and action}}
+% =================================================================================================
+
+\begin{frame}[t]{Gradient descent on $F$: one rule for $\mu$ and $a$}
+  \label{d2f:24}
+  \centering
+  {\small The robot can change two things:\quad \textcolor{accent}{$\mu$}, its estimate of $s$\quad and\quad \textcolor{good!70!black}{$a$}, its action.\\[0.2em]
+  $a$ moves the sensor, so it changes the reading: $o = o(a)$.\par}\vspace{1.5em}
+  \begin{columns}[c]
+    \begin{column}{0.45\textwidth}\centering
+      \begin{tikzpicture}[scale=1.15]
+        \draw[-{Stealth}, black!60] (-0.2,0) -- (4.2,0) node[right, font=\small] {$\mu$ or $a$};
+        \draw[-{Stealth}, black!60] (0,-0.2) -- (0,2.9) node[above, font=\small] {$F$};
+        \draw[very thick, accent, domain=0.3:3.9, samples=50] plot (\x, {0.3+0.45*(\x-2.1)^2});
+        \fill[black!80] (3.4,1.06) circle (0.09);
+        \draw[thick, black!60] (2.8,0.358) -- (3.95,1.70);
+        \node[font=\scriptsize, black!70, anchor=west] at (3.95,1.70) {slope};
+        \draw[-{Stealth[length=2.5mm]}, very thick, black!80] (3.3,1.45) -- (2.5,1.45);
+        \node[font=\scriptsize, anchor=south] at (2.9,1.5) {step $= -$slope};
+        \draw[accent, dashed] (2.1,0) -- (2.1,0.3);
+        \node[font=\scriptsize, accent, anchor=north] at (2.1,0) {bottom};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \begin{tabular}{@{}l@{\quad}l@{}}
+        $\textcolor{accent}{\dot\mu} = -\dfrac{\partial F}{\partial\mu}$ & \small\textbf{perception}\\[1.4em]
+        $\textcolor{good!70!black}{\dot a} = -\dfrac{\partial F}{\partial o}\,\dfrac{\partial o}{\partial a}$ & \small\textbf{action}
+      \end{tabular}\\[0.8em]
+      {\footnotesize $\dot x$: rate of change of $x$ in time. $\partial o/\partial a$: how much the reading changes per unit of action (frame \ref{d2f:27}: 0.1\,s).}
+    \end{column}
+  \end{columns}
+  \par\vspace*{\fill}
+  \lesson{Gradient descent: step $\mu$ and $a$ against the slope of $F$.}
+\end{frame}
+
+\newcommand{\robotscene}[6]{% x, y, robot distance (m), belief mu (m), belief text, o text
+    \begin{scope}[shift={(#1,#2)}, x=1.95cm]
+      \foreach \h in {-0.2,0,...,0.6} \draw[black!50] (-0.12,\h) -- (0,\h+0.12);
+      \draw[very thick] (0,-0.25) -- (0,0.75);
+      \draw[black!40] (0,-0.25) -- (1.85,-0.25);
+      \draw[cool!80!black, dashed, thick] (1,-0.25) -- (1,0.75); \node[font=\scriptsize, text=cool!80!black, anchor=west] at (1.0,0.68) {goal};
+      \draw[good!70!black, -{Stealth[length=1.6mm]}, thick] (#3,0.25) -- (0,0.25);
+      \node[font=\footnotesize, text=good!70!black, above] at (#3*0.45,0.25) {#6};
+      \draw[thick, fill=muted!25, rounded corners=1pt] (#3,0.0) rectangle (#3+0.32,0.5);
+      \fill[black!70] (#3+0.06,-0.06) rectangle (#3+0.13,0.0); \fill[black!70] (#3+0.19,-0.06) rectangle (#3+0.26,0.0);
+      \fill[accent] (#4,-0.25) -- ++(-0.07,-0.2) -- ++(0.14,0) -- cycle;
+      \node[draw=accent, rounded corners, fill=accent!8, font=\footnotesize, inner sep=2pt] at (0.75,-0.75) {#5};
+    \end{scope}}
+
+\begin{frame}{Perception moves the belief, action moves the robot: both lower $F$}
+  \label{d2f:25}
+  \centering
+  $F = \underbrace{\tfrac12\,\textcolor{good!70!black}{\tfrac{1}{0.2^2}}\,(o-\mu)^2}_{\text{\scriptsize we write: the sensor's noise, 0.2\,m}}
+     + \underbrace{\tfrac12\,\textcolor{cool!80!black}{\tfrac{1}{0.5^2}}\,(\mu-1)^2}_{\text{\scriptsize we write: the goal, 1\,m from the wall, }\pm0.5\,\text{m}} + \text{const}$\\[0.1em]
+  \begin{tikzpicture}[arr/.style={-{Stealth[length=2.5mm]}, very thick, black!60},
+                      fv/.style={font=\small, text=accent, anchor=west}]
+    \node[font=\small\bfseries, anchor=west, text=accent] at (-0.3,1.35) {Perception: the belief moves};
+    \robotscene{0}{0}{1.5}{1.0}{$\mu = 1.0$\,m}{$o = 1.5$\,m}
+    \node[fv] at (2.5,-0.75) {$F = 3.1$};
+    \draw[arr] (4.15,0.25) -- (4.85,0.25);
+    \robotscene{5.3}{0}{1.5}{1.43}{\textcolor{accent}{$\mu = 1.43$\,m}}{$o = 1.5$\,m}
+    \node[fv] at (8.4,-0.75) {$F = 0.43$ = surprise};
+    \node[anchor=west] at (10.2,-0.2) {$\textcolor{accent}{\dot\mu} = -\dfrac{\partial F}{\partial\mu}$};
+    \node[font=\small\bfseries, anchor=west, text=good!70!black] at (-0.3,-1.5) {Action: the robot drives};
+    \robotscene{0}{-2.65}{1.5}{1.0}{$\mu = 1.0$\,m}{$o = 1.5$\,m}
+    \node[fv] at (2.5,-3.4) {$F = 3.1$};
+    \draw[arr] (4.15,-2.4) -- (4.85,-2.4);
+    \robotscene{5.3}{-2.65}{1.0}{1.0}{$\mu = 1.0$\,m}{\textcolor{good!70!black}{$o = 1.0$\,m}}
+    \node[fv] at (8.4,-3.4) {$F = 0$ = surprise};
+    \node[anchor=west] at (10.2,-2.85) {$\textcolor{good!70!black}{\dot a} = -\dfrac{\partial F}{\partial o}\,\dfrac{\partial o}{\partial a}$};
+  \end{tikzpicture}
+  \vfill
+  \lesson{Perception lowers $F$ to the surprise, 0.43; driving 0.5\,m lowers the surprise itself, to 0.}
+\end{frame}
+
+\begin{frame}{Where frame \ref{d2f:25}'s numbers come from: 3.1, 0.43 and 0}
+  \label{d2f:26}
+  \centering
+  {\small\textbf{we write}: $s$: distance to the wall; prior = \emph{the goal}, \textcolor{cool!80!black}{$p(s) = \N(1.0,\, 0.5^2)$};
+   likelihood \textcolor{good!70!black}{$p(o\given s) = \N(o;\, s,\, 0.2^2)$}}\\[0.1em]
+  \[
+  \begin{array}{r@{\;}l@{\qquad}l}
+    F &\approx -\ln p(o,\mu) + (\text{terms in } \sigma \text{ only}) & \text{\small frame \ref{d2f:17}}\\[0.3em]
+    \uncover<2->{&= -\ln \textcolor{good!70!black}{p(o\given\mu)} - \ln \textcolor{cool!80!black}{p(\mu)} + \dots & \\[0.3em]}
+    \uncover<3->{&= \underbrace{\tfrac12\,\textcolor{good!70!black}{25}\,(o-\mu)^2}_{\text{reading vs belief}}
+             + \underbrace{\tfrac12\,\textcolor{cool!80!black}{4}\,(\mu-1)^2}_{\text{belief vs goal}} + \dots & \text{\small $25 = \tfrac{1}{0.2^2}$,\; $4 = \tfrac{1}{0.5^2}$}}
+  \end{array}
+  \]
+  \uncover<4->{%
+  \small
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabular}{@{}l l l@{}}
+    \toprule
+    start & $o = 1.5$, $\mu = 1.0$ & $F = \tfrac12\cdot25\cdot0.5^2 = 3.1$ \\
+    \textcolor{accent}{perception}: $\partial F/\partial\mu = 0$ & $\mu = \dfrac{25\cdot1.5 + 4\cdot1}{25+4} = 1.43$ & $F = \tfrac12\cdot25\cdot0.07^2 + \tfrac12\cdot4\cdot0.43^2 = 0.43$ \\
+    \textcolor{good!70!black}{action}: drive 0.5\,m & $o = 1.0$, $\mu = 1.0$ & $F = 0$ \\
+    \bottomrule
+  \end{tabular}\\[0.3em]
+  {\footnotesize $F$ up to constants. $p(o) = \N(o;\,1,\,0.2^2{+}0.5^2)$: how likely the reading is. Surprise: $-\ln p(o) = \tfrac12\cdot\tfrac{0.5^2}{0.29} = 0.43$.\par}}
+  \vfill
+  \uncover<4->{\lesson{Perception brings $F$ down to the surprise; only action, by changing $o$, lowers the surprise.}}
+\end{frame}
+
+\begin{frame}{Put the goal in the prior: the robot drives until it comes true}
+  \label{d2f:27}
+  \begin{columns}[c]
+    \begin{column}{0.48\textwidth}
+      \small
+      $F = \tfrac12\,\textcolor{good!70!black}{25}\,(o-\mu)^2 + \tfrac12\,\textcolor{cool!80!black}{4}\,(\mu-1)^2 + \text{const}$\\[0.8em]
+      \begin{tikzpicture}
+        \node[draw=accent, thick, rounded corners, fill=accent!6, align=left, font=\small, inner sep=5pt] {%
+          \textbf{the robot, every 0.1\,s}\\[0.2em]
+          1. read $o$\\[0.2em]
+          2. \textcolor{accent}{perception}: move $\mu$ downhill on $F$\\
+          \hspace*{1.2em}{\footnotesize pulled hard to the reading (25),}\\
+          \hspace*{1.2em}{\footnotesize a little towards 1\,m (4)}\\[0.2em]
+          3. \textcolor{good!70!black}{action}: change the speed $a$ downhill on $F$\\
+          \hspace*{1.2em}{\footnotesize driving at $a$ for 0.1\,s changes the}\\
+          \hspace*{1.2em}{\footnotesize next reading by $a\cdot 0.1$\,s: $\partial o/\partial a = 0.1$\,s}};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.52\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d1_ai_loop.pdf}
+    \end{column}
+  \end{columns}
+  \vfill
+  \lesson{The prior keeps $\mu$ a little nearer 1\,m than $o$; driving closes the gap until both reach 1\,m.}
+\end{frame}
+
+\begin{frame}{To choose a look, the robot scores a reading it does not have yet}
+  \label{d2f:efe1}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.15cm, y=1cm]
+        \foreach \y in {0.9,-0.9} {
+          \foreach \h in {-0.5,-0.25,...,0.4} \draw[black!50] (-0.1,\y+\h) -- (0,\y+\h+0.12);
+          \draw[very thick] (0,\y-0.55) -- (0,\y+0.55);
+        }
+        \node[font=\scriptsize] at (0,1.75) {wall};
+        \foreach \d/\y/\c/\w/\t in {1/0.9/good/0.2/{from 1 m},2/-0.9/accent/0.6/{from 2 m}} {
+          \draw[thick, fill=muted!20, rounded corners=1pt] (\d,\y-0.17) rectangle (\d+0.32,\y+0.17);
+          \draw[muted, densely dashed] (0,\y) -- (\d,\y);
+          \fill[\c!30, draw=\c!80!black, thick, domain={-2.5*\w}:{2.5*\w}, samples=40, shift={(0,\y-0.55)}]
+            plot (\x, {0.45*exp(-0.5*(\x/\w)^2)}) -- cycle;
+          \node[font=\scriptsize, text=\c!80!black, anchor=west] at (\d+0.38,\y) {\t};
+        }
+        \node[font=\scriptsize, align=center] at (0.9,-2.05) {shaded: where each look predicts\\it would read the wall};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \small
+      Frames \ref{d2f:24}--\ref{d2f:27}: the reading arrives every 0.1\,s and changes smoothly with $a$, so
+      the robot follows the slope of $F$.\\[0.6em]
+      To choose \emph{between} places, each must be scored before its reading exists. The robot averages
+      $F$ over the readings it predicts:
+      \[ G(a) = \E_{q(o,s\given a)}\big[\ln q(s\given a) - \ln p(o,s)\big] \]
+      {\footnotesize $q(o,s\given a)$: what the robot predicts it would read, and believe, after $a$.
+      $p(o,s)$: the model we write, with the goal as a prior over readings, $p(o)$.\par}
+    \end{column}
+  \end{columns}
+  \lesson{To choose an action, the robot scores the free energy it expects: $G$, the expected free energy.}
+\end{frame}
+
+\begin{frame}{$G$ = what a look would teach + how far it leaves the goal}
+  \label{d2f:efe2}
+  \centering
+  \[
+    G(a) \;\approx\; \underbrace{-\,I(s;o\given a)}_{\substack{\text{epistemic: minus the information}\\ \text{the reading would carry about } s}}
+    \;+\; \underbrace{\E\big[-\ln p(o)\big]}_{\substack{\text{pragmatic: how far the predicted}\\ \text{reading is from the goal}}}
+    \qquad
+    I = \tfrac12\ln\!\Big(1+\frac{\sigma_s^2}{\sigma_o^2}\Big)
+  \]
+  {\footnotesize $s$: distance to the wall, believed to $\sigma_s = 0.5$\,m.\; $\sigma_o$: the sensor's noise, 0.2\,m from 1\,m away,
+  0.6\,m from 2\,m.\; Goal $p(o) = \N(1,\,0.5^2)$.\par}\vspace{0.6em}
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{@{}l r r r@{}}
+    \toprule
+    look from & epistemic & pragmatic & $G$ (nats) \\
+    \midrule
+    1\,m & $-0.99$ & $0.58$ & \textcolor{good!70!black}{$\mathbf{-0.41}$} \\
+    2\,m & $-0.26$ & $3.22$ & $2.96$ \\
+    \bottomrule
+  \end{tabular}\\[0.4em]
+  {\footnotesize Pragmatic up to a constant: $\tfrac12\,\E[(o-1)^2]/0.5^2$. The dropped term of $G$ is zero when inference is good (Day 4).\par}
+  \vfill
+  \lesson{$G$ adds what a look would teach and how far it leaves the goal, both in nats.}
+\end{frame}
+
+
+
+% ---- Taken out of Day 2 on 2026-11-26: 'F has two handles' (out of place before the derivatives; reuse after them).
+\begin{frame}{$F$ has two handles: the belief and the reading}
+  \label{d2f:handles}
+  \centering
+  $F[q,o] \;=\; \underbrace{\textcolor{accent}{\KL{q(s)}{p(s\given o)}}}_{\text{how wrong the belief is}}
+   \;+\; \underbrace{\textcolor{black!60}{-\ln p(o)}}_{\text{surprise}}
+$\qquad{\small\color{muted}(frame~\ref{d2f:10})}\\[1.2em]
+  \begin{tikzpicture}[x=1.45cm, y=1cm, lab/.style={font=\small, anchor=east}, nt/.style={font=\footnotesize, anchor=west}]
+    % lengths in nats: prior N(1, 0.5^2), o = 1.5 m, mu = 1.0 m
+    \node[lab] at (-0.15,0) {start};
+    \fill[accent!45] (0,-0.25) rectangle (2.67,0.25);
+    \fill[black!30] (2.67,-0.25) rectangle (3.1,0.25);
+    \node[font=\scriptsize, text=accent!80!black] at (1.33,0) {how wrong: 2.67};
+    \node[font=\scriptsize, anchor=south] at (2.9,0.25) {surprise: 0.43};
+    \node[nt] at (3.2,0) {$F = 3.1$};
+    \node[lab, text=accent] at (-0.15,-1.1) {\textbf{perception}: change $q$};
+    \draw[accent!60, densely dashed] (0,-1.35) rectangle (2.67,-0.85);
+    \node[font=\scriptsize, text=accent!70] at (1.33,-1.1) {removed};
+    \fill[black!30] (2.67,-1.35) rectangle (3.1,-0.85);
+    \node[nt] at (3.2,-1.1) {$F = 0.43$: only the surprise is left};
+    \node[lab, text=good!70!black] at (-0.15,-2.2) {\textbf{action}: drive, so $o$ changes};
+    \draw[accent!60, densely dashed] (0,-2.45) rectangle (2.67,-1.95);
+    \draw[black!50, densely dashed] (2.67,-2.45) rectangle (3.1,-1.95);
+    \node[font=\scriptsize, text=muted] at (1.55,-2.2) {both removed};
+    \node[nt] at (3.2,-2.2) {$F = 0$: the reading matches what the model expects};
+  \end{tikzpicture}\\[1.0em]
+  {\footnotesize $q$: the belief;\; $o$: the reading;\; $a$: the action, which moves the sensor and so changes the next
+  reading. Bar lengths in nats: prior $\N(1, 0.5^2)$, reading 1.5\,m.\par}
+  \vfill
+  \lesson{Perception lowers $F$ by changing the belief; action lowers it by changing the reading.}
+\end{frame}

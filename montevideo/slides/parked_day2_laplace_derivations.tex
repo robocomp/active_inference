@@ -1,0 +1,144 @@
+% Laplace frames with the Taylor derivations, taken out of Day 2 on 2026-11-26 (replaced by simpler frames).
+% Not built.
+
+\begin{frame}[t]{Why the posterior is not Gaussian: a nonlinear likelihood}
+  \label{d2f:13}
+  \centering
+  \begin{columns}[c]
+    \begin{column}{0.30\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.1cm, y=0.9cm, lab/.style={font=\scriptsize}]
+        \draw[muted, thick] (-0.6,0) -- (2.2,0) node[below left, lab, text=black, inner sep=1pt] {track};
+        \node[star, star points=5, star point ratio=2.2, fill=prob, draw=prob!70!black, inner sep=1.4pt] (L) at (0,0.8) {};
+        \node[lab, left] at (L.west) {landmark};
+        \draw[muted, dashed] (0,0) -- (0,0.8) node[midway, left, lab, text=black] {0.8\,m};
+        \fill[black!75] (1.0,0) circle (0.07);
+        \draw[good!70!black, thick] (1.0,0) -- (L) node[pos=0.5, above, sloped, lab, inner sep=1pt] {$h(s)$};
+        \draw[{Stealth[length=1.5mm]}-{Stealth[length=1.5mm]}] (0,-0.2) -- (1.0,-0.2) node[midway, below, lab] {$s$};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.68\textwidth}
+      \small
+      \textbf{we write} (our example for the rest of today)\\
+      $s$: the robot's position along the track, $0$ at the landmark's foot\\
+      likelihood \textcolor{good!70!black}{$p(o\given s) = \N\big(o;\, h(s),\, 0.2^2\big)$}, range $h(s) = \sqrt{s^2+0.8^2}$\\
+      prior \textcolor{cool!80!black}{$p(s) = \N(s;\, 1.0,\, 0.5^2)$}.\quad The robot reads $o = 1.0$\,m.
+    \end{column}
+  \end{columns}
+  \vspace{0.2em}
+  \includegraphics[width=0.86\textwidth]{d1_why_skew.pdf}\\[0.1em]
+  {\small If $h$ were a straight line in $s$: a symmetric likelihood, and a Gaussian posterior.}
+  \vfill
+  \lesson{A nonlinear sensor bends the likelihood, and the posterior inherits the bend.}
+\end{frame}
+
+\begin{frame}{The Laplace approximation: a Gaussian fitted at the peak}
+  \label{d2f:14}
+  \centering
+  \includegraphics[width=0.78\textwidth]{d1_laplace_generic.pdf}\\[0.6em]
+  {\large $-\ln g(s) \;\approx\; -\ln g(\mu) + \tfrac12\,\Hess\,(s-\mu)^2
+   \quad\Longrightarrow\quad g(s) \propto e^{-\frac12\Hess(s-\mu)^2} = \N(\mu,\, 1/\Hess)$\par}
+  \vspace{0.4em}
+  {\footnotesize\color{muted} $g$: any curve with one peak, at $\mu$;\; $\Hess$: the curvature of $-\ln g$ at $\mu$ (its slope there is 0)\par}
+  \vfill
+  \lesson{Laplace: the peak gives the mean, the curvature gives the variance $1/\Hess$.}
+\end{frame}
+
+\begin{frame}[t]{With a Gaussian belief, $F$ becomes a formula in $\mu$ and $\sigma$}
+  \label{d2f:17}
+  \centering
+  $F = \displaystyle\int q\ln\frac{q}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s$
+  \quad {\small (frame \ref{d2f:9})}
+  \qquad {\small with $q(s) = \N(\mu,\sigma^2)$: centre $\mu$, spread $\sigma$}\\[0.2em]
+  {\small Split the log, $\ln\frac{a}{b} = \ln a - \ln b$, and write $p(o,s) = \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$ (the joint):}\\[0.1em]
+  $F = \displaystyle\textcolor{cool!80!black}{\int q\ln q\,\mathrm{d}s} \;+\; \textcolor{accent}{\int q\,\big[-\ln p(o,s)\big]\,\mathrm{d}s}$\\[0.1em]
+  \only<3->{%
+  \begin{tikzpicture}
+    \node[draw=cool!80!black, thick, rounded corners, fill=cool!6, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
+      \textbf{first integral} $=$ minus the entropy of $q$: \quad $\textstyle\int q\ln q\,\mathrm{d}s = \textcolor{cool!80!black}{-\tfrac12\ln\sigma^2} + \text{const}$};
+  \end{tikzpicture}}%
+  \only<2>{%
+  \begin{tikzpicture}
+    \node[draw=cool!80!black, thick, rounded corners, fill=cool!6, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
+      \textbf{first integral: minus the entropy of $q$} (frame \ref{d2f:16}).\\[0.4em]
+      For our Gaussian: $\ln q(s) = -\tfrac12\ln(2\pi\sigma^2) - \dfrac{(s-\mu)^2}{2\sigma^2}$\\[0.3em]
+      Take the expectation $\E_q$; $\E_q[(s-\mu)^2] = \sigma^2$, so\\[0.2em]
+      \hspace*{1em}$\textstyle\int q\ln q\,\mathrm{d}s = -\tfrac12\ln(2\pi\sigma^2) - \tfrac12 = \textcolor{cool!80!black}{-\tfrac12\ln\sigma^2} + \text{const}$};
+  \end{tikzpicture}}\par\vspace{0.3em}
+  \only<4->{%
+  \begin{tikzpicture}
+    \node[draw=accent, thick, rounded corners, fill=accent!5, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
+      \textbf{second integral}: \quad $\textstyle\int q\,\big[-\ln p(o,s)\big]\,\mathrm{d}s \approx -\ln p(o,\mu) + \textcolor{accent}{\tfrac12\Hess\,\sigma^2}$};
+  \end{tikzpicture}}%
+  \only<3>{%
+  \begin{tikzpicture}
+    \node[draw=accent, thick, rounded corners, fill=accent!5, text width=0.9\textwidth, align=left, inner sep=5pt, font=\small] {%
+      \textbf{second integral.} Replace the bowl by its Taylor expansion around $\mu$ (Laplace, frame \ref{d2f:14}):\\[0.2em]
+      \hspace*{1em}$-\ln p(o,s) \approx -\ln p(o,\mu) + \text{slope}\cdot(s-\mu) + \tfrac12\Hess\,(s-\mu)^2$, \quad $\Hess$: curvature at $\mu$\\[0.1em]
+      The integral is the expectation $\E_q$ of the bowl (frame \ref{d2f:16}). Take it term by term:\\[0.2em]
+      \hspace*{1em}$\E_q[\text{constant}] = \text{constant}$,\quad $\E_q[s-\mu] = 0$ ($q$ is centred at $\mu$),\quad $\E_q[(s-\mu)^2] = \sigma^2$, so\\[0.2em]
+      \hspace*{1em}$\textstyle\int q\,\big[-\ln p(o,s)\big]\,\mathrm{d}s \approx -\ln p(o,\mu) + 0 + \textcolor{accent}{\tfrac12\Hess\,\sigma^2}$};
+  \end{tikzpicture}}\par
+  \only<4->{%
+  \vspace{0.8em}
+  {\Large $\boxed{\;F(\mu,\sigma) \approx \underbrace{-\ln p(o,\mu) \;+\; \textcolor{accent}{\tfrac12\Hess\,\sigma^2}}_{\textstyle\text{\normalsize\textcolor{accent}{second integral}}} \;\underbrace{\textcolor{cool!80!black}{-\;\tfrac12\ln\sigma^2}}_{\textstyle\text{\normalsize\textcolor{cool!80!black}{first integral}}} \;+\; \text{const}\;}$}}
+  \vfill
+  \uncover<4->{\lesson{Two integrals became three terms: the bowl at $\mu$, $\tfrac12\Hess\sigma^2$, and minus the entropy of $q$.}}
+\end{frame}
+
+
+% ---- Also taken out of Day 2 on 2026-11-26: 'Exact answers exist' and 'A real wall'.
+\begin{frame}{Exact answers exist, but each one needs an integral over every $s$}
+  \begin{columns}[c]
+    \begin{column}{0.55\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d2_grid_posterior.pdf}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \small
+      \textbf{Bayes on the grid}, one product per point:
+      \[ \begin{gathered}
+        p(o) \approx \textstyle\sum_i p(o\given s_i)\,p(s_i)\,\Delta s = 0.25\\
+        \mu \approx \textstyle\sum_i s_i\,p(s_i\given o)\,\Delta s = 1.691,\;\; \sigma = 0.205
+      \end{gathered} \]
+      {\footnotesize The best Gaussian's $\sigma$, instead of $1/\Hess$, needs the same kind of sum: $1/\sigma^2 = \int q(s)\,\text{bowl}''(s)\,\mathrm{d}s$, the curvature averaged over the belief, not read at $\mu$.\par}\vspace{0.6em}
+      \textbf{grid points}, 200\,000 per number:\\[0.2em]
+      \renewcommand{\arraystretch}{1.1}
+      \begin{tabular}{@{}l r@{}}
+        $s$: one number & $2\times10^{5}$ \\
+        the wall $(\alpha, d)$: two & $4\times10^{10}$ \\
+        a pose and a room: dozens & \alert{never}
+      \end{tabular}
+    \end{column}
+  \end{columns}
+  \vfill
+  \lesson{Laplace needs the bowl at one point; the exact answers need a sum over every $s$.}
+\end{frame}
+
+\begin{frame}{A real wall: two numbers, one belief that tilts}
+  \label{d2f:23}
+  \centering
+  \includegraphics[width=0.72\textwidth]{d1_wall_belief.pdf}\\[0em]
+  \footnotesize
+  \begin{tabular}{@{}p{0.16\textwidth}@{}p{0.84\textwidth}@{}}
+    \textbf{we write} &
+      robot's frame: $\alpha$, direction of the wall's normal; $d$, robot--wall distance. Point $i$ at $(x_i,y_i)$\\
+    & (forward, left) is off the line by $r_i = \cos\alpha\,x_i + \sin\alpha\,y_i - d$; right line: only LiDAR noise, \textcolor{good!70!black}{$\epsilon = 2$\,cm}.\\[0.1em]
+    \textbf{the robot} &
+      minimises the bowl $F \approx \tfrac12\sum_{i=1}^{82} (r_i/\epsilon)^2$ over $(\alpha, d)$ with a solver (\texttt{laplace} in the lab):\\
+    \textbf{computes} & mean: its bottom; covariance: $\Hess^{-1}$, its curvature now a $2\times2$ matrix $\Hess$. Belief \textcolor{accent}{$q(\alpha,d)$}\\
+    & {\color{muted} ellipses: 68\%, 95\% of $q$;\; $\rho$: how much $\alpha$ and $d$ move together ($-1$ to $1$; $0$: not at all)}
+  \end{tabular}
+  \vfill
+  \lesson{Same recipe, two numbers: the belief is an ellipse, and its tilt says angle and distance move together.}
+\end{frame}
+
+
+% ---- Also taken out of Day 2 on 2026-11-26: 'Laplace nearly exact far from the landmark'.
+\begin{frame}{Laplace on frame \ref{d2f:13}: nearly exact far from the landmark, not near it}
+  \centering
+  {\small $g$ = the posterior of frame \ref{d2f:13}, for a reading far from the landmark and one near it}\\[0.2em]
+  \includegraphics[width=0.82\textwidth]{d1_laplace.pdf}
+  \vfill
+  \lesson{Near the landmark $h$ bends: the bowl is lopsided and Laplace's $\sigma$ comes out too small.}
+\end{frame}
