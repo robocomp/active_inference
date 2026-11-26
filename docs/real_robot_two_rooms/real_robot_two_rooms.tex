@@ -1,0 +1,119 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,urlcolor=blue!50!black,linkcolor=black}
+\lstset{basicstyle=\ttfamily\small,backgroundcolor=\color{gray!10},frame=single,rulecolor=\color{gray!40},
+        columns=fullflexible,breaklines=true,xleftmargin=4pt,xrightmargin=4pt}
+\setlist{itemsep=2pt,topsep=4pt}
+\newcommand{\f}[1]{\texttt{#1}}
+\title{Room estimation with two rooms on the real robot\\[2pt]\large How to run it and how to make the robot cross doors}
+\author{For Noé, prepared with Claude for Pablo}
+\date{26 November 2026}
+\sloppy
+\begin{document}
+\maketitle
+
+\noindent All paths are relative to the repository root \f{robocomp/\allowbreak{}components/\allowbreak{}active\_\allowbreak{}inference}
+(branch \f{main}). This note is meant to be read by you and by your Claude session.
+
+\section{The idea in one paragraph}
+The robot starts in room~1 with an empty memory, estimates the room's layout while driving, finds the door, crosses
+it, estimates room~2, and crosses back. The cortex fleet that does this is the same one used in Webots:
+\f{retina}, \f{room\_\allowbreak{}concept}, \f{residual\_\allowbreak{}concept}, \f{controller}, \f{door\_\allowbreak{}concept}, \f{ltsm\_\allowbreak{}agent}
+(started by \f{room\_\allowbreak{}concept/\allowbreak{}estimation\_\allowbreak{}scripts/\allowbreak{}scripts/\allowbreak{}run\_\allowbreak{}crossing.sh}). Only the simulator-specific steps of the
+scripts have to be removed.
+
+\section{How the robot is told to cross a door}
+The controller watches a file, \f{controller/\allowbreak{}remote\_\allowbreak{}cmd.txt}. It reads it every 300\,ms and deletes it, so each command
+runs exactly once (code: \f{controller/\allowbreak{}src/\allowbreak{}specificworker.cpp}, the ``REMOTE RUN/STOP'' timer). There are two ways to
+use it.
+
+\subsection*{Option 1 (recommended): the robot runs the tour itself}
+\begin{lstlisting}
+echo "explore_tour on" > controller/remote_cmd.txt
+\end{lstlisting}
+The exploration drive (\f{controller/\allowbreak{}src/\allowbreak{}exploration\_\allowbreak{}drive.h}, spec
+\f{docs/\allowbreak{}superpowers/\allowbreak{}specs/\allowbreak{}2026-11-05-exploration-tour-design.md}) explores the current room until the room is
+confirmed, crosses the nearest door it has not crossed yet, explores the next room, and, when no uncrossed door is left,
+returns through the door it came in by. With two rooms this is exactly room~1 $\to$ cross $\to$ room~2 $\to$ cross back.
+It prints \f{[explore-tour] DONE} in the controller log when it finishes. The reference script is
+\f{room\_\allowbreak{}concept/\allowbreak{}estimation\_\allowbreak{}scripts/\allowbreak{}scripts/\allowbreak{}explore\_\allowbreak{}tour.sh} (Estimate mode, empty memory, recognition on).
+In the Webots apartment this passed 6 of 6 tours.
+
+\subsection*{Option 2: scripted legs}
+Write a mission script into the same file:
+\begin{lstlisting}
+mission "leg 1"
+  open new
+  cross new retry=2
+\end{lstlisting}
+\f{cross new} means ``the door whose far side I do not remember yet'', so no door name is needed in advance. After the
+first crossing the door has a name, and \f{cross room\_\allowbreak{}1} brings the robot back. A single line \f{cross door\_\allowbreak{}N} also
+works when you know the door node's name. \f{warm\_\allowbreak{}start\_\allowbreak{}tour.sh} shows how legs are sent and how their end is
+detected from \f{controller.log} (\f{passage DONE}, \f{mission 'leg N': completed /\allowbreak{} failed}).
+
+\subsection*{Other useful commands (same file)}
+\f{run}, \f{stop}, \f{cancel}, \f{pause}, \f{unpause}, \f{move <m>}, \f{turn <deg>}, \f{explore\_\allowbreak{}tour off}.
+\f{stop} is the remote equivalent of the Stop button in the controller window.
+
+\section{What is different on the real robot}
+\begin{enumerate}
+\item \textbf{Open the doors by hand before the run.} The \f{open} step goes through the DoorControl interface
+  (\f{door\_\allowbreak{}concept/\allowbreak{}src/\allowbreak{}door\_\allowbreak{}actuator.h}). It is provider-agnostic, but today the only provider is the Webots
+  supervisor, and its door matching uses simulator-only ground-truth poses. On the robot nobody serves it. An
+  \f{open} step is satisfied when the door is \emph{seen} open, so prop the door fully open and leave it open.
+\item \textbf{Remove the Webots-only steps from the scripts:}
+  \begin{itemize}
+  \item \f{tp.py} (teleports the robot to the start pose): place the robot by hand instead and use
+    \f{run\_\allowbreak{}crossing.sh <dir> here}, which does not teleport;
+  \item \f{door.py} (opens/closes the simulated doors);
+  \item the ground-truth pose log \f{gt\_\allowbreak{}pose.tsv}, \f{true\_\allowbreak{}room.py}, \f{doors\_\allowbreak{}crossed.py}: they read the simulator's pose and cannot work on hardware. (\f{here} still calls
+    \f{tp.py get} once; on the robot that line only logs an error.) \f{loc\_\allowbreak{}ok.py} is fine: it reads
+    \f{room\_\allowbreak{}concept}'s own scan residual, not ground truth, and is a useful ``is the pose good enough to start'' check.
+  \end{itemize}
+  Which doors were crossed is then judged from the robot's own logs plus a person watching.
+\item \textbf{Ground truth for the rooms.} As agreed in \f{REAL\_\allowbreak{}ROBOT\_\allowbreak{}VALIDATION\_\allowbreak{}PLAN.md}
+  (in Pablo's \f{Papers Ongoing/\allowbreak{}2026/\allowbreak{}ICRA-rejected} folder): survey each room with a laser meter. The meter gives
+  distances only, so the corners are computed by least squares. Not built yet: the survey file format, the
+  least-squares fit, and a scorer that compares the learnt layout (\f{layouts/\allowbreak{}learnt/\allowbreak{}*.svg}, \f{ltsm\_\allowbreak{}history}) with it.
+\item \textbf{Safety.} Stop with \f{echo stop > controller/\allowbreak{}remote\_\allowbreak{}cmd.txt} or the Stop button. Keep someone with a
+  joystick or emergency stop next to the robot. Stop agents with SIGTERM (\f{kill}), never \f{kill -9}: the agents
+  clean their nodes from the shared graph only on a graceful exit.
+\end{enumerate}
+
+\section{Suggested steps}
+\begin{enumerate}
+\item Write \f{real\_\allowbreak{}two\_\allowbreak{}rooms.sh}: a copy of \f{explore\_\allowbreak{}tour.sh} without the simulator steps listed above. Keep the
+  parts that matter: archive (never delete) the old memory (\f{ltsm\_\allowbreak{}agent/\allowbreak{}etc/\allowbreak{}ltsm\_\allowbreak{}memory.json},
+  \f{door\_\allowbreak{}concept/\allowbreak{}etc/\allowbreak{}door\_\allowbreak{}identities.csv}, \f{ltsm\_\allowbreak{}history}), set \f{MapMode = "estimate"} in
+  \f{room\_\allowbreak{}concept/\allowbreak{}etc/\allowbreak{}config.toml} and \f{Recognition.enabled = true} in \f{ltsm\_\allowbreak{}agent/\allowbreak{}etc/\allowbreak{}config.toml} (restored on
+  exit), start the fleet with \f{run\_\allowbreak{}crossing.sh <dir> here}, send \f{explore\_\allowbreak{}tour on}, wait for
+  \f{[explore-tour] DONE}, then \f{run\_\allowbreak{}crossing.sh <dir> collect} to copy the logs and stop the fleet.
+\item Dry-run that exact script in Webots on the two-room world (\f{webots-shadow/\allowbreak{}worlds/\allowbreak{}piso/\allowbreak{}tworooms-piso-door1open.wbt}) with the door left
+  open, so the only thing that changes on the robot is the hardware.
+\item On the robot: first a short run with one room and one crossing (option~2, a single \f{cross new} leg), then the
+  full tour (option~1).
+\item Survey both rooms with the laser meter and score the learnt layouts.
+\end{enumerate}
+
+\section{Known unknowns}
+\begin{itemize}
+\item Nobody has checked how the exploration drive copes with real sensor noise, or with a real doorway narrower than
+  the simulated one. The Webots dry run will not show this; the first robot run is the real test.
+\item The controller runs the three-mode hybrid (merged in main 37444cd7, \f{[Policy] HybridChain = true} with the
+  chain monitor on): open space is driven by the spline chain (planner, spline, tracker), tight stretches such as doorways
+  are handed to the local policy, and a recovery mode re-plans or waits when progress fails. The modes switch automatically;
+  nothing has to be selected. Its pose-noise inputs (\f{[Policy] SigmaRelXyM}, \f{SigmaRelYawRad}, \f{PoseDriftSigmaM},
+  \f{PoseDriftTimeS}) were fitted on Webots runs, and the config says to re-fit them on the real robot
+  (\f{controller/tools/pose\_error\_stats.py} needs ground truth, so this is a later step).
+\item The robot starts with an empty memory (Estimate mode). The warm-start mode, which starts from a remembered map,
+  accepts only \f{room\_\allowbreak{}1} as the start room for now.
+\end{itemize}
+
+\end{document}
