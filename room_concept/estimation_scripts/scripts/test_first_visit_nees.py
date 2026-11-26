@@ -23,6 +23,116 @@ def rand_cov(rng, n=6):
     return S @ (A @ A.T + n * np.eye(n)) @ S
 
 
+def integration():
+    import csv, tempfile
+    from pathlib import Path
+    import aba_geometry as G
+    wbt = F.DEFAULT_WBT
+    polys = F.polygons(wbt)
+    t0 = 1_000_000
+
+    def write(path, header, rows):
+        with open(path, 'w', newline='') as fh:
+            w = csv.writer(fh, delimiter='\t' if str(path).endswith('.tsv') else ','); w.writerow(header); w.writerows(rows)
+
+    def make_run(tmp, cls, nodes, legacy=False, dumps=()):
+        """A run folder: the robot sits at each of `nodes`' truth for 10 s; nodes = [(name, est, sig, ups)], ups = update stamps."""
+        run = Path(tmp); (run / 'replay').mkdir(parents=True, exist_ok=True)
+        pos = nodes[0][4]
+        write(run / 'gt_pose.tsv', ['t_ms', 'x', 'y', 'yaw'], [[t0 + 1000 * i, pos[0], pos[1], 0.0] for i in range(11)])
+        write(run / 'gt_error.csv', ['ts_ms', 'est_x', 'est_y', 'est_theta', 'gt_x_world', 'gt_y_world', 'gt_theta'],
+              [[t0 + 1000 * i, pos[0], pos[1], 0.3, pos[0], pos[1], 0.3 + math.pi / 2] for i in range(11)])
+        sig_k, est_k = R.SIG, R.EST
+        if legacy:
+            hdr = ['cycle', 'node', 'pkt_ts', 'npts', 'gated', *est_k, *sig_k]
+            rows = [[c, n, t, npts, g, *e, *sg] for n, e, sg, ups, _ in nodes for c, (t, npts, g) in enumerate(ups, 1)]
+        else:
+            hdr = ['cycle', 'node', 'pkt_ts', 'npts', 'gated', 'lidar_only', 'beam_qsum', 'rho_cam', 'rho_L', 'rho_chain', *est_k, *sig_k,
+                   'spose_x', 'spose_y', 'spose_psi', 'lever_x', 'lever_y']
+            rows = [[c, n, t, npts, g, 0, 0.0, 1, 1, 1, *e, *sg, 0, 0, 0, 0, 0] for n, e, sg, ups, _ in nodes for c, (t, npts, g) in enumerate(ups, 1)]
+        write(run / f'{cls}_ai2_log.csv', hdr, rows)
+        for d in dumps: (run / 'replay' / d).write_bytes(b'')
+        return run
+
+    def stub(rows_for):
+        def runner(dump, binp, cache): return rows_for(Path(dump).name)
+        return runner
+
+    def replay_rows(n, theta, sd, cyc0=1, dth=0.0, dP=0.0):
+        P = np.diag([s_ ** 2 for s_ in sd]); out = []
+        for i in range(n):
+            r = dict(upd=i, cycle=cyc0 + i, gated=0, lidar_only=0, dth_live=dth, dP_live=dP)
+            r.update({c: v for c, v in zip(F.DOFS, theta)})
+            r.update({f'S_{a}_{b}': P[a, b] for a in range(6) for b in range(a, 6)})
+            out.append(r)
+        return out, 0, ''
+
+    # ---- a nightstand: node on NIGHTSTAND_R, replay theta 2 cm off in cx with sigma 2 cm everywhere -> e^T P^-1 e / 6 = 1/6
+    T = G.object_truth(wbt, 'NIGHTSTAND_R'); sd = [0.02] * 6
+    est = [T['cx'], T['cy'], T['H'], T['w'], T['h'][0], T['yaw_theta_world']]
+    ups = [(t0 + 2000 + 1000 * i, 100, 0) for i in range(3)]
+    node = ('nightstand_1', est, sd, ups, (T['cx'], T['cy']))
+    theta = [est[0] + 0.02] + est[1:]
+    with tempfile.TemporaryDirectory() as tmp:
+        run = make_run(tmp, 'nightstand', [node], dumps=['nightstand_1_1_1.bin'])
+        def go(rows_for, smoke=False):
+            return {r['key']: r for r in F.score_tour(run, wbt, 'replay', tmp + '/c', smoke, {'nightstand'}, runner=stub(rows_for))}
+        r = go(lambda n: replay_rows(3, theta, sd, 1))['NIGHTSTAND_R']
+        check('integration: matched node, full P, NEES/DOF = 1/6', r['status'] == 'ok' and abs(r['nees'] - 1 / 6) < 1e-6 and r['label'] == '', f"{r['status']} {r.get('nees')} {r['why']}")
+        r = go(lambda n: replay_rows(3, theta, sd, 1, dP=1e-3))['NIGHTSTAND_R']
+        check('integration: replay not bit-identical -> no full P', r['status'] == 'no full P' and 'bit-identical' in r['why'], r['why'])
+        r = go(lambda n: replay_rows(3, theta, sd, 1, dP=1e-3), smoke=True)['NIGHTSTAND_R']
+        check('integration: --smoke waives the identity check', r['status'] == 'ok')
+        r = go(lambda n: replay_rows(2, theta, sd, 1))['NIGHTSTAND_R']
+        check('integration: alignment gate, row count', r['status'] == 'no full P' and 'updates' in r['why'], r['why'])
+        r = go(lambda n: replay_rows(3, theta, sd, 5))['NIGHTSTAND_R']
+        check('integration: alignment gate, cycle', r['status'] == 'no full P' and 'differ' in r['why'], r['why'])
+        rows = replay_rows(3, theta, sd, 1)[0]; rows[2]['upd'] = 7
+        r = go(lambda n: (rows, 0, ''))['NIGHTSTAND_R']
+        check('integration: alignment gate, upd index', r['status'] == 'no full P' and 'differ' in r['why'], r['why'])
+        r = go(lambda n: (replay_rows(3, theta, sd, 1)[0], 1, 'boom'))['NIGHTSTAND_R']
+        check('integration: replay tool exit != 0 -> no full P', r['status'] == 'no full P' and 'exit 1' in r['why'], r['why'])
+        recs = F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'nightstand'}, runner=stub(lambda n: replay_rows(3, theta, sd, 1)))
+        check('integration: the other nightstand is unmatched (reported)', {x['key']: x['status'] for x in recs}['NIGHTSTAND_L'] == 'unmatched')
+        check('integration: unmatched fails the class', not F.summarise(recs, 'nightstand')['passed'])
+    # ---- one node matched to both nightstands -> duplicate on both
+    TL = G.object_truth(wbt, 'NIGHTSTAND_L')
+    mid = [(est[0] + TL['cx']) / 2, (est[1] + TL['cy']) / 2] + est[2:]
+    with tempfile.TemporaryDirectory() as tmp:
+        run = make_run(tmp, 'nightstand', [('nightstand_1', mid, [3.0] * 6, ups, (T['cx'], T['cy']))], dumps=['nightstand_1_1_1.bin'])
+        recs = F.score_tour(run, wbt, 'replay', tmp + '/c', True, {'nightstand'}, runner=stub(lambda n: replay_rows(3, mid, [3.0] * 6, 1)))
+        st = {x['key']: x['status'] for x in recs}
+        check('integration: one node matched to two instances -> duplicate on both', st == {'NIGHTSTAND_L': 'duplicate', 'NIGHTSTAND_R': 'duplicate'}, str(st))
+    # ---- the legacy table: its own log header, read; no dump -> diagonal and labelled; a dump -> full P; a bad dump -> no full P
+    TT = G.object_truth(wbt, 'Table1')
+    test = [TT['cx'], TT['cy'], TT['H'], TT['w'], TT['h'][0], TT['yaw_theta_world']]
+    tnode = ('table_1', test, [0.02] * 6, ups, (TT['cx'], TT['cy']))
+    with tempfile.TemporaryDirectory() as tmp:
+        run = make_run(tmp, 'table', [tnode], legacy=True)
+        rows, legacy = F.class_rows(run, 'table')
+        check('legacy table log is read (aba_runlog.ai2_rows reads none of it)', legacy and len(rows) == 3 and R.ai2_rows(run, 'table') == [], f'{len(rows)} rows')
+        r = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'table'})}['Table1']
+        check('legacy table: matched, diagonal, labelled old engine', r['status'] == 'ok' and r['label'] == 'old engine, diagonal' and r['legacy_log'], f"{r['status']} {r['why']}")
+        check('legacy table: diagonal NEES of a perfect node is 0', abs(r['nees']) < 1e-9, str(r.get('nees')))
+    with tempfile.TemporaryDirectory() as tmp:
+        run = make_run(tmp, 'table', [tnode], legacy=True, dumps=['table_1_1_1.bin'])
+        tth = [test[0] + 0.02] + test[1:]
+        r = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'table'}, runner=stub(lambda n: replay_rows(3, tth, [0.02] * 6, 1)))}['Table1']
+        check('table with a valid dump: full P, no old-engine label', r['status'] == 'ok' and r['label'] == '' and abs(r['nees'] - 1 / 6) < 1e-6, f"{r['status']} {r.get('label')} {r.get('nees')}")
+        r = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'table'}, runner=stub(lambda n: replay_rows(3, tth, [0.02] * 6, 1, dP=1.0)))}['Table1']
+        check('table whose dump fails validation: no full P, never diagonal', r['status'] == 'no full P' and not r.get('label'), f"{r['status']} {r.get('label')}")
+    # ---- c2v: the image is chosen by the FULL-P NEES
+    Tt = dict(cls='table', symmetry='c2v', H=0.75, w=1.2, h=(0.8, 0.8))
+    est_c = (1.03, 1.97, 0.76, 0.85, 1.22, 0.33 + math.pi / 2)      # the swapped description of a (1.2, 0.8, 0.3) table
+    P_c = rand_cov(np.random.default_rng(5))
+    e_c, Pc = F.graded_error_full(est_c, [math.sqrt(P_c[i, i]) for i in range(6)], P_c, Tt, (1.0, 2.0, 0.3))
+    allq = []
+    for e_, s_, perm in R.c2v_images(est_c, [1.0] * 6):
+        ee = R.graded_errors(e_, s_, dict(Tt, symmetry='none'), (1.0, 2.0, 0.3))[0]
+        allq.append(F.nees_full(ee, P_c[np.ix_(list(perm), list(perm))])[0])
+    check('c2v: image with the smallest full-P NEES', abs(F.nees_full(e_c, Pc)[0] - min(allq)) < 1e-12, f'{F.nees_full(e_c, Pc)[0]:.4f} vs {min(allq):.4f}')
+
+
 def main():
     rng = np.random.default_rng(1)
     # 1. e ~ N(0, P): NEES/DOF has mean 1 (chi2_6 / 6); each DOF's e^2/P_kk has mean 1
@@ -37,15 +147,13 @@ def main():
     exact = float(e2 @ np.linalg.inv(P2) @ e2) / 6
     q2, pd2 = F.nees_full(e2, P2)
     check('full P is not diagonal NEES', abs(q2 - exact) < 1e-12 and abs(q2 - F.nees_diag(e2, np.ones(6))[0]) > 0.1, f'{q2:.6f} vs diag {F.nees_diag(e2, np.ones(6))[0]:.6f}')
-    # 3. rotated frame: (cx, cy) block and P rotated together leave the NEES unchanged; P alone rotated does not
+    # 3. the statistic is invariant to a common rotation of e and P (a property of e^T P^-1 e; the scorer itself never rotates P:
+    #    the truth is taken into the published frame, so e and P already share it)
     a = 0.7; Rm = np.eye(6); Rm[:2, :2] = [[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]]
-    Pa = P.copy(); Pa[:2, :2] = np.diag([1e-4, 4e-2]) * 1.0; Pa[:2, 2:] = 0; Pa[2:, :2] = 0
+    Pa = P.copy(); Pa[:2, :2] = np.diag([1e-4, 4e-2]); Pa[:2, 2:] = 0; Pa[2:, :2] = 0
     ea = np.array([0.01, 0.15, 0.01, 0.0, 0.0, 0.0])
-    q_a = F.nees_full(ea, Pa)[0]
-    q_r = F.nees_full(Rm @ ea, Rm @ Pa @ Rm.T)[0]
-    q_wrong = F.nees_full(Rm @ ea, Pa)[0]
-    check('rotated frame: e and P rotated together', abs(q_a - q_r) < 1e-12 * max(1, q_a), f'{q_a:.6f} {q_r:.6f}')
-    check('rotated frame: P left behind is a different (wrong) number', abs(q_a - q_wrong) > 1e-3 * q_a, f'{q_a:.4f} vs {q_wrong:.4f}')
+    q_a = F.nees_full(ea, Pa)[0]; q_r = F.nees_full(Rm @ ea, Rm @ Pa @ Rm.T)[0]
+    check('NEES invariant to a common rotation of e and P', abs(q_a - q_r) < 1e-12 * max(1, q_a), f'{q_a:.6f} {q_r:.6f}')
     # and the frames themselves: a truth taken into a rotated published frame lands where Frames.world_to_pub says
     import aba_geometry as G
     ph, ts = 0.4, (0.3, -0.2)
@@ -90,6 +198,7 @@ def main():
     check('FAIL: one unmatched visit', not F.summarise(recs + [dict(run='r', key='u', name='u', cls='bed', room='room_1', status='unmatched', why='x')], 'bed')['passed'])
     check('FAIL: one visit with no full P', not F.summarise(recs + [dict(run='r', key='u', name='u', cls='bed', room='room_1', status='no full P', why='x')], 'bed')['passed'])
     check('FAIL: mean 2.5', not F.summarise([dict(r, nees=2.5) for r in recs], 'bed')['passed'])
+    integration()
     print('\n' + ('ALL PASS' if not FAILS else f'FAILED: {FAILS}'))
     return 1 if FAILS else 0
 

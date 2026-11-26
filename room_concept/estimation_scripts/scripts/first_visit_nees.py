@@ -22,8 +22,16 @@ Definitions pre-registered in .superpowers/sdd/2026-11-23-shared-engine/task-G1a
               (aba_runlog.updates) = the k-th update of its dump; the cycle, gated and lidar_only of the two must agree.
               Valid only if the tool exits 0 and the draw's dth_live and dP_live are exactly 0 (bit-identical to the live run), else
               the visit is "no full P" (--smoke waives that, for runs whose dumps predate the engine in the tool).
-  table       the legacy binary writes no dumps: its NEES is DIAGONAL from the ai2 log sigma and labelled "old engine, diagonal".
+  table       the legacy binary writes no dumps (and a different ai2 header: no lidar_only / beam_qsum / rho_* / spose_* / lever_*, so
+              aba_runlog.ai2_rows reads none of it; legacy_rows reads it with the legacy log's own rule: an update is a row with
+              gated == 0 and npts > 0, as table_fitter.cpp writes npts = 0 on the no-mask rows). Match and draw use those rows. With NO
+              dump the NEES is DIAGONAL from the log's sigma, labelled "old engine, diagonal". A table WITH a dump is graded with full P
+              like any class (the c2v image chosen by the full-P NEES); a dump that fails validation is "no full P", never diagonal.
               Any other class without a usable dump: the visit is "no full P", never silently diagonal.
+  P and fit    P is the node's own posterior; fit_rms^2 never enters it. fit_rms per visit and per-class mean fit_rms^2 against mean
+              P_cx, P_cy are PRINTED (report only, not in the verdict).
+  duplicates  one node matched to two instances of a tour: both are "duplicate", fail the class, and give no draw.
+  no room     an instance whose centre is in no room polygon is skipped, listed as "no room" (not a visit).
   output      per class: visits, matched, graded, mean NEES/DOF, bootstrap 95 % CI over visits (percentile, 10000 resamples of the
               graded visits, fixed seed: a computation, not a bound), per-DOF mean e^2/P_kk, PASS/FAIL. No other statistic, no
               outlier removal. PASS needs: n graded >= 10, no unmatched visit, no 'no full P' visit, mean in [0.5, 2].
@@ -72,14 +80,89 @@ def cov_from_row(row):
 
 
 def graded_error_full(est, sig, P, T, truth_pub):
-    """(e, P in the TRUTH's DOF labels). The error is aba_runlog.graded_errors; for a c2v class the covariance follows the image
-    graded_errors picked: perm[k] = the estimate's DOF that stands for DOF k, so P_img = P[perm][:, perm]."""
-    e, _, perm = R.graded_errors(est, sig, T, truth_pub)
-    perm = list(perm)
-    return np.asarray(e, float), np.asarray(P, float)[np.ix_(perm, perm)]
+    """(e, P in the TRUTH's DOF labels). The error is aba_runlog.graded_errors. For a c2v class (a table) the four equivalent
+    descriptions (aba_runlog.c2v_images) are each scored with graded_errors on that image alone, P permuted with the image
+    (perm[k] = the estimate's DOF that stands for DOF k: P_img = P[perm][:, perm]), and the image with the smallest FULL-P NEES is
+    returned (graded_errors' own pick uses a diagonal cost, which is not this statistic)."""
+    P = np.asarray(P, float)
+    if T.get('symmetry') != 'c2v':
+        e, _, _ = R.graded_errors(est, sig, T, truth_pub)
+        return np.asarray(e, float), P
+    best = None
+    for e_, s_, perm in R.c2v_images(est, sig):
+        e, _, _ = R.graded_errors(e_, s_, dict(T, symmetry='none'), truth_pub)
+        perm = list(perm); Pi = P[np.ix_(perm, perm)]
+        try: q = nees_full(e, Pi)[0]
+        except np.linalg.LinAlgError: continue
+        if best is None or q < best[0]: best = (q, np.asarray(e, float), Pi)
+    if best is None: raise np.linalg.LinAlgError('no c2v image has a positive definite P')
+    return best[1], best[2]
 
 
 # ------------------------------------------------------------------------------------------------ rooms and the first stay
+def legacy_rows(run, cls):
+    """The ai2 log of a LEGACY binary (table_concept, table_fitter.cpp log_ai2_csv): header without lidar_only / beam_qsum / rho_* /
+    spose_* / lever_*. Rows shaped like aba_runlog.ai2_rows' (node, t, est, sig, cam, L ...); an update = gated == 0 and npts > 0 (the
+    log writes npts = 0 on the no-mask rows, and gated cycles do not update); the legacy engine has no separate LiDAR-only update."""
+    p = run / f'{cls}_ai2_log.csv'
+    if not p.exists(): return []
+    out = []
+    with open(p) as fh:
+        for r in csv.DictReader(fh):
+            try:
+                d = dict(node=r['node'], t=int(r['pkt_ts']), gated=int(float(r['gated'])), npts=int(float(r['npts'])), lidar_only=0,
+                         beam_qsum=0.0, rho_cam=1.0, rho_L=1.0, rho_chain=1.0,
+                         sig=[float(r[k]) for k in R.SIG], est=[float(r[k]) for k in R.EST], cycle=int(float(r['cycle'])))
+            except (KeyError, ValueError):
+                continue
+            d['cam'] = d['gated'] == 0 and d['npts'] > 0
+            d['L'] = False
+            out.append(d)
+    out.sort(key=lambda d: d['t'])
+    return out
+
+
+def class_rows(run, cls):
+    """(rows, legacy): aba_runlog.ai2_rows, else the legacy reader when the file has the legacy header."""
+    rows = R.ai2_rows(run, cls)
+    if rows: return rows, False
+    p = run / f'{cls}_ai2_log.csv'
+    if p.exists():
+        with open(p) as fh: hdr = fh.readline().strip().split(',')
+        if 'lidar_only' not in hdr: return legacy_rows(run, cls), True
+    return [], False
+
+
+def polygons(wbt):
+    """The room polygons of THIS world file (wbt_rooms reads its module default otherwise), and aba_geometry made to use them."""
+    import wbt_rooms as W
+    if os.path.abspath(wbt) != os.path.abspath(W.WBT):
+        W.WBT = wbt; W.MESH_DIR = os.path.join(os.path.dirname(wbt), 'meshes'); W.parse_wbt.__defaults__ = (wbt,)
+    polys = G.room_polygons()
+    G.room_polygons = lambda: polys
+    return polys
+
+
+def replay_identity(replay_bin):
+    """One line: the replay binary, its mtime, the HEAD of the source tree it sits in, and whether any source it is built from
+    (countable_concept/src, tools/replay, common/ai_belief, common/concept_manifest) is newer than the binary."""
+    import datetime
+    try: st = os.stat(replay_bin)
+    except OSError: return f'replay binary {replay_bin}: NOT FOUND'
+    root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(replay_bin)), '..', '..', '..'))
+    def git(*a):
+        r = subprocess.run(['git', '-C', root, *a], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else '?'
+    newest = 0.0
+    for d in ('countable_concept/src', 'countable_concept/tools/replay', 'common/ai_belief', 'common/concept_manifest'):
+        for dp, _, fs in os.walk(os.path.join(root, d)):
+            for f in fs:
+                if f.endswith(('.h', '.cpp')): newest = max(newest, os.path.getmtime(os.path.join(dp, f)))
+    return (f"replay binary {replay_bin}  built {datetime.datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M}  source tree {root} "
+            f"HEAD {git('describe', '--always', '--dirty')} ({git('log', '-1', '--format=%cd', '--date=iso')})  "
+            + ('STALE: a source file is newer than the binary' if newest > st.st_mtime else 'no source file newer than the binary'))
+
+
 def read_gt_pose(run):
     out = []
     for r in R.read_tsv(run / 'gt_pose.tsv'):
@@ -140,25 +223,29 @@ def instances(wbt):
     return out
 
 
-def score_tour(run, wbt, replay_bin, cache, smoke=False, only=None, say=print):
-    """[dict]: one record per (instance) of the tour: status 'ok' | 'unmatched' | 'no full P' | 'not visited', and the numbers."""
+def score_tour(run, wbt, replay_bin, cache, smoke=False, only=None, runner=None, say=print):
+    """[dict]: one record per instance of the tour: status 'ok' | 'unmatched' | 'no full P' | 'duplicate' | 'not visited' | 'no room'.
+    runner(dump, replay_bin, cache) -> (rows, rc, stderr) is injectable (tests)."""
+    runner = runner or replay_rows
     run = R.run_path(run)
-    series = room_series(read_gt_pose(run), G.room_polygons())
+    series = room_series(read_gt_pose(run), polygons(wbt))
     rows_by_cls, cycles_by_cls, recs = {}, {}, []
     for key, name, cls in instances(wbt):
         if only and cls not in only: continue
-        rec = dict(run=run.name, key=key, name=name, cls=cls, status='', why='')
+        rec = dict(run=run.name, key=key, name=name, cls=cls, status='', why='', room='?')
         recs.append(rec)
-        T = G.object_truth(wbt, key)
+        try: T = G.object_truth(wbt, key)
+        except ValueError as ex: rec.update(status='no room', why=str(ex)); continue
         rec['room'] = T['room_poly']
         stay = first_stay(series, T['room_poly'])
         if stay is None: rec.update(status='not visited', why=f'the robot was never inside {T["room_poly"]}'); continue
         t_in, t_out, is_open = stay
         rec.update(t_in=t_in, t_out=t_out, stay_open=is_open)
-        rows = rows_by_cls.setdefault(cls, R.ai2_rows(run, cls))
+        if cls not in rows_by_cls: rows_by_cls[cls] = class_rows(run, cls)
+        rows, legacy = rows_by_cls[cls]
         S = {'A1': {'t_claim_ms': t_in, 't_dwell1_ms': t_out}, 'A2': {'t_dwell1_ms': t_out}}
         m = R.match_node_to_truth(run, rows, S, T)
-        rec.update(d2=m['d2'], runner=m['runner'], runner_d2=m['runner_d2'], fit_rms=m['fit_rms'], fit_n=m['fit_n'])
+        rec.update(d2=m['d2'], runner=m['runner'], runner_d2=m['runner_d2'], fit_rms=m['fit_rms'], fit_n=m['fit_n'], legacy_log=legacy)
         if m['node'] is None: rec.update(status='unmatched', why=m['why'] or 'no node'); continue
         node = m['node']; fr = m['frames']; rec['node'] = node
         ups = R.updates(rows, node)
@@ -167,40 +254,50 @@ def score_tour(run, wbt, replay_bin, cache, smoke=False, only=None, say=print):
         k = len(inside) - 1; d = inside[k]
         rec.update(t_first=inside[0]['t'], t_draw=d['t'], n_updates=len(inside))
         px, py, pyaw = fr.world_to_pub(T['cx'], T['cy'], T['yaw_theta_world'], t_out)
-        est, sig = d['est'], d['sig']
-        if T.get('symmetry') == 'c2v' or cls == 'table': rec['label'] = 'old engine, diagonal'
-        # --- full P from the replay
+        truth_pub = (px, py, pyaw)
         dumps = dump_for(run, node)
-        P = why = None
+        P = None; why = ''; est = sig = None
         if len(dumps) == 1:
-            rr, rc, err = replay_rows(dumps[0], replay_bin, cache)
-            if k >= len(rr): why = f'dump has {len(rr)} updates, the ai2 log {len(ups)}'
+            rr, rc, err = runner(dumps[0], replay_bin, cache)
+            if len(rr) != len(ups): why = f'the dump has {len(rr)} updates, the ai2 log {len(ups)} for {node}'
             else:
                 r = rr[k]
-                cyc = cycles_by_cls.setdefault(cls, update_cycles(run, cls)).get(node, [])
-                same = (len(cyc) == len(ups) and int(r['cycle']) == cyc[k] and int(r['gated']) == d['gated']
-                        and int(r['lidar_only']) == d['lidar_only'])
-                dth, dP = float(r['dth_live']), float(r['dP_live'])
-                rec.update(dth_live=dth, dP_live=dP, replay_rc=rc, dtheta_vs_ai2=max(abs(float(r[c]) - e) for c, e in zip(DOFS, est)))
-                if not same: why = f'update {k}: replay cycle/gated/lidar_only differ from the ai2 log'
-                elif not smoke and rc != 0: why = f'replay tool exit {rc}: ' + (err.strip().splitlines() or ['?'])[-1][:120]
-                elif not smoke and not (dth == 0.0 and dP == 0.0): why = f'replay not bit-identical to the live run at the draw (dth_live {dth:.3g}, dP_live {dP:.3g})'
+                if legacy: cyc_k, ok_cyc = d['cycle'], True
                 else:
-                    est = [float(r[c]) for c in DOFS]; sig = [math.sqrt(float(r[f'S_{i}_{i}'])) for i in range(6)]; P = cov_from_row(r)
+                    if cls not in cycles_by_cls: cycles_by_cls[cls] = update_cycles(run, cls)
+                    cyc = cycles_by_cls[cls].get(node, []); ok_cyc = len(cyc) == len(ups); cyc_k = cyc[k] if ok_cyc else None
+                if not ok_cyc: why = 'the ai2 cycle column does not align with its updates'
+                else:
+                    dth, dP = float(r['dth_live']), float(r['dP_live'])
+                    rec.update(dth_live=dth, dP_live=dP, replay_rc=rc, dtheta_vs_ai2=max(abs(float(r[c]) - e) for c, e in zip(DOFS, d['est'])))
+                    if not (int(r['upd']) == k and int(r['cycle']) == cyc_k and int(r['gated']) == d['gated'] and int(r['lidar_only']) == d['lidar_only']):
+                        why = f'update {k}: replay upd/cycle/gated/lidar_only differ from the ai2 log'
+                    elif not smoke and rc != 0: why = f'replay tool exit {rc}: ' + (err.strip().splitlines() or ['?'])[-1][:120]
+                    elif not smoke and not (dth == 0.0 and dP == 0.0): why = f'replay not bit-identical to the live run at the draw (dth_live {dth:.3g}, dP_live {dP:.3g})'
+                    else:
+                        est = [float(r[c]) for c in DOFS]; P = cov_from_row(r); sig = [math.sqrt(P[i, i]) for i in range(6)]
         else:
             why = f'{len(dumps)} replay dumps for {node}' if dumps else f'no replay dump for {node}'
-        if P is None and cls == 'table':
-            rec.update(status='ok', why=why or '', label='old engine, diagonal')       # legacy: diagonal from the ai2 log sigma
-            e, s, _ = R.graded_errors(d['est'], d['sig'], T, (px, py, pyaw))
-            q, perdof = nees_diag(e, s)
+        if P is None and cls == 'table' and not dumps:
+            e, s_, _ = R.graded_errors(d['est'], d['sig'], T, truth_pub)       # the legacy binary: no dump exists; diagonal from the log
+            q, perdof = nees_diag(e, s_)
+            rec.update(label='old engine, diagonal', pcx=float(d['sig'][0]) ** 2, pcy=float(d['sig'][1]) ** 2)
         elif P is None:
             rec.update(status='no full P', why=why); continue
         else:
-            e, Pg = graded_error_full(est, sig, P, T, (px, py, pyaw))
-            try: q, perdof = nees_full(e, Pg)
+            try:
+                e, Pg = graded_error_full(est, sig, P, T, truth_pub); q, perdof = nees_full(e, Pg)
             except np.linalg.LinAlgError: rec.update(status='no full P', why='theta covariance not positive definite'); continue
-            rec.update(status='ok', why='')
-        rec.update(nees=q, perdof=[float(x) for x in perdof], e=[float(x) for x in e])
+            rec.update(label='', pcx=float(Pg[0, 0]), pcy=float(Pg[1, 1]))
+        rec.update(status='ok', why='', nees=q, perdof=[float(x) for x in perdof], e=[float(x) for x in e])
+    # one node matched to two instances of the tour: a duplicate draw on both, failing both
+    by_node = {}
+    for r in recs:
+        if r['status'] in ('ok', 'no full P') and r.get('node'): by_node.setdefault((r['cls'], r['node']), []).append(r)
+    for (cls, node), rs in by_node.items():
+        if len(rs) > 1:
+            for r in rs:
+                r.update(status='duplicate', why=f'{node} is the match of {len(rs)} instances: ' + ', '.join(x['key'] for x in rs))
     return recs
 
 
@@ -234,40 +331,50 @@ def bootstrap_ci(x, n=BOOT_N, seed=BOOT_SEED):
 
 
 def summarise(recs, cls):
-    rs = [r for r in recs if r['cls'] == cls and r['status'] != 'not visited']
+    rs = [r for r in recs if r['cls'] == cls and r['status'] not in ('not visited', 'no room')]
     ok = [r for r in rs if r['status'] == 'ok']
     q = [r['nees'] for r in ok]
     mean = float(np.mean(q)) if q else math.nan
     lo, hi = bootstrap_ci(q)
     perdof = np.mean([r['perdof'] for r in ok], 0).tolist() if ok else [math.nan] * 6
     n_un = sum(r['status'] == 'unmatched' for r in rs); n_nop = sum(r['status'] == 'no full P' for r in rs)
+    n_dup = sum(r['status'] == 'duplicate' for r in rs)
     why = []
     if len(ok) < N_MIN: why.append(f'n graded {len(ok)} < {N_MIN}')
     if n_un: why.append(f'{n_un} unmatched')
     if n_nop: why.append(f'{n_nop} no full P')
+    if n_dup: why.append(f'{n_dup} duplicate draw')
     if not (PASS_LO <= mean <= PASS_HI): why.append(f'mean {mean:.2f} outside [{PASS_LO}, {PASS_HI}]')
     labels = sorted({r.get('label', '') for r in ok} - {''})
-    return dict(cls=cls, visits=len(rs), matched=sum(r['status'] != 'unmatched' for r in rs), graded=len(ok), mean=mean, lo=lo, hi=hi,
-                perdof=perdof, passed=not why, why=why, label='; '.join(labels), not_visited=sum(r['cls'] == cls and r['status'] == 'not visited' for r in recs))
+    fit = [r for r in ok if r.get('fit_rms') is not None and math.isfinite(r['fit_rms'])]
+    frame = dict(fit_rms2=float(np.mean([r['fit_rms'] ** 2 for r in fit])) if fit else math.nan,
+                 pcx=float(np.mean([r['pcx'] for r in fit])) if fit else math.nan, pcy=float(np.mean([r['pcy'] for r in fit])) if fit else math.nan)
+    return dict(cls=cls, visits=len(rs), matched=sum(r['status'] not in ('unmatched',) for r in rs), graded=len(ok), mean=mean, lo=lo, hi=hi,
+                perdof=perdof, passed=not why, why=why, label='; '.join(labels), frame=frame,
+                not_visited=sum(r['cls'] == cls and r['status'] == 'not visited' for r in recs),
+                no_room=sum(r['cls'] == cls and r['status'] == 'no room' for r in recs))
 
 
 def report(recs, classes=CLASSES, say=print):
     say('first-visit NEES/DOF, 6-DOF, full theta covariance (AuRo test a)   registered pass: n >= 10 and mean in [0.5, 2]')
     for c in classes:
         s = summarise(recs, c)
-        if s['visits'] == 0 and not s['not_visited']: continue
+        if s['visits'] == 0 and not s['not_visited'] and not s['no_room']: continue
         say(f"{c:13s} visits {s['visits']:3d}  matched {s['matched']:3d}  graded {s['graded']:3d}  mean NEES/DOF {s['mean']:7.3f}  "
             f"95% CI [{s['lo']:.3f}, {s['hi']:.3f}]  {'PASS' if s['passed'] else 'FAIL'}"
             + (f"  [{s['label']}]" if s['label'] else '') + (f"  ({'; '.join(s['why'])})" if s['why'] else '')
-            + (f"  not visited {s['not_visited']}" if s['not_visited'] else ''))
+            + (f"  not visited {s['not_visited']}" if s['not_visited'] else '') + (f"  no room {s['no_room']}" if s['no_room'] else ''))
         say('              per-DOF mean e^2/P_kk  ' + '  '.join(f'{d} {v:.3f}' for d, v in zip(DOFS, s['perdof'])))
+        f = s['frame']
+        say(f"              frame fit (report only): mean fit_rms^2 {f['fit_rms2']:.2e} m^2 vs mean P_cx {f['pcx']:.2e}, P_cy {f['pcy']:.2e} m^2")
+        if c == 'bed': say('              note: h inside the interval contributes 0 to e; the mean is over 6 DOF as registered')
     say('--- per visit')
     for r in recs:
         if classes and r['cls'] not in classes: continue
         base = f"{r['run']} {r['cls']:12s} {r['key']:24s} {r['room']:7s} {r['status']:11s}"
         if r['status'] == 'ok':
-            say(f"{base} node {r['node']} d2 {r['d2']:.2f} nees/DOF {r['nees']:.3f} (n_upd {r['n_updates']}, dtheta_vs_ai2 {r.get('dtheta_vs_ai2', math.nan):.2g})"
-                + (f" [{r['label']}]" if r.get('label') else '') + (f" ({r['why']})" if r['why'] else ''))
+            say(f"{base} node {r['node']} d2 {r['d2']:.2f} fit_rms {r['fit_rms']:.4f} m nees/DOF {r['nees']:.3f} (n_upd {r['n_updates']}, dtheta_vs_ai2 {r.get('dtheta_vs_ai2', math.nan):.2g})"
+                + (f" [{r['label']}]" if r.get('label') else '') + (' [legacy log]' if r.get('legacy_log') else ''))
         else:
             say(f"{base} {r['why']}" + (f" (nearest d2 {r['d2']:.1f})" if r['status'] == 'unmatched' and 'd2' in r else ''))
 
@@ -285,6 +392,7 @@ def main(argv):
         else: runs.append(a)
         i += 1
     if not runs: print(__doc__); return 2
+    print(replay_identity(replay_bin))
     recs = []
     for run in runs: recs += score_tour(run, wbt, replay_bin, cache, smoke, only)
     report(recs, tuple(c for c in CLASSES if not only or c in only))
