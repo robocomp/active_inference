@@ -266,12 +266,78 @@ int check(const char* path)
 }
 }  // namespace
 
+// ── Part 2: the shared oracle, as an object agent holds it (rc::standpoint::Oracle: no planner), rasterising the same inputs
+// itself, answers what the controller answers. The planner is set up as the live controller sets it up: the body installed with
+// set_footprint (controller_session.cpp), so the lattice pad already includes the margin. Compared at every query of part 1:
+// -log P(stand and turn) in both stages, and P(stand facing yaw) > 0 ⇔ pose_free at the 8 headings.
+int oracle_parity()
+{
+    int failures = 0;
+    for (const auto& w : worlds())
+    {
+        rc::GridPlanner p;
+        p.params.cell_size_m = w.cell;
+        p.params.safety_margin_m = w.margin;
+        p.set_footprint(rc::RobotFootprint::shadow());
+        p.set_passages(w.passages);
+        p.set_world(w.room, w.obstacles, w.cells);
+        rc::standpoint::Oracle o(rc::RobotFootprint::shadow(), w.cell, w.margin);
+        o.set_world(w.room, w.passages, w.obstacles, w.cells);
+        long n = 0, bad = 0;
+        const V2 org = p.grid_origin();
+        Lcg g{99};
+        std::vector<V2> qs;
+        for (int iy = 0; iy < p.height(); ++iy)
+            for (int ix = 0; ix < p.width(); ++ix)
+                qs.emplace_back(org.x() + static_cast<float>(ix) * p.cell_size(), org.y() + static_cast<float>(iy) * p.cell_size());
+        for (int k = 0; k < 400; ++k) qs.emplace_back(g.uni(-0.8f, 5.6f), g.uni(-0.8f, 4.8f));
+        for (const V2& q : qs)
+        {
+            for (const bool pers : {false, true})
+            {
+                const float a = p.fit_nats_turning(q, pers), b = o.nats_turning(q, pers);
+                ++n;
+                if (not (a == b or (std::isinf(a) and std::isinf(b)))) ++bad;
+                const double pa = std::exp(-static_cast<double>(a));
+                if (pa != o.p_stand_and_turn(q, pers)) ++bad;
+            }
+            for (int h = 0; h < 8; ++h)
+            {
+                const float yaw = static_cast<float>(h) * kPi / 4.f;
+                ++n;
+                if (p.pose_free(q, yaw) != (o.p_stand(q, yaw, false) > 0.0)) ++bad;
+            }
+            ++n;
+            if (p.can_turn_here(q) != (o.p_stand_and_turn(q, false) > 0.0)) ++bad;
+        }
+        const bool ok = bad == 0 and o.raster().w == p.width() and o.raster().h == p.height();
+        std::printf("  [%s] %-24s %ld comparisons, %ld differ\n", ok ? "ok" : "FAIL", w.name.c_str(), n, bad);
+        if (not ok) ++failures;
+    }
+    // A finding, not a pass/fail: a planner that has NOT had set_footprint called (every offline tool, and the golden above)
+    // pads its first lattice by the BARE circumscribed radius, because the margin reaches the footprint only in rebuild_offsets,
+    // at the end of set_world. Its lattice origin then differs from the live controller's by the margin.
+    {
+        rc::GridPlanner fresh, live;
+        fresh.params.safety_margin_m = live.params.safety_margin_m = 0.05f;
+        live.set_footprint(rc::RobotFootprint::shadow());
+        const std::vector<V2> room{{0, 0}, {4, 0}, {4, 4}, {0, 4}};
+        fresh.set_world(room, {});
+        live.set_world(room, {});
+        std::printf("  (finding) lattice origin: fresh planner %.4f, after set_footprint %.4f — the first set_world of an "
+                    "uninstalled planner pads without the margin\n", fresh.grid_origin().x(), live.grid_origin().x());
+    }
+    return failures;
+}
+
 int main(int argc, char** argv)
 {
     if (argc >= 3 and std::string_view(argv[1]) == "--record") return record(argv[2]);
     const char* path = argc >= 2 ? argv[1] : "tests/data/standpoint_oracle_golden.txt";
     std::printf("K3 part 1: the controller's standpoint decisions vs the golden recorded at BASE\n");
     int failures = check(path);
+    std::printf("\nK3 part 2: the shared oracle (no planner) on the same inputs answers what the controller answers\n");
+    failures += oracle_parity();
     std::printf(failures == 0 ? "\nALL PASS (0 failures)\n" : "\nFAILURES: %d\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -41,31 +41,13 @@
 #include <Eigen/Dense>
 
 #include "../../common/robot_footprint/robot_footprint.h"
+#include "../../common/standpoint/standpoint_oracle.h"   // rc::OccupiedCells, the raster + fit kernel (K3)
 
 namespace rc
 {
 
-// residual_concept's occupancy as the planner takes it: cell centres in the room frame at residual's
-// own resolution. At namespace scope because a nested type cannot serve as a default argument inside
-// its own enclosing class — its default member initialisers are not complete there yet.
-struct OccupiedCells
-{
-    std::vector<Eigen::Vector2f> centres;
-    float cell_size_m = 0.f;                    // 0 ⇒ no grid supplied, nothing marked
-    // ── HOW MUCH EACH CELL COSTS, FROM RESIDUAL'S OWN BELIEF (2026-10-19, try96 leg 3) ─────────────
-    // One entry per centre, in NATS: −log Pr(cell mostly free | residual's Beta), see residual_risk.h.
-    // A finite entry makes the cell a TOLL — the A* pays residual_risk_weight per nat the body covers —
-    // instead of a wall; +inf keeps it HARD (no belief behind it, or a live LiDAR return in it).
-    // ★EMPTY (or the wrong length) ⇒ EVERY cell is hard, exactly as before: a caller that has no belief
-    // to offer gets the conservative planner, never a permissive one.
-    std::vector<float> risk_nats;
-    // ── Task 3c fix round 1: WHICH HARD CELLS COME AND GO ─────────────────────────────────────────────
-    // One entry per centre (or empty): 1 = the cell is hard ONLY because a live return lands in it this cycle
-    // (residual_risk.h harden_corroborated; it had a finite price before). GridPlanner keeps such cells out of its
-    // PERSISTENT occupancy (fit_nats_* with persistent_only), so a standpoint verdict can tell a wall from a person
-    // walking past. occ_ — routing, pose_free, the distance map — is unchanged: they stay hard there.
-    std::vector<std::uint8_t> live_hard;
-};
+// rc::OccupiedCells (residual's cells as the planner takes them) lives in the shared standpoint oracle since K3 (2026-11-26),
+// with the rasterisation and the body-fit kernel this class uses: common/standpoint/standpoint_oracle.h.
 
 class GridPlanner
 {
@@ -417,11 +399,13 @@ private:
     //   (0.10 m live), which is right for routing and wrong for "does the hull touch it". So the sweep keeps the cells' SOURCE
     //   squares (hard residual cells: centre + half-size) and, for everything ELSE that occupies the lattice (room mask, obstacle
     //   polygons), the occupancy raster as it stood BEFORE the residual stamp. Routing keeps using occ_ unchanged.
-    struct SourceSquare { Eigen::Vector2f c; float half = 0.f; };
+    using SourceSquare = rc::standpoint::SourceSquare;
     std::vector<SourceSquare> src_squares_;
     std::vector<std::uint8_t> occ_nocells_;
     std::vector<std::uint8_t> live_only_;   // Task 3c: cells occ_ marks ONLY because of a live-hard residual cell (or empty)
     bool cell_free_persistent(int ix, int iy, int h) const;
+    // K3: the shared oracle's view of this planner's raster (no copy): the fit kernel runs on it.
+    rc::standpoint::RasterView raster_view() const { return {xmin_, ymin_, cell_, w_, h_, occ_, live_only_, risk_}; }
     // Soft residual risk per planner cell, nats (0 = none). Empty when nothing soft was supplied, which
     // is how plan() skips the footprint sum entirely in the common case.
     std::vector<float> risk_;

@@ -18,6 +18,9 @@
 //     return in the body band — residual_risk.h harden_corroborated)  -> the body cannot be there;
 //     soft residual cells -> -log Pr(cell mostly free | residual's Beta), summed over the cells the body covers.
 //   So -log P(fits) = +inf if a hard cell is under the body, else the soft nats under it (GridPlanner::fit_nats_*).
+//   ★ K3 (2026-11-26): GridPlanner::fit_nats_* and the raster they read are the SHARED standpoint oracle
+//   (common/standpoint/standpoint_oracle.h), the same function the object agents' p_stand (G6) calls — so the producer's offer
+//   and this consumer's verdict come from one model. Decisions unchanged: tests/test_standpoint_oracle_parity.cpp.
 //   A lone return with no residual cell behind it is not in that belief at all, and one outside the footprint is not
 //   under the body — so a stray hit in a disc condemns nothing (the policy's contact model still sees every live return
 //   while it drives, which is what keeps the body out of contact on the way in).

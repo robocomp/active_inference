@@ -21,19 +21,7 @@
 namespace rc
 {
 
-namespace
-{
-bool point_in_polygon(const std::vector<Eigen::Vector2f>& poly, const Eigen::Vector2f& p)
-{
-    bool inside = false;
-    const std::size_t n = poly.size();
-    for (std::size_t i = 0, j = n - 1; i < n; j = i++)
-        if (((poly[i].y() > p.y()) != (poly[j].y() > p.y())) and
-            (p.x() < (poly[j].x() - poly[i].x()) * (p.y() - poly[i].y()) / (poly[j].y() - poly[i].y()) + poly[i].x()))
-            inside = not inside;
-    return inside;
-}
-}  // namespace
+// (point_in_polygon moved to common/standpoint/standpoint_oracle.h with the rasterisation, K3)
 
 void GridPlanner::rebuild_offsets()
 {
@@ -61,7 +49,7 @@ void GridPlanner::rebuild_offsets()
         // of 50, which is the difference between a comfortable pass and a scrape. Silent, because the
         // hull is nearly symmetric and nothing ever throws.
         const float yaw = 2.0f * static_cast<float>(M_PI) * h / kHeadings;
-        offsets_[h] = footprint.cell_offsets_yaw(cell_, yaw);
+        offsets_[h] = footprint.cell_offsets_yaw(cell_, yaw);   // = rc::standpoint::body_offsets (the oracle's) at this margin
         // MIGRATION MONITOR — see orientation_census() / pose_free_legacy(). The pre-correction
         // rasterisation, kept ONLY so the change can be measured against the world the robot is
         // actually in rather than argued about. Delete both, and the census, once it is trusted.
@@ -85,12 +73,7 @@ bool GridPlanner::cell_free_legacy(int ix, int iy, int h) const
 { return cell_free_in(offsets_legacy_, ix, iy, h); }
 
 int GridPlanner::heading_bucket(float yaw) const
-{
-    const float two_pi = 2.0f * static_cast<float>(M_PI);
-    float t = std::fmod(yaw, two_pi);
-    if (t < 0) t += two_pi;
-    return static_cast<int>(std::lround(t / two_pi * kHeadings)) % kHeadings;
-}
+{ return rc::standpoint::heading_bucket(yaw); }   // K3: one quantisation, shared with the oracle
 
 bool GridPlanner::pose_free_legacy(const Eigen::Vector2f& pos_room, float yaw) const
 {
@@ -123,8 +106,7 @@ GridPlanner::OrientationCensus GridPlanner::orientation_census() const
 
 bool GridPlanner::inside_room_or_passage(const std::vector<Eigen::Vector2f>& room_polygon, const Eigen::Vector2f& p) const
 {
-    if (point_in_polygon(room_polygon, p)) return true;
-    return std::ranges::any_of(passages_, [&](const auto& pass) { return pass.size() >= 3 and point_in_polygon(pass, p); });
+    return rc::standpoint::inside_room_or_passage(room_polygon, passages_, p);   // K3: the oracle's, the one set_world rasterises with
 }
 
 void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
@@ -161,123 +143,51 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
     live_only_.clear();
     if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); occ_nocells_.clear(); src_squares_.clear(); dist_.clear(); return; }
 
-    float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
-    for (const auto& p : room_polygon)
-    { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
-    for (const auto& pass : passages_)
-        for (const auto& p : pass)
-        { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
-    // A margin of one circumscribed radius so the footprint of a robot near the boundary is representable.
+    // ── K3 (2026-11-26): THE RASTERISATION IS THE SHARED ORACLE'S (common/standpoint/standpoint_oracle.h rasterise) ─────────
+    // Moved there unchanged, so an agent offering a standpoint builds the SAME occupancy from the same inputs; the rules it applies
+    // are the ones documented here before the move:
+    //  · OUTSIDE the room (and every passage) is occupied — walls need no separate representation and cannot be accidentally
+    //    omitted. A margin of one circumscribed radius (+ margin + one cell) pads the lattice so a body near the boundary is
+    //    representable.
+    //  · ...UNLESS the polygon is unusable (it marks >= 95 % of the lattice outside: live, 27018 of 27018 cells once), in which
+    //    case the mask is DISCARDED and planning continues on the obstacle set alone — loud, a degraded mode (below).
+    //  · Obstacles at TRUE extent — no inflation; a cell counts if its centre is inside. Sub-cell slivers are missed by design at
+    //    this resolution, which is why the safety margin exists and why it is ONE number rather than a per-stage guess.
+    //  · RESIDUAL'S OCCUPANCY, MARKED DIRECTLY: a HARD residual cell marks every planner cell its square touches (rounding
+    //    OUTWARD); a SOFT one (finite OccupiedCells::risk_nats, 2026-10-19 try96 leg 3) adds its nats to the one planner cell
+    //    holding its centre and never touches occ_ — so it can raise what a route costs but never disconnect the map (a thin
+    //    weakly-evidenced curtain of latched cells once sealed the robot off from a door approach). Live-hard cells (Task 3c fix
+    //    round 1) are marked after the persistent ones, so a planner cell is "live only" exactly when nothing persistent is there.
+    //  · occ_nocells_ = everything but the residual stamp, and src_squares_ the hard cells' true squares, for the sweep.
     const float pad = footprint.circumscribed_radius() + params.safety_margin_m + cell_;
-    xmin_ = xmn - pad; ymin_ = ymn - pad;
-    w_ = std::max(1, static_cast<int>(std::ceil((xmx + pad - xmin_) / cell_)));
-    h_ = std::max(1, static_cast<int>(std::ceil((ymx + pad - ymin_) / cell_)));
-    occ_.assign(static_cast<std::size_t>(w_) * h_, 0);
-    last_obstacle_count_ = static_cast<int>(obstacles.size());
-
-    // OUTSIDE the room is occupied. Walls therefore need no separate representation and cannot be
-    // accidentally omitted — a cell is free only if it is positively inside the room polygon.
-    //
-    // ...UNLESS the polygon turns out to be unusable, in which case this single input would brick the whole
-    // planner: every cell reads "outside", every goal is infeasible, and the robot never moves again. That is
-    // exactly what was observed live — 27018 of 27018 cells occupied — while the same code on a known-good
-    // polygon marks ~39%. A planner must not be one bad input away from total failure, so the room mask is
-    // applied only if it leaves a plausible amount of free space; otherwise it is DISCARDED and planning
-    // continues on the obstacle set alone. That is strictly better than refusing to move: obstacles still
-    // block, the robot is merely no longer confined by a boundary we cannot trust. It is loud about it,
-    // because navigating without a room boundary is a degraded mode, not a normal one.
-    long outside = 0;
-    for (int iy = 0; iy < h_; ++iy)
-        for (int ix = 0; ix < w_; ++ix)
-            if (not inside_room_or_passage(room_polygon, cell_to_world(ix, iy)))
-                { occ_[idx(ix, iy)] = 1; ++outside; }
-    room_mask_usable_ = outside < static_cast<long>(0.95 * w_ * h_);
-    if (not room_mask_usable_)
     {
-        std::fill(occ_.begin(), occ_.end(), 0);          // discard it; obstacles are re-applied below
-        static int rc = 0;
-        if ((rc++ % 50) == 0)
-            std::printf("[grid-world] ROOM POLYGON UNUSABLE — %zu verts, bbox x[%.2f,%.2f] y[%.2f,%.2f] marks "
-                        "%ld/%d cells (%.0f%%) as outside. Discarding it and planning on obstacles only "
-                        "(DEGRADED: no room boundary). Check delimiting_polygon_x/y on the room node.\n",
-                        room_polygon.size(), xmn, xmx, ymn, ymx, outside, w_ * h_,
-                        100.0 * outside / std::max(1, w_ * h_));
-        std::fflush(stdout);
-    }
-
-    // Obstacles at TRUE extent — no inflation anywhere. Rasterised over each polygon's bbox; a cell counts as
-    // occupied if its centre is inside. Sub-cell slivers are missed by design at this resolution, which is why
-    // the safety margin exists and why it is ONE number rather than a per-stage guess.
-    for (const auto& poly : obstacles)
-    {
-        if (poly.size() < 3) continue;
-        float pxn = poly[0].x(), pxx = pxn, pyn = poly[0].y(), pyx = pyn;
-        for (const auto& p : poly)
-        { pxn = std::min(pxn, p.x()); pxx = std::max(pxx, p.x()); pyn = std::min(pyn, p.y()); pyx = std::max(pyx, p.y()); }
-        int ix0, iy0, ix1, iy1;
-        world_to_cell({pxn, pyn}, ix0, iy0);
-        world_to_cell({pxx, pyx}, ix1, iy1);
-        for (int iy = std::max(0, iy0); iy <= std::min(h_ - 1, iy1); ++iy)
-            for (int ix = std::max(0, ix0); ix <= std::min(w_ - 1, ix1); ++ix)
-                if (not occ_[idx(ix, iy)] and point_in_polygon(poly, cell_to_world(ix, iy)))
-                    occ_[idx(ix, iy)] = 1;
-    }
-    // ── RESIDUAL'S OCCUPANCY, MARKED DIRECTLY ────────────────────────────────────────────────────
-    // One cell of residual covers a square of its own resolution; mark every planner cell that square
-    // touches. Rounding is OUTWARD (a planner cell is marked if the squares overlap at all), which is
-    // the conservative direction for an obstacle and keeps this exact at any pair of resolutions.
-    // ★★★ONLY THE HARD ONES (2026-10-19, try96 leg 3). A residual cell with a finite risk is a belief
-    // the caller has priced (OccupiedCells::risk_nats): it goes into risk_, which plan() charges for,
-    // and does NOT touch occ_ — so it can raise what a route costs but can never disconnect the map.
-    // A thin, weakly-evidenced "curtain" of latched cells sealed the robot off from a door approach
-    // when every latch was a wall. Its risk is added to the ONE planner cell holding its centre: it is
-    // an expectation, not an obstacle extent, so there is nothing to round outward — the footprint and
-    // safety_margin_m already carry the body's reach.
-    occ_nocells_ = occ_;     // everything but the residual stamp, for the sweep's true-extent test
-    src_squares_.clear();
-    if (cells.cell_size_m > 0.f and not cells.centres.empty())
-    {
-        const float h = 0.5f * cells.cell_size_m;
-        const bool priced = cells.risk_nats.size() == cells.centres.size();
-        const bool flagged = cells.live_hard.size() == cells.centres.size();
-        // Task 3c fix round 1: persistent hard cells are marked first, so a planner cell a live-hard cell touches is
-        // "live only" exactly when nothing persistent occupies it as well.
-        std::vector<std::size_t> live_cells;
-        for (std::size_t k = 0; k < cells.centres.size(); ++k)
+        rc::standpoint::Raster r = rc::standpoint::rasterise(room_polygon, passages_, obstacles, cells, cell_, pad);
+        xmin_ = r.xmin; ymin_ = r.ymin; w_ = r.w; h_ = r.h;
+        occ_ = std::move(r.occ);
+        occ_nocells_ = std::move(r.occ_nocells);
+        live_only_ = std::move(r.live_only);
+        risk_ = std::move(r.risk);
+        src_squares_ = std::move(r.src_squares);
+        residual_soft_in_ = r.soft_in;
+        residual_hard_in_ = r.hard_in;
+        room_mask_usable_ = r.room_mask_usable;
+        last_obstacle_count_ = static_cast<int>(obstacles.size());
+        if (not room_mask_usable_)
         {
-            const auto& c = cells.centres[k];
-            if (flagged and cells.live_hard[k] and not (priced and std::isfinite(cells.risk_nats[k])))
-            { live_cells.push_back(k); continue; }
-            if (priced and std::isfinite(cells.risk_nats[k]))
-            {
-                ++residual_soft_in_;
-                int ix, iy;
-                if (cells.risk_nats[k] <= 0.f or not world_to_cell(c, ix, iy)) continue;
-                if (risk_.empty()) risk_.assign(static_cast<std::size_t>(w_) * h_, 0.f);
-                risk_[idx(ix, iy)] += cells.risk_nats[k];
-                continue;
-            }
-            ++residual_hard_in_;
-            src_squares_.push_back({c, h});
-            int ix0, iy0, ix1, iy1;
-            world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
-            world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
-            for (int iy = std::max(0, iy0); iy <= std::min(h_ - 1, iy1); ++iy)
-                for (int ix = std::max(0, ix0); ix <= std::min(w_ - 1, ix1); ++ix)
-                    occ_[idx(ix, iy)] = 1;
-        }
-        if (not live_cells.empty()) live_only_.assign(static_cast<std::size_t>(w_) * h_, 0);
-        for (const std::size_t k : live_cells)
-        {
-            ++residual_hard_in_;
-            const auto& c = cells.centres[k];
-            src_squares_.push_back({c, h});
-            int ix0, iy0, ix1, iy1;
-            world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
-            world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
-            for (int iy = std::max(0, iy0); iy <= std::min(h_ - 1, iy1); ++iy)
-                for (int ix = std::max(0, ix0); ix <= std::min(w_ - 1, ix1); ++ix)
-                    if (not occ_[idx(ix, iy)]) { occ_[idx(ix, iy)] = 1; live_only_[idx(ix, iy)] = 1; }
+            float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
+            for (const auto& p : room_polygon)
+            { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
+            for (const auto& pass : passages_)
+                for (const auto& p : pass)
+                { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
+            static int rc = 0;
+            if ((rc++ % 50) == 0)
+                std::printf("[grid-world] ROOM POLYGON UNUSABLE — %zu verts, bbox x[%.2f,%.2f] y[%.2f,%.2f] marks "
+                            "%ld/%d cells (%.0f%%) as outside. Discarding it and planning on obstacles only "
+                            "(DEGRADED: no room boundary). Check delimiting_polygon_x/y on the room node.\n",
+                            room_polygon.size(), xmn, xmx, ymn, ymx, r.outside, w_ * h_,
+                            100.0 * r.outside / std::max(1, w_ * h_));
+            std::fflush(stdout);
         }
     }
     rebuild_offsets();
@@ -338,61 +248,24 @@ float GridPlanner::body_risk_at(const Eigen::Vector2f& pos_room) const
 }
 
 bool GridPlanner::cell_free_persistent(int ix, int iy, int h) const
-{
-    if (offsets_.size() != kHeadings) return false;
-    for (const auto& o : offsets_[h])
-    {
-        const int nx = ix + o.x(), ny = iy + o.y();
-        if (not in_bounds(nx, ny)) return false;
-        const std::size_t i = static_cast<std::size_t>(idx(nx, ny));
-        if (occ_[i] and not (i < live_only_.size() and live_only_[i])) return false;
-    }
-    return true;
-}
+{ return rc::standpoint::body_free(raster_view(), offsets_, ix, iy, h, /*persistent_only=*/true); }
 
+// K3 (2026-11-26): -log P(the body fits) is the SHARED oracle's kernel (common/standpoint/standpoint_oracle.h), run on this
+// planner's own raster — the object agents' p_stand calls the same function on the same rasterisation of their inputs.
 float GridPlanner::fit_nats_some_heading(const Eigen::Vector2f& pos_room, bool persistent_only) const
 {
-    constexpr float kInf = std::numeric_limits<float>::infinity();
-    int ix, iy;
-    if (not world_to_cell(pos_room, ix, iy)) return kInf;
     const_cast<GridPlanner*>(this)->rebuild_offsets();
-    float best = kInf;
-    for (int h = 0; h < kHeadings; ++h)
-        if (persistent_only ? cell_free_persistent(ix, iy, h) : cell_free(ix, iy, h)) best = std::min(best, state_risk(ix, iy, h));
-    return best;
+    return rc::standpoint::fit_nats_some_heading(raster_view(), offsets_, pos_room, persistent_only);
 }
 
 float GridPlanner::fit_nats_turning(const Eigen::Vector2f& pos_room, bool persistent_only) const
 {
-    constexpr float kInf = std::numeric_limits<float>::infinity();
-    int ix, iy;
-    if (not world_to_cell(pos_room, ix, iy)) return kInf;
     const_cast<GridPlanner*>(this)->rebuild_offsets();
-    for (int h = 0; h < kHeadings; ++h)
-        if (not (persistent_only ? cell_free_persistent(ix, iy, h) : cell_free(ix, iy, h))) return kInf;
-    if (risk_.empty()) return 0.f;
-    std::unordered_set<int> covered;
-    float r = 0.f;
-    for (int h = 0; h < kHeadings; ++h)
-        for (const auto& o : offsets_[h])
-        {
-            const int nx = ix + o.x(), ny = iy + o.y();
-            if (in_bounds(nx, ny) and covered.insert(idx(nx, ny)).second) r += risk_[idx(nx, ny)];
-        }
-    return r;
+    return rc::standpoint::fit_nats_turning(raster_view(), offsets_, pos_room, persistent_only);
 }
 
 float GridPlanner::state_risk(int ix, int iy, int h) const
-{
-    if (risk_.empty() or offsets_.size() != kHeadings) return 0.f;
-    float r = 0.f;
-    for (const auto& o : offsets_[h])
-    {
-        const int nx = ix + o.x(), ny = iy + o.y();
-        if (in_bounds(nx, ny)) r += risk_[idx(nx, ny)];
-    }
-    return r;
-}
+{ return rc::standpoint::body_nats(raster_view(), offsets_, ix, iy, h); }
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────────────────────────
 // One row of '0'/'1' per grid row, preceded by everything needed to place it in the room frame. Text
