@@ -1073,6 +1073,10 @@ Eigen::Matrix<double, 1, 1> CountableEngineModel::proportions() const
     const auto& q = b->q_now();
     return Eigen::Matrix<double, 1, 1>(q.empty() ? 0.0 : q[0]);
 }
+// ⚠ SINGLE-THREAD (review I4): a const hook that WRITES the belief's q through const_cast — the engine's const offer path
+// (PersistentEngine::predicted_gain) linearises a hypothetical look at other proportions and restores them on exit (RAII). Safe
+// only while one thread owns the belief: the countable's compute thread runs both update() and the offers. Two offers, or an
+// offer and an update, on the same belief from different threads race on q.
 void CountableEngineModel::set_proportions(const Eigen::Matrix<double, 1, 1>& q) const
 {
     auto& v = const_cast<std::vector<double>&>(b->q_now());

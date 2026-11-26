@@ -472,6 +472,7 @@ public:
         P_.diagonal().template tail<K>() = sig_prev_.cwiseProduct(sig_prev_);
         P_.template block<3, 3>(N + kChain, N + kChain) = last_sigma_pose_;
         b_.setZero();
+        set_q(m, b_);                                                     // the model's proportions follow b: q = q₀ (review I4)
         first_update_done_ = false;                                       // the class prior re-enters once, at the class mean
         vol_init_ = false;                                                // the volatility estimate is suspect too: back to Q₀
         wall_set_ = false;                                                // the wall priors re-enter once, at the next association
@@ -1256,8 +1257,18 @@ public:
     //     frame's context with the look's points in it (none before the first update);
     //   - joint_cov through the channels' selectors, exactly as a measured frame's.
     // A standpoint whose look measures nothing promises 0.
+    // ⚠ SINGLE-THREAD (review I4): const, but NOT read-only — it moves the model's proportions (set_q / set_q_channel write
+    // through CountableEngineModel::set_proportions' const_cast into the belief's q) and fills the mutable offer_cache_. Call it
+    // only from the thread that owns the belief (the countable's compute thread, which also runs update()), never concurrently
+    // with another offer or an update of the same belief. The RAII guard below puts q back at the posterior (q₀ + b_q) on EVERY
+    // exit path, early returns and exceptions included.
     double predicted_gain(const M& m, const Standpoint& s, const OfferSensors& sn) const
     {
+        struct RestoreProportions
+        {
+            const PersistentEngine& e; const M& m;
+            ~RestoreProportions() { e.set_q(m, e.b_); }
+        } const restore_q{*this, m};
         namespace vw = rc::ai::view;
         namespace pu = rc::ai::persistent;
         namespace of = rc::ai::offer;
@@ -1390,8 +1401,7 @@ public:
             theta_only.I = Id_th.template cast<double>();
         }
         const MatJd P_after = pu::joint_cov<N, K, NP>(P_bar, std::span<const Chan>(chans), theta_only);
-        set_q(m, b_);                                                      // back to the posterior proportions
-        return H_before - half_logdet_theta(P_after);
+        return H_before - half_logdet_theta(P_after);                     // restore_q: back to the posterior proportions
     }
     // The θ-marginal entropy drop ½ log det Σθ_before − ½ log det Σθ_after of the last update(): what it delivered, the same
     // quantity predicted_gain promises. NaN when the last update measured nothing (predict-only).

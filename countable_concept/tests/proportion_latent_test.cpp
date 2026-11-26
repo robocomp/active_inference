@@ -25,6 +25,7 @@
 #include <clocale>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 #include "countable_belief.h"
@@ -259,6 +260,27 @@ int main(int argc, char** argv)
         const double sq2 = b.proportion_std(0);
         CHECK(sq2 < sq1);
         std::printf("  sigma_q: one view (41 frames) %.5f >= floor %.5f; after a second view %.5f\n", sq1, std::sqrt(floor2), sq2);
+    }
+    // 6. review I4 (final fix wave F5): the model's q stays consistent with the latent b. (a) predicted_gain (a const offer that
+    //    linearises a hypothetical look at other proportions) leaves q exactly where it found it; (b) sanitize re-seeds b = 0, so q
+    //    must return to q₀ = the prior mean — at BASE it kept the stale posterior q.
+    {
+        CountableBelief b(CountableBeliefState{0.0f, 0.10f, 0.90f, 0.58f, 0.73f, 0.0f}, tp);
+        b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+        const CountableFrame f = frame(tp);
+        for (int k = 0; k < 6; ++k) b.update(f);
+        const double q0 = 0.5 * (double(pr.lo) + double(pr.hi)), q_post = b.proportion_value(0);
+        CHECK(q_post != q0);
+        rc::ai::offer::OfferSensors sn;
+        const rc::ai::offer::Standpoint st{kHelios.head<2>(), 0.5f * float(M_PI)};   // the Helios view, facing +y
+        const double g = b.predicted_gain(st, sn);
+        const double q_gain = b.proportion_value(0);
+        CHECK(q_gain == q_post);
+        b.joint_covariance_for_test()(0, 0) = std::numeric_limits<double>::quiet_NaN();   // a degenerate P
+        b.sanitize_covariance();
+        CHECK(b.proportion_value(0) == q0);
+        std::printf("  q consistency: posterior q %.5f; after predicted_gain (%.3f nats) %.5f; after sanitize %.5f (q0 %.5f)\n", q_post, g, q_gain,
+                    b.proportion_value(0), q0);
     }
     std::printf(bad ? "FAILED (%d)\n" : "proportion_latent_test OK\n", bad);
     return bad ? 1 : 0;
