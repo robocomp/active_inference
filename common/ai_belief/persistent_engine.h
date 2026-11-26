@@ -1036,6 +1036,19 @@ public:
         // local quadratic's second moment about x̂) — at a non-mode δ₀ is the quadratic's extrapolation, metres on p1r8_bed's
         // capped updates (refuted rays), and the bed ran away (cx −0.31 → −2.15). Converged updates are unchanged (P plus the
         // last accepted step's outer product on θθ, round 6).
+        // ⚠ THRESHOLD (flagged, CLAUDE.md "a threshold that is truly unavoidable"; F1 round 9 fix round 2 ruling): this is a binary
+        // switch on the solve's stop rule (converged ⇔ the undamped step ≤ tol_sigma·σ on θ). tol_sigma decides whether a frame's
+        // information is absorbed (Laplace Σ) or not at all (P̄), and x̂ keeps the frame's pull while P̄ says it added nothing.
+        // No continuous model-level term was found (task-F1r9-report.md, fix round 1). The tempered Laplace family
+        // P_α = (P̄⁻¹ + αW)⁻¹ failed on every measured variant, on p1r8_bed / k2c_table:
+        //  · α = exp(−½δ₀ᵀP⁻¹δ₀) (density ratio): ≈ 0 at any capped point (R in posterior σ), the mean returns to x̄, progress
+        //    lost (unit test: cx 1.25 → 1.06 → back to 1.25; the "carry x̄, P̄" diagnostic capped 739 of 2272 bed updates);
+        //  · α = A/(A+R) with the tempered mean x̄ + αP_αη': the local quadratic extrapolates (table_2 ran to h = 19.2 m, DEGENERATE);
+        //  · α = A/(A+R) with a mean anchored at x̂: overconfident (unit test α 0.966 at 69 % of the distance, mode 4.6σ away;
+        //    bed d² 3.53, NEES 3.35, no gain over BASE 3.81 / 3.49).
+        // This switch: bed_11 d² 3.81 → 0.04, NEES 3.49 → 1.82; nightstand, fridge and chair bit-identical (they never cap).
+        // The cap binds at most 5 times per graded dump. ROOT FIX (post-12-02 owner list): remove why fits cap at all —
+        // kinked energies (mixture / beam panel boundaries) and λ escalation in the damped GN.
         if (not converged) P_ = P_bar;
         const VecNd post_var = P_.diagonal().template head<N>();          // the model's posterior, before the solver's last-step term
         if (converged) P_.template topLeftCorner<N, N>() += d_last * d_last.transpose();
@@ -1473,7 +1486,8 @@ private:
             const double q = double(q_used(i)), sbar = P_bar(i, i), spost = post_var(i);
             double ew2;
             if (not jumps)
-            {   // Gaussian random walk (item 2): E[w²] = q + (q/Σ̄)²(δθ² − (Σ̄ − Σ⁺))
+            {   // (unreachable for the countable classes: CountableEngineModel::volatility() always sets jump_var, so `jumps` holds)
+                // Gaussian random walk (item 2): E[w²] = q + (q/Σ̄)²(δθ² − (Σ̄ − Σ⁺))
                 const double k = q / sbar;
                 ew2 = q + k * k * (dth * dth - (sbar - spost));
             }
