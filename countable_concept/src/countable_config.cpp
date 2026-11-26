@@ -631,6 +631,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     return out;
 }
 
+// The birth seed is part of this contract (F1 round 9 a): rc::birth_on_wall puts the +y face on a wall only for a class that
+// declares a flush prior or a stand-off, both refused below, and is false for every c2v class whatever it declares.
 std::string symmetric_config_violation(const CountableConfig& c)
 {
     if (c.ai2_prior_depth_m > 0.0f and c.ai2_prior_depth_m != c.ai2_prior_footprint_m)

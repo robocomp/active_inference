@@ -370,3 +370,14 @@ target_compile_options(table_face_ranking_test PRIVATE -O2)
 target_link_libraries(table_face_ranking_test PRIVATE Eigen3::Eigen)
 add_test(NAME table_face_ranking_test COMMAND table_face_ranking_test ${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest)
 set_tests_properties(table_face_ranking_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+
+# F1 round 9 (a): which classes the birth seeds on a wall — only a declared back-face attachment, never c2v (rc::birth_on_wall),
+# on every shipped countable config. Run: LANG=es_ES.UTF-8 ./birth_seed_rule_test
+add_executable(birth_seed_rule_test birth_seed_rule_test.cpp ../src/countable_config.cpp $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp)
+target_include_directories(birth_seed_rule_test PRIVATE manifest_stub ../src ../../common ../../common/concept_manifest
+                           ../../common/config_report ../../common/media_transport $ENV{ROBOCOMP}/classes)
+target_compile_definitions(birth_seed_rule_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+target_compile_options(birth_seed_rule_test PRIVATE -O2)
+target_link_libraries(birth_seed_rule_test PRIVATE Eigen3::Eigen)
+add_test(NAME birth_seed_rule_test COMMAND birth_seed_rule_test)
+set_tests_properties(birth_seed_rule_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")

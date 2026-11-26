@@ -1228,8 +1228,9 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
                     const float sum = mom.ext_major + mom.ext_minor;
                     if (sum > 1e-4f and (mom.ext_major - mom.ext_minor) / sum > 0.10f)
                         s0.yaw = mom.phi;
-                    // ★BORN ON THE FURNITURE PRIORS (owner 2026-11-14): room-axis yaw, back on the nearest wall.
-                    if (have_room_geometry_) birth_pos_cov = birth_on_priors(s0, pts, z_lo, z_hi, inst.node_name);
+                    // ★BORN ON THE FURNITURE PRIORS (owner 2026-11-14): room-axis yaw, back on the nearest wall — for a class that
+                    // declares a back-face attachment only (F1 round 9 a, rc::birth_on_wall); any other keeps this cold-start seed.
+                    if (have_room_geometry_ and rc::birth_on_wall(cfg_)) birth_pos_cov = birth_on_priors(s0, pts, z_lo, z_hi, inst.node_name);
                 }
             }
         }

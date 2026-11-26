@@ -551,5 +551,14 @@ bool verify_countable_manifest(const CountableConfig& out, const std::string& pa
 // (FrontDetectEnabled), the fronted approach (ApproachEnabled) and the yaw-binned thumbnails (ThumbnailsEnabled). The flush reach
 // (AI2WallReachM) is inert once those are off (and flush_posterior is 0 for a symmetric belief), so it is not refused.
 std::string symmetric_config_violation(const CountableConfig& c);
+// F1 round 9 (a): does the birth seed this class's back face on the nearest wall (CountableFitter::birth_on_priors)? Only a class
+// that DECLARES a back-face attachment — a flush prior (Model.WallFlushPrior > 0) or a stand-off ([prior.attachment]
+// standoff_std_m > 0) — and never a c2v class (it has no back face: the seed would distinguish its yaw sheets). Every other class
+// is seeded from its cold-start footprint (the cloud's centre and extents). k2c_table: the wall seed moved every table 1.0–1.3 m
+// off its detection cloud, and the first update froze it there.
+inline bool birth_on_wall(const CountableConfig& c)
+{
+    return (c.ai2_wall_flush_prior > 0.0f or c.wall_standoff_std_m > 0.0f) and not c.shape_symmetric;
+}
 
 }  // namespace rc
