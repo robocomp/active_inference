@@ -38,6 +38,10 @@
 //   the one-box solid). The dumped FRAMES are unchanged: what the live agent staged with its own θ trajectory (see the K2a report).
 //   --seed-h-rule re-derives the seed's H with the birth rule (CountableBelief::seed_height, F1 round 6.2) from the dump's FIRST
 //   camera frame (the birth cloud itself is not recorded), at the recorded born pose.
+//   --theta-cov appends, after dP_live, the 21 upper-triangle entries S_i_j (i <= j, i, j = 0..5 in the order cx cy H w h yaw) of the
+//   FULL 6x6 theta covariance the update left (b.covariance(); the yaw entry is the within-mode Sigma(5,5)), %.9g. Off by default: the
+//   default output is byte-identical to before. The full block is NOT in the dump (the live result stores only diag P), so replaying
+//   is the only way to recover it (first_visit_nees.py, AuRo test (a)).
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
 // it fails unless --allow-defaults says that is intended (e.g. a dump older than a new params member).
@@ -83,13 +87,13 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--parts DIR] [--seed-h-rule]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--parts DIR] [--seed-h-rule] [--theta-cov]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
     std::string neighbour_manifests, standoff_manifests, permanence_manifests, parts_manifests;
-    bool seed_h_rule = false;
+    bool seed_h_rule = false, theta_cov = false;
     long neighbours_without_class = 0;
     for (int i = 2; i < argc; ++i)
     {
@@ -101,6 +105,7 @@ int main(int argc, char** argv)
         if (k == "--permanence" and i + 1 < argc) { permanence_manifests = argv[++i]; continue; }
         if (k == "--parts" and i + 1 < argc) { parts_manifests = argv[++i]; continue; }
         if (k == "--seed-h-rule") { seed_h_rule = true; continue; }
+        if (k == "--theta-cov") { theta_cov = true; continue; }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -118,13 +123,18 @@ int main(int argc, char** argv)
     }
     std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                 "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
-                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,range_m,jump_p,q,std_q,dth_live,dP_live\n");
+                "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,range_m,jump_p,q,std_q,dth_live,dP_live");
+    if (theta_cov)
+        for (int i = 0; i < 6; ++i)
+            for (int j = i; j < 6; ++j) std::printf(",S_%d_%d", i, j);
+    std::printf("\n");
 
+    std::string cov_tail;  // --theta-cov: the update's 21 covariance entries, printed after the live comparison columns
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
     {
         if (pending.empty()) return;
-        std::printf("%s,%.9g,%.9g\n", pending.c_str(), dth, dP);
+        std::printf("%s,%.9g,%.9g%s\n", pending.c_str(), dth, dP, cov_tail.c_str());
         pending.clear();
     };
     rc::CountableBelief belief;
@@ -168,6 +178,15 @@ int main(int argc, char** argv)
                           b.last_jump_p(), b.proportion_value(0), b.params().shape_proportions.empty()
                                                               ? std::numeric_limits<double>::quiet_NaN() : b.proportion_std(0));
             pending = row;
+            cov_tail.clear();
+            if (theta_cov)
+                for (int i = 0; i < 6; ++i)
+                    for (int j = i; j < 6; ++j)
+                    {
+                        char c[40];
+                        std::snprintf(c, sizeof c, ",%.9g", double(S(i, j)));
+                        cov_tail += c;
+                    }
         },
         [&](const rc::replay::ResultEv& live, const rc::CountableBelief& b)
         {
