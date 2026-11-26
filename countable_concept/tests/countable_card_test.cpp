@@ -104,10 +104,15 @@ int main(int argc, char** argv)
     if (hangs) cfg.vertical_extent_m = mext.value_or(-1.0f);
     const float ew = mw.value_or(-1.0f), ed = md.value_or(md2.value_or(ew)), eh = mh.value_or(-1.0f);
     const float eext = hangs ? mext.value_or(-1.0f) : eh, ez0 = hangs ? eh - eext : 0.0f;
-    // The envelope and the LiDAR return rate are the config's when it sets them (the refrigerator's own fitted envelope, the
-    // hood's measured return rate), else the fleet prior 0.10 / 0.60 / 0.06 and the code default 0.85.
-    const float env_min = toml_peek(toml, "DetectMinFill", 0.10f), env_max = toml_peek(toml, "DetectMaxFill", 0.60f),
-                env_soft = toml_peek(toml, "DetectSoft", 0.06f), q_ret = toml_peek(toml, "ExistenceDetectionProb", 0.85f);
+    // The envelope and the LiDAR return rate. bed, nightstand and toilet: the LITERAL fleet prior 0.10 / 0.60 / 0.06 and 0.85
+    // (final fix wave F6 — an expectation read from the same file the card is built from could never fail; these three run the
+    // countable engine on main and their envelope must not drift unnoticed). The K1/K2 classes: the config's when it sets them
+    // (the refrigerator's own fitted envelope, the hood's measured return rate), else the same fleet prior.
+    const bool literal_env = cls == "bed" or cls == "nightstand" or cls == "toilet";
+    const float env_min = literal_env ? 0.10f : toml_peek(toml, "DetectMinFill", 0.10f),
+                env_max = literal_env ? 0.60f : toml_peek(toml, "DetectMaxFill", 0.60f),
+                env_soft = literal_env ? 0.06f : toml_peek(toml, "DetectSoft", 0.06f),
+                q_ret = literal_env ? 0.85f : toml_peek(toml, "ExistenceDetectionProb", 0.85f);
 
     const card::Card c = make_card(cfg);
     if (json) std::puts(card::to_json(c).c_str());
