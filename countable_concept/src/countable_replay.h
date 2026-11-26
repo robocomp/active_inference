@@ -93,7 +93,7 @@ template <class V> void fields(V& v, CountableBeliefParams& x)
     v("plaus_height_min", x.plaus_height_min); v("plaus_height_soft", x.plaus_height_soft);
     v("plaus_fe_ref", x.plaus_fe_ref); v("plaus_fe_scale", x.plaus_fe_scale);
     v("plaus_height_prior_gain", x.plaus_height_prior_gain);
-    v("wall_precision", x.wall_precision); v("wall_reach_m", x.wall_reach_m); v("wall_flush_prior", x.wall_flush_prior);
+    v("wall_precision", x.wall_precision); v("wall_reach_m", x.wall_reach_m); v("wall_flush_prior", x.wall_flush_prior); v("symmetric", x.symmetric);
     v("room_axis_std", x.room_axis_std); v("wall_parallel_precision", x.wall_parallel_precision);
     v("wall_no_cross_precision", x.wall_no_cross_precision); v("wall_no_cross_margin_m", x.wall_no_cross_margin_m);
     v("wall_standoff_m", x.wall_standoff_m); v("wall_standoff_std_m", x.wall_standoff_std_m);

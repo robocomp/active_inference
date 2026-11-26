@@ -101,6 +101,7 @@ struct CountableConfig
     std::vector<rc::manifest::ShapePart> shape_parts;   // [[shape.part]] of the class manifest (empty = whole box)
     bool solid_parts = false;                           // [shape] solid = "parts": the parts ARE the model's solid (K2a)
     std::vector<rc::manifest::ShapeProportion> shape_proportions;   // [[shape.proportion]]: the class proportions (K2a-L)
+    bool shape_symmetric = false;                       // [shape] symmetry = "c2v": no front, no labelled sides (K2c, a table)
     // Δ per DOF (cx, cy, H, w, h, yaw), the manifest's [shape].layer_spread_m (spec shared-engine G4): the class's layer
     // spread, the persistent path's shape latent (marginal Δ²/12, ρ = 1). Absent ⇒ zeros (no layering declared, said so).
     std::array<float, 6> layer_spread_m{};
@@ -542,5 +543,11 @@ inline std::string countable_manifest_path(const std::string& concept_class)
 // Cross-check common/concept_manifest/<class>.concept.toml against the priors etc/config.toml actually
 // produced. Read-only, startup-only: the manifest is NOT authoritative yet — this measures whether it could be.
 bool verify_countable_manifest(const CountableConfig& out, const std::string& path);
+// K2c: a class whose manifest declares [shape] symmetry = "c2v" must run only model terms invariant under that group, or the sheets
+// it identifies stop being one body (the plain chart then needs the quotient chart). Returns the first offending key ("" = none):
+// the w/h size priors must be one distribution (AI2PriorDepthM / AI2PriorDepthStd unset or equal to the footprint's), and no
+// channel may read a front or a back: the wall flush (WallFlushPrior > 0 puts the +y face on the wall), the front cue
+// (FrontDetectEnabled), the fronted approach (ApproachEnabled) and the yaw-binned thumbnails (ThumbnailsEnabled).
+std::string symmetric_config_violation(const CountableConfig& c);
 
 }  // namespace rc

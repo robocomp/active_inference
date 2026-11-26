@@ -1245,6 +1245,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.prior_depth_m       = cfg_.ai2_prior_depth_m;
         p.vertical_extent_m   = cfg_.vertical_extent_m;   // the manifest's support: floor-anchored or hanging (K1)
         p.wall_flush_prior    = cfg_.ai2_wall_flush_prior;
+        p.symmetric           = cfg_.shape_symmetric;   // K2c: [shape] symmetry = "c2v" (a table: the four yaw modes are one body)
         p.room_axis_std       = cfg_.ai2_room_axis_std_deg * 0.017453293f;
         p.headboard_h_m       = cfg_.ai2_headboard_h_m;
         p.headboard_t_m       = cfg_.ai2_headboard_t_m;

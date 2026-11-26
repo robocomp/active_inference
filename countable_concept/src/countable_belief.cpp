@@ -1204,6 +1204,7 @@ std::array<float, 4> CountableBelief::door_clearance_logprior() const
 // own wall — the case detect_front can never report on. Returns true if the belief was rotated.
 bool CountableBelief::resolve_front_geometric()
 {
+    if (params_.symmetric) return false;   // K2c: every mode is the same body — nothing to resolve
     const auto lp = door_clearance_logprior();
     const std::array<bool, 4> allowed = allowed_modes();
     int kbest = 0;
@@ -1369,6 +1370,7 @@ void CountableBelief::predict_size_likelihood(float q_scale)
 // Fold one appearance FrontCue into the door-mode accumulator and adopt the argmax mode. See the header.
 bool CountableBelief::resolve_front(const FrontCue& cue, float evidence_weight)
 {
+    if (params_.symmetric) return false;   // K2c: no front to find — every mode is the same body
     constexpr float kHalfPi    = 0.5f * static_cast<float>(M_PI);
     // Clamp each accumulated mode-evidence to ±kFrontClamp so a long confident run cannot drive the accumulator
     // arbitrarily deep and make the belief unable to RECANT when the bed is physically turned. ≈6 nats ≈ a
@@ -1464,6 +1466,7 @@ bool CountableBelief::resolve_front(const FrontCue& cue, float evidence_weight)
 // Posterior over the 4 front modes = softmax(front_acc_) with disallowed modes zeroed.
 std::array<float, 4> CountableBelief::front_posterior() const
 {
+    if (params_.symmetric) return {1.0f, 0.0f, 0.0f, 0.0f};   // K2c: the four modes are one body (a point mass on the held one)
     const std::array<bool, 4> allowed = allowed_modes();
     const auto lp = door_clearance_logprior();   // the SAME score resolve_front decides on (evidence + prior)
     std::array<float, 4> s{};

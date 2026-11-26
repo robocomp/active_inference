@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <span>
 #include <format>
 #include <fstream>
 #include <stdexcept>
@@ -227,6 +228,67 @@ inline bool load_solid_is_parts(const std::string& path)
     if (val != "parts") throw std::runtime_error(std::format("{}: [shape].solid = \"{}\": not \"box\" or \"parts\"", path, val));
     if (not parts) throw std::runtime_error(std::format("{}: [shape].solid = \"parts\" without any [[shape.part]] row", path));
     return true;
+}
+
+// [shape] symmetry (K2c): "none" (or absent) — the class has a front, θ's (w, h, yaw) names one body; "c2v" — the class has no
+// front and no labelled sides (a table), so (w, h, yaw), (w, h, yaw + π) and (h, w, yaw ± π/2) are the SAME body. The group acts
+// on the part fractions as r_π: (x, y, w, h) → (−x, −y, w, h) and swap∘r_π/2: (x, y, w, h) → (y, −x, h, w) (z unchanged); the
+// solid is invariant iff each generator maps every part onto a part of the set (exact equality of the declared numbers: a
+// declared −0.441 parses to the exact negation of 0.441).
+enum class Symmetry { none, c2v };
+
+inline bool parts_invariant_c2v(std::span<const ShapePart> parts)
+{
+    const auto has = [&](const ShapePart& img)
+    {
+        return std::ranges::any_of(parts, [&](const ShapePart& p)
+        {
+            return p.x_f == img.x_f and p.y_f == img.y_f and p.w_f == img.w_f and p.h_f == img.h_f and p.z0_f == img.z0_f
+                   and p.z1_f == img.z1_f and p.z0_ref == img.z0_ref and p.z1_ref == img.z1_ref and p.z0_off == img.z0_off
+                   and p.z1_off == img.z1_off;
+        });
+    };
+    return std::ranges::all_of(parts, [&](const ShapePart& p)
+    {
+        ShapePart r = p;  r.x_f = -p.x_f; r.y_f = -p.y_f;                                   // r_π
+        ShapePart s = p;  s.x_f = p.y_f;  s.y_f = -p.x_f; s.w_f = p.h_f; s.h_f = p.w_f;    // swap∘r_π/2
+        return has(r) and has(s);
+    });
+}
+
+// absent / "none" ⇒ none; "c2v" ⇒ c2v, and the [[shape.part]] rows must then be invariant (above). Anything else, or a c2v class
+// whose parts are not invariant, throws std::runtime_error naming the file.
+inline Symmetry load_shape_symmetry(const std::string& path)
+{
+    std::ifstream f(path);
+    if (not f) throw std::runtime_error(std::format("{}: cannot open the manifest to read [shape].symmetry", path));
+    bool in_shape = false, seen = false;
+    std::string val, line;
+    while (std::getline(f, line))
+    {
+        std::string_view l = detail::trim(line);
+        if (l.empty() or l.front() == '#') continue;
+        if (l.front() == '[')
+        {
+            const auto c = l.find('#');
+            in_shape = detail::trim(c == std::string_view::npos ? l : l.substr(0, c)) == "[shape]";
+            continue;
+        }
+        if (not in_shape) continue;
+        const auto eq = l.find('=');
+        if (eq == std::string_view::npos or detail::trim(l.substr(0, eq)) != "symmetry") continue;
+        auto v = detail::trim(l.substr(eq + 1));
+        if (v.empty() or v.front() != '"' or v.find('"', 1) == std::string_view::npos)
+            throw std::runtime_error(std::format("{}: [shape].symmetry must be a quoted string (\"none\" or \"c2v\")", path));
+        val = std::string(v.substr(1, v.find('"', 1) - 1));
+        seen = true;
+    }
+    if (not seen or val == "none") return Symmetry::none;
+    if (val != "c2v") throw std::runtime_error(std::format("{}: [shape].symmetry = \"{}\": not \"none\" or \"c2v\"", path, val));
+    if (const auto parts = load_shape_parts(path); not parts_invariant_c2v(parts))
+        throw std::runtime_error(std::format("{}: [shape].symmetry = \"c2v\" but the [[shape.part]] rows are not invariant under "
+                                             "(x,y,w,h) -> (-x,-y,w,h) and (y,-x,h,w)", path));
+    return Symmetry::c2v;
 }
 
 }  // namespace rc::manifest

@@ -63,7 +63,7 @@ int main()
         CHECK(none.has_value());
         if (none) CHECK(none->p_label_true == 0.8f and none->fit_H_m == 0.0f and none->fit_w_m == 0.0f and none->fit_h_m == 0.0f);
     }
-    CHECK(not rc::manifest::load_class_prior(mf("table")).has_value());     // a manifest without the section
+    CHECK(not rc::manifest::load_class_prior(mf("cabinet")).has_value());   // a manifest without the section (was the table, which declares one since K2c)
     bool cp_opened = true;
     CHECK(not rc::manifest::load_class_prior(mf("no_such_class"), &cp_opened).has_value());
     CHECK(not cp_opened);

@@ -160,6 +160,7 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         out.shape_parts = rc::manifest::load_shape_parts(manifest_path);
         out.solid_parts = rc::manifest::load_solid_is_parts(manifest_path);
         out.shape_proportions = rc::manifest::load_shape_proportions(manifest_path);
+        out.shape_symmetric = rc::manifest::load_shape_symmetry(manifest_path) == rc::manifest::Symmetry::c2v;
         if (out.shape_proportions.size() > std::size_t(rc::CountableEngineModel::kProportions))
             throw std::runtime_error(std::format("{}: {} [[shape.proportion]] declared; the countable engine carries {}", manifest_path,
                                                  out.shape_proportions.size(), rc::CountableEngineModel::kProportions));
@@ -168,8 +169,9 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     {
         throw CountableConfigError(std::format("{}: ★ {} — refusing to start\n", out.agent_name, e.what()));
     }
-    std::print("[manifest] {} shape: {} part(s); the model's solid is {}\n", out.concept_class, out.shape_parts.size(),
-               out.solid_parts ? "the parts" : "the whole box (the parts are the carve's)");
+    std::print("[manifest] {} shape: {} part(s); the model's solid is {}{}\n", out.concept_class, out.shape_parts.size(),
+               out.solid_parts ? "the parts" : "the whole box (the parts are the carve's)",
+               out.shape_symmetric ? "; symmetry c2v (no front: the four yaw modes are one body)" : "");
     try
     {   // The permanence prior (F1 round 6): how often a real object of the class is moved — the volatility's hyperprior.
         if (const auto pm = rc::manifest::permanence(manifest_path))
@@ -569,6 +571,11 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     out.existence_verify_gain         = getf("Model.ExistenceVerifyGain", 5.0f,
             "epistemic gain (nats) a wants_verification bed gets, so the");
 
+    if (out.shape_symmetric)
+        if (const std::string v = symmetric_config_violation(out); not v.empty())
+            throw CountableConfigError(std::format("{}: ★ {} declares [shape] symmetry = \"c2v\" but {} — a term that is not invariant "
+                                                   "under the class's symmetry would tell its four yaw modes apart — refusing to start\n",
+                                                   out.agent_name, manifest_path, v));
     std::print("{}: configuration loaded (class '{}').\n", out.agent_name, out.concept_class);
     // Peripheral (ricoh) existence confirmation — see countable_config.h. OFF by default.
     out.ricoh_confirm_enabled        = getb("Concept.RicohConfirmEnabled", out.ricoh_confirm_enabled,
@@ -622,6 +629,20 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     }
 
     return out;
+}
+
+std::string symmetric_config_violation(const CountableConfig& c)
+{
+    if (c.ai2_prior_depth_m > 0.0f and c.ai2_prior_depth_m != c.ai2_prior_footprint_m)
+        return std::format("Model.AI2PriorDepthM = {} differs from AI2PriorFootprintM = {}", c.ai2_prior_depth_m, c.ai2_prior_footprint_m);
+    if (c.ai2_prior_depth_std > 0.0f and c.ai2_prior_depth_std != c.ai2_prior_footprint_std)
+        return std::format("Model.AI2PriorDepthStd = {} differs from AI2PriorFootprintStd = {}", c.ai2_prior_depth_std,
+                           c.ai2_prior_footprint_std);
+    if (c.ai2_wall_flush_prior > 0.0f) return std::format("Model.WallFlushPrior = {} (the flush puts the +y face on a wall)", c.ai2_wall_flush_prior);
+    if (c.front_detect_enabled) return "Concept.FrontDetectEnabled = true (a front cue)";
+    if (c.approach_enabled) return "Concept.ApproachEnabled = true (a fronted approach)";
+    if (c.thumbnails_enabled) return "Concept.ThumbnailsEnabled = true (thumbnails binned on the yaw)";
+    return {};
 }
 
 // ─── Concept-manifest cross-check (declarative-priors experiment, step 1½) ────────────────────────

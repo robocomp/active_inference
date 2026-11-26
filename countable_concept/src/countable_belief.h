@@ -259,6 +259,12 @@ struct CountableBeliefParams
     // pointing straight INTO the room over one pointing straight into the wall. Scaled by the flush mixture
     // weight, so it vanishes for a genuine mid-room bed. 0 = OFF. A precision, not a gate.
     float door_clearance_gain = 3.0f;
+    // SYMMETRY (K2c, manifest [shape] symmetry = "c2v"): the class has no front and no labelled sides (a table), so the four
+    // discrete yaw modes {0, π/2, π, 3π/2} of the front resolver (with the w↔h relabel on the quarter turns) are the SAME body —
+    // group elements, not hypotheses. The mode posterior is then a point mass on the held mode: the reported yaw variance is the
+    // within-sheet Σ(5,5) (no mode term), and the front resolver never rotates. The plain (w, h, yaw) chart is a local chart of the
+    // quotient (the group acts freely: every non-identity element moves yaw), so the Gaussian needs no other chart. false = as before.
+    bool  symmetric = false;
     // ── INFERRED VOLATILITY (MODEL_HISTORY.md §3): "how fast does THIS object change?" ──────────────────
     // Q stops being a per-frame constant and becomes exp(ω), a per-DOF latent inferred from how much the
     // belief actually MOVES. This is the history stage: with a fixed Q, evidence is discarded exactly as
