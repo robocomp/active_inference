@@ -124,7 +124,7 @@ dP_live = 0). No definition changed between the passes.
 - **Overconfident by ~3–4.5×** where the class is born reliably (bed, nightstand, toilet, fridge). Same direction and size as
   the single runs. This is what removing the range-growing camera common mode (T5 ruling, I3) risked; restoring it is the
   open owner decision.
-- **Chair: the yaw carries the mean.** 7 of 30 visits are above 1000 (yaw e²/P ~ 4e4 on average), consistent with a confident
+- **Chair: the yaw carries the mean.** 5 of 30 visits are above 1000 (6 above 100) (yaw e²/P ~ 4e4 on average), consistent with a confident
   heading in the wrong mode (≈180°); the remaining visits are mostly 3–40, still overconfident. Not yet diagnosed.
 - **Births are the second failure.** Fridge born in 4/12 tours, hood 1/12 matched, table 2/24, chair 41/72 unmatched (incl.
   the two sunken chairs, graded as in the world).
