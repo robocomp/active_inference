@@ -6,7 +6,7 @@
 > scripted visit per class, and several of them were made on earlier commits than the build commit. They are not the graded
 > result and must not be quoted as such.
 
-- Branch feat/shared-engine. Build commit for the batch: **cf65a471**, tree `5c0029ab522691fb4747d2e7215493162f13f0b0`.
+- Branch feat/shared-engine. Build commit for the batch: **91598c88** (code = fix wave 17f13198), tree `2d0c2d5107011e10da553ad8ac569535b7b33c48`.
 - Spec: `docs/superpowers/specs/2026-11-23-shared-engine-design.md` (Tests, Graded quantities). Plan revision 2, Task G1x.
 - Count (test c): `2026-11-23-patch-constants-baseline.md`, section "After part 1".
 - Closed prior-term list: `2026-11-26-closed-prior-list.md`.
