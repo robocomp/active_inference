@@ -149,7 +149,7 @@ closed prior-term list check finds six violating terms in every graded class, fo
 BATCH REQUEST — shared-engine part 1 grading (G1x, 2026-11-26)
 
 BUILD
-  feat/shared-engine @ cf65a471 (tree 5c0029ab522691fb4747d2e7215493162f13f0b0). Any later docs-only commit is the same code.
+  feat/shared-engine @ 91598c88 (tree 2d0c2d5107011e10da553ad8ac569535b7b33c48; code = fix wave 17f13198, 91598c88 adds docs only). Any later docs-only commit is the same code.
   Pin a worktree at that commit (as k1-live / k2b-live) and build there with -j8 (check `pgrep -a cc1plus` first):
     countable_concept, controller (K3 moved its planner kernels into common/standpoint — the controller MUST be built
     from this commit too), table_concept (legacy, for the cut table); the rest of the fleet as usual.
