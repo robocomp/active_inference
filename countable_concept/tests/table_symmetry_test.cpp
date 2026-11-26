@@ -10,7 +10,13 @@
 //       point at θ and at each group image of θ — within float roundoff (bound derived below, before running); the chair's is not;
 //   (c) the belief: with symmetric = true the front-mode posterior is a point mass, the REPORTED yaw variance is the within-sheet
 //       Σ(5,5), and a front cue rotates nothing; with symmetric = false (the same belief otherwise) the undecided modes add their
-//       variance (π²/4 for a rectangle: modes {0, π} at ½ each) and the cue rotates the box.
+//       variance (π²/4 for a rectangle: modes {0, π} at ½ each) and the cue rotates the box;
+//   (d) the whole update is equivariant (fix round 1): a belief built from the TABLE's own loaded params
+//       (table_concept/etc/countable.toml through rc::load_countable_config) and its group image (w↔h, yaw + π/2), given the SAME
+//       frames — a table seen from the front with a room wall staged 5 cm behind one side — end at states that map onto each other.
+//       Bound, stated before running: the persistent engine stops when the undamped step is below gn_tol_sigma·σ_k on every θ
+//       component and then applies it, so two runs of the same problem can differ by at most that step: |Δθ_k| ≤ gn_tol_sigma·σ_k
+//       (σ_k the posterior's, at the end), per component after the group map (yaw compared modulo π/2's image).
 // Run: LANG=es_ES.UTF-8 ./table_symmetry_test
 #include <clocale>
 #include <cmath>
@@ -25,6 +31,9 @@
 #include "countable_vertical_span.h"
 #include "ai_belief/parts_geometry.h"
 #include "shape_parts.h"
+#include "countable_config.h"
+#include <genericworker.h>   // the test stub: the real ConfigLoader (manifest_stub/)
+#include "beam_fixture.h"
 
 #ifndef MANIFEST_DIR
 #error "MANIFEST_DIR must name common/concept_manifest"
@@ -62,6 +71,66 @@ static float max_sdf_gap(const std::vector<rc::manifest::ShapePart>& parts, floa
                              std::abs(d0 - sdf(p, cx, cy, H, h, w, yaw - 0.5f * pi, T, span))});
     }
     return gap;
+}
+
+// The table's params as the agent builds them (CountableFitter::run_inference's mapping, as in table_face_ranking_test).
+static rc::CountableBeliefParams table_params()
+{
+    const auto cwd = std::filesystem::current_path();
+    std::filesystem::current_path(std::filesystem::path(REPO_DIR) / "table_concept");
+    ConfigLoader cl;
+    cl.load("etc/countable.toml");
+    const rc::CountableConfig c = rc::load_countable_config(cl);
+    std::filesystem::current_path(cwd);
+    rc::CountableBeliefParams p;
+    p.sigma_base_m = c.ai2_sigma_base_m;
+    p.prior_footprint_m = c.ai2_prior_footprint_m; p.prior_footprint_std = c.ai2_prior_footprint_std;
+    p.prior_depth_m = c.ai2_prior_depth_m; p.prior_depth_std = c.ai2_prior_depth_std;
+    p.prior_height_m = c.ai2_prior_height_m; p.prior_height_std = c.ai2_prior_height_std;
+    p.plaus_height_min = c.plaus_height_min; p.plaus_height_soft = c.plaus_height_soft;
+    p.wall_flush_prior = c.ai2_wall_flush_prior;
+    p.wall_precision = c.ai2_wall_precision; p.wall_parallel_precision = c.ai2_wall_parallel_precision;
+    p.wall_reach_m = c.ai2_wall_reach_m; p.wall_no_cross_precision = c.ai2_wall_no_cross_precision;
+    p.wall_explain_frac = c.ai2_wall_explain_frac; p.wall_explain_sigma_m = c.ai2_wall_explain_sigma_m;
+    p.symmetric = c.shape_symmetric;
+    p.room_axis_std = c.ai2_room_axis_std_deg * 0.017453293f;
+    p.volatility_infer = c.ai2_volatility_infer;
+    p.move_rate_per_day = c.move_rate_per_day; p.move_scale_m = c.move_scale_m; p.move_scale_rad = c.move_scale_rad;
+    p.wall_standoff_m = c.wall_standoff_m; p.wall_standoff_std_m = c.wall_standoff_std_m;
+    p.vertical_extent_m = c.vertical_extent_m;
+    p.shape_parts = c.shape_parts; p.solid_parts = c.solid_parts; p.shape_proportions = c.shape_proportions;
+    p.layer_spread_m = c.layer_spread_m;
+    p.persistent = c.lidar_measures_on_gated;
+    p.beam = rc::test::test_beam_config();
+    return p;
+}
+
+// A dining table at (0.4, −0.3), yaw 0, top 1.60 x 0.90 at 0.74, a 3 cm top, seen from the −y side (as table_face_ranking_test),
+// with a room wall staged 5 cm behind its +y face (normal −y, into the room).
+static rc::CountableFrame wall_frame(const rc::CountableBeliefParams& p)
+{
+    constexpr float tx = 0.40f, ty = -0.30f, tw = 1.60f, th = 0.90f, tH = 0.74f, tq = 1.0f - 0.03f / 0.74f;
+    rc::CountableFrame f;
+    const float tu = tq * tH, lx = 0.048f * tw, ly = 0.048f * th, ax = 0.441f * tw, ay = 0.441f * th;
+    for (int i = 0; i < 16; ++i) for (int j = 0; j < 9; ++j)
+        f.points.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 16.0f, ty - 0.5f * th + th * (j + 0.5f) / 9.0f, tH);
+    for (int i = 0; i < 16; ++i) for (int j = 0; j < 2; ++j)
+        f.points.emplace_back(tx - 0.5f * tw + tw * (i + 0.5f) / 16.0f, ty - 0.5f * th, tu + (tH - tu) * (j + 0.5f) / 2.0f);
+    for (const float sx : {-1.0f, 1.0f}) for (const float sy : {-1.0f, 1.0f})
+        for (int j = 0; j < 8; ++j) for (int i = 0; i < 2; ++i)
+            f.points.emplace_back(tx + sx * ax + lx * (i - 0.5f) * 0.5f, ty + sy * ay - 0.5f * ly, tu * (j + 0.5f) / 8.0f);
+    f.R.assign(f.points.size(), p.sigma_base_m * p.sigma_base_m);
+    f.z_top_obs = tH;
+    const float pp = p.common_mode_pos_std * p.common_mode_pos_std, ss = p.common_mode_size_std * p.common_mode_size_std,
+                yy = p.common_mode_yaw_std * p.common_mode_yaw_std;
+    f.sig2_cam = {pp, pp, ss, ss, ss, yy};
+    f.sig2_L   = {pp, pp, ss, ss, ss, yy};
+    f.sigma_pose = Eigen::Vector3d(1e-4, 1e-4, 0.0).asDiagonal();
+    f.rho_cam.fill(1.0f); f.rho_L.fill(1.0f); f.rho_chain = 1.0f;
+    f.robot_xy = Eigen::Vector2f(tx, ty - 2.0f);
+    f.wall.ok = true; f.wall.p = Eigen::Vector2f(tx, ty + 0.5f * th + 0.05f); f.wall.n = Eigen::Vector2f(0.0f, -1.0f);
+    f.wall.sigma_m = 0.02f; f.wall.length_m = 3.0f; f.wall.room = 1; f.wall.edge = 0;
+    return f;
 }
 
 int main()
@@ -121,6 +190,31 @@ int main()
         {   // rectangle (|w−h|/(w+h) = 0.28): modes {0, π} undecided at ½ each ⇒ + (π/2)² = π²/4 (float rounding of ~2.47 ≪ 1e-5)
             CHECK(std::abs((reported - within) - std::numbers::pi_v<float> * std::numbers::pi_v<float> / 4.0f) < 1e-5f);
             CHECK(rotated);
+        }
+    }
+    // (d) equivariance of the whole update on the table's own params
+    {
+        const rc::CountableBeliefParams p = table_params();
+        CHECK(p.symmetric and p.persistent and p.shape_parts.size() == 5);
+        constexpr float hp = 0.5f * std::numbers::pi_v<float>;
+        rc::CountableBelief A(rc::CountableBeliefState{0.43f, -0.32f, 0.72f, 1.55f, 0.88f, 0.0f}, p);
+        rc::CountableBelief B(rc::CountableBeliefState{0.43f, -0.32f, 0.72f, 0.88f, 1.55f, hp}, p);   // the image under swap∘r_π/2
+        for (auto* b : {&A, &B}) b->set_room_interior(Eigen::Vector2f(0.0f, -4.0f));
+        const rc::CountableFrame f = wall_frame(p);
+        for (int k = 0; k < 10; ++k) { A.update(f); B.update(f); }
+        const auto& a = A.state(); const auto& bs = B.state();
+        const auto S = A.covariance();
+        const double tol = p.gn_tol_sigma;
+        const float dyaw = std::remainder(bs.yaw - a.yaw - hp, std::numbers::pi_v<float>);   // modulo the r_π image
+        const std::array<float, 6> d{bs.cx - a.cx, bs.cy - a.cy, bs.H - a.H, bs.w - a.h, bs.h - a.w, dyaw};
+        const std::array<int, 6> k_of{0, 1, 2, 4, 3, 5};   // B's component ↔ A's
+        std::printf("equivariance: A (%.4f %.4f %.4f %.4f %.4f %.4f q %.4f)  B (%.4f %.4f %.4f %.4f %.4f %.4f q %.4f)\n", a.cx, a.cy, a.H,
+                    a.w, a.h, a.yaw, A.proportion_value(0), bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw, B.proportion_value(0));
+        for (int i = 0; i < 6; ++i)
+        {
+            const double bound = tol * std::sqrt(double(S(k_of[i], k_of[i])));
+            std::printf("  component %d: |Δ| %.3e  bound %.3e\n", i, std::abs(double(d[i])), bound);
+            CHECK(std::abs(double(d[i])) <= bound);
         }
     }
     std::printf(bad ? "table_symmetry_test FAILED (%d)\n" : "table_symmetry_test OK\n", bad);

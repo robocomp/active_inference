@@ -135,9 +135,9 @@ SingletonInhibition = 1.0   # mutual-inhibition: a STRONGER table subtracts this
 # WALL-FLUSH + WALL-PARALLEL factor (a table's back face rests against a room wall; ported from cabinet_concept).
 # Precision = marginal of a {flush, free-standing} mixture keyed on the back-to-wall gap ⇒ decays CONTINUOUSLY to 0
 # for a genuine mid-room table (no proximity gate). 0 = OFF.
-AI2WallPrecision = 400.0         # 1/m² at zero gap (back face → wall line)
-AI2WallParallelPrecision = 200.0 # back face parallel to the wall (width-axis · wall-normal → 0)
-AI2WallReachM = 0.15             # gap scale (m) over which the flush hypothesis loses its weight
+AI2WallPrecision = 0.0   # K2c table (fix 1): OFF, REQUIRED by symmetry c2v (the flush acts on the +y face); a table is free-standing and the manifest declares no attachment
+AI2WallParallelPrecision = 0.0   # K2c table (fix 1): OFF, REQUIRED by symmetry c2v (the +y face parallel to a wall); a table is free-standing and the manifest declares no attachment
+AI2WallReachM = 0.15   # K2c table (fix 1): inert (no flush term runs: the precisions above are 0 and a symmetric belief's flush posterior is 0); kept at the default
 WallFlushPrior = 0.0   # K2c table: OFF, REQUIRED by symmetry c2v (the flush puts the +y face on a wall); the manifest declares no attachment: a table is free-standing
                         # holds it; was 0 (the fridge parent never assumed a wall), so front-only views felt no wall at all
 RoomAxisStdDeg = 0.0   # K2c table: OFF: no cited class knowledge, and the legacy table had none (the 4-fold room-axis term would be invariant under c2v, so this is a choice, not a requirement)
@@ -196,7 +196,7 @@ AI2WallExplainSigmaM = 0.05      # extra wall-plane std (m): room-polygon + loca
 # so a fit can end up CROSSING the wall (back past it into the wall/exterior). This one-sided term resists penetration
 # ONLY — active when gap=(back_centre−wall.p)·(inward normal) goes negative (crossed) or within the margin; precision
 # GROWS with how far past, leaving flush (gap≈0) untouched. STRONG (a wall is a hard boundary), continuous. 0 = OFF.
-WallNoCrossPrecision = 2000.0    # 1/m² per m of penetration past the wall (>> the flush precision)
+WallNoCrossPrecision = 0.0   # K2c table (fix 1): OFF, REQUIRED by symmetry c2v (the legacy path's no-cross acts on the +y face); a table is free-standing and the manifest declares no attachment
 WallNoCrossMarginM = 0.0         # interior offset (m) inside which the constraint activates
 AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
 AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)

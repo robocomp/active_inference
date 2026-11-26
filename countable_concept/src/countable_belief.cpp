@@ -374,7 +374,9 @@ float CountableBelief::two_sided_fraction(const CountableBeliefState& s, const C
 // definition (a range hood) declares 1.0. Default 0 ⇒ this is exactly flush_weight() and nothing changes.
 float CountableBelief::flush_posterior(const CountableBeliefState& s, const CountableFrame& f) const
 {
-    if (not f.wall.ok) return 0.0f;
+    // K2c: a symmetric class (no front) has no BACK face to stand flush with — "flush" would single out the +y face and tell
+    // the c2v sheets apart (the wall prior and the footprint's depth hand-over both read this weight).
+    if (params_.symmetric or not f.wall.ok) return 0.0f;
     const float two_sided = two_sided_along(s, f, false);
     return two_sided * flush_weight(s, f)
          + (1.0f - two_sided) * std::clamp(params_.wall_flush_prior, 0.0f, 1.0f);

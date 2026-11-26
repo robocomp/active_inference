@@ -1523,7 +1523,10 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             if (inst.replay) inst.replay->room_interior(room_interior_);
             inst.ai2_belief.set_room_interior(room_interior_);
             const auto& bs_now = inst.ai2_belief.state();
-            frame.wall = nearest_wall(inst.ai2_belief.back_centre(bs_now));
+            // K2c: a symmetric class has no back face, so its wall is the one nearest its CENTRE (invariant under the c2v group;
+            // the back centre moves to another face in another sheet). The staged wall feeds the explain-away component and δ.
+            frame.wall = nearest_wall(inst.ai2_belief.params().symmetric ? Eigen::Vector2f(bs_now.cx, bs_now.cy)
+                                                                         : inst.ai2_belief.back_centre(bs_now));
             if (const auto ax = room_axis(); ax) { frame.room_axis_ok = true; frame.room_axis = *ax; }
         }
     };

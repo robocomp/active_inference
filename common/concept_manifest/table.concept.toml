@@ -136,6 +136,20 @@ mesh = "meshes/table.obj"
 # countable binary, which then requires every model term to be invariant under that group (the parts below are; see the K2c report).
 # Note: the legacy [model].state carries 7 DOF (+ the depth tilt t); the countable θ has 6, its per-view camera latents carry t.
 #
+# ★SPEC DEVIATION (K2c fix round 1, review I2): the [model] block above says "symmetry = c2v ... 90° w<->h ambiguity is REAL and must
+# be carried" and the spec (2026-11-23 shared-engine design, Engine shape) names "table: N = 7 in the quotient chart". The countable
+# class DELIBERATELY does neither:
+#   - N = 6, not 7: the depth tilt t is the persistent engine's per-view camera shared error (one per DOF, yaw included); a θ copy
+#     would count it twice.
+#   - no quotient chart: the c2v sheets (w,h,yaw), (w,h,yaw+π), (h,w,yaw±π/2) are ONE table, every model term is required invariant
+#     (the loader and rc::symmetric_config_violation refuse otherwise), the group acts freely, so one sheet of the plain chart is a
+#     chart of the quotient and the four "modes" carry no variance.
+#   - the genuinely DIFFERENT near-square alternative — the same box turned 90° WITHOUT the w↔h swap — is NOT carried: the Laplace
+#     Gaussian holds one local optimum. Why: for a square top it is the same solid; for a near-square one it differs by |w − h| in
+#     the footprint, so a wrong pick is an extent error of |w − h| (graded correctly only modulo the group), not a 90° yaw error; a
+#     rectangular top's data separate the two. The legacy table carried it as p(1−p)(π/2)² in σ_yaw (and runs with
+#     QuotientChart = false). The owner is told; see .superpowers/sdd/2026-11-23-shared-engine/task-K2c-report.md §2.
+#
 # Sources:
 #   [BAS-G] Bassett Furniture, "The Complete Guide to Table Sizes" (bassettfurniture.com/blog/complete-guide-to-table-sizes.html):
 #           rectangular dining tables "between 36" and 40" wide"; "A table that seats four should be about 48" long", six to eight

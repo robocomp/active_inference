@@ -347,9 +347,12 @@ set_tests_properties(chair_face_ranking_test PROPERTIES ENVIRONMENT "LANG=es_ES.
 
 # K2c: the table's symmetry (no quotient chart needed): the manifest's c2v and its invariance check, the parts SDF invariant under
 # the group, the symmetric belief's point-mass mode posterior and within-sheet yaw variance. Run: LANG=es_ES.UTF-8 ./table_symmetry_test
-add_executable(table_symmetry_test table_symmetry_test.cpp ../src/countable_belief.cpp)
-target_include_directories(table_symmetry_test PRIVATE ../src ../../common ../../common/concept_manifest ../../common/media_transport)
-target_compile_definitions(table_symmetry_test PRIVATE MANIFEST_DIR="${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest")
+add_executable(table_symmetry_test table_symmetry_test.cpp ../src/countable_belief.cpp ../src/countable_config.cpp
+               $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp)
+target_include_directories(table_symmetry_test PRIVATE manifest_stub ../src ../../common ../../common/concept_manifest
+                           ../../common/config_report ../../common/media_transport $ENV{ROBOCOMP}/classes)
+target_compile_definitions(table_symmetry_test PRIVATE MANIFEST_DIR="${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest"
+                           REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
 target_compile_options(table_symmetry_test PRIVATE -O2)
 target_link_libraries(table_symmetry_test PRIVATE Eigen3::Eigen)
 add_test(NAME table_symmetry_test COMMAND table_symmetry_test)

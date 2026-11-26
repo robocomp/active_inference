@@ -639,6 +639,16 @@ std::string symmetric_config_violation(const CountableConfig& c)
         return std::format("Model.AI2PriorDepthStd = {} differs from AI2PriorFootprintStd = {}", c.ai2_prior_depth_std,
                            c.ai2_prior_footprint_std);
     if (c.ai2_wall_flush_prior > 0.0f) return std::format("Model.WallFlushPrior = {} (the flush puts the +y face on a wall)", c.ai2_wall_flush_prior);
+    if (c.ai2_wall_precision > 0.0f)
+        return std::format("Model.AI2WallPrecision = {} (the wall flush / stand-off acts on the +y face)", c.ai2_wall_precision);
+    if (c.ai2_wall_parallel_precision > 0.0f)
+        return std::format("Model.AI2WallParallelPrecision = {} (the +y face parallel to the wall)", c.ai2_wall_parallel_precision);
+    if (c.ai2_wall_no_cross_precision > 0.0f)
+        return std::format("Model.WallNoCrossPrecision = {} (the +y face may not cross the wall)", c.ai2_wall_no_cross_precision);
+    if (c.wall_standoff_std_m > 0.0f)
+        return std::format("[prior.attachment] standoff_std_m = {} (a stand-off of the back face)", c.wall_standoff_std_m);
+    if (c.class_fit_w_m != c.class_fit_h_m)
+        return std::format("[prior.class] fit_error_w_m = {} differs from fit_error_h_m = {}", c.class_fit_w_m, c.class_fit_h_m);
     if (c.front_detect_enabled) return "Concept.FrontDetectEnabled = true (a front cue)";
     if (c.approach_enabled) return "Concept.ApproachEnabled = true (a fronted approach)";
     if (c.thumbnails_enabled) return "Concept.ThumbnailsEnabled = true (thumbnails binned on the yaw)";

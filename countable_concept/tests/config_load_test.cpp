@@ -127,6 +127,14 @@ int main()
         v = *c; v.front_detect_enabled = true;         CHECK(rc::symmetric_config_violation(v).contains("FrontDetectEnabled"));
         v = *c; v.approach_enabled = true;             CHECK(rc::symmetric_config_violation(v).contains("ApproachEnabled"));
         v = *c; v.thumbnails_enabled = true;           CHECK(rc::symmetric_config_violation(v).contains("ThumbnailsEnabled"));
+        // fix round 1 (I1): the back face's wall terms and the class box-fit errors
+        CHECK(c->ai2_wall_precision == 0.0f and c->ai2_wall_parallel_precision == 0.0f and c->ai2_wall_no_cross_precision == 0.0f);
+        v = *c; v.ai2_wall_precision = 400.0f;          CHECK(rc::symmetric_config_violation(v).contains("AI2WallPrecision"));
+        v = *c; v.ai2_wall_parallel_precision = 200.0f; CHECK(rc::symmetric_config_violation(v).contains("AI2WallParallelPrecision"));
+        v = *c; v.ai2_wall_no_cross_precision = 2000.0f; CHECK(rc::symmetric_config_violation(v).contains("WallNoCrossPrecision"));
+        v = *c; v.wall_standoff_std_m = 0.05f;          CHECK(rc::symmetric_config_violation(v).contains("standoff_std_m"));
+        v = *c; v.class_fit_w_m = 0.04f;                CHECK(rc::symmetric_config_violation(v).contains("fit_error_w_m"));
+        v = *c; v.class_fit_w_m = 0.04f; v.class_fit_h_m = 0.04f; CHECK(rc::symmetric_config_violation(v).empty());
     }
     else CHECK(false);
     for (const char* cls : {"bed", "nightstand", "toilet"})   // the other classes stay asymmetric

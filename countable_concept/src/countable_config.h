@@ -545,9 +545,11 @@ inline std::string countable_manifest_path(const std::string& concept_class)
 bool verify_countable_manifest(const CountableConfig& out, const std::string& path);
 // K2c: a class whose manifest declares [shape] symmetry = "c2v" must run only model terms invariant under that group, or the sheets
 // it identifies stop being one body (the plain chart then needs the quotient chart). Returns the first offending key ("" = none):
-// the w/h size priors must be one distribution (AI2PriorDepthM / AI2PriorDepthStd unset or equal to the footprint's), and no
-// channel may read a front or a back: the wall flush (WallFlushPrior > 0 puts the +y face on the wall), the front cue
-// (FrontDetectEnabled), the fronted approach (ApproachEnabled) and the yaw-binned thumbnails (ThumbnailsEnabled).
+// the w/h size priors must be one distribution (AI2PriorDepthM / AI2PriorDepthStd unset or equal to the footprint's; the class
+// box-fit errors fit_error_w_m = fit_error_h_m), and no channel may read a front or a back: the wall terms of the back face
+// (WallFlushPrior, AI2WallPrecision, AI2WallParallelPrecision, WallNoCrossPrecision, a [prior.attachment] stand-off), the front cue
+// (FrontDetectEnabled), the fronted approach (ApproachEnabled) and the yaw-binned thumbnails (ThumbnailsEnabled). The flush reach
+// (AI2WallReachM) is inert once those are off (and flush_posterior is 0 for a symmetric belief), so it is not refused.
 std::string symmetric_config_violation(const CountableConfig& c);
 
 }  // namespace rc
