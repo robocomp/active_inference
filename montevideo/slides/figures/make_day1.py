@@ -705,3 +705,89 @@ fig.tight_layout(); fig.savefig(OUT / "d1_gauss_newton.pdf"); plt.close(fig)
 print(f"gauss-newton: mu = {s_k:.3f}, H = {H_k:.2f}, sigma = {1/np.sqrt(H_k):.3f}")
 
 print("day 1 figures written")
+
+
+# 12. a GENERIC continuous joint (no Gaussian yet): p(s) with two bumps, and a sensor whose noise
+#     grows with distance, o | s ~ N(s, (0.05 + 0.1 s)^2). Used on the frames before the Gaussian
+#     is introduced: the surface (volume = probability) and marginalisation.
+gen_ps = lambda s: 0.6 * npdf(s, 1.6, 0.3 ** 2) + 0.4 * npdf(s, 2.7, 0.25 ** 2)
+gen_so = lambda s: 0.05 + 0.1 * s
+gen_joint = lambda s, o: gen_ps(s) * npdf(o, s, gen_so(s) ** 2)
+gq = np.linspace(0.4, 3.6, 400)
+Xq, Yq = np.meshgrid(gq, gq)
+Zq = gen_joint(Xq, Yq)
+gen_po = Zq.sum(axis=1) * (gq[1] - gq[0])                  # integrate over s (columns): p(o) on the o grid
+print(f"generic joint: total volume = {Zq.sum() * (gq[1] - gq[0]) ** 2:.3f}")
+
+# 12a. the surface, one patch lifted out
+gc2 = np.linspace(0.4, 3.6, 80)
+Xc2, Yc2 = np.meshgrid(gc2, gc2)
+Zc2 = gen_joint(Xc2, Yc2)
+q0, q1, r0, r1 = 1.5, 2.0, 1.5, 2.0
+gp = np.linspace(0, 1, 200)
+Xp2, Yp2 = np.meshgrid(q0 + gp * (q1 - q0), r0 + gp * (r1 - r0))
+p_patch2 = gen_joint(Xp2, Yp2).mean() * (q1 - q0) * (r1 - r0)
+fig = plt.figure(figsize=(6.0, 4.6))
+ax = fig.add_subplot(projection="3d")
+cs2, co2 = 0.5 * (Xc2[:-1, :-1] + Xc2[1:, 1:]), 0.5 * (Yc2[:-1, :-1] + Yc2[1:, 1:])
+inp = (cs2 >= q0) & (cs2 <= q1) & (co2 >= r0) & (co2 <= r1)
+fc2 = plt.cm.Blues(0.25 + 0.7 * Zc2[:-1, :-1] / Zc2.max())
+fc2[inp] = matplotlib.colors.to_rgba("#E08E0B")
+ax.plot_surface(Xc2, Yc2, Zc2, facecolors=fc2, linewidth=0, antialiased=False, rstride=1, cstride=1, shade=False)
+for xa, ya, xb, yb in [(q0, r0, q1, r0), (q1, r0, q1, r1), (q1, r1, q0, r1), (q0, r1, q0, r0)]:
+    t = np.linspace(0, 1, 30)
+    ax.plot(xa + t * (xb - xa), ya + t * (yb - ya), np.zeros_like(t), color="#E08E0B", lw=1.4)
+for xe, ye in [(q0, r0), (q1, r0), (q1, r1)]:
+    ax.plot([xe, xe], [ye, ye], [0, gen_joint(xe, ye)], color="#E08E0B", lw=1.0, ls=":")
+ax.set_xlabel(r"$s$: distance to the wall (m)", labelpad=6)
+ax.set_ylabel(r"$o$: range reading (m)", labelpad=6)
+ax.set_zlabel(r"$p(s,o)$", labelpad=2)
+ax.contour(Xc2, Yc2, Zc2, levels=5, zdir="z", offset=0, colors=COOL, linewidths=0.8)
+ax.set_zticks([]); ax.view_init(elev=30, azim=-40)
+ax.xaxis.pane.fill = ax.yaxis.pane.fill = ax.zaxis.pane.fill = False
+fig.savefig(OUT / "d1_joint_generic.pdf", bbox_inches="tight"); plt.close(fig)
+print(f"generic joint: P(s in [{q0},{q1}], o in [{r0},{r1}]) = {p_patch2:.3f}")
+
+# 12b. marginalisation on the generic joint
+fig = plt.figure(figsize=(7.2, 4.6))
+gs = fig.add_gridspec(2, 2, width_ratios=(4, 1.2), height_ratios=(1.2, 4), wspace=0.05, hspace=0.05)
+ax = fig.add_subplot(gs[1, 0]); axt = fig.add_subplot(gs[0, 0], sharex=ax); axr = fig.add_subplot(gs[1, 1], sharey=ax)
+ax.contourf(Xq, Yq, Zq, levels=8, cmap="Blues", alpha=0.85)
+ax.set_xlabel(r"$s$: distance to the wall (m)"); ax.set_ylabel(r"$o$: range reading (m)")
+ax.text(0.6, 3.25, r"joint $p(s,o)$", fontsize=14, color="#2E6DB4")
+ax.annotate("", xy=(3.55, 1.0), xytext=(2.75, 1.0), arrowprops=dict(arrowstyle="-|>", color="#2E8B57", lw=2))
+ax.text(2.78, 1.12, r"add along $s$", fontsize=13, color="#2E8B57")
+axt.fill_between(gq, gen_ps(gq), color="#2E6DB4", alpha=0.3)
+axt.text(0.5, 0.6, r"$p(s)$", fontsize=14, color="#2E6DB4"); axt.axis("off")
+axr.fill_betweenx(gq, gen_po, color="#2E8B57", alpha=0.3)
+axr.text(0.0, 3.5, r"$p(o)=\int p(s,o)\,ds$", fontsize=13, color="#2E8B57"); axr.axis("off")
+fig.savefig(OUT / "d1_marg_generic.pdf", bbox_inches="tight"); plt.close(fig)
+
+# 12c. conditioning on the generic joint: the slice at o = GEN_O has area p(o = GEN_O); dividing by it
+#      gives p(s | o), which is not a bell either.
+GEN_O = 2.1
+gslice = gen_joint(gq, GEN_O)
+gp_o = gslice.sum() * (gq[1] - gq[0])
+gcond = gslice / gp_o
+gpk = gq[np.argmax(gcond)]
+fig = plt.figure(figsize=(7.2, 5.2))
+gs = fig.add_gridspec(2, 2, width_ratios=(4, 1.2), height_ratios=(2.2, 4), wspace=0.05, hspace=0.05)
+ax = fig.add_subplot(gs[1, 0]); axt = fig.add_subplot(gs[0, 0], sharex=ax); axr = fig.add_subplot(gs[1, 1], sharey=ax)
+ax.contourf(Xq, Yq, Zq, levels=8, cmap="Blues", alpha=0.85)
+ax.axhline(GEN_O, color="crimson", lw=1.6, ls="--")
+ax.text(0.5, GEN_O + 0.07, rf"observe $o={GEN_O}$", color="crimson", fontsize=14)
+ax.set_xlabel(r"$s$: distance to the wall (m)"); ax.set_ylabel(r"$o$: range reading (m)")
+axt.fill_between(gq, gcond, color="crimson", alpha=0.25); axt.plot(gq, gcond, color="crimson", lw=1.5)
+axt.fill_between(gq, gslice, color="0.55", alpha=0.6)
+axt.annotate("", xy=(gpk, gcond.max() * 0.97), xytext=(gpk, gslice.max() * 1.03),
+             arrowprops=dict(arrowstyle="-|>", color="crimson", lw=1.6))
+axt.text(gpk + 0.08, 0.5 * (gslice.max() + gcond.max()), rf"$\div\,{gp_o:.2f}$", color="crimson", fontsize=15, va="center")
+axt.text(0.45, gcond.max() * 0.22, "grey: the slice,\n" rf"area ${gp_o:.2f}$", fontsize=12, color="0.3")
+axt.text(0.45, gcond.max() * 0.68, rf"red: $p(s\mid o{{=}}{GEN_O})$," "\n" r"area $1$", fontsize=12, color="crimson")
+axt.set_ylim(0, gcond.max() * 1.08); axt.axis("off")
+axr.fill_betweenx(gq, gen_po, color="#2E8B57", alpha=0.3)
+axr.plot([0, gp_o], [GEN_O, GEN_O], color="crimson", lw=1.6)
+axr.text(0.12, 3.3, r"$p(o)$", fontsize=14, color="#2E8B57")
+axr.text(0.02, GEN_O + 0.12, f"{gp_o:.2f} = area\nof the slice", fontsize=13, color="crimson", va="bottom"); axr.axis("off")
+fig.savefig(OUT / "d1_cond_generic.pdf", bbox_inches="tight"); plt.close(fig)
+print(f"generic conditioning: p(o={GEN_O}) = {gp_o:.3f}, peak of p(s|o) at {gpk:.2f}")
