@@ -1,10 +1,8 @@
 # Part 1 grading: shared estimation engine (AuRo tests a–d)
 
-> **Status: GRADED COLUMNS PENDING.** The graded numbers come from the combined rerun batch, which the room session runs from
-> one build commit (§6). They are not in this file yet: every "graded" column below says *pending*. What this file does
-> contain is the structure and the method, and the preliminary numbers that exist now. Those come from single live runs, one
-> scripted visit per class, and several of them were made on earlier commits than the build commit. They are not the graded
-> result and must not be quoted as such.
+> **Status: GRADED (Parts A and B of the batch, 2026-11-26 21:29–23:41, room session, g1x-live @ 91598c88).** Part C (C3
+> non-regression) is reported by the room session. The graded columns of §3 and the section "Graded results" below are the
+> result; the other columns are the earlier single runs, kept for context.
 
 - Branch feat/shared-engine. Build commit for the batch: **91598c88** (code = fix wave 17f13198), tree `2d0c2d5107011e10da553ad8ac569535b7b33c48`.
 - Spec: `docs/superpowers/specs/2026-11-23-shared-engine-design.md` (Tests, Graded quantities). Plan revision 2, Task G1x.
@@ -60,13 +58,13 @@ None of these is the build commit.
 
 | class | run (crossing/) | node match d² (bound 9.21) | first-visit NEES/DOF, A1 dwell, diag (n = 1 visit) | NEES/DOF over all dwells | planar error end A1 / end A2 | registered A/B/A checks | **graded (a) mean NEES/DOF, n ≥ 10** | **graded (b) ρ** | count: patch total (baseline → now) |
 |---|---|---|---|---|---|---|---|---|---|
-| nightstand | p1r8_nightstand | 1.34 (nightstand_25) | 2.54 | 2.31 | 3.1 / 2.6 cm | 5/6 FAIL (net A2 > net B, a wrong registered inequality) | *pending* | *pending* | 131 → 134 |
-| bed | p1r8_bed | 3.81 (bed_11) | 3.09 | 3.49 | 4.7 / 4.3 cm | 6/6 PASS | *pending* | *pending* | 131 → 134 |
-| toilet | p1r8_toilet | **none** (toilet_5, d² 126.9) | 29.10 | 40.53 | 23.7 / 24.2 cm | NO VERDICT, FAIL | *pending* | *pending* | 131 → 134 |
-| refrigerator | k1_fridge | 3.16 (refrigerator_1) | 2.05 | 2.23 | 5.0 / 2.7 cm | 4/6 FAIL (B: promise 0.97, delivery 0: no detections at B; net A2 > net B) | *pending* | *pending* | 129 → 134 |
-| hood | k1_hood | **none** (hood_3, d² 25.2) | no dwell updates | — | 14.2 / 14.2 cm (birth estimate, never updated) | NO VERDICT, FAIL | *pending* | *pending* | 128 → 134 |
-| chair | k2b_chair | 3.27 (chair_2) | 1.92 | 3.44 | 3.9 / 4.3 cm | 6/6 PASS | *pending* | *pending* | 110 → 134 |
-| table | k2c_table | **none** (table_2, d² 262.6) | 193.8 | 193.8 | 50.5 / 50.5 cm | NO VERDICT, FAIL | **cut**: graded as "old engine" (legacy binary) | *pending* (legacy) | 120 → 121 (legacy) |
+| nightstand | p1r8_nightstand | 1.34 (nightstand_25) | 2.54 | 2.31 | 3.1 / 2.6 cm | 5/6 FAIL (net A2 > net B, a wrong registered inequality) | **4.51** [2.45, 6.98], n 17/24 (6 unmatched) FAIL | pooled **+0.36** | 131 → 134 |
+| bed | p1r8_bed | 3.81 (bed_11) | 3.09 | 3.49 | 4.7 / 4.3 cm | 6/6 PASS | **3.06** [2.17, 4.07], n 11/12 FAIL | pooled **+0.36** | 131 → 134 |
+| toilet | p1r8_toilet | **none** (toilet_5, d² 126.9) | 29.10 | 40.53 | 23.7 / 24.2 cm | NO VERDICT, FAIL | **4.09** [2.69, 6.39], n 9/12 (3 unmatched) FAIL | unmatched 2/2 (not in ρ) | 131 → 134 |
+| refrigerator | k1_fridge | 3.16 (refrigerator_1) | 2.05 | 2.23 | 5.0 / 2.7 cm | 4/6 FAIL (B: promise 0.97, delivery 0: no detections at B; net A2 > net B) | **3.27** [1.75, 5.87], n 4/12 (8 unmatched) FAIL | pooled **+0.36** | 129 → 134 |
+| hood | k1_hood | **none** (hood_3, d² 25.2) | no dwell updates | — | 14.2 / 14.2 cm (birth estimate, never updated) | NO VERDICT, FAIL | **2.20**, n 1/12 (11 unmatched) FAIL | unmatched 2/2 (not in ρ) | 128 → 134 |
+| chair | k2b_chair | 3.27 (chair_2) | 1.92 | 3.44 | 3.9 / 4.3 cm | 6/6 PASS | **6751** [213, 16049], n 30/72 (41 unmatched) FAIL | pooled **+0.36** | 110 → 134 |
+| table | k2c_table | **none** (table_2, d² 262.6) | 193.8 | 193.8 | 50.5 / 50.5 cm | NO VERDICT, FAIL | **cut**; old engine, diagonal: **2.33** [0.88, 3.78], n 2/24 (22 unmatched) FAIL | not run (cut) | 120 → 121 (legacy) |
 
 Reading the preliminary column:
 - **Overconfident.** Every matched class is over 1 at first visit: chair 1.92, fridge 2.05, nightstand 2.54, bed 3.09.
@@ -97,6 +95,51 @@ Reading the preliminary column:
 
 Patch totals went up for every class, as the last column of the table shows. See "After part 1" in the baseline file. The
 closed prior-term list check finds six violating terms in every graded class, four of them not argued in the ledger.
+
+## Graded results (batch)
+
+Runs: `crossing/g1x_tour_S01..S12` (Part A, 12/12 tours, all legs) and `crossing/g1x_aba_<obj>_<k>` (Part B, 12/12 runs).
+Every run's `resolve.txt` = 6 countable + legacy table from g1x-live. Scores: `crossing/g1x_tour_nees.txt`
+(first_visit_nees.py, f2d456a3, written and reviewed before any batch result was seen), `crossing/g1x_aba_scores.txt`,
+`crossing/g1x_aba_reports.txt`.
+
+**Scoring note.** The first scoring pass used g1x-live's replay binary, built from 91598c88, which predates the opt-in
+`--theta-cov` output. Every engine visit then read "no full P", misreported as "the dump has 0 updates". The score above
+uses the shared-engine worktree's replay binary: between 91598c88 and the scorer commit the only non-script change is
+`countable_concept/tools/replay/replay.cpp` (the flag), and every graded draw replays bit-identically (dθ vs ai2 ≤ 5e-6,
+dP_live = 0). No definition changed between the passes.
+
+### Test (a): FAILS for every class
+
+| class | visits | matched | graded | mean NEES/DOF | 95 % CI | per-DOF mean e²/P_kk (cx cy H w h yaw) | frame fit² vs P_cx, P_cy (report only) |
+|---|---|---|---|---|---|---|---|
+| nightstand | 24 | 18 | 17 | 4.51 | 2.45–6.98 | see g1x_tour_nees.txt | 5.9e-4 vs 2.5e-3, 1.1e-3 |
+| bed | 12 | 12 | 11 | 3.06 | 2.17–4.07 | (h inside the interval contributes 0) | 5.4e-4 vs 1.7e-3, 6.2e-3 |
+| toilet | 12 | 9 | 9 | 4.09 | 2.69–6.39 | | 2.5e-3 vs 6.4e-4, 1.7e-3 |
+| refrigerator | 12 | 4 | 4 | 3.27 | 1.75–5.87 | | 1.3e-3 vs 5.6e-4, 6.7e-4 |
+| hood | 12 | 1 | 1 | 2.20 | — | | 2.1e-3 vs 5.7e-2, 5.1e-2 |
+| chair | 72 | 31 | 30 | 6751 | 213–16049 | 1.44 4.09 36.0 10.4 19.0 40384 | 1.2e-3 vs 1.9e-2, 2.1e-2 |
+| table (old engine, diagonal) | 24 | 2 | 2 | 2.33 | 0.88–3.78 | | 1.3e-3 vs 1.4e-3, 1.7e-3 |
+
+- **Overconfident by ~3–4.5×** where the class is born reliably (bed, nightstand, toilet, fridge). Same direction and size as
+  the single runs. This is what removing the range-growing camera common mode (T5 ruling, I3) risked; restoring it is the
+  open owner decision.
+- **Chair: the yaw carries the mean.** 7 of 30 visits are above 1000 (yaw e²/P ~ 4e4 on average), consistent with a confident
+  heading in the wrong mode (≈180°); the remaining visits are mostly 3–40, still overconfident. Not yet diagnosed.
+- **Births are the second failure.** Fridge born in 4/12 tours, hood 1/12 matched, table 2/24, chair 41/72 unmatched (incl.
+  the two sunken chairs, graded as in the world).
+- **Frame-fit error** (the room-frame transform's own error, not in P) is small against P for bed, nightstand and chair;
+  comparable to P for the toilet and the fridge. It does not change any verdict.
+
+### Test (b): PASSES as registered (ρ > 0, with spread)
+
+Pairs (claim promise, visit net) over the matched objects' segments: **n = 17, Spearman ρ = +0.36**, promises 0.107–1.343
+nats (bed 6, chair 4, refrigerator 4, nightstand 3). Not in ρ: toilet 2/2 and hood 2/2 unmatched (NO VERDICT), and
+nightstand_1 (NO VERDICT: arrival at B 0.307 m from the standpoint, tolerance 0.25 m). The largest discordant pair is the
+fridge's 1.343-nat promise that delivered 0.136 (the P(detect) gap of §4).
+
+Registered A/B/A checks: bed 6/6, 6/6 PASS; chair 6/6, 6/6 PASS; refrigerator 4/6, 4/6 FAIL; nightstand NO VERDICT, 5/6
+FAIL; toilet NO VERDICT ×2; hood NO VERDICT ×2.
 
 ## 4. Cut, failing, ungraded
 
