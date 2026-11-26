@@ -29,8 +29,13 @@
  * the class prior, the constraints. Conventions the engine relies on: θ(0), θ(1) are the room-frame centre (cx, cy) — the
  * lever is taken there and the birth position covariance lands there — and θ(M::kYaw) is an angle (wrapped; −1 = none).
  *
- * All solves in double; fixed-size Eigen throughout. No thresholds: the solver's tolerances are solver constants
- * (SolverConfig), and the only case split on a latent is σ_prev = 0 (a new error source).
+ * All solves in double; fixed-size Eigen throughout. The solver's tolerances are solver constants (SolverConfig), and the only
+ * case split on a latent is σ_prev = 0 (a new error source). NOT threshold-free: three ⚠ THRESHOLDs are flagged in place, each
+ * with what it decides and why no model-level term replaces it yet (CLAUDE.md):
+ *   - the wall-identity gate, same_physical_wall: χ² ≤ the quantile at P(|z| ≤ 3) for the DOF count (transport δ vs a new source;
+ *     whether the attachment priors re-enter);
+ *   - the GN-cap switch in update(): an update ending at the iteration cap carries P̄ instead of the Laplace Σ;
+ *   - the Σ ≤ Σ₀ cap in predict_theta_on: the predict never lets a θ variance exceed the class prior's (G1x closed list V5).
  */
 #pragma once
 
@@ -268,7 +273,22 @@ struct WallAnchor
     double length_m = 0.0;                             // the edge's length (its direction is known to σ/L; 0 ⇒ direction unknown)
 };
 
+// The wall-identity gate's χ² quantile at P(|z| ≤ 3) = erf(3/√2) for 1 or 2 DOF (closed forms: 3² and −2 ln erfc(3/√2)).
+inline double wall_identity_chi2_gate(int dof)
+{
+    return dof == 1 ? 9.0 : -2.0 * std::log(std::erfc(3.0 / std::sqrt(2.0)));
+}
+
 // The same physical wall (see above): same room (when both are known), facing the same way, within 3σ in offset and angle.
+// ⚠ THRESHOLD (flagged, CLAUDE.md; final review I2). WHAT IT DECIDES: a YES transports δ (its mean shifted by the staged line's
+// move, no information) and, for walls_entered_, means the attachment priors (flush / stand-off, parallel) do NOT re-enter; a NO
+// starts a new δ source (the old one marginalised out) and, for a wall not yet entered, enters the priors again. WHY KEPT: the
+// model-level alternative — a mixture over "same wall / another wall" with the identity's posterior weighting both the transport
+// and the priors — needs a per-update hypothesis over the wall set that the ρ = 1 δ latent does not carry; post-12-02.
+// THE QUANTILE: the statistic d² is χ² with 1 DOF (offset only: a length unknown) or 2 DOF (offset + angle). BASE used 9 for both
+// — 3σ (99.73 %) for 1 DOF but 98.9 % for 2. It is now the χ² quantile at ONE probability, P(|z| ≤ 3) = erf(3/√2) = 0.99730, for
+// the actual DOF count: 9 (1 DOF, exactly) and −2 ln(1 − P) = 11.83 (2 DOF). Replay of the four graded box-class dumps
+// (p1r8_bed, p1r8_nightstand, k1_fridge, k2b_chair) is bit-identical before / after (final-fix-wave-report.md).
 inline bool same_physical_wall(const WallAnchor& a, const WallAnchor& b)
 {
     if (a.room != 0 and b.room != 0 and a.room != b.room) return false;
@@ -278,12 +298,14 @@ inline bool same_physical_wall(const WallAnchor& a, const WallAnchor& b)
     const double doff = (a.p - b.p).dot(b.n);
     const double so2 = a.sigma_m * a.sigma_m + b.sigma_m * b.sigma_m;
     double d2 = so2 > 0.0 ? doff * doff / so2 : (doff == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
+    int dof = 1;
     if (a.length_m > 0.0 and b.length_m > 0.0)
     {
         const double sp2 = std::pow(a.sigma_m / a.length_m, 2) + std::pow(b.sigma_m / b.length_m, 2);
         d2 += sp2 > 0.0 ? dphi * dphi / sp2 : (dphi == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
+        dof = 2;
     }
-    return d2 <= 9.0;
+    return d2 <= wall_identity_chi2_gate(dof);
 }
 
 namespace detail
@@ -1508,6 +1530,14 @@ private:
 
     // θ's predict on P (Σ += q_scale·Q, then the clamp_to_prior congruence; see predict()).
     void predict_theta(const M& m, float q_scale) { predict_theta_on(P_, process_noise(m), m.prior_cov_diag(), q_scale); }
+    // ⚠ THRESHOLD (flagged, CLAUDE.md; G1x closed prior-term list violation V5; no behaviour change). WHAT IT DECIDES: after the
+    // process noise, a θ variance above the class prior's Σ₀,ii is rescaled back to it (symmetrically, so P stays PSD) — a hard
+    // ceiling Σ ≤ Σ₀ on every θ DOF, applied on every predict: the class prior (counted once, at birth) is used again as a clamp,
+    // for ever (V5: not argued on the closed list). WHY KEPT: it is recursive_laplace.h's clamp_to_prior, moved here unchanged —
+    // without it Q (authored per frame) makes an unobserved static object lose its prior at σ ∝ √frames (live table_9, ~2 min
+    // unseen: std_w 0.030 → 0.170 m, std_yaw 0.101 → 0.348 rad) and the next stray mask re-cuts it. The model-level replacement is
+    // a stationary process (Ornstein–Uhlenbeck toward the class prior, Σ∞ = Σ₀, the claim recursive_laplace.h makes for the clamp
+    // but does not implement) in place of the random walk + ceiling — post-12-02 owner list. No behaviour change here.
     static void predict_theta_on(MatJd& P_, const VecNf& q, const VecNf& p0, float q_scale)
     {
         for (int i = 0; i < N; ++i) P_(i, i) += double(std::max(0.0f, q_scale)) * double(q(i));
