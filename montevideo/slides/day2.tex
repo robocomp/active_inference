@@ -252,10 +252,9 @@
     \end{column}
     \begin{column}{0.42\textwidth}
       \small
-      The robot expects to read 1.0\,m; it reads 1.5\,m. That reading costs 0.43\,nats more than the
-      expected one.\\[0.8em]
-      \textbf{Nats}: the unit of $\ln$ (with $\log_2$, bits: 1 bit = 0.69 nats).\\[0.3em]
-      \renewcommand{\arraystretch}{1.15}
+      Expected 1.0\,m, read 1.5\,m: 0.43\,nats more.\\[0.5em]
+      \textbf{Nats}: the unit of $\ln$ (1 bit = 0.69 nats).\\[0.3em]
+      \renewcommand{\arraystretch}{1.0}
       \begin{tabular}{@{}l r@{}}
         \toprule
         a reading with probability & surprise \\
@@ -265,7 +264,9 @@
         $1/e \approx 0.37$ & 1 nat \\
         $1/100$ & 4.6 nats \\
         \bottomrule
-      \end{tabular}\\[0.4em]
+      \end{tabular}\\[0.5em]
+      {\footnotesize a sequence: Day~1's product becomes a sum,\\
+      $-\ln p(o_{1:T}\given s_{1:T}) = \sum_t -\ln p(o_t\given s_t)$\par}
     \end{column}
   \end{columns}
   {\footnotesize $p(o)$: how likely the reading is under the robot's model, $\N(1,\,0.29)$ (derived on frame~\ref{d2f:26}).\par}

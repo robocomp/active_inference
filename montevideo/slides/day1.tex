@@ -689,7 +689,7 @@
 % transition: from two variables to many
 \begin{frame}[plain]
   \centering\vfill
-  {\fontsize{30}{34}\selectfont\bfseries\color{accent} The chain rule}
+  {\fontsize{30}{34}\selectfont\bfseries\color{accent} Modelling\\ the joint distribution\\ through factorisation\par}
   \vfill
 \end{frame}
 
@@ -721,7 +721,43 @@
   \lesson{Always true, because it assumes nothing. So it saves nothing yet.}
 \end{frame}
 
-\begin{frame}{One joint, $N!$ factorisations}
+\begin{frame}{Two variables: one joint, $2! = 2$ factorisations}
+  \begin{center}
+    \textcolor{cool!80!black}{$S$: state} (door open?) \quad
+    \textcolor{good!70!black}{$O$: observation} (gap seen?)
+  \end{center}
+  \centering
+  % the factorisation frame's two products, drawn as graphs: an arrow X -> Y means Y's factor is conditioned on X
+  \begin{tikzpicture}[
+      vs/.style={draw=cool!80!black, circle, minimum size=0.9cm, fill=cool!15},
+      vo/.style={draw=good!70!black, circle, minimum size=0.9cm, fill=good!15},
+      ar/.style={-{Stealth[length=2.4mm]}, very thick},
+      ex/.style={font={\small\hyphenpenalty=10000\relax}, text width=4.8cm, align=center}]
+    \begin{scope}
+      \node[font=\bfseries] at (0,1.6) {$S$ first};
+      \node[font=\small\bfseries, text=good!70!black] at (0,1.1) {generative model: $p(O\given S)$};
+      \node[vs] (S0) at (-1,0) {$S$}; \node[vo] (O0) at (1,0) {$O$};
+      \draw[ar] (S0) -- (O0);
+      \node at (0,-1.0) {\large $p(S)\,p(O\given S)$};
+      \node[ex] at (0,-1.8) {the door is open or closed; it makes the reading};
+    \end{scope}
+    \begin{scope}[xshift=6.4cm]
+      \node[font=\bfseries] at (0,1.6) {$O$ first};
+      \node[font=\small\bfseries, text=accent!80!black] at (0,1.1) {classifier: $p(S\given O)$};
+      \node[vs] (S1) at (-1,0) {$S$}; \node[vo] (O1) at (1,0) {$O$};
+      \draw[ar] (O1) -- (S1);
+      \node at (0,-1.0) {\large $p(O)\,p(S\given O)$};
+      \node[ex] at (0,-1.8) {a reading appears; the door is the one that matches it};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  {\small an arrow $X \to Y$: the factor of $Y$ is conditioned on $X$\par}
+  \vfill
+  \lesson{Both orders rebuild the same joint; only the generative one can produce a reading.}
+\end{frame}
+
+\begin{frame}{Three variables: one joint, $3! = 6$ factorisations}
   \begin{center}
     \textcolor{cool!80!black}{$S$: state} (door open?) \quad
     \textcolor{good!70!black}{$O$: observation} (gap seen?) \quad
@@ -758,170 +794,320 @@
   \lesson{$3! = 6$ orderings, all \alert{exactly equal}; $N$ variables give $N!$, and we must write down one.}
 \end{frame}
 
-\begin{frame}{Choose the order in which the world produces things}
+\begin{frame}{How the world works: the door and the aim come first, the reading last}
   \centering
-  \begin{tikzpicture}[vs/.style={draw=cool!80!black, circle, minimum size=0.9cm, fill=cool!15},
-      vo/.style={draw=good!70!black, circle, minimum size=0.9cm, fill=good!15},
-      va/.style={draw=black!60, circle, minimum size=0.9cm, fill=black!8},
-      ar/.style={-{Stealth[length=2.2mm]}, very thick}]
-    % causal
-    \node[font=\large\bfseries] at (0,2.45) {causal: causes first};
-    \node[font=\footnotesize, muted] at (0,2.0) {(first step: nothing seen yet)};
-    \node[vs] (S) at (-1.5,1.2) {$S$}; \node[va] (A) at (1.5,1.2) {$A$}; \node[vo] (O) at (0,-0.3) {$O$};
-    \draw[ar] (S) -- (O); \draw[ar] (A) -- (O);
-    \draw[ar, black!25, densely dashed] (S) -- node[midway, text=accent, font=\Large\bfseries] {$\times$} node[above=2pt, font=\footnotesize, text=accent] {$A\perp S$: drop it} (A);
-    \node at (0,-1.3) {\large $p(S)\;\textcolor{accent}{p(A\given S)}\;p(O\given S,A)$};
-    \node at (0,-2.0) {\large $=\; p(S)\;\textcolor{accent}{p(A)}\;p(O\given S,A)$};
-    \node[text=prob] at (0,-2.8) {\large $1 + 1 + 4 = 6$ numbers};
-    % anti-causal
-    \begin{scope}[xshift=7cm]
-      \node[font=\large\bfseries] at (0,2.45) {anti-causal: effects first};
-      \node[vs] (S2) at (-1.5,1.2) {$S$}; \node[va] (A2) at (1.5,1.2) {$A$}; \node[vo] (O2) at (0,-0.3) {$O$};
-      \draw[ar] (O2) -- (S2); \draw[ar] (O2) -- (A2); \draw[ar] (A2) -- (S2);
-      \node at (0,-1.3) {\large $p(O)\;p(A\given O)\;p(S\given O,A)$};
-      \node[font=\footnotesize, muted] at (0,-2.0) {no arrow can be dropped};
-      \node[text=prob] at (0,-2.8) {\large $1 + 2 + 4 = 7$ numbers};
+  {\small\color{accent} the first step: the robot has not seen anything yet\par}
+  \vspace{0.1em}
+  \begin{tikzpicture}[badge/.style={circle, inner sep=0pt, minimum size=0.45cm, fill=black!70, text=white, font=\small\bfseries},
+                      nxt/.style={-{Stealth[length=2.5mm]}, very thick, muted}]
+    \begin{scope}[shift={(0,0)}]
+      \begin{scope}[x=1.3cm, y=1.1cm]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        
+        
+      \end{scope}
+      \node[badge] at (-0.05,1.7) {1};
+      \node[font={\small\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, anchor=north] at (1.82,-0.15) {\textcolor{cool!80!black}{$S$}: the door is open or closed};
+    \end{scope}
+    \begin{scope}[shift={(4.4,0)}]
+      \begin{scope}[x=1.3cm, y=1.1cm]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed, -{Stealth[length=1.5mm]}] (0.56,0.6) -- (1.56,0.62);
+        
+      \end{scope}
+      \node[badge] at (-0.05,1.7) {2};
+      \node[font={\small\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, anchor=north] at (1.82,-0.15) {\textcolor{black!75}{$A$}: the robot aims the LiDAR, without seeing the door};
+    \end{scope}
+    \begin{scope}[shift={(8.8,0)}]
+      \begin{scope}[x=1.3cm, y=1.1cm]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed, -{Stealth[length=1.5mm]}] (0.56,0.6) -- (1.56,0.62);
+        \fill[good!70!black] (1.6,0.62) circle (2.4pt);
+      \end{scope}
+      \node[badge] at (-0.05,1.7) {3};
+      \node[font={\small\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, anchor=north] at (1.82,-0.15) {\textcolor{good!70!black}{$O$}: the beam returns a reading, made by the door \emph{and} the aim};
+    \end{scope}
+    \draw[nxt] (3.75,0.7) -- (4.25,0.7);
+    \draw[nxt] (8.15,0.7) -- (8.65,0.7);
+    % what causes what
+    \begin{scope}[shift={(6.2,-2.2)}, vv/.style={circle, minimum size=0.75cm, font=\small}]
+      \node[vv, draw=cool!80!black, fill=cool!15] (S) at (-1.6,0.35) {$S$};
+      \node[vv, draw=black!60, fill=black!8] (A) at (1.6,0.35) {$A$};
+      \node[vv, draw=good!70!black, fill=good!15] (O) at (0,-0.45) {$O$};
+      \draw[-{Stealth[length=2mm]}, very thick] (S) -- (O);
+      \draw[-{Stealth[length=2mm]}, very thick] (A) -- (O);
+      \draw[-{Stealth[length=2mm]}, thick, black!30, densely dashed] (S) -- (A);
+      \node[font=\small, anchor=west] at (2.3,0) {$p(S)\;p(A\given S)\;p(O\given S,A)$};
+      \node[font=\small, text=muted, anchor=east] at (-2.3,0) {what causes what};
     \end{scope}
   \end{tikzpicture}
 
-  \vspace{0.2em}
-  {\small The robot cannot see the door, so where it points the LiDAR does not depend on it.}
   \vfill
-  \lesson{One arrow fewer, fewer numbers: $p(A\given S)$ needs one per value of $S$ (2), $p(A)$ needs just 1.}
+  \lesson{$S$ is the real door, not a belief: $p(A\given S)$ asks how the aim depends on the door itself.}
 \end{frame}
 
-\begin{frame}{Why the causal order wins}
+\begin{frame}{Orders 1--3: the same joint, told in different orders}
   \centering
-  \begin{tikzpicture}[scale=1.12, transform shape, vs/.style={draw=cool!80!black, circle, minimum size=0.85cm, fill=cool!15, font=\small},
-      vo/.style={draw=good!70!black, circle, minimum size=0.85cm, fill=good!15, font=\small},
-      va/.style={draw=black!60, circle, minimum size=0.85cm, fill=black!8, font=\small},
-      ar/.style={-{Stealth[length=2.2mm]}, very thick},
-      ttl/.style={font=\bfseries}, cpn/.style={font=\footnotesize, align=center, text width=3.6cm}]
-    % 1. physics
-    \node[ttl] at (0,1.9) {Each factor is physics};
-    \node[vs] (s0) at (-0.9,0.8) {$s_{t-1}$}; \node[vs] (s1) at (0.9,0.8) {$s_t$}; \node[vo] (o1) at (0.9,-0.8) {$o_t$};
-    \draw[ar] (s0) -- node[above, font=\footnotesize] {motion} (s1);
-    \draw[ar] (s1) -- node[left, font=\footnotesize] {sensor} (o1);
-    \node[cpn] at (0,-1.9) {nobody can write $p(O)$:\\every possible scan};
-    % 2. modular
-    \begin{scope}[xshift=4.0cm]
-      \node[ttl] at (0,1.9) {Modular};
-      \node[font=\footnotesize] at (0,1.35) {swap the LiDAR for a camera};
-      \node[vs] (S) at (-0.9,0.5) {$S$}; \node[va] (A) at (0.9,0.5) {$A$}; \node[vo] (O) at (0,-0.6) {$O$};
-      \draw[ar, accent] (S) -- (O); \draw[ar, accent] (A) -- (O);
-      \node[cpn, text=accent] at (0,-1.55) {only $p(O\given S,A)$\\is re-learnt};
-      \node[cpn, muted] at (0,-2.35) {anti-causal: all three factors};
+  {\small
+    \textcolor{cool!80!black}{$S$: the door leaf, open?} \quad
+    \textcolor{black!75}{$A$: the LiDAR aimed at the door?} \quad
+    \textcolor{good!70!black}{$O$: a gap seen at the door?}\par}
+  \vspace{0.8em}
+  % one two-room scene per ordering; the badges number the order in which the factors produce each variable
+  \begin{tikzpicture}[badge/.style={circle, inner sep=0pt, minimum size=0.4cm, text=white, font=\scriptsize\bfseries}]
+    \begin{scope}[shift={(0.0,0)}]
+      \draw[muted!60, rounded corners=4pt] (-0.2,-2.15) rectangle (4.1,2.2);
+      \begin{scope}[x=1.4cm, y=1.15cm, shift={(0.1,0.1)}]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed] (0.56,0.6) -- (1.58,0.62);
+        \fill[good!70!black] (1.6,0.62) circle (2.2pt);
+        \node[badge, fill=cool!80!black] at (2.45,0.95) {1};
+        \node[badge, fill=black!75] at (0.45,0.95) {3};
+        \node[badge, fill=good!70!black] at (1.25,0.3) {2};
+      \end{scope}
+      \node[font=\normalsize] at (1.95,-0.3) {$\textcolor{cool!80!black}{S} \to \textcolor{good!70!black}{O} \to \textcolor{black!75}{A}$};
+      \node[font=\scriptsize\bfseries, text=accent!80!black, anchor=north west, inner sep=2pt] at (-0.15,2.15) {controller with the true door};
+      \node[font=\scriptsize] at (1.95,-0.75) {$p(S)\,p(O\given S)\,p(A\given S,O)$};
+      \node[font={\scriptsize\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, text=black!80, anchor=north] at (1.95,-1.0) {door open or closed; a reading appears; the aim is chosen to match it};
     \end{scope}
-    % 3. runs forwards
-    \begin{scope}[xshift=8.0cm]
-      \node[ttl] at (0,1.9) {It runs forwards};
-      \node[vs] (S3) at (-0.9,0.5) {$S$}; \node[va] (A3) at (0.9,0.5) {$A$};
-      \node[vo, densely dashed] (O3) at (0,-0.6) {$\hat O$};
-      \draw[ar] (S3) -- (O3); \draw[ar] (A3) -- (O3);
-      \node[cpn, anchor=north] at (0,-1.15) {sample in order:\\what I would see if I did $A$\\{\color{muted}$\hat O$: a predicted, not a measured, $O$}};
+    \begin{scope}[shift={(4.45,0)}]
+      \draw[good!70!black, very thick, rounded corners=4pt, fill=good!5] (-0.2,-2.15) rectangle (4.1,2.2);
+      \begin{scope}[x=1.4cm, y=1.15cm, shift={(0.1,0.1)}]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed] (0.56,0.6) -- (1.58,0.62);
+        \fill[good!70!black] (1.6,0.62) circle (2.2pt);
+        \node[badge, fill=cool!80!black] at (2.45,0.95) {1};
+        \node[badge, fill=black!75] at (0.45,0.95) {2};
+        \node[badge, fill=good!70!black] at (1.25,0.3) {3};
+      \end{scope}
+      \node[font=\normalsize] at (1.95,-0.3) {$\textcolor{cool!80!black}{S} \to \textcolor{black!75}{A} \to \textcolor{good!70!black}{O}$};
+      \node[font=\scriptsize\bfseries, text=good!70!black, anchor=north west, inner sep=2pt] at (-0.15,2.15) {generative model};
+      \node[font=\scriptsize] at (1.95,-0.75) {$p(S)\,p(A\given S)\,p(O\given S,A)$};
+      \node[font={\scriptsize\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, text=black!80, anchor=north] at (1.95,-1.0) {door open or closed; the robot aims without knowing $S$; then the reading};
+    \end{scope}
+    \begin{scope}[shift={(8.9,0)}]
+      \draw[muted!60, rounded corners=4pt] (-0.2,-2.15) rectangle (4.1,2.2);
+      \begin{scope}[x=1.4cm, y=1.15cm, shift={(0.1,0.1)}]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed] (0.56,0.6) -- (1.58,0.62);
+        \fill[good!70!black] (1.6,0.62) circle (2.2pt);
+        \node[badge, fill=cool!80!black] at (2.45,0.95) {2};
+        \node[badge, fill=black!75] at (0.45,0.95) {3};
+        \node[badge, fill=good!70!black] at (1.25,0.3) {1};
+      \end{scope}
+      \node[font=\normalsize] at (1.95,-0.3) {$\textcolor{good!70!black}{O} \to \textcolor{cool!80!black}{S} \to \textcolor{black!75}{A}$};
+      \node[font=\scriptsize\bfseries, text=accent!80!black, anchor=north west, inner sep=2pt] at (-0.15,2.15) {classifier, then controller};
+      \node[font=\scriptsize] at (1.95,-0.75) {$p(O)\,p(S\given O)\,p(A\given S,O)$};
+      \node[font={\scriptsize\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, text=black!80, anchor=north] at (1.95,-1.0) {a reading appears first; the door and the aim are chosen to match it};
     \end{scope}
   \end{tikzpicture}
+
   \vfill
-  \lesson{Causal factors: measure each one, swap each one, run them forwards to predict.}
+  \lesson{The joint is the same in all three; only $S \to A \to O$ produces the reading last.}
 \end{frame}
 
-\begin{frame}{Three things you can build from one joint}
+\begin{frame}{Orders 4--6: only the reading last follows how the world works}
   \centering
-  \begin{tikzpicture}[vs/.style={draw=cool!80!black, circle, minimum size=0.85cm, fill=cool!15},
-      vo/.style={draw=good!70!black, circle, minimum size=0.85cm, fill=good!15},
-      va/.style={draw=black!60, circle, minimum size=0.85cm, fill=black!8},
-      ar/.style={-{Stealth[length=2.2mm]}, very thick},
-      ttl/.style={font=\bfseries}, ex/.style={font=\footnotesize, align=center, text width=3.4cm}]
-    % perception only
-    \node[ttl] at (0,1.5) {Perception only};
-    \node at (0,0.9) {$p(s\given o)$};
-    \node[vo] (o1) at (-0.8,0) {$O$}; \node[vs] (s1) at (0.8,0) {$S$}; \draw[ar] (o1) -- (s1);
-    \node[ex] at (0,-1.0) {a classifier, a detector};
-    % control only
-    \begin{scope}[xshift=3.9cm]
-      \node[ttl] at (0,1.5) {Control only};
-      \node at (0,0.9) {$p(a\given o)$};
-      \node[vo] (o2) at (-0.8,0) {$O$}; \node[va] (a2) at (0.8,0) {$A$}; \draw[ar] (o2) -- (a2);
-      \node[ex] at (0,-1.0) {a hand-written controller, a learned reflex};
+  {\small
+    \textcolor{cool!80!black}{$S$: the door leaf, open?} \quad
+    \textcolor{black!75}{$A$: the LiDAR aimed at the door?} \quad
+    \textcolor{good!70!black}{$O$: a gap seen at the door?}\par}
+  \vspace{0em}
+  % one two-room scene per ordering; the badges number the order in which the factors produce each variable
+  \begin{tikzpicture}[badge/.style={circle, inner sep=0pt, minimum size=0.4cm, text=white, font=\scriptsize\bfseries}]
+    \begin{scope}[shift={(0.0,0)}]
+      \draw[muted!60, rounded corners=4pt] (-0.2,-2.68) rectangle (4.1,2.2);
+      \begin{scope}[x=1.4cm, y=1.15cm, shift={(0.1,0.1)}]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed] (0.56,0.6) -- (1.58,0.62);
+        \fill[good!70!black] (1.6,0.62) circle (2.2pt);
+        \node[badge, fill=cool!80!black] at (2.45,0.95) {3};
+        \node[badge, fill=black!75] at (0.45,0.95) {2};
+        \node[badge, fill=good!70!black] at (1.25,0.3) {1};
+      \end{scope}
+      \node[font=\normalsize] at (1.95,-0.3) {$\textcolor{good!70!black}{O} \to \textcolor{black!75}{A} \to \textcolor{cool!80!black}{S}$};
+      \node[font=\scriptsize\bfseries, text=accent!80!black, anchor=north west, inner sep=2pt] at (-0.15,2.15) {reactive policy: $p(A\given O)$};
+      \node[font=\scriptsize] at (1.95,-0.75) {$p(O)\,p(A\given O)\,p(S\given O,A)$};
+      \node[font={\scriptsize\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, text=black!80, anchor=north] at (1.95,-1.0) {a reading first; the aim, then the door, chosen to match it};
     \end{scope}
-    % generative model
-    \begin{scope}[xshift=7.8cm]
-      \node[ttl, text=accent] at (0,1.5) {The generative model};
-      \node at (0,0.9) {$p(s)\,p(a)\,p(o\given s,a)$};
-      \node[vs] (s3) at (-1.1,0) {$S$}; \node[vo] (o3) at (0,-0.3) {$O$}; \node[va] (a3) at (1.1,0) {$A$};
-      \draw[ar] (s3) -- (o3); \draw[ar] (a3) -- (o3);
-      \node[ex] at (0,-1.0) {what we build};
-      \node[ex, muted, text width=4.2cm, anchor=north] at (0,-1.35) {model-based RL learns it too,\\then adds a reward};
+    \begin{scope}[shift={(4.45,0)}]
+      \draw[good!70!black, very thick, rounded corners=4pt, fill=good!5] (-0.2,-2.68) rectangle (4.1,2.2);
+      \begin{scope}[x=1.4cm, y=1.15cm, shift={(0.1,0.1)}]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed] (0.56,0.6) -- (1.58,0.62);
+        \fill[good!70!black] (1.6,0.62) circle (2.2pt);
+        \node[badge, fill=cool!80!black] at (2.45,0.95) {2};
+        \node[badge, fill=black!75] at (0.45,0.95) {1};
+        \node[badge, fill=good!70!black] at (1.25,0.3) {3};
+      \end{scope}
+      \node[font=\normalsize] at (1.95,-0.3) {$\textcolor{black!75}{A} \to \textcolor{cool!80!black}{S} \to \textcolor{good!70!black}{O}$};
+      \node[font=\scriptsize\bfseries, text=good!70!black, anchor=north west, inner sep=2pt] at (-0.15,2.15) {generative model};
+      \node[font=\scriptsize] at (1.95,-0.75) {$p(A)\,p(S\given A)\,p(O\given S,A)$};
+      \node[font={\scriptsize\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, text=black!80, anchor=north] at (1.95,-1.0) {the robot picks an aim from its policy $p(A)$, blind to the door; door open or closed; then the reading};
+      \node[font=\scriptsize\itshape, text width=3.9cm, align=center, text=good!50!black] at (1.95,-2.28) {same as $S \to A \to O$ here; causal if the action moved the door};
+    \end{scope}
+    \begin{scope}[shift={(8.9,0)}]
+      \draw[muted!60, rounded corners=4pt] (-0.2,-2.68) rectangle (4.1,2.2);
+      \begin{scope}[x=1.4cm, y=1.15cm, shift={(0.1,0.1)}]
+        \draw[thick, muted] (1.6,0.85) -- (1.6,1.25) -- (0,1.25) -- (0,0) -- (1.6,0) -- (1.6,0.4);
+        \draw[thick, muted] (1.6,1.25) -- (2.8,1.25) -- (2.8,0) -- (1.6,0);
+        \draw[line width=2.2pt, cool!80!black] (1.6,0.85) -- ++(-35:0.42);
+        \fill[cool!80!black] (1.6,0.85) circle (1.4pt);
+        \fill[black!25, draw=black!60] (0.45,0.6) circle (0.11);
+        \draw[black!70, thick, densely dashed] (0.56,0.6) -- (1.58,0.62);
+        \fill[good!70!black] (1.6,0.62) circle (2.2pt);
+        \node[badge, fill=cool!80!black] at (2.45,0.95) {3};
+        \node[badge, fill=black!75] at (0.45,0.95) {1};
+        \node[badge, fill=good!70!black] at (1.25,0.3) {2};
+      \end{scope}
+      \node[font=\normalsize] at (1.95,-0.3) {$\textcolor{black!75}{A} \to \textcolor{good!70!black}{O} \to \textcolor{cool!80!black}{S}$};
+      \node[font=\scriptsize\bfseries, text=accent!80!black, anchor=north west, inner sep=2pt] at (-0.15,2.15) {classifier: $p(S\given O,A)$};
+      \node[font=\scriptsize] at (1.95,-0.75) {$p(A)\,p(O\given A)\,p(S\given O,A)$};
+      \node[font={\scriptsize\hyphenpenalty=10000\relax}, text width=3.9cm, align=center, text=black!80, anchor=north] at (1.95,-1.0) {the robot aims; a reading appears; then the door is chosen to match it};
     \end{scope}
   \end{tikzpicture}
 
-  \vspace{0.6em}
-  \footnotesize
-  \begin{tabular}{@{}l c c c c c@{}}
+  \vfill
+  \lesson{All six give the same joint; only the two with the reading last follow how the world works.}
+\end{frame}
+
+\begin{frame}{Causal order: one factor per mechanism}
+  \centering\small
+  {\color{good!70!black}\textbf{causal}: $S \to A \to O$}\\[0.3em]
+  \begin{tabular}{@{}llll@{}}
     \toprule
-     & acts, in the world & says what it & notices it & knows what it & survives a \\
-     & it was tuned in & expects to see & is surprised & does not know & sensor swap \\
+    factor & mechanism & who decides it & new policy? \\
     \midrule
-    controller, model-free RL & $\checkmark$ & $\times$ & $\times$ & $\times$ & $\times$ \\
-    \alert{the joint}         & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+    \textcolor{cool!80!black}{$p(S)$} & the door & the world & no \\
+    $p(A\given S)$ & the policy & the robot & \textbf{yes, only this one} \\
+    \textcolor{good!70!black}{$p(O\given S,A)$} & the sensor & physics & no \\
+    \bottomrule
+  \end{tabular}\\[0.3em]
+  {\footnotesize first step: the robot cannot see the door, so $p(A\given S) = p(A)$ and the arrow $S \to A$ is dropped}\\[0.4em]
+  {\color{accent}\textbf{worst}: $O \to S \to A$}\\[0.3em]
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    factor & what it mixes & who decides it & new policy? \\
+    \midrule
+    $p(O)$ & door + policy + sensor & world + robot + physics & yes \\
+    $p(S\given O)$ & door + sensor + policy & world + robot + physics & yes \\
+    $p(A\given S,O)$ & policy, after its own reading & robot, backwards & yes \\
+    \bottomrule
+  \end{tabular}\\[0.1em]
+  {\footnotesize $p(O) = \sum_S \sum_A p(O\given S,A)\,p(S)\,p(A)$: it needs the causal factors first}
+  \vfill
+  \lesson{A new policy rewrites one causal factor; in $O \to S \to A$ it rewrites all three.}
+\end{frame}
+
+\begin{frame}{Model-free RL against the generative model: what each can do}
+  \vfill
+  \centering
+  \renewcommand{\arraystretch}{1.35}
+  \begin{tabular}{@{}l c c@{}}
+    \toprule
+     & controller, model-free RL & \alert{generative model} \\
+     & $p(a\given o)$ & $p(s)\,p(a)\,p(o\given s,a)$ \\
+    \midrule
+    acts, in the world it was tuned in & $\checkmark$ & $\checkmark$ \\
+    says what it expects to see        & $\times$ & $\checkmark$ \\
+    notices it is surprised            & $\times$ & $\checkmark$ \\
+    knows what it does not know        & $\times$ & $\checkmark$ \\
+    survives a sensor swap             & $\times$ & $\checkmark$ \\
     \bottomrule
   \end{tabular}
   \vfill
-  \lesson{Only the joint says what the robot expects to see, so only the joint can notice a surprise.}
+  \lesson{Only the generative model says what the robot expects to see, so only it can notice a surprise.}
 \end{frame}
+
+% =================================================================================================
+\section{Introducing time}
+% =================================================================================================
 
 \begin{frame}{Time: one copy of each variable per step}
   \centering
-  \vspace{0.6em}
   \begin{tikzpicture}[v/.style={draw, circle, minimum size=0.95cm, font=\small, inner sep=1pt},
       s/.style={v, draw=cool!80!black, fill=cool!15}, o/.style={v, draw=good!70!black, fill=good!15},
       br/.style={decorate, decoration={brace, amplitude=6pt}, thick}]
     \foreach \x/\l in {0/s_0, 1/s_1, 2/s_2, 4/s_T} \node[s] (s\x) at (1.4*\x, 0) {$\l$};
     \node at (1.4*3, 0) {$\cdots$};
     \draw[br, cool!80!black] ($(s0.north west)+(0,0.15)$) -- node[above=7pt, text=cool!80!black] {$s_{0:T} = (s_0, s_1, \dots, s_T)$: every step from $0$ to $T$} ($(s4.north east)+(0,0.15)$);
-    \foreach \x/\l in {1/o_1, 3/o_{t-1}, 4/o_t, 6/o_T} \node[o] (o\x) at (1.4*\x, -2.2) {$\l$};
-    \node at (1.4*2, -2.2) {$\cdots$}; \node at (1.4*5, -2.2) {$\cdots$};
+    \foreach \x/\l in {1/o_1, 3/o_{t-1}, 4/o_t, 6/o_T} \node[o] (o\x) at (1.4*\x, -1.6) {$\l$};
+    \node at (1.4*2, -1.6) {$\cdots$}; \node at (1.4*5, -1.6) {$\cdots$};
     \node[o, very thick, draw=accent] at (o4) {$o_t$};
-    \node[font=\footnotesize, text=accent] at (1.4*4, -1.45) {now};
+    \node[font=\footnotesize, text=accent] at (1.4*4, -0.95) {now};
     \draw[br, accent] ($(o3.south east)+(0,-0.15)$) -- node[below=7pt, text=accent] {$o_{<t} = o_{1:t-1}$: everything seen before now} ($(o1.south west)+(0,-0.15)$);
   \end{tikzpicture}
 
-  \vspace{0.8em}
-  {\large $\displaystyle \prod_{t=1}^{T} f_t \;=\; f_1\, f_2 \cdots f_T$}\qquad
-  {\small one factor per step, multiplied}
+  \vspace{0.6em}
+  {\large $\displaystyle p(o_{1:T}\given s_{1:T}) = \prod_{t=1}^{T} p(o_t\given s_t)$}
   \vfill
   \lesson{A subscript is a time; $a{:}b$ means every step from $a$ to $b$.}
 \end{frame}
 
 \begin{frame}{The robot acts on what it sees, not on the world}
+  \label{d1f:acts}
   \centering
   \begin{tikzpicture}[v/.style={draw, circle, minimum size=1.0cm},
       vs/.style={v, draw=cool!80!black, fill=cool!15}, vo/.style={v, draw=good!70!black, fill=good!15},
       va/.style={v, draw=black!60, fill=black!8},
       ar/.style={-{Stealth[length=2.4mm]}, very thick},
       side/.style={font=\footnotesize, muted}]
-    \foreach \x/\ttl in {0/{first step: nothing seen yet}, 6.4/{later steps}} {
-      \begin{scope}[xshift=\x cm]
-        \fill[muted!20] (-0.45,-1.3) rectangle (0.45,1.3);
-        \node[font=\bfseries] at (0,2.1) {\ttl};
-        \node[side] at (-1.7,1.55) {world}; \node[side] at (0,1.55) {senses}; \node[side] at (1.7,1.55) {robot};
-      \end{scope}}
     % first step
-    \node[vs] (S1) at (-1.7,0) {$S$}; \node[va] (A1) at (1.7,0) {$A$};
-    \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {no path: $A$ cannot depend on $S$};
-    % later
-    \begin{scope}[xshift=6.4cm]
-      \node[vs] (S2) at (-1.7,0) {$S$}; \node[vo] (O2) at (0,0) {$o_{<t}$}; \node[va] (A2) at (1.7,0) {$A$};
-      \draw[ar] (S2) -- (O2); \draw[ar] (O2) -- (A2);
-      \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {the only path goes through what it has seen};
+    \fill[muted!20] (-0.45,-1.3) rectangle (0.45,1.3);
+    \node[font=\bfseries] at (0,2.1) {first step: nothing seen yet};
+    \node[side] at (-1.7,1.55) {world}; \node[side] at (0,1.55) {senses}; \node[side] at (1.7,1.55) {robot};
+    \node[vs] (S1) at (-1.7,0) {$S$}; \node[va] (A1) at (1.7,0) {$a_1$};
+    \node[font=\footnotesize, text=accent, align=center] at (0,-1.6) {no path: $a_1$ cannot depend on $S$};
+    % later steps: the robot plans on its belief, which is built from what it has seen
+    \begin{scope}[xshift=7.0cm]
+      \fill[muted!20] (-1.25,-1.3) rectangle (-0.35,1.3);
+      \node[font=\bfseries] at (0,2.1) {later steps};
+      \node[side] at (-2.6,1.55) {world}; \node[side] at (-0.8,1.55) {senses};
+      \node[side] at (0.9,1.55) {belief}; \node[side] at (3.2,1.55) {robot};
+      \node[vs] (S2) at (-2.6,0) {$S$}; \node[vo] (O2) at (-0.8,0) {$o_{<t}$};
+      \node[draw=accent!80!black, fill=accent!10, rounded corners=4pt, minimum height=1.0cm, inner sep=3pt, font=\small] (Q2) at (0.9,0) {$p(S\given o_{<t})$}; \node[va] (A2) at (3.2,0) {$a_t$};
+      \draw[ar] (S2) -- (O2); \draw[ar] (O2) -- (Q2); \draw[ar] (Q2) -- node[above, font=\scriptsize] {plan} (A2);
+      \node[font=\footnotesize, text=accent, align=center] at (0.3,-1.75) {the robot plans on its belief $p(S\given o_{<t})$,\\ built from what it has seen};
     \end{scope}
   \end{tikzpicture}
 
-  \vspace{1.0em}
+  \vspace{0.4em}
   {\large You take an umbrella because of the \textcolor{good!70!black}{forecast}, not because of tomorrow's \textcolor{cool!80!black}{rain}.}\\[0.3em]
   {\small Same forecast, same decision, whatever the weather turns out to be.}
   \vfill
-  \lesson{Once we know what the robot has seen, also knowing the world changes nothing about its action.}
+  \lesson{Once we know what the robot has seen, knowing the world adds nothing about its action.}
 \end{frame}
 
 \begin{frame}{The robot's joint, in causal order}
@@ -980,6 +1166,44 @@
   \includegraphics[width=0.9\textwidth]{d1_bayes_ops.pdf}
   \vfill
   \lesson{Step 2, the area $p(o)$, is what a real robot cannot compute; tomorrow we find a way around it.}
+\end{frame}
+
+\begin{frame}{The same factors give a recursion: yesterday's belief, one motion, one reading}
+  \begin{columns}[c]
+    \begin{column}{0.47\textwidth}
+      \centering
+      \begin{tikzpicture}[bx/.style={draw, rounded corners=3pt, align=center, font=\footnotesize, inner sep=3pt, minimum width=4.6cm},
+                          ar/.style={-{Stealth[length=2mm]}, thick}]
+        \node[bx, draw=cool!80!black, fill=cool!10] (b0) at (0,0) {belief at $t-1$\\ $p(s_{t-1}\given o_{<t})$};
+        \node[bx, draw=muted, fill=muted!10] (pr) at (0,-1.25) {\textbf{predict}: marginalise $s_{t-1}$\\ with the motion model $p(s_t\given s_{t-1},a_t)$};
+        \node[bx, draw=good!70!black, fill=good!10] (up) at (0,-2.5) {\textbf{update}: condition on $o_t$\\ with the sensor model $p(o_t\given s_t)$};
+        \node[bx, draw=accent, fill=accent!10] (b1) at (0,-3.75) {belief at $t$\\ $p(s_t\given o_{\le t})$};
+        \draw[ar] (b0) -- (pr); \draw[ar] (pr) -- (up); \draw[ar] (up) -- (b1);
+        \draw[ar, accent] (b1.west) -- ++(-0.35,0) |- node[pos=0.25, left, font=\scriptsize, text=accent, align=right] {next\\step} (b0.west);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.45cm, y=1.0cm, lab/.style={font=\scriptsize, align=center}]
+        \draw[-{Stealth[length=1.5mm]}, muted] (0.3,0) -- (3.4,0) node[below, lab, text=black] {$s$ (m)};
+        \foreach \t in {1,2,3} \node[lab, below] at (\t,0) {\t};
+        \draw[cool!80!black, thick, domain=0.4:3.3, samples=70, smooth] plot (\x, {exp(-(\x-2.0)*(\x-2.0)/(2*0.25))/sqrt(2*pi*0.25)});
+        \draw[muted, thick, densely dashed, domain=0.3:3.0, samples=70, smooth] plot (\x, {exp(-(\x-1.5)*(\x-1.5)/(2*0.29))/sqrt(2*pi*0.29)});
+        \fill[accent!20, domain=0.75:1.9, samples=60, smooth] plot (\x, {exp(-(\x-1.3242)*(\x-1.3242)/(2*0.03515))/sqrt(2*pi*0.03515)}) -- (1.9,0) -- (0.75,0) -- cycle;
+        \draw[accent, thick, domain=0.75:1.9, samples=60, smooth] plot (\x, {exp(-(\x-1.3242)*(\x-1.3242)/(2*0.03515))/sqrt(2*pi*0.03515)});
+        \draw[good!70!black, very thick] (1.3,-0.08) -- (1.3,2.3) node[above, lab, text=good!70!black] {reading $o_t = 1.3$};
+        \node[lab, text=cool!80!black, anchor=west] at (2.25,0.75) {before: $2.00 \pm 0.50$};
+        \node[lab, text=muted, anchor=east] at (0.95,0.72) {predicted:\\$1.50 \pm 0.54$};
+        \node[lab, text=accent, anchor=west] at (1.55,2.0) {after: $1.32 \pm 0.19$};
+        \draw[-{Stealth[length=1.5mm]}, muted, thick] (2.0,-0.55) -- (1.5,-0.55) node[left, lab, text=muted] {drive 0.5\,m};
+      \end{tikzpicture}\\[0.3em]
+      {\footnotesize predict: the belief moves with the robot and \textbf{widens} (motion noise $0.2$\,m)\\
+       update: the reading ($\pm 0.2$\,m) \textbf{narrows} it}
+    \end{column}
+  \end{columns}
+  \vfill
+  {\footnotesize\color{muted} This belief is the one the robot plans on (frame~\ref{d1f:acts}); with Gaussians the loop is the Kalman filter.\par}
+  \lesson{Each step needs only the last belief, one motion and one reading.}
 \end{frame}
 
 
