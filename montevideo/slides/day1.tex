@@ -57,9 +57,9 @@
       day/.style={font=\scriptsize\bfseries, text=accent},
       arr/.style={-{Stealth[length=3mm]}, thick, color=muted}]
     \node[stage] (room) at (90:2.6)   {estimate the room\\[1pt] {\scriptsize\color{muted}walls, from LiDAR}};
-    \node[stage] (loc)  at (18:4.1)   {localise, learn the body\\[1pt] {\scriptsize\color{muted}pose, wheels, from LiDAR vs room}};
+    \node[stage] (loc)  at (18:4.1)   {localise\\[1pt] {\scriptsize\color{muted}pose, from LiDAR vs room}};
     \node[stage] (obj)  at (-54:3.0)  {concepts fill the room\\[1pt] {\scriptsize\color{muted}objects, from masks, LiDAR}};
-    \node[stage] (door) at (-126:3.0) {find the door, cross it\\[1pt] {\scriptsize\color{muted}door, open?, from free space}};
+    \node[stage] (door) at (-126:3.0) {choose where to go\\[1pt] {\scriptsize\color{muted}a look, the door: priced by $G$}};
     \node[stage] (mem)  at (162:4.1)  {new room, remember\\[1pt] {\scriptsize\color{muted}links, from all of it again}};
     \draw[arr] (room) to[bend left=15] (loc);
     \draw[arr] (loc)  to[bend left=15] (obj);
@@ -67,12 +67,13 @@
     \draw[arr] (door) to[bend left=15] (mem);
     \draw[arr] (mem)  to[bend left=15] (room);
     \node[day, above=1pt of room] {Day 4};
-    \node[day, right=1pt of loc]  {Days 4--5};
-    \node[day, below=1pt of obj]  {Day 4};
-    \node[day, below=1pt of door] {Day 5};
+    \node[day, right=1pt of loc]  {Day 4};
+    \node[day, below=1pt of obj]  {Days 3--4};
+    \node[day, below=1pt of door] {Days 2, 4};
     \node[day, left=1pt of mem]   {Day 3};
     \node[align=center] at (0,0) {every stage is a belief\\[2pt] \alert{one} quantity to lower\\{\scriptsize (Day 2)}};
-  \end{tikzpicture}
+  \end{tikzpicture}\\[0.3em]
+  {\small \textcolor{accent}{\textbf{Day 5}}: language reads and changes these beliefs\par}
   \vfill
   \lesson{Each stage is a belief, and one quantity, defined on Day 2, improves them all.}
 \end{frame}
