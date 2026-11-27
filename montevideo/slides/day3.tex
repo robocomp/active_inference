@@ -41,6 +41,7 @@
 }
 
 \begin{document}
+\metroset{subsectionpage=progressbar}
 
 \maketitle
 
@@ -695,6 +696,8 @@
   \lesson{Memories fill by watching the working memory; common sense arrives compiled from outside.}
 \end{frame}
 
+\subsection{Episodic memory: what the robot undertook}
+
 \begin{frame}{Episodic memory records what the robot undertook, and what came of it}
   \begin{columns}[c]
     \begin{column}{0.54\textwidth}
@@ -759,6 +762,8 @@
   \end{tikzpicture}
   \lesson{Each thing the robot undertook is one record, hung from the root in time order.}
 \end{frame}
+
+\subsection{Long-term object memory: this chair, again}
 
 \begin{frame}{Long-term object memory recognises this chair, again}
   \centering
@@ -855,14 +860,17 @@
   \begin{columns}[c]
     \begin{column}{0.52\textwidth}
       \small
-      A chair is detected at $x$. Two hypotheses:\\[0.4em]
-      \textbf{remembered}: it stayed, or it moved anywhere
-      \[ p(x\given\text{rem}) = (1-\pi)\,\N(x;\,\mu,\ \Sigma+R) + \pi\,\tfrac1A \]
-      \textbf{new}: it could be anywhere in the room
-      \[ p(x\given\text{new}) = \tfrac1A \]
-      Posterior $\propto$ prior $\times$ likelihood; the larger wins, a tie goes to new.\\[0.4em]
-      {\footnotesize $\mu,\Sigma$: where the memory last saw it;\; $R$: the detection's noise;\;
-      $\pi$: the chance it moved (0.5, a guess);\; $A$: the room's area.\par}
+      \centering
+      \begin{tikzpicture}[h/.style={draw, thick, rounded corners=3pt, align=center, inner sep=5pt, text width=4.5cm}]
+        \node[h, draw=good, fill=good!8] (r) at (0,0) {\textbf{the remembered chair}\\[2pt]
+          $\underbrace{(1-\pi)\,\N(x;\mu,\Sigma{+}R)}_{\text{it stayed}} + \underbrace{\pi\,\tfrac1A}_{\text{it moved}}$};
+        \node[h, draw=muted, fill=muted!8] (n) at (0,-2.0) {\textbf{a new chair}\\[2pt] $\tfrac1A$ \;{\scriptsize anywhere in the room}};
+        \node[font=\small, align=center] (x) at (-3.6,-1.0) {a chair\\at $x$};
+        \draw[flow, muted] (x.east) -- (r.west);
+        \draw[flow, muted] (x.east) -- (n.west);
+      \end{tikzpicture}\\[0.4em]
+      {\small the larger posterior wins; a tie goes to new\par}\vspace{0.3em}
+      {\footnotesize $\mu,\Sigma$: where it was remembered;\; $R$: detection noise;\; $\pi$: chance it moved;\; $A$: room area\par}
     \end{column}
     \begin{column}{0.46\textwidth}
       \centering
@@ -884,6 +892,8 @@
   \end{columns}
   \ask{With equal priors, does the guess $\pi$ change which hypothesis wins?}{No: remembered wins exactly where $\N(x;\mu,\Sigma+R) > 1/A$; $\pi$ only changes how sure the answer is.}
 \end{frame}
+
+\subsection{Long-term spatial memory: rooms and passages}
 
 \begin{frame}{Long-term spatial memory keeps the rooms the robot has left}
   \begin{columns}[c]
@@ -987,6 +997,12 @@
     \end{column}
   \end{columns}
   \lesson{After a three-room tour: three whole rooms, joined by passages.}
+\end{frame}
+
+\begin{frame}{Back to the whole architecture: every memory, and the agents that fill it}
+  \centering
+  \includegraphics[height=0.76\textheight]{cortex_overview_nosem.png}
+  \ask{Which memory would you ask ``where was chair\_22 yesterday?''}{The long-term object memory: it keeps the room and pose where chair\_22 was last seen; the episodic memory says what the robot was doing then.}
 \end{frame}
 
 % =================================================================================================
