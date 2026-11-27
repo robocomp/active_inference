@@ -1199,46 +1199,29 @@ std::array<float, 4> CountableBelief::door_clearance_logprior() const
         return lp;                                   // no room polygon ⇒ nothing to say about clearance
     constexpr float kHalfPi = 0.5f * static_cast<float>(M_PI);
     const auto wrap = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
-    // ★CB1: WHETHER the body stands against the wall must not depend on which of its faces is held as the back — that is exactly
-    // what the modes disagree about. back_centre() already picks, along the depth axis, the face AWAY from the room interior, so
-    // the held mode and its half-turn share one face and a 180° error keeps its weight (G1x chair_18, held 180° wrong: that face
-    // 0.08 m off the wall, f = 0.75, and the posterior already put 0.80 on the right mode — it was never ADOPTED, see
-    // update_persistent_cycle). A body held a QUARTER turn off, though, holds a SIDE face as its back, about half a depth off the
-    // wall, and its weight collapsed (0.28 m: f = 0.03) in exactly the mode it had to correct. The weight is now that of the
-    // body's WALL-SIDE face: the largest flush weight over the four modes' back faces (k = 0 is the held one, so a body held
-    // correctly gets BASE's value bit for bit).
+    // ★CB1 (fix round 1, owner ruling 11-27): the wall prior decides ONLY between the held mode and its half-turn — front vs
+    // back — because only that pair is the same body to the points (a half-turn about the centre moves nothing the camera can
+    // separate on a symmetric body seen without its back). The quarter turns relabel w ↔ h, which the point fit CAN separate, so
+    // the prior says nothing about them (lp[1] = lp[3] = 0): a side-on body near a wall keeps its mode.
+    // The flush weight f is that of the pair's back faces: the larger of the held back face's and the half-turn's (back_centre()
+    // already picks the face away from the room interior, so with an interior the two coincide and f is BASE's; without one, a
+    // body held 180° wrong would otherwise read its front's gap). f is recomputed here from the CURRENT pose and staged wall.
     const auto flush_of = [&](const CountableBeliefState& st)
     {
         const float rel = (back_centre(st) - point_wall_.p).dot(point_wall_.n) / std::max(1e-3f, params_.wall_reach_m);
         return std::exp(-rel * rel);                 // same mixture weight the wall-flush factor uses
     };
-    float flush = flush_of(state_);
-    for (int k = 1; k < 4; ++k)
-    {
-        CountableBeliefState st = state_;
-        st.yaw = wrap(state_.yaw + static_cast<float>(k) * kHalfPi);
-        if (k % 2 == 1) std::swap(st.w, st.h);       // as apply_mode_rotation relabels
-        flush = std::max(flush, flush_of(st));
-    }
-    // The weight: BASE reads f as the posterior that the body is flush, P(flush | gap), under an even prior (it is the {flush,
-    // free-standing} mixture weight, flush_posterior). With a declared placement mixture (π = P(against a wall), [prior.placement]
-    // p_against_wall) that posterior is re-weighted by the class prior: odds π/(1 − π) times the evidence's odds f/(1 − f),
-    //     weight = π f / (π f + (1 − π)(1 − f)),
-    // continuous in both and → 0 as f → 0 (no gate). π = 1/2 (the chair) gives f back exactly: the chair's mode prior is BASE's
-    // number, and CB1's change to it is the wall-side face above and the adoption in update_persistent_cycle. π = 1 ("against a
-    // wall by definition") is weight 1 and π = 0 weight 0 — the formula's limits, written out where it would read 0/0.
-    float weight = flush;
-    if (const float pi = params_.placement_p_against_wall; pi >= 0.0f)
-    {
-        const float num = pi * flush, den = num + (1.0f - pi) * (1.0f - flush);
-        weight = den > 0.0f ? num / den : (pi > 0.0f ? 1.0f : 0.0f);
-    }
-    for (int k = 0; k < 4; ++k)
-    {
-        const float psi = wrap(state_.yaw + static_cast<float>(k) * kHalfPi);
-        const Eigen::Vector2f front_dir(std::sin(psi), -std::cos(psi));   // door = local −Y
-        lp[k] = params_.door_clearance_gain * weight * front_dir.dot(point_wall_.n);
-    }
+    CountableBeliefState half = state_;
+    half.yaw = wrap(state_.yaw + 2.0f * kHalfPi);
+    const float flush = std::max(flush_of(state_), flush_of(half));
+    // The weight P(back toward the wall) = π · f: the class prior P(against a wall) ([prior.placement] p_against_wall, the chair's
+    // 0.5) times the continuous wall-proximity weight, → 0 as f → 0 (no gate). A class without a placement mixture keeps f (BASE).
+    const float pi = params_.placement_p_against_wall;
+    const float weight = pi >= 0.0f ? pi * flush : flush;
+    // the half-turn's front is exactly the held front reversed: one cosine, so lp[2] = −lp[0] with no rounding asymmetry
+    const Eigen::Vector2f front_dir(std::sin(state_.yaw), -std::cos(state_.yaw));   // door = local −Y
+    lp[0] = params_.door_clearance_gain * weight * front_dir.dot(point_wall_.n);
+    lp[2] = -lp[0];
     return lp;
 }
 

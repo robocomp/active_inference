@@ -135,7 +135,7 @@ int main(int argc, char** argv)
             if (const auto* r = std::get_if<rc::replay::ResultEv>(&e)) { if (nres == 0) l0 = r->theta; lN = r->theta; ++nres; }
         // the CB1 replay: from the CB1 seed when the branch changed, else the recorded one; the class placement prior set
         rc::CountableBeliefParams params = seed->params;
-        params.placement_p_against_wall = p_wall >= 0.0f ? p_wall : cfg.placement_p_against_wall.value_or(-1.0f);   // as the fitter
+        params.placement_p_against_wall = cfg.placement_p_against_wall.value_or(-1.0f);   // the class prior, as the fitter
         const bool changed = pc_base.has_value() != pc_cb1.has_value();
         rc::CountableBeliefState start = seed->state;
         if (changed)
@@ -151,7 +151,7 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "%s: WALL -> FREE is not written for replay --rebirth (the recorded birth covariance would stand)\n", path.c_str());
             const bool w = changed and pc_cb1.has_value();
             const Eigen::Matrix2f C = w ? *pc_cb1 : Eigen::Matrix2f::Zero();
-            rb << std::setprecision(9) << stem << ' ' << int(w) << ' ' << params.placement_p_against_wall << ' ' << start.cx << ' '
+            rb << std::setprecision(9) << stem << ' ' << int(w) << ' ' << p_wall << ' ' << start.cx << ' '
                << start.cy << ' ' << start.H << ' ' << start.w << ' ' << start.h << ' ' << start.yaw << ' ' << C(0, 0) << ' ' << C(0, 1)
                << ' ' << C(1, 1) << '\n';
         }

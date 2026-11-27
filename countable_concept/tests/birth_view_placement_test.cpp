@@ -8,10 +8,11 @@
 //     whose rendered cloud has the logged middle, seen from the logged camera. The five FREE-born outliers are placed AGAINST THE
 //     WALL with the view (S12 chair_71 is the exception, stated), and the correct wall births of S01/S02 stay on the wall; mid-room
 //     chairs stay free. BASE's comparison (no view) on the same clouds is printed: it put the outliers FREE.
-// (c) the mode prior: a chair held 180° and 90° wrong at the wall is turned to back-on-the-wall by the update's adoption
-//     (resolve_front_geometric); the posterior goes to uniform as the flush weight goes to 0 (chair moved off the wall); a chair the
-//     birth found free (its placement posterior, handed to the belief, is 0) gets no mode prior and is never turned; with no
-//     declared placement or with π = 1/2 the clearance prior is BASE's number for a body held correctly.
+// (c) the mode prior: a chair held 180° wrong at the wall is turned to back-on-the-wall by the update's adoption; one held
+//     side-on to a wall keeps its mode (the prior decides only the 180° pair; fix round 1, I2); a chair born free and later at a
+//     wall gets the prior (π is the class p_against_wall, not the birth posterior; I3)
+//     (resolve_front_geometric); the posterior goes to uniform as the flush weight goes to 0 (chair moved off the wall); with no
+//     declared placement the clearance prior is BASE's number for a body held correctly, and with π it is π times it.
 // Run: LANG=es_ES.UTF-8 ./birth_view_placement_test
 #include <clocale>
 #include <cmath>
@@ -217,8 +218,8 @@ int main()
                     &k == &all.back() ? "printed" : k.expect_wall ? "WALL" : "FREE", p_wall);
         if (&k != &all.back()) CHECK(cb1 == k.expect_wall);
         CHECK(p_wall >= 0.f and p_wall <= 1.f and (p_wall > 0.5f) == cb1);
-        // a chair the birth finds well off the wall hands the belief P(wall) = 0 (the exponential's underflow, not a cutoff): its
-        // yaw-mode prior has weight 0 and the update's adoption cannot turn it (c)
+        // a chair the birth finds well off the wall has P(wall | view) = 0 (the exponential's underflow); it decides the placement
+        // only — the mode prior uses the class π (fix round 1, I3; (c) checks such a chair still gets the prior at a wall)
         if (not k.expect_wall and k.mid > 1.2f) { CHECK(p_wall < 1e-30f); mid_room_p = std::max(mid_room_p, p_wall); }
         if (k.expect_wall and std::string(k.name).find("FREE-born") != std::string::npos and base) ++base_wall_outliers;
     }
@@ -251,25 +252,36 @@ int main()
             std::printf(" -> after adoption %.2f\n", back_dot(b));
             CHECK(back_dot(b) > 0.99f);
         }
-        {   // held a quarter turn off at the wall (w ↔ h as the mode relabels): the wall-side face carries the weight (CB1)
-            auto b = at(gap0, 0.5f * float(M_PI), true);
-            const auto fp = b.front_posterior();
-            std::printf("  (c) held 90 deg off at the wall: posterior [%.3f %.3f %.3f %.3f], back.(-n) %.2f", fp[0], fp[1], fp[2], fp[3], back_dot(b));
-            CHECK(b.resolve_front_geometric());
-            std::printf(" -> after adoption %.2f\n", back_dot(b));
-            CHECK(back_dot(b) > 0.99f);
+        {   // fix round 1 (I2): a chair held correctly SIDE-ON to a wall (its side 5 cm off, its back along the wall) keeps its mode:
+            // the prior decides only the 180° pair, and the quarter turns are the point fit's
+            const rc::CountableBeliefState s{0.f, gap0 + 0.5f * w_bar, H_bar, w_bar, d_bar,
+                                             std::remainder(yaw_w + 0.5f * float(M_PI), float(2.0 * M_PI))};
+            rc::CountableBelief b(s, p);
+            b.set_room_interior({0.f, 3.f});
+            b.set_frame_wall_for_test(wall);
+            const auto lp = b.door_clearance_logprior();
+            const float yaw0 = b.state().yaw;
+            std::printf("  (c) side-on chair 5 cm off the wall: lp [%.3g %.3g %.3g %.3g]", lp[0], lp[1], lp[2], lp[3]);
+            CHECK(lp[1] == 0.f and lp[3] == 0.f);
+            CHECK(not b.resolve_front_geometric());
+            std::printf(" -> yaw %.3f kept (%.3f)\n", b.state().yaw, yaw0);
+            CHECK(b.state().yaw == yaw0);
         }
-        {   // a chair the birth found free, 1.27 m off the wall and held so its back faces the room: weight 0, no adoption
+        {   // fix round 1 (I3): a chair born FREE (its birth posterior is 0, case (b)) that is later held 180° wrong at a wall gets the
+            // prior: π is the CLASS p_against_wall, f the current pose's flush weight — nothing is frozen at birth
             rc::CountableBeliefParams q = p;
-            q.placement_p_against_wall = mid_room_p;
-            rc::CountableBeliefState s{0.f, 1.5f, H_bar, w_bar, d_bar, std::remainder(yaw_w + float(M_PI), float(2.0 * M_PI))};
+            q.placement_p_against_wall = cc.placement_p_against_wall.value_or(-1.f);   // as the fitter stages it
+            CHECK(mid_room_p == 0.f and q.placement_p_against_wall == 0.5f);
+            rc::CountableBeliefState s{0.f, gap0 + 0.5f * d_bar, H_bar, w_bar, d_bar, std::remainder(yaw_w + float(M_PI), float(2.0 * M_PI))};
             rc::CountableBelief b(s, q);
             b.set_room_interior({0.f, 3.f});
             b.set_frame_wall_for_test(wall);
             const auto lp = b.door_clearance_logprior();
-            std::printf("  (c) birth-free chair 1.27 m off (P(wall) %.3g): lp [%.3g %.3g %.3g %.3g]\n", mid_room_p, lp[0], lp[1], lp[2], lp[3]);
-            CHECK(lp[0] == 0.f and lp[1] == 0.f and lp[2] == 0.f and lp[3] == 0.f);
-            CHECK(not b.resolve_front_geometric());
+            std::printf("  (c) born-free chair now at the wall, held 180 deg wrong: lp [%.3g %.3g %.3g %.3g]", lp[0], lp[1], lp[2], lp[3]);
+            CHECK(lp[2] > 0.f and lp[0] < 0.f);
+            CHECK(b.resolve_front_geometric());
+            std::printf(" -> back.(-n) %.2f\n", back_dot(b));
+            CHECK(back_dot(b) > 0.99f);
         }
         {   // held correctly: the adoption is a no-op
             auto b = at(gap0, 0.f, false);
@@ -292,8 +304,8 @@ int main()
             CHECK(mono);
             CHECK(last < 1e-6f);
         }
-        {   // BASE equivalence for a body held correctly: no placement declared (−1) and π = 1/2 both give gain·f·cos
-            for (const float pi : {-1.0f, 0.5f})
+        {   // a body held correctly: no placement declared (−1) gives BASE's gain·f·cos, π gives π times it (ω = π·f)
+            for (const float pi : {-1.0f, 0.5f, 1.0f, 0.0f})
             {
                 rc::CountableBeliefParams q = p;
                 q.placement_p_against_wall = pi;
@@ -308,24 +320,12 @@ int main()
                 for (int k = 0; k < 4; ++k)
                 {
                     const float psi = std::remainder(s.yaw + float(k) * float(M_PI_2), float(2.0 * M_PI));
-                    const float base = q.door_clearance_gain * f * Eigen::Vector2f(std::sin(psi), -std::cos(psi)).dot(wall.n);
+                    const float base = (k % 2 ? 0.f : 1.f) * (pi >= 0.f ? pi : 1.f) * q.door_clearance_gain * f
+                                       * Eigen::Vector2f(std::sin(psi), -std::cos(psi)).dot(wall.n);
                     worst = std::max(worst, std::abs(lp[std::size_t(k)] - base));
                 }
                 std::printf("  (c) held correctly, pi %.1f: |lp - BASE| max %.2e\n", pi, worst);
                 CHECK(worst <= 1e-6f);
-            }
-            // π = 1: weight 1 at any distance; π = 0: weight 0
-            for (const float pi : {1.0f, 0.0f})
-            {
-                rc::CountableBeliefParams q = p;
-                q.placement_p_against_wall = pi;
-                rc::CountableBeliefState s{0.f, 1.5f, H_bar, w_bar, d_bar, yaw_w};
-                rc::CountableBelief b(s, q);
-                b.set_room_interior({0.f, 3.f});
-                b.set_frame_wall_for_test(wall);
-                const auto lp = b.door_clearance_logprior();
-                std::printf("  (c) pi %.0f, 1.27 m off: lp[0] %.3f\n", pi, lp[0]);
-                CHECK(std::abs(lp[0] - (pi > 0.f ? q.door_clearance_gain : 0.f)) <= 1e-5f);
             }
         }
     }

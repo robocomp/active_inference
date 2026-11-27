@@ -219,9 +219,13 @@ inline bool placement_map_on_wall(const WallSeed& ws, const CountableBeliefState
                                   const std::string& name, const std::vector<Eigen::Vector3f>* pts = nullptr, float z_lo = 0.0f,
                                   float z_hi = 0.0f, const BirthView* view = nullptr, float* p_wall = nullptr)
 {
-    // the placement POSTERIOR P(against the wall | first view) = 1 / (1 + e^(lf − lw)), handed to the belief as this instance's
-    // P(against a wall) (CountableBeliefParams::placement_p_against_wall: the yaw-mode prior's weight)
-    const auto post = [p_wall](double lw, double lf) { if (p_wall) *p_wall = static_cast<float>(1.0 / (1.0 + std::exp(lf - lw))); };
+    // the placement POSTERIOR P(against the wall | first view) = 1 / (1 + e^(lf − lw)): reported (log, tests, the replay tool); it
+    // decides the placement only — the yaw-mode prior uses the CLASS p_against_wall (fix round 1, owner ruling I3)
+    const auto post = [p_wall](double lw, double lf)
+    {   // review M6: two degenerate log-densities (−inf − −inf) give no posterior; p_wall is then left untouched
+        const double q = 1.0 / (1.0 + std::exp(lf - lw));
+        if (p_wall and std::isfinite(q)) *p_wall = static_cast<float>(q);
+    };
     const float h_bar = ws.bf.h;
     const double m = ws.bf.mid_n;
     if (view and view->have_cam and pts)
@@ -285,31 +289,27 @@ inline bool placement_map_on_wall(const WallSeed& ws, const CountableBeliefState
             const double cf = (Eigen::Vector2f(free_seed.cx, free_seed.cy) - ws.w.p).dot(n);
             const double delta = rf.mid - cf, c_hat = m - delta, sf = std::sqrt(vf);
             const double D = view->room_span ? double(view->room_span(ws.w)) : 0.0, a = 0.5 * h_bar, b = D - 0.5 * h_bar;
-            double lf;
-            const char* free_form;
             if (b > a and sf > 0.0)
             {
-                lf = std::log(1.0 - static_cast<double>(p)) + log_mass((a - c_hat) / sf, (b - c_hat) / sf) - std::log(b - a);
-                free_form = "uniform over the room span";
+                const double lf = std::log(1.0 - static_cast<double>(p)) + log_mass((a - c_hat) / sf, (b - c_hat) / sf) - std::log(b - a);
+                const bool wall = lw > lf;
+                post(lw, lf);
+                std::print("[{}] birth placement MAP (view): p(wall) {:.2f}; cloud middle {:.3f} m off the wall ({} pts, cam {:.2f} m off "
+                           "the wall, {:.2f} m away); wall render {:.3f} ± {:.3f} ({} hits) → log {:.2f}; free render offset {:+.3f}, "
+                           "centre {:.3f} ± {:.3f} over [{:.2f}, {:.2f}] (uniform over the room span) → log {:.2f}; pose σ across {:.3f} → {}\n",
+                           name, p, m, n_obs, (view->cam.head<2>() - ws.w.p).dot(n), (view->cam.head<2>() - ws.c).norm(), rw.mid,
+                           std::sqrt(vw), rw.n_hit, lw, delta, c_hat, sf, a, b, lf, std::sqrt(var_pose),
+                           wall ? "AGAINST THE WALL" : "FREE (cloud seed)");
+                return wall;
             }
-            else
-            {   // the room's span is unknown: BASE's free term
-                const double e = static_cast<double>(h_bar) - ws.bf.extent_n, sp = CountableBeliefParams{}.prior_pos_std;
-                lf = std::log(1.0 - static_cast<double>(p)) + log_normal_1d(m - cf, e * e / 12.0 + sp * sp);
-                free_form = "BASE (room span unknown)";
-            }
-            const bool wall = lw > lf;
-            post(lw, lf);
-            std::print("[{}] birth placement MAP (view): p(wall) {:.2f}; cloud middle {:.3f} m off the wall ({} pts, cam {:.2f} m off "
-                       "the wall, {:.2f} m away); wall render {:.3f} ± {:.3f} ({} hits) → log {:.2f}; free render offset {:+.3f}, centre "
-                       "{:.3f} ± {:.3f} over [{:.2f}, {:.2f}] ({}) → log {:.2f}; pose σ across {:.3f} → {}\n",
-                       name, p, m, n_obs, (view->cam.head<2>() - ws.w.p).dot(n), (view->cam.head<2>() - ws.c).norm(), rw.mid,
-                       std::sqrt(vw), rw.n_hit, lw, delta, c_hat, sf, a, b, free_form, lf, std::sqrt(var_pose),
-                       wall ? "AGAINST THE WALL" : "FREE (cloud seed)");
-            return wall;
+            // fix round 1 (review M4): the room's span is unknown ⇒ BASE's comparison for BOTH terms (a rendered wall term against
+            // BASE's cloud-centred free term would mix the two models)
+            std::print("[{}] birth placement MAP (view): the room span along the wall normal is unknown ({:.2f} m) → BASE's comparison\n",
+                       name, D);
         }
-        std::print("[{}] birth placement MAP (view): a hypothesis rendered no hit (wall {}, free {}) → BASE's comparison\n", name,
-                   rw.n_hit, rf.n_hit);
+        else
+            std::print("[{}] birth placement MAP (view): a hypothesis rendered no hit (wall {}, free {}) → BASE's comparison\n", name,
+                       rw.n_hit, rf.n_hit);
     }
     const double e = static_cast<double>(h_bar) - ws.bf.extent_n;
     const double v_obs = e * e / 12.0;

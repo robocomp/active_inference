@@ -1052,7 +1052,8 @@ float CountableFitter::room_span(const WallRef& w) const
     float best = std::numeric_limits<float>::infinity();
     for (std::size_t i = 0; i < n; ++i)
     {
-        if (static_cast<int>(i) == w.edge) continue;   // the wall itself
+        // the wall itself, and (review M5) its two neighbours: from a foot at or near a vertex they cross at t ≈ 0
+        if (w.edge >= 0 and (i == std::size_t(w.edge) or i == (std::size_t(w.edge) + 1) % n or (i + 1) % n == std::size_t(w.edge))) continue;
         const Eigen::Vector2f a = room_polygon_[i], ab = room_polygon_[(i + 1) % n] - a;
         const float den = w.n.x() * ab.y() - w.n.y() * ab.x();   // cross(n, ab)
         if (den == 0.0f) continue;                                // parallel: never crossed
@@ -1143,7 +1144,6 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         const auto& m = inst.model.state();
         CountableBeliefState s0{m.cx, m.cy, m.countable_height, m.w, m.h, m.yaw};
         std::optional<Eigen::Matrix2f> birth_pos_cov;   // spec 7c.8 rev 3.3.14: the cloud's excess position covariance
-        float birth_p_wall = -1.0f;   // CB1: the placement posterior P(against the wall | first view); < 0 = no mixture decided
 
         // The cold-start cloud is THIS FRAME's mask only.
         //
@@ -1239,7 +1239,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
                     view.room_span = [this](const WallRef& w) { return room_span(w); };
                     birth_pos_cov = rc::seed_birth(s0, pts, z_lo, z_hi, cfg_, have_room_geometry_,
                                                    [this](const Eigen::Vector2f& q) { return nearest_wall(q); }, inst.node_name,
-                                                   &view, &birth_p_wall);
+                                                   &view);
                 }
             }
         }
@@ -1286,9 +1286,8 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
         p.wall_explain_frac    = have_room_geometry_ ? cfg_.ai2_wall_explain_frac : 0.0f;
         p.wall_explain_sigma_m = cfg_.ai2_wall_explain_sigma_m;
         p.door_clearance_gain  = cfg_.ai2_door_clearance_gain;
-        // CB1: this instance's P(against a wall) for the yaw-mode prior — the birth's placement POSTERIOR when a mixture decided it,
-        // else the class prior ([prior.placement], −1 when the class declares none: the weight is then BASE's)
-        p.placement_p_against_wall = birth_p_wall >= 0.0f ? birth_p_wall : cfg_.placement_p_against_wall.value_or(-1.0f);
+        // CB1: the class's P(against a wall) for the yaw-mode prior ([prior.placement]; −1 when the class declares none: BASE's weight)
+        p.placement_p_against_wall = cfg_.placement_p_against_wall.value_or(-1.0f);
         p.volatility_infer     = cfg_.ai2_volatility_infer;
         p.volatility_lr        = cfg_.ai2_volatility_lr;
         p.volatility_sigma     = cfg_.ai2_volatility_sigma;

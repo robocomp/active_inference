@@ -37,8 +37,8 @@
 //   ([prior.placement] p_against_wall; −1 when the class declares none), as a dump recorded before CB1 lacks it.
 //   --rebirth FILE (CB1, COUNTERFACTUAL) replaces the recorded seed state of this dump with the one FILE gives for its stem (written
 //   by tools/replay/birth_placement: the birth re-derived from the dump's first camera frame with the view-conditional placement),
-//   and sets that birth's position covariance, and sets the seed's placement_p_against_wall to the birth's placement posterior. One
-//   line per dump: stem changed p_wall cx cy H w h yaw c00 c01 c11 (decimal points, from_chars); the state and covariance are used
+//   and sets that birth's position covariance (the p_wall column, the birth's placement posterior, is informational: the mode prior
+//   uses the class p_against_wall, --placement). One line per dump: stem changed p_wall cx cy H w h yaw c00 c01 c11 (decimal points, from_chars); the state and covariance are used
 //   only when changed = 1 (a FREE -> WALL change: the recorded stream then holds no birth covariance to supersede). A dump not in
 //   FILE is as recorded.
 //   --parts DIR sets the seed's solid (K2a: params.shape_parts and params.solid_parts, common/ai_belief/parts_geometry.h) from the
@@ -361,7 +361,6 @@ int main(int argc, char** argv)
             if (rebirth)
             {
                 const auto& r = *rebirth;
-                seed.params.placement_p_against_wall = r[1];
                 if (r[0] != 0.0f) seed.state = rc::CountableBeliefState{r[2], r[3], r[4], r[5], r[6], r[7]};
             }
             if (seed_h_rule)
