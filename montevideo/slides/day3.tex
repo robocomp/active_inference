@@ -963,7 +963,7 @@
     \draw[-{Stealth}, thick, good!70!black] (rc) -- node[lab, above, pos=0.6] {robot pose: mean and covariance} (cc);
     \draw[densely dashed, muted] (0.35,2.0) -- (0.35,2.85) node[lab, above, text=muted] {the cut};
     % two scenes, same data: the robot's position is uncertain (green ellipse), the true chair is the red cross
-    \foreach \sx/\ttl/\ea/\eb/\nees/\col/\bh in {0/{pose taken as exact}/0.22/0.14/{5.57: five times too sure}/accent/0.13, 4.6/{pose covariance added}/0.72/0.46/{1.09: right}/good/0.3}{
+    \foreach \sx/\ttl/\ea/\eb/\nees/\col/\bh in {0/{pose taken as exact}/0.22/0.14/{5.01: five times too sure}/accent/0.13, 4.6/{pose covariance added}/0.72/0.46/{1.07: right}/good/0.3}{
       \begin{scope}[xshift=\sx cm]
         \node[font=\footnotesize\bfseries] at (0.9,1.75) {\ttl};
         \draw[good, thick, dashed] (-0.4,0.3) ellipse (0.38 and 0.22);
@@ -1155,7 +1155,7 @@
     \node[tile] (t1) at (0,0) {};
     \node[ttl] at (t1.north west) {2\; read across a cut\\[-1pt]{\mdseries\scriptsize Exercises 3--4}};
     \node[job] at ($(t1.north west)+(0.15,-0.95)$) {an object agent reads the robot's pose from its edge; drop the covariance and measure the NEES};
-    \node[chk] at ($(t1.south west)+(0.15,0.1)$) {NEES 1.09 with it;\\ 5.57 without it};
+    \node[chk] at ($(t1.south west)+(0.15,0.1)$) {NEES 1.07 with it;\\ 5.01 without it};
     \node[tile] (t2) at (4.0,0) {};
     \node[ttl] at (t2.north west) {3\; one $F$, many owners\\[-1pt]{\mdseries\scriptsize Exercises 5--6}};
     \node[job] at ($(t2.north west)+(0.15,-0.95)$) {write each agent's $F_i$; check that their sum is the global $F$; compare one object and the relation between two};

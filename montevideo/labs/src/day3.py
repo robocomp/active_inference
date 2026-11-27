@@ -218,7 +218,7 @@ print("published means:", np.round(mu, 3), " sd:", np.round(np.sqrt(var), 3))
 # ignores the published covariance to be?**
 
 # %%
-def mean_nees(rng, use_cov, trials=600):
+def mean_nees(rng, use_cov, trials=2000):
     # BEGIN SOLUTION
     vals = []
     for _ in range(trials):
@@ -235,7 +235,7 @@ print(f"NEES with the published covariance: {NEES_USE:.2f}   ignoring it: {NEES_
 # %% [markdown] solution
 # The agent that takes the published pose as truth is about five times over-confident in variance,
 # which is exactly $(r+s^2)/r$. The covariance on the edge is what lets another process use the
-# estimate as evidence rather than as ground truth. A mean alone is half a belief.
+# estimate as evidence rather than as ground truth: another agent needs the mean and its variance.
 
 # %% [markdown]
 # ## 3. One free energy, many owners (in class; Exercise 7 at home)

@@ -116,11 +116,11 @@ The lecture is long (about 115 min). If you are behind at 1:15, go faster throug
 
 **Expected lab numbers** (seed 0; r = (5 cm)², s² = (10 cm)²):
 - Exercise 1: bottle_concept's write to table_1 is refused; the sweep removes bottle_1.
-- Exercise 4: NEES with the published covariance 1.09; ignoring it 5.57 (predicted (r + s²)/r = 5).
-- Exercise 5: the sum of the agents' F equals the global F (81.530351) when s² = 0.
+- Exercise 4 (2000 runs): NEES with the published covariance 1.07; ignoring it 5.01 (predicted (r + s²)/r = 5).
+- Exercise 5: the sum of the agents' F equals the global F (416.839925 with this draw) when s² = 0.
 - Exercise 6: one object, exact sd 2.50 cm and agent 2.50 cm; the relation θ₀ − θ₁, exact 1.58 cm and agents 3.54 cm.
 - Exercise 7 (home): KL = F(agents) − F(exact) = 2.56 nats, the same at 10, 40 and 160 frames; at s²/r = 4: 1.27 / 5.12 / 11.37 nats for 2 / 5 / 10 objects.
-- Exercise 8: near pass, best threshold 2.0 m, rmse 1.01 cm against 0.86 cm with the precision; far pass, best 8.0 m, 4.79 cm against 4.22 cm; the near threshold used on the far pass, 300 cm.
+- Exercise 8: near pass, best threshold 2.25 m, rmse 1.02 cm against 0.84 cm with the precision; far pass, best 8.25 m, 4.78 cm against 4.20 cm (the slide's figure, from another run, shows 2 m, 1.01, 0.86, 4.79, 4.22); the near threshold used on the far pass, 300 cm.
 - Exercise 9 (home): at n = 2000 the displacement is 3.00 / 3.00 / 2.99 / 0 cm for α = 1 / 0.3 / 0.05 / 0.
 
 ## Day 4 — Concepts: geometry, life cycle, aspect (`slides/day4.pdf`, `labs/day4.ipynb`)
