@@ -38,6 +38,14 @@
 //   the one-box solid). The dumped FRAMES are unchanged: what the live agent staged with its own θ trajectory (see the K2a report).
 //   --seed-h-rule re-derives the seed's H with the birth rule (CountableBelief::seed_height, F1 round 6.2) from the dump's FIRST
 //   camera frame (the birth cloud itself is not recorded), at the recorded born pose.
+//   --f1-restage GAP re-stages every frame's rho_cam / rho_L with task-F1's rule (rc::ai::view: the viewpoints' SEPARATION from each
+//   latent's anchor beyond its paid frontier, the kernels unchanged) for a dump recorded BEFORE F1, whose frames carry the old arc-length
+//   rho and no viewpoints. It mirrors CountableFitter::stage_persistent / consume_paths from what the dump does record: the odometry
+//   displacement since the last accepted update = the frame's chain_dr (an approximation: chain_dr also carries the pose increment over
+//   a stretch the odometry could not integrate, which the agent's own F1 viewpoint skips); the camera position = camera_xy; the LiDAR
+//   origin = the staged beam's origin (on a frame without beam rays, the last one shifted with the camera); GAP = the Helios max ring
+//   gap the run logged ("[lidar-measures] Helios SensorModel: max ring gap"). A rejected update (RestoreEv) commits no anchor. The
+//   result is a COUNTERFACTUAL replay — not the live run — so dth_live / dP_live then measure the change. Off: frames as recorded.
 //   --theta-cov appends, after dP_live, the 21 upper-triangle entries S_i_j (i <= j, i, j = 0..5 in the order cx cy H w h yaw) of the
 //   FULL 6x6 theta covariance the update left (b.covariance(); the yaw entry is the within-mode Sigma(5,5)), %.9g. Off by default: the
 //   default output is byte-identical to before. The full block is NOT in the dump (the live result stores only diag P), so replaying
@@ -55,6 +63,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -87,13 +96,15 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--parts DIR] [--seed-h-rule] [--theta-cov]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--parts DIR] [--seed-h-rule] [--theta-cov] [--f1-restage GAP]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
     std::string neighbour_manifests, standoff_manifests, permanence_manifests, parts_manifests;
     bool seed_h_rule = false, theta_cov = false;
+    bool f1_restage = false;
+    float f1_gap = 0.0f;
     long neighbours_without_class = 0;
     for (int i = 2; i < argc; ++i)
     {
@@ -106,6 +117,18 @@ int main(int argc, char** argv)
         if (k == "--parts" and i + 1 < argc) { parts_manifests = argv[++i]; continue; }
         if (k == "--seed-h-rule") { seed_h_rule = true; continue; }
         if (k == "--theta-cov") { theta_cov = true; continue; }
+        if (k == "--f1-restage" and i + 1 < argc)
+        {
+            const std::string_view a = argv[++i];
+            const auto [p, ec] = std::from_chars(a.data(), a.data() + a.size(), f1_gap);
+            if (ec != std::errc{} or p != a.data() + a.size() or not (f1_gap > 0.0f))
+            {
+                std::fprintf(stderr, "replay: bad --f1-restage %s (the Helios max ring gap, rad, > 0)\n", argv[i]);
+                return 2;
+            }
+            f1_restage = true;
+            continue;
+        }
         long* dst = k == "--from" ? &from : k == "--to" ? &to : nullptr;
         if (dst == nullptr or i + 1 >= argc or not parse_int(argv[i + 1], *dst))
         {
@@ -138,6 +161,68 @@ int main(int argc, char** argv)
         pending.clear();
     };
     rc::CountableBelief belief;
+    // --f1-restage: the fitter's F1 bookkeeping, carried across the dump (see the header note).
+    struct F1Restage
+    {
+        rc::ai::view::ViewState v;                         // the viewpoints + anchors after the last ACCEPTED update
+        rc::ai::view::ViewState staged;                    // the last replayed update's staged view
+        bool pending = false, restored = false, camera = false, lidar = false;
+        float rho_cam = 1.0f, rho_lat = 1.0f, rho_H = 1.0f;
+        std::optional<Eigen::Vector3f> L;                  // the last LiDAR origin seen (room frame)
+        std::optional<Eigen::Vector2f> L_minus_cam;        // its offset from the camera then
+        long frames = 0, no_beam_origin = 0;
+    } f1;
+    const auto f1_frame = [&](rc::CountableFrame& f)
+    {
+        namespace vw = rc::ai::view;
+        if (f1.pending and not f1.restored) f1.v = vw::view_commit(f1.staged, f1.camera, f1.lidar, f1.rho_cam, f1.rho_lat, f1.rho_H);
+        f1.pending = false; f1.restored = false;
+        ++f1.frames;
+        if (not f.beam.endpoints.empty())
+        {
+            f1.L = f.beam.origin.template cast<float>();
+            if (f.camera_xy.has_value()) f1.L_minus_cam = f1.L->head<2>() - *f.camera_xy;
+        }
+        else if (f1.L.has_value() and f1.L_minus_cam.has_value() and f.camera_xy.has_value())
+        {
+            f1.L->head<2>() = *f.camera_xy + *f1.L_minus_cam;
+            ++f1.no_beam_origin;
+        }
+        const auto& s = belief.state();
+        const Eigen::Vector2f c(s.cx, s.cy);
+        const std::optional<Eigen::Vector2f> Lxy = f1.L.has_value() ? std::optional<Eigen::Vector2f>(f1.L->head<2>()) : std::nullopt;
+        f.view = vw::view_stage(f1.v, f.camera_xy, Lxy, f.chain_dr, c);
+        float rho_cam = 1.0f;   // as CountableFitter::stage_persistent
+        if (f.camera_xy.has_value())
+        {
+            const Eigen::Vector2f r = *f.camera_xy - c;
+            const float z = r.norm();
+            if (z > 0.0f)
+            {
+                const Eigen::Vector2f t(-r.y() / z, r.x() / z);
+                const Eigen::Vector2f ux(std::cos(s.yaw), std::sin(s.yaw)), uy(-std::sin(s.yaw), std::cos(s.yaw));
+                const float w_perp = s.w * std::abs(ux.dot(t)) + s.h * std::abs(uy.dot(t));
+                if (w_perp > 0.0f) rho_cam = vw::rho_camera(vw::anchor_separation(f.view.a_cam, f.view.cam), z, w_perp);
+            }
+        }
+        float rho_lat = 1.0f, rho_H = 1.0f;
+        if (f1.L.has_value())
+        {
+            const float zl = (f1.L->head<2>() - c).norm();
+            rho_lat = vw::rho_lidar_lateral(vw::anchor_separation(f.view.a_lat, f.view.L), f1_gap);
+            const auto span = belief.params().span();
+            const float z_edge = span.hangs() ? span.z0(s.H) : s.H;
+            if (zl > 0.0f)
+                rho_H = vw::rho_lidar_height(vw::anchor_separation(f.view.a_H, f.view.L), zl, std::atan2(z_edge - f1.L->z(), zl), f1_gap);
+        }
+        f.rho_cam.fill(rho_cam);
+        f.rho_L = {rho_lat, rho_lat, rho_H, rho_lat, rho_lat, rho_lat};
+        f1.staged = f.view;
+        f1.camera = not f.points.empty();
+        f1.lidar = belief.lidar_measured(f);
+        f1.rho_cam = rho_cam; f1.rho_lat = rho_lat; f1.rho_H = rho_H;
+        f1.pending = true;
+    };
     double worst_th = 0.0, worst_P = 0.0;
     long compared = 0, gn_total = 0;
     std::array<double, 6> sd_max{};
@@ -213,6 +298,7 @@ int main(int argc, char** argv)
         track,
         [&](rc::CountableFrame& f)
         {
+            if (f1_restage) f1_frame(f);
             if (sig2_cam_measured)
             {
                 const float yaw_std = std::sqrt(std::max(0.0f, f.sig2_cam[5]));
@@ -259,7 +345,8 @@ int main(int argc, char** argv)
                 seed.params.wall_standoff_std_m = so->std_m;
                 std::fprintf(stderr, "replay: stand-off %.3f +- %.3f m from %s\n", so->mean_m, so->std_m, path.c_str());
             }
-        });
+        },
+        [&](const rc::CountableBelief&) { f1.restored = true; });
     flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
 
     print_set("missing (default kept)", reader.diag().missing);
@@ -283,6 +370,9 @@ int main(int argc, char** argv)
                          0.5 * double(belief.params().shape_proportions[0].lo + belief.params().shape_proportions[0].hi),
                          double(belief.params().shape_proportions[0].hi - belief.params().shape_proportions[0].lo) / std::sqrt(12.0));
     }
+    if (f1_restage)
+        std::fprintf(stderr, "replay: COUNTERFACTUAL --f1-restage %.4f: %ld frames re-staged with F1's rho (viewpoint separation), %ld of "
+                     "them with the LiDAR origin carried from the last beam — not the live run\n", f1_gap, f1.frames, f1.no_beam_origin);
     if (neighbours_without_class > 0)
         std::fprintf(stderr, "replay: %ld recorded neighbours carry no class (a dump older than ForeignBox::cls): their size std "
                      "left as recorded\n", neighbours_without_class);
