@@ -395,8 +395,8 @@ struct CountableFrame
     std::vector<rc::ai::LidarRays> lidar_extra;
 
     // A frame that carries LiDAR rays ONLY (no camera points; spec 2026-11-15 lidar-measures §7b, C1 = A). It adds what was
-    // measured on it (the rays) plus the ONE-SIDED constraints that are zero unless violated ((2b) short height, (2c) wall
-    // no-cross). The Gaussian class anchors (flush/parallel, room axis, footprint, height) are NOT added: the predicted
+    // measured on it (the rays) plus the ONE-SIDED constraints that are zero unless violated ((2b) short height; (2c) wall
+    // no-cross on the flag-off path only — the persistent path's is CW1's containment, every measured frame). The Gaussian class anchors (flush/parallel, room axis, footprint, height) are NOT added: the predicted
     // belief already contains them, and re-adding them each frame would count the prior as a measurement.
     bool lidar_only = false;
 
@@ -445,7 +445,8 @@ class CountableBelief;
 // The countable belief as a model of the shared persistent engine (rc::ai::engine::PersistentModel; shared-engine Task 3). A
 // view on one CountableBelief: the engine calls these hooks, which read (and, for the state and its covariance mirror, write)
 // that belief. Its accumulate_extra is the PERSISTENT θ-only channel ((1) flush/parallel and the room axis while not yet in,
-// (2b), (2c)), not CountableBelief::accumulate_extra (the flag-off path's, which the recursive-Laplace engine calls).
+// (2b); the (2c) no-cross is gone here, F1.4 — the persistent containment is accumulate_containment, CW1), not
+// CountableBelief::accumulate_extra (the flag-off path's, which the recursive-Laplace engine calls).
 struct CountableEngineModel
 {
     static constexpr int N = 6;
@@ -491,8 +492,10 @@ struct CountableEngineModel
     static constexpr int kWallLatents = 1;
     rc::ai::engine::WallAnchor wall_anchor(const Frame& f) const;
     void accumulate_wall_prior(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
-    // CW1: the prior's support (no footprint corner past a room wall), every measured update, mode only (persistent_engine.h)
-    void accumulate_containment(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
+    // CW1: the prior's support on θ (no footprint corner past a room wall), every measured update; in the mode and the move
+    // statistic, not in P; the walls' errors profiled out (wo: the staged wall latent's carried belief) — persistent_engine.h
+    void accumulate_containment(const State& s, const Frame& f, const rc::ai::engine::WallOffset& wo, Mat6& Id, Vec6& bd,
+                                double* E) const;
     // the 7c.7 first-crossing LiDAR channel (set_first_crossing_for_test only); false = the engine's beam channel
     bool accumulate_lidar_override(const State& s, const Frame& f, Mat6* Id, Vec6* bd, double* E) const;
     // the beam channel
@@ -778,7 +781,7 @@ public:
     const Eigen::Matrix2f& birth_position_excess() const { return with_engine([](const auto& e) -> decltype(auto) { return e.birth_position_excess(); }); }
     // The persistent path's per-channel information (public so the tests can drive it): camera = points + (2d) top + the
     // depth_unobs_precision shares (footprint w/h boost, the flush boost); LiDAR = the beam set f.beam (spec 7c.8; f.lidar is
-    // the flag-off path's and is not read here); θ-only = (2b), (2c) and,
+    // the flag-off path's and is not read here); θ-only = (2b) (no (2c) since F1.4; CW1's containment is its own channel) and,
     // on an admissible camera update whose anchor is not yet in (per-anchor flags), wall flush/parallel (1) / the room axis. Each channel
     // is linearised at its own state: s_th = θ_k, s_cam = θ_k + B_chain ē + b̄_cam, s_L = θ_k + B_chain ē + b̄_L.
     void accumulate_channels(const CountableBeliefState& s_th, const CountableBeliefState& s_cam,
@@ -809,7 +812,7 @@ public:
     // The data energy whose gradients accumulate_channels builds: camera (the points' mixture −log likelihood, (2d) top, the
     // depth_unobs_precision flush / footprint boosts) at s_cam, LiDAR (the smooth beam model of f.beam, spec 7c.8: Σ E_i, κ ≡ 1 since rev 3.3.11,
     // whose gradient accumulate_channels uses exactly) at s_L, θ-only ((1) flush/parallel and the room axis when they enter, (2b),
-    // (2c)) at s_th — each term's own energy at its own linearisation point, with the per-frame gates of accumulate_channels.
+    // and, CW1, the containment) at s_th — each term's own energy at its own linearisation point, with the per-frame gates of accumulate_channels.
     // ∇E = −(bd_cam + bd_L + bd_th) up to the state dependence of the blocks' mixture weights (flush posterior, two-sidedness,
     // the rays' n̂·u), which the GN information also holds fixed. The ego-motion share is the latent u_c (rev 3.3.13), so it
     // enters J through the prior term, as the step's G does (the old "zero while parked, step only" was wrong: live13trace).

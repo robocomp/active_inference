@@ -878,31 +878,60 @@ void CountableEngineModel::accumulate_wall_prior(const State& s, const Frame& f,
     }
 }
 
-// CW1: the prior's SUPPORT on the persistent path — no footprint corner past a room wall (countable_containment.h has the region,
-// the derivation of the one-sided form and the corner handling). Every object, attached or not, and every measured update: the
-// engine puts it in the energy its GN minimises (so the mode respects it) and leaves it out of the posterior covariance (a support
-// restriction is idempotent; its information must not accumulate — persistent_engine.h, update() step 4). It is exactly 0 while
-// every corner is inside, so a mid-room object and a back-on object at its stand-off are untouched.
-//   σ_s = Model.ModelSigmaM (the box surface's std about the real surface); σ_wall is the wall latent δ's (s = θ + B_w b), not here.
-//   The region: the frame's room polygon (all walls, any corner of the room), else the staged wall's half-plane (a dump recorded
-//   before CW1 carries no polygon), else nothing.
-void CountableEngineModel::accumulate_containment(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const
+// CW1: the prior's SUPPORT on the persistent path — no footprint corner past a room wall (countable_containment.h has the model,
+// the derivation of the profiled one-sided form and the corner handling). Every object, attached or not, and every measured update:
+// the engine puts it in the energy its GN minimises (the mode respects it) and in the move statistic's factor, and leaves it out of
+// the posterior covariance (a support restriction is idempotent; its information must not accumulate — persistent_engine.h,
+// update() step 4). A prior on θ ONLY: each wall's error is profiled out with its own marginal (the staged wall's: the latent's
+// carried δ̄, v = wo; the others: the staged σ², the flagged stand-in), so the wall latent is never moved by it. Exactly 0 while every
+// corner is inside, so a mid-room object and a back-on object at its stand-off are untouched.
+//   The region: the frame's room polygon with the staged edge moved by δ̄ (all walls, any corner of the room), else the staged
+//   wall's half-plane moved by δ̄ (a dump recorded before CW1 carries no polygon), else nothing.
+void CountableEngineModel::accumulate_containment(const State& s, const Frame& f, const rc::ai::engine::WallOffset& wo, Mat6& Id,
+                                                  Vec6& bd, double* E) const
 {
     const CountableBeliefParams& P = b->params_;
     if (b->containment_off_for_test_ or not (P.model_sigma_m > 0.0f)) return;
-    if (f.room_polygon.size() < 3 and not f.wall.ok) return;
-    const float lam = 1.0f / (P.model_sigma_m * P.model_sigma_m);
+    const bool poly = f.room_polygon.size() >= 3;
+    if (not poly and not f.wall.ok) return;
     namespace ct = rc::containment;
+    const float s2 = P.model_sigma_m * P.model_sigma_m;
+    const float vs = f.wall.ok ? f.wall.sigma_m * f.wall.sigma_m : 0.0f;       // ⚠ the stand-in σ² of every non-staged edge
+    const bool latent = wo.var >= 0.0 and f.wall.ok;                            // the staged wall carries the wall latent δ
+    const float dmean = latent ? float(wo.mean) : 0.0f;
+    const float vstaged = latent ? float(wo.var) : vs;
+    const int staged = (poly and f.wall.ok and f.wall.edge >= 0 and f.wall.edge < int(f.room_polygon.size())) ? f.wall.edge : -1;
+    const std::vector<Eigen::Vector2f> region = poly ? ct::shifted_polygon(f.room_polygon, staged, f.wall.n, dmean)
+                                                     : std::vector<Eigen::Vector2f>{};
+    const Eigen::Vector2f wp = f.wall.p + dmean * f.wall.n;                    // the half-plane fallback, moved by δ̄
+    const auto edge_var = [&](int e) { return e == staged ? vstaged : vs; };
     for (const auto& k : ct::corners(s.cx, s.cy, s.w, s.h, s.yaw))
     {
-        const ct::Signed sd = ct::signed_distance(k.p, f.room_polygon, f.wall.ok, f.wall.p, f.wall.n);
+        const ct::Signed sd = ct::signed_distance(k.p, region, f.wall.ok, wp, f.wall.n);
         if (not (sd.d < 0.0f)) continue;                                  // inside (or on the boundary): exactly 0
+        float v = vstaged;                                                // the half-plane: the staged wall
+        if (poly)
+        {
+            const int m = int(region.size());
+            if (sd.t > 0.0f and sd.t < 1.0f) v = edge_var(sd.edge);       // an edge's interior: u = its normal
+            else
+            {   // a vertex: the two edges meeting there, weighted by (u·n_j)² (u = the corner's way back in)
+                const int e0 = sd.t <= 0.0f ? (sd.edge + m - 1) % m : sd.edge;
+                const int e1 = (e0 + 1) % m;
+                const float c0 = sd.grad.dot(ct::inward_normal(region, e0)), c1 = sd.grad.dot(ct::inward_normal(region, e1));
+                v = c0 * c0 * edge_var(e0) + c1 * c1 * edge_var(e1);
+            }
+        }
+        const float lam = 1.0f / (s2 + v);
         const Vec6 J = (sd.grad.transpose() * ct::corner_jacobian(k, s.w, s.h, s.yaw)).transpose();
         Id.noalias() += lam * (J * J.transpose());
         bd.noalias() += -lam * J * sd.d;
         if (E) *E += 0.5 * double(lam) * double(sd.d) * double(sd.d);
     }
 }
+static_assert(rc::ai::engine::PersistentEngine<CountableEngineModel>::kContainment
+              and rc::ai::engine::PersistentEngine<CountableEngineModelBox>::kContainment,
+              "CW1: the countable model's accumulate_containment no longer matches the engine's hook (it would silently switch off)");
 
 // Test hook (set_first_crossing_for_test): the 7c.6 first-crossing factor of f.lidar / f.lidar_extra in place of the beam set.
 bool CountableEngineModel::accumulate_lidar_override(const State& s, const Frame& f, Mat6* Id, Vec6* bd, double* E) const

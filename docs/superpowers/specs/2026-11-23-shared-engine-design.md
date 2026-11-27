@@ -246,19 +246,25 @@ wall while the back-face centre is legal. Live: chairfig_1127 chair_291 (91598c8
 wall. Its replay on that engine shows the cause was data-driven drift on LiDAR-only updates with nothing constraining the corners.
 The once-entered stand-off had entered back-on, at update 0.
 
-- **(i) Containment, every object.** E = Σ_k ½(min(0, d(p_k(θ + B_w b)))/σ_s)². Here p_k are the footprint's four corners and d is
-  the signed distance to the room polygon the frame carries; when the frame has none, the staged wall's half-plane is used.
-  σ_s = Model.ModelSigmaM, and the wall's error enters through δ only (B_w), so σ_wall is counted once.
-  - It is the profile likelihood of the box corner under the hard support "the real object is inside the true wall", with the
-    box surface = the real surface up to σ_s. No new constant. It is exactly 0 while every corner is inside.
-  - The corners are separate smooth terms. The support-function min of one wall is what the sum becomes while a single corner
-    penetrates. Past a convex room corner, the nearest boundary point is the vertex, which pushes the corner back across both walls.
-- **Entered on every measured update, in the GN energy only.** It is not in the posterior covariance and not in the move
-  statistic (persistent_engine.h `accumulate_containment`). The reason is that a support restriction is idempotent
-  (1[c]·1[c] = 1[c]), while a Gaussian factor re-entered n times is n·λJJᵀ. The latter is the hinge that pinned the parked toilet.
-  P therefore stays the data's covariance, which is conservative: a truncated posterior is narrower along g, never wider.
-  - Entering it once, like the attachment priors, would not work. The violation develops later (chair_291's did), and a
-    one-sided term is zero at an entry where the corners are inside.
+- **(i) Containment, every object (fix round 1 form).** E = Σ_k ½ min(0, d_k − δ̄_j)²/(σ_s² + v_j).
+  - p_k are the footprint's four corners and d_k is the signed distance to the room polygon the frame carries; when the frame
+    has none, the staged wall's half-plane is used. j is the wall nearest corner k.
+  - σ_s = Model.ModelSigmaM is the box surface's std.
+  - (δ̄_j, v_j) is wall j's error: for the staged wall, the wall latent's carried mean and variance; for every other edge, mean 0
+    and the staged σ². ⚠ That σ² is a stand-in: room_concept publishes no per-edge covariance.
+  - It is the profile likelihood, jointly over the real corner and δ_j, of the hard support "the real object is inside the true
+    walls". Each wall's error is therefore counted once, as its own marginal.
+  - It is exactly 0 while every corner is inside. The corners are separate smooth terms.
+- **A prior on θ ONLY, entered on every measured update.** Its selector is 0: the wall latent is never moved by it (review I1;
+  the round-0 form, evaluated at θ + B_w b, ratcheted δ̂).
+  - It is in the GN energy, so the mode respects it.
+  - It is in the move statistic's factor: a support is part of the prior of both "stayed" and "moved", so it enters as a factor
+    common to both (review I2).
+  - It is NOT in the posterior covariance. A support restriction is idempotent (1[c]·1[c] = 1[c]), while a Gaussian factor
+    re-entered n times is n·λJJᵀ, the hinge that pinned the parked toilet. P therefore stays the data's covariance, which is
+    conservative.
+  - Entering it once, like the attachment priors, would not work: the violation develops later, and a one-sided term is zero at
+    an entry where the corners are inside.
 - **(ii) Attachment** (stand-off and parallel, `[prior.attachment]`, flush-weighted) is unchanged. It is still on the back face,
   entered once per physical wall.
 

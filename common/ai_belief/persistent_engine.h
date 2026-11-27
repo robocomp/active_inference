@@ -186,12 +186,15 @@ struct GnTraceFd
 //   kWallLatents = 1, wall_anchor(f) -> WallAnchor, accumulate_wall_prior(s, f, I, b, E)   the wall latent and the wall priors
 //                                              it carries (see WallAnchor; absent: no wall latent, K unchanged);
 //   accumulate_lidar_override(s, f, I*, b*, E*) -> bool   route the LiDAR channel elsewhere (a test hook; absent: never).
-//   accumulate_containment(s, f, I, b, E)      CW1: the SUPPORT of the prior (no part of the object past a room wall), a term
-//                                              that is exactly 0 on the legal side. Evaluated at θ + B_w b (the object relative
-//                                              to the TRUE wall) on EVERY measured update, in the energy the GN minimises, so the
-//                                              posterior MODE respects it; NOT in the posterior covariance nor in the move
-//                                              statistic: a support restriction is idempotent (1[c]·1[c] = 1[c]), so it carries no
-//                                              information that may accumulate update after update (absent: none). See update().
+//   accumulate_containment(s, f, wo, I, b, E)  CW1: the SUPPORT of the prior on θ (no part of the object past a room wall), a term
+//                                              that is exactly 0 on the legal side, on EVERY measured update. It is a prior on θ
+//                                              ONLY (selector 0, fix round 1): the walls' errors are profiled out of it with their
+//                                              own marginals — for the staged wall the wall latent's CARRIED mean and variance,
+//                                              wo = WallOffset{δ̄, P̄_δδ} (fixed over the update), so δ is never moved by it. It
+//                                              is in the energy the GN minimises (the posterior MODE respects it) and in the move
+//                                              statistic's factor (a support is common to "stayed" and "moved"), NOT in the
+//                                              posterior covariance: a support restriction is idempotent (1[c]·1[c] = 1[c]), so
+//                                              it carries no information that may accumulate update after update (absent: none).
 // The camera channel's flag is FrameLatents::camera_measured alone: it gates both the camera's accumulation (information and
 // energy) and its channel in the joint step, so G and J cannot disagree about whether the camera measured.
 template <class M>
@@ -271,6 +274,9 @@ concept HasOfferContext =
 // on δ directly, not through θ; they are evaluated at the wall shifted by δ's CURRENT posterior mean (wall_offset_mean), so
 // they ignore δ's variance. Full coupling (a ∂E/∂δ column in those channels) is deferred.
 // Models without kWallLatents: K unchanged, bit-identical.
+// CW1: the staged wall latent's carried belief, handed to accumulate_containment (var < 0: no latent for the staged wall).
+struct WallOffset { double mean = 0.0, var = -1.0; };
+
 struct WallAnchor
 {
     bool ok = false;                                   // a wall is staged in this frame
@@ -426,8 +432,9 @@ public:
     using VecPd = Eigen::Matrix<double, NP, 1>;
     using Chan  = rc::ai::persistent::Channel<N, K, NP>;
     // CW1: the model states the prior's support (accumulate_containment, see the hooks above)
-    static constexpr bool kContainment = requires(const M& cm, const State& s, const Frame& f, MatNf& I, VecNf& b, double* E) {
-        cm.accumulate_containment(s, f, I, b, E);
+    static constexpr bool kContainment = requires(const M& cm, const State& s, const Frame& f, const WallOffset& wo, MatNf& I,
+                                                  VecNf& b, double* E) {
+        cm.accumulate_containment(s, f, wo, I, b, E);
     };
     // A sensor channel's information on q (NP > 0): the (u, q) cross block, the q block, and the q gradient (bd's sign convention).
     struct QInfo
@@ -850,6 +857,11 @@ public:
 
         std::vector<Chan> channels;
         std::size_t n_info = 0;                                            // channels[0, n_info): information the posterior keeps
+        // CW1: the staged wall latent's CARRIED belief (the predicted mean and variance; after a transport or a new source above),
+        // fixed over this update — what the containment profiles the staged wall's error out with.
+        WallOffset wo;
+        if constexpr (W > 0)
+            if (wall_set_) { wo.mean = x_bar(N + kWall); wo.var = P_bar(N + kWall, N + kWall); }
         pu::FreshInfo<N> theta_only;
         MatN Id_cam, Id_L, Id_th; VecN bd_cam, bd_L, bd_th;
         QInfo q_cam, q_L;
@@ -871,11 +883,12 @@ public:
                 }
             n_info = channels.size();                                      // the channels whose information the posterior keeps
             if constexpr (kContainment)
-            {   // CW1: the prior's support, LAST, so chans_info() can leave it out (see the hook's note and Step 4)
+            {   // CW1: the prior's support on θ ONLY (selector 0: δ is profiled out with its carried belief wo, never moved), LAST,
+                // so chans_info() can leave it out of P (see the hook's note and Step 4)
                 MatN Ic = MatN::Zero(); VecN bc = VecN::Zero();
-                m.accumulate_containment(S(th + B_w * bb), f, Ic, bc, nullptr);
+                m.accumulate_containment(S(th), f, wo, Ic, bc, nullptr);
                 if (not Ic.isZero(0.0f) or not bc.isZero(0.0f))
-                { Chan c; c.info = pu::marginalise_fresh<N>(Ic, bc, MatN::Zero()); c.B = B_w; channels.push_back(c); }
+                { Chan c; c.info = pu::marginalise_fresh<N>(Ic, bc, MatN::Zero()); c.B.setZero(); channels.push_back(c); }
             }
         };
 
@@ -899,7 +912,7 @@ public:
             if constexpr (kContainment)
             {
                 MatN Ic = MatN::Zero(); VecN bc = VecN::Zero();
-                m.accumulate_containment(S(th + B_w * bb), f, Ic, bc, &E);
+                m.accumulate_containment(S(th), f, wo, Ic, bc, &E);
             }
             return E;
         };
@@ -1071,11 +1084,14 @@ public:
         // stayed fit frees them inside its own prior (the LiDAR's ego-motion latent u_L, σ 6 cm / 4°): at x̂ the same factor gives
         // log BF −3.3 / −2.5.
         MatJd Lambda_data; VecXd eta_data;
-        // CW1: the prior's support (accumulate_containment) is left out of Λ̂ / η̂ and of P below. It moved the mode x̂ (it is in J);
-        // its information is not data and must not be absorbed: 1[g ≥ δ] re-applied is 1[g ≥ δ], but a Gaussian factor λJJᵀ re-applied
-        // on every update is n·λJJᵀ — the hinge that pinned the parked toilet (design doc, F1 amendment). P stays the data's
-        // covariance (conservative: the truncated posterior is narrower along g, never wider).
-        pu::detail::information<N, K, NP>(chans_info(), theta_only, Lambda_data, eta_data);
+        // CW1 (fix round 1): the prior's support (accumulate_containment) IS in the move statistic's factor Λ̂ / η̂: the support is
+        // part of the prior of BOTH hypotheses ("stayed" N(x̄, P̄)·S, "moved" N(x̄, P̄ + EMEᵀ)·S), so under Laplace it enters as a
+        // factor common to the two integrals, i.e. L·S linearised at the constrained mode x̂, where its gradient balances the data's
+        // — without it the data factor about x̄ would place the data's mean past the wall and the unconstrained slab could reach it
+        // (review I2). It is left out of P below: its information is not data and must not be absorbed — 1[g ≥ δ] re-applied is
+        // 1[g ≥ δ], but a Gaussian factor λJJᵀ re-applied on every update is n·λJJᵀ, the hinge that pinned the parked toilet
+        // (design doc, F1 amendment). P stays the data's covariance (conservative: the truncated posterior is narrower along g).
+        pu::detail::information<N, K, NP>(chans(), theta_only, Lambda_data, eta_data);
         {
             VecXd x_hat; x_hat << theta_post, (consistent ? b_post : b_);
             eta_data += Lambda_data * wrapped(x_hat - x_bar);

@@ -41,17 +41,35 @@ namespace
 {
 constexpr float kW = 0.45f, kD = 0.50f, kH = 0.90f, kSigmaC = 0.0289f;
 const std::vector<Eigen::Vector2f> kRoom{{-3.0f, -3.0f}, {0.0f, -3.0f}, {0.0f, 0.0f}, {-3.0f, 0.0f}};
+// The STAGED room: the true room with its y = 0 wall published `shift` m inward (an outline whose edge lies inside the real wall).
+std::vector<Eigen::Vector2f> staged_room(float shift)
+{ return {{-3.0f, -3.0f}, {0.0f, -3.0f}, {0.0f, -shift}, {-3.0f, -shift}}; }
+
+// Options of a run (defaults = the original cases).
+struct Opts
+{
+    int   n = 40;              // parked updates
+    float yaw_std = 0.60f;     // the class yaw prior (prior_yaw_std); a tight one holds a side-on body side-on
+    bool  volatility = false;  // infer Q (the chair's [prior.permanence]) so the move statistic jump_p is computed
+    float shift = 0.0f;        // the staged y = 0 wall lies this far inside the true one
+    bool  trace = false;       // print δ̂, the corner gap and jump_p at a few updates
+};
 const Eigen::Vector2f kInterior(-1.5f, -1.5f);
 
-CountableBeliefParams params(float prior_w, float prior_d)
+CountableBeliefParams params(float prior_w, float prior_d, const Opts& o = {})
 {
     CountableBeliefParams p;
+    p.prior_yaw_std = o.yaw_std;
+    if (o.volatility)
+    {   // chair.concept.toml [prior.permanence]
+        p.move_rate_per_day = 3.0f; p.move_scale_m = 0.3f; p.move_scale_rad = 0.5f;
+    }
     p.prior_footprint_m = prior_w; p.prior_depth_m = prior_d; p.prior_footprint_std = 0.05f;
     p.prior_height_m = kH; p.prior_height_std = 0.10f;
     p.plaus_height_min = 0.40f; p.plaus_height_soft = 0.08f;
     p.depth_unobs_precision = 0.0f;
     p.room_axis_std = 3.0f * 0.017453293f;
-    p.volatility_infer = false;
+    p.volatility_infer = o.volatility;
     p.persistent = true;
     p.wall_standoff_m = 0.05f; p.wall_standoff_std_m = 0.05f;   // chair.concept.toml [prior.attachment]
     p.placement_p_against_wall = 0.5f;                           // chair.concept.toml [prior.placement]
@@ -87,13 +105,13 @@ std::vector<Eigen::Vector3f> visible_points(const Truth& t, const Eigen::Vector2
 }
 
 // The nearest polygon edge to q as the fitter stages it (CountableFitter::nearest_wall), edge index = its identity.
-WallRef nearest_wall(const Eigen::Vector2f& q)
+WallRef nearest_wall(const Eigen::Vector2f& q, const std::vector<Eigen::Vector2f>& room)
 {
     WallRef w;
     float best = 1e30f;
-    for (std::size_t i = 0; i < kRoom.size(); ++i)
+    for (std::size_t i = 0; i < room.size(); ++i)
     {
-        const Eigen::Vector2f a = kRoom[i], ab = kRoom[(i + 1) % kRoom.size()] - a;
+        const Eigen::Vector2f a = room[i], ab = room[(i + 1) % room.size()] - a;
         const float t = std::clamp((q - a).dot(ab) / ab.squaredNorm(), 0.0f, 1.0f);
         const Eigen::Vector2f foot = a + t * ab;
         if ((q - foot).squaredNorm() < best)
@@ -108,15 +126,16 @@ WallRef nearest_wall(const Eigen::Vector2f& q)
     return w;
 }
 
-CountableFrame frame(const Truth& t, const CountableBelief& b, bool with_polygon)
+CountableFrame frame(const Truth& t, const CountableBelief& b, bool with_polygon, float shift = 0.0f)
 {
+    const std::vector<Eigen::Vector2f> room = staged_room(shift);
     CountableFrame f;
     const Eigen::Vector2f cam = t.cam;
     f.points = visible_points(t, cam);
     f.R.assign(f.points.size(), b.params().sigma_base_m * b.params().sigma_base_m);
     f.z_top_obs = kH;
-    f.wall = nearest_wall(b.back_centre(b.state()));
-    if (with_polygon) f.room_polygon = kRoom;
+    f.wall = nearest_wall(b.back_centre(b.state()), room);
+    if (with_polygon) f.room_polygon = room;
     f.room_axis_ok = true; f.room_axis = 0.0f;
     const float c2 = kSigmaC * kSigmaC;
     f.sig2_cam = {c2, c2, c2, c2, c2, 0.03f * 0.03f};
@@ -134,24 +153,37 @@ struct Result
     Eigen::Matrix<float, 6, 6> S;
     float min_corner = 0.0f;                   // over every update: the smallest corner signed distance to the STAGED room polygon
     float min_true = 0.0f;                     // the same to the TRUE room: the polygon moved by the wall latent's mean δ̂ along n
+    std::vector<float> delta, gap;             // per update: δ̂ and the staged corner gap
+    std::vector<double> jump;                  // per update: P(moved | data) (NaN: none computed)
+    int gn_conv = 0;                           // updates whose GN converged
 };
-Result run(const Truth& t, float prior_w, float prior_d, bool containment, bool with_polygon)
+Result run(const Truth& t, float prior_w, float prior_d, bool containment, bool with_polygon, const Opts& o = {})
 {
     // born near the truth (a birth seed is never exact): 2 cm and 2 degrees off
-    CountableBelief b(CountableBeliefState{t.cx + 0.02f, t.cy - 0.02f, kH, prior_w, prior_d, t.yaw + 0.035f}, params(prior_w, prior_d));
+    CountableBelief b(CountableBeliefState{t.cx + 0.02f, t.cy - 0.02f, kH, prior_w, prior_d, t.yaw + 0.035f}, params(prior_w, prior_d, o));
     b.set_room_interior(kInterior);
     b.set_containment_for_test(containment);
     Result r;
     r.min_corner = r.min_true = 1e30f;
-    for (int k = 0; k < 40; ++k)
+    const std::vector<Eigen::Vector2f> room = staged_room(o.shift);
+    for (int k = 0; k < o.n; ++k)
     {
-        const CountableFrame f = frame(t, b, with_polygon);
+        const CountableFrame f = frame(t, b, with_polygon, o.shift);
         b.update(f);
         const auto& s = b.state();
-        r.min_corner = std::min(r.min_corner, containment::min_corner_distance(s.cx, s.cy, s.w, s.h, s.yaw, kRoom, false, {}, {}));
-        // the true wall is the staged line + δ·n: the object relative to it is c − δ̂·n (the engine's θ + B_w b)
-        const Eigen::Vector2f c = Eigen::Vector2f(s.cx, s.cy) - b.wall_offset_mean(f.wall) * f.wall.n;
-        r.min_true = std::min(r.min_true, containment::min_corner_distance(c.x(), c.y(), s.w, s.h, s.yaw, kRoom, false, {}, {}));
+        const float staged = containment::min_corner_distance(s.cx, s.cy, s.w, s.h, s.yaw, room, false, {}, {});
+        r.min_corner = std::min(r.min_corner, staged);
+        // the wall the model believes in is the staged line + δ̂·n: the object relative to it is c − δ̂·n
+        const float dl = b.wall_offset_mean(f.wall);
+        const Eigen::Vector2f c = Eigen::Vector2f(s.cx, s.cy) - dl * f.wall.n;
+        r.min_true = std::min(r.min_true, containment::min_corner_distance(c.x(), c.y(), s.w, s.h, s.yaw, room, false, {}, {}));
+        r.delta.push_back(dl);
+        r.jump.push_back(b.last_jump_p());
+        r.gap.push_back(staged);
+        r.gn_conv += b.last_gn_converged() ? 1 : 0;
+        if (o.trace and (k == 0 or k == 1 or k == 9 or k == 49 or k == 99 or k == o.n - 1))
+            std::printf("      update %3d: delta_hat %+.5f  staged corner gap %+.5f  jump_p %.4g  gn %d conv %d  sd_cy %.4f\n", k + 1, dl,
+                        staged, b.last_jump_p(), b.last_gn_iters(), int(b.last_gn_converged()), std::sqrt(b.covariance()(1, 1)));
     }
     r.s = b.state();
     r.S = b.covariance();
@@ -176,9 +208,11 @@ int main()
 {
     std::printf("containment_test (CW1)\n");
     const float sig_s = CountableBeliefParams{}.model_sigma_m;
+    const float sig_c = std::sqrt(sig_s * sig_s + 0.02f * 0.02f);   // the term's scale: σ_s² + the staged wall's σ² (the stand-in for every edge)
+    constexpr float kQuarter = 0.7853982f;
     constexpr float kHalfPi = 1.5707963f;
 
-    // (a) side-on, 5 cm off y = 0: yaw π/2 puts the local x (width w) along the wall normal, the depth (back) along the wall
+    // (a) side-on, 5 cm off y = 0: yaw −π/2 puts the local x (width w) along the wall normal, the depth (back) along the wall
     {
         const Truth t{-1.5f, -(0.05f + 0.5f * kW), kW, kD, -kHalfPi};
         const Result off = run(t, kW, kD, false, true), on = run(t, kW, kD, true, true);
@@ -228,6 +262,100 @@ int main()
         print("AFTER (room polygon)", on);
         print("AFTER (staged wall line only)", line);
         CHECK(on.min_true >= -sig_s);
+    }
+    // (e) see the header: side-on, held side-on, class extent toward the wall +0.10, the part next to the wall unseen
+    {
+        Truth t{-1.5f, -(0.05f + 0.5f * kW), kW, kD, -kHalfPi};
+        t.clip_y = -0.25f;
+        Opts o; o.yaw_std = 0.05f;
+        const Result off = run(t, kW + 0.10f, kD, false, true, o), on = run(t, kW + 0.10f, kD, true, true, o);
+        const auto near_face = [](const Result& r)
+        { return r.s.cy - 0.5f * r.s.w * std::abs(std::sin(r.s.yaw)) - 0.5f * r.s.h * std::abs(std::cos(r.s.yaw)); };
+        std::printf(" (e) side-on chair HELD side-on (yaw prior 0.05 rad), class extent toward the wall +0.10 m, the part next to the wall unseen\n");
+        print("BASE (containment off)", off);
+        print("AFTER", on);
+        const float sd_cy = std::sqrt(on.S(1, 1));
+        std::printf("      near (seen) face y: BASE %+.4f AFTER %+.4f (truth %+.4f); |sin yaw| %.4f; |cy - truth| %.4f (sd_cy %.4f)\n",
+                    near_face(off), near_face(on), t.cy - 0.5f * kW, std::abs(std::sin(on.s.yaw)), std::abs(on.s.cy - t.cy), sd_cy);
+        CHECK(std::abs(std::sin(on.s.yaw)) > std::cos(kQuarter));        // still side-on: the side, not the back, faces the wall
+        CHECK(off.min_true < -sig_c);                                     // BASE: the size prior puts it through the wall
+        CHECK(on.min_true >= -sig_c);
+        CHECK(std::abs(near_face(on) - (t.cy - 0.5f * kW)) <= 2.0f * sig_s);
+        CHECK(std::abs(on.s.cy - t.cy) <= sd_cy);
+    }
+    // (f) see the header: side-on, its side ON the true wall, the staged wall 3 cm inside it, parked 200 updates with the move
+    //     statistic on: the points push the corners 3 cm past the staged wall
+    {
+        constexpr float kD3 = 0.03f;
+        const Truth t{-1.5f, -0.5f * kW, kW, kD, -kHalfPi};
+        Opts o; o.yaw_std = 0.05f; o.volatility = true; o.shift = kD3; o.n = 200; o.trace = true;
+        std::printf(" (f) side-on chair pushed %.2f m past the staged wall by its points, parked %d updates (move statistic on)\n", kD3, o.n);
+        std::printf("    BASE (containment off):\n");
+        const Result off = run(t, kW, kD, false, true, o);
+        std::printf("    AFTER:\n");
+        const Result on = run(t, kW, kD, true, true, o);
+        print("BASE (containment off)", off);
+        print("AFTER", on);
+        // δ̂ after the attachment's one entry (update 1): the drift over updates 2..200 (the ratchet of review I1 would carry it
+        // toward kD3 = 3 cm, where the data's corner is legal)
+        const auto drift = [](const Result& r)
+        { float m = 0.0f; for (std::size_t k = 1; k < r.delta.size(); ++k) m = std::max(m, std::abs(r.delta[k] - r.delta[0])); return m; };
+        const auto max_jump = [](const Result& r)
+        { double m = 0.0; for (std::size_t k = 1; k < r.jump.size(); ++k) if (std::isfinite(r.jump[k])) m = std::max(m, r.jump[k]); return m; };
+        // the prior P(moved) per update: the class rate over one predict period (move_rate_per_day·dt/86400, chair 3/day, dt 0.1 s)
+        const double p_move = 3.0 * double(CountableBeliefParams{}.predict_period_s) / 86400.0;
+        std::printf("      delta_hat drift over updates 2..%d: BASE %.3g m AFTER %.3g m (delta_hat(1) BASE %+.5f AFTER %+.5f)\n", o.n, drift(off),
+                    drift(on), off.delta.front(), on.delta.front());
+        std::printf("      max jump_p over updates 2..%d: BASE %.3g AFTER %.3g (the prior P(moved) per update %.3g); GN converged BASE %d AFTER %d of %d\n",
+                    o.n, max_jump(off), max_jump(on), p_move, off.gn_conv, on.gn_conv, o.n);
+        std::printf("      staged corner gap at update 200: BASE %+.4f AFTER %+.4f; sd_cy BASE %.4f AFTER %.4f\n", off.gap.back(), on.gap.back(),
+                    std::sqrt(off.S(1, 1)), std::sqrt(on.S(1, 1)));
+        CHECK(on.gap.back() > off.gap.back());                            // the term holds it: less penetration than BASE
+        CHECK(on.gap.back() >= -kD3);                                     // never further out than the points put it
+        CHECK(drift(on) < 0.1f * kD3);                                    // δ̂ does not travel toward the data (no ratchet)
+        CHECK(max_jump(on) <= p_move);                                    // the pushed parked object gives no evidence of moving
+    }
+    // (g) finite-difference checks of the corner Jacobian (∂p/∂θ, the yaw column included) and of the polygon gradient ∂d/∂q (an
+    //     edge's interior and a convex room vertex)
+    {
+        float worst_j = 0.0f, worst_g = 0.0f;
+        const float h = 1e-3f;
+        for (float yaw : {-2.9f, -1.5708f, -0.4f, 0.0f, 0.7f, 2.2f})
+        {
+            const float cx = -1.2f, cy = -0.8f, w = 0.45f, hh = 0.5f;
+            const auto c0 = containment::corners(cx, cy, w, hh, yaw);
+            for (int i = 0; i < 6; ++i)
+            {
+                float v[6] = {cx, cy, kH, w, hh, yaw}, u[6] = {cx, cy, kH, w, hh, yaw};
+                v[i] += h; u[i] -= h;
+                const auto cp = containment::corners(v[0], v[1], v[3], v[4], v[5]), cm = containment::corners(u[0], u[1], u[3], u[4], u[5]);
+                for (int k = 0; k < 4; ++k)
+                {
+                    const Eigen::Vector2f fd = (cp[k].p - cm[k].p) / (2.0f * h);
+                    const Eigen::Vector2f an = containment::corner_jacobian(c0[k], w, hh, yaw).col(i);
+                    worst_j = std::max(worst_j, (fd - an).norm());
+                }
+            }
+        }
+        for (const Eigen::Vector2f q : {Eigen::Vector2f(-1.0f, 0.03f), Eigen::Vector2f(0.04f, -1.7f), Eigen::Vector2f(0.03f, 0.05f),
+                                        Eigen::Vector2f(-3.05f, -3.02f)})
+        {
+            const auto sd = containment::signed_distance(q, kRoom, false, {}, {});
+            Eigen::Vector2f fd;
+            for (int i = 0; i < 2; ++i)
+            {
+                Eigen::Vector2f a = q, b = q;
+                a(i) += h; b(i) -= h;
+                fd(i) = (containment::signed_distance(a, kRoom, false, {}, {}).d - containment::signed_distance(b, kRoom, false, {}, {}).d) / (2.0f * h);
+            }
+            worst_g = std::max(worst_g, (fd - sd.grad).norm());
+        }
+        std::printf(" (g) finite differences (h = 1e-3): corner Jacobian worst |fd - analytic| %.3g; polygon gradient worst %.3g\n", worst_j, worst_g);
+        // both maps are smooth there (a rotation, and a distance away from the medial axis), so the central difference's error is
+        // O(h²·curvature): the corner's yaw curvature is ≤ the half-diagonal 0.34 m ⇒ ≤ 0.34·h²/6 ≈ 6e-8, the distance's ≤ h²/d ≈ 3e-5;
+        // the bound is float's resolution at these magnitudes (≈ 1e-7·|p|/h ≈ 3e-4)
+        CHECK(worst_j <= 1e-3f);
+        CHECK(worst_g <= 1e-3f);
     }
     // (d) mid-room
     {

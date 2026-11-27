@@ -60,7 +60,8 @@
 //   smallest gap of the footprint's four corners to the frame's STAGED wall line, min_k (p_k − wall.p)·n (< 0: a corner past it;
 //   NaN: no wall staged), corner_gap_true = the same against the TRUE wall (the staged line moved by the wall latent's mean δ̂ along n,
 //   where the engine evaluates the containment), and room_gap = the smallest signed distance of the corners to the frame's room polygon (< 0: a corner
-//   outside the room; NaN: the frame carries no polygon, e.g. a dump recorded before CW1). Off by default. The full block is NOT in the dump (the live result stores only diag P), so replaying
+//   outside the room; NaN: the frame carries no polygon, e.g. a dump recorded before CW1). corner_gap and corner_gap_true are against the
+//   staged wall's LINE even when a polygon is present (room_gap is the polygon's). Off by default. The full block is NOT in the dump (the live result stores only diag P), so replaying
 //   is the only way to recover it (first_visit_nees.py, AuRo test (a)).
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
@@ -170,7 +171,7 @@ int main(int argc, char** argv)
             for (int j = i; j < 6; ++j) std::printf(",S_%d_%d", i, j);
     std::printf("\n");
 
-    std::string geom_tail; // --wall-geom: corner_gap, room_gap of the update (CW1)
+    std::string geom_tail; // --wall-geom: corner_gap, corner_gap_true, room_gap of the update (CW1)
     std::string cov_tail;  // --theta-cov: the update's 21 covariance entries, printed after the live comparison columns
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
