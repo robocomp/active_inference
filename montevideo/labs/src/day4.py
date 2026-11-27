@@ -5,27 +5,26 @@
 # life, look at what it stands on, and then let it act: what is a look worth, and who chooses.
 #
 # **Life cycle: how a belief begins and ends.**
-# - **A. Birth.** An object is born by comparing two worlds in nats, not by counting detections.
-# - **B. Absence.** A miss removes an object only where the object would have been seen.
-# - **C. Forgetting.** Replace a constant process noise by an inferred volatility.
+# 1. **Birth** (in class: Exercise 1; Exercise 2 at home). An object is born by comparing two worlds in nats, not by counting detections.
+# 2. **Absence** (in class: Exercises 3–4). A miss removes an object only where the object would have been seen.
+# 3. **Forgetting** (at home: Exercises 5–6). Replace a constant process noise by an inferred volatility.
 #
 # **Geometry: what a belief stands on.**
-# - **D. The room.** Find the room's walls in a scan, with no labels and no map.
-# - **E. The pose.** Drive, and keep a calibrated belief about where you are.
-# - **F. Symmetry.** Find the place where gradient descent cannot help.
-# - **G. The common-mode ceiling.** See how little a thousand points teach when they share one error.
-#
-# The thesis calls D the **acquisition** regime, where the room is a variable, and E the
-# **operating** regime, where the room is a constant. Part H says why the split matters.
+# 4. **The room** (optional, not in the lecture: Exercises 7–11). Find the room's walls in a scan, with no labels and no map.
+# 5. **The pose** (in class: Exercise 12; Exercise 13 at home). Drive, and keep a calibrated belief about where you are.
+# 6. **Symmetry** (optional: Exercise 14). Find the place where gradient descent cannot help.
+# 7. **The common-mode ceiling** (optional: Exercise 15). See how little a thousand points teach when they share one error.
+# 8. **Two regimes** (reading). The thesis calls 4 the **acquisition** regime, where the room is a variable,
+#    and 5 the **operating** regime, where the room is a constant.
 #
 # **Action: what a belief offers.**
-# - **I. Where to look.** One belief, a few candidate viewpoints, expected information against the
-#   price of a trip.
-# - **J. Priced offers.** Many beliefs on the shared graph, one body. Producers publish, the controller
-#   chooses, and hand-offs happen without a rule.
+# 9. **Where to look** (in class: Exercises 16 and 18; 17 and 19 at home). One belief, a few candidate
+#    viewpoints, expected information against the price of a trip.
+# 10. **Priced offers** (at home: Exercises 20–22). Many beliefs on the shared graph, one body. Producers
+#    publish, the controller chooses, and hand-offs happen without a rule.
 #
-# About two hours. The three groups are independent of each other; if time runs short, do A, B, E, G
-# and J. Route following and the occupancy-grid explorer are in `day4_extra.ipynb`.
+# In class: Exercises 1, 3, 4, 12, 16 and 18, about 55 minutes. The sections run on their own:
+# skip the optional ones. Route following and the occupancy-grid explorer are in `day4_extra.ipynb`.
 
 # %%
 import sys
@@ -45,9 +44,10 @@ rng = np.random.default_rng(0)
 world = two_room_apartment()
 lidar = Lidar(n_beams=360, sigma=0.02, max_range=12.0)
 SIGMA = 0.02
+TRUE0 = np.array([1.0, 0.6, 0.3])       # where the robot starts in the world; ground truth, for grading only
 
 # %% [markdown]
-# ## A. Birth: a belief begins as a model comparison
+# ## 1. Birth: a belief begins as a model comparison (in class)
 #
 # A run of detections has appeared near the bottle. Does the room contain a new object, or is this
 # clutter? A tracker would count: *three detections close together, and the object exists*. The
@@ -152,7 +152,7 @@ for name, n in (("sharp views", 2), ("reflections", 10)):
 #   (agents_life_cycle.tex, "What the surrogate costs").
 
 # %% [markdown]
-# ## B. Absence: a miss is evidence only where the object would have been seen
+# ## 2. Absence: a miss is evidence only where the object would have been seen (in class)
 #
 # Every belief carries one number for whether it exists: a log-odds $L$. A frame can say one of three
 # things about it:
@@ -321,7 +321,7 @@ ax.legend(ncol=5, frameon=False, fontsize=8); ax.set_title("the evidence rule")
 #   cannot resolve from here is a reason to move, not a reason to forget.
 
 # %% [markdown]
-# ## C. Forgetting: how fast does *this* object change?
+# ## 3. Forgetting: how fast does *this* object change? (at home)
 #
 # A static object is usually tracked by adding a constant process noise every frame,
 # $\Sigma \leftarrow \Sigma + Q$, whether or not anything was seen. That makes two predictions, neither
@@ -431,13 +431,13 @@ for name, infer in (("constant Q", False), ("inferred Q", True)):
 # bias, unlike a symmetric error, must be gated rather than down-weighted.
 
 # %% [markdown]
-# ## D. The first belief born: acquiring the room
+# ## 4. The first belief born: acquiring the room (optional)
 #
 # The room is a belief with a birth of its own: nothing in the first scan says how many walls there
 # are. Yesterday the robot was told which points belonged to the wall, and knew its pose; here it
 # knows neither.
 #
-# ### D1. Whose frame?
+# ### 4.1 Whose frame?
 #
 # The robot has no map, so there is no "world" frame it could report a pose in. The only frame
 # available is its own frame at the moment it starts. That choice is a **gauge**: a convention
@@ -446,7 +446,6 @@ for name, infer in (("constant Q", False), ("inferred Q", True)):
 # is used only for grading.
 
 # %%
-TRUE0 = np.array([1.0, 0.6, 0.3])       # ground truth, for grading only
 scan0 = lidar.scan(world, TRUE0, rng)
 P0 = scan0.points()                      # robot frame at t=0  ==  map frame
 
@@ -456,7 +455,7 @@ draw.robot([0, 0, 0], ax)
 ax.set_aspect("equal"); ax.set_title("what the robot has: one scan, in its own frame")
 
 # %% [markdown]
-# ### D2. Which way is the room?
+# ### 4.2 Which way is the room?
 #
 # Rooms are mostly rectilinear. Each scan point has a local surface normal, which you can estimate
 # from its neighbours. If the room has a dominant direction $\theta_0$, every normal is
@@ -497,7 +496,7 @@ print(f"theta0 = {np.degrees(theta0):.2f}°   (truth, for grading: the room axes
 # against 24.00 true, but aspect ratio 1.344 against 1.500, was a frame error, not a fit error.)
 
 # %% [markdown]
-# ### D3. Which points belong to a wall? A band that is derived, not chosen
+# ### 4.3 Which points belong to a wall? A band that is derived, not chosen
 #
 # A point belongs to a line when the line explains it better than clutter does. Clutter is uniform
 # over the scan's area $A$. A wall concentrates its points in a strip $L$ long and about $\sigma$
@@ -544,7 +543,7 @@ plt.title("a longer wall must fit each point more closely")
 # - each point arrives with its evidence in **nats**, the currency every structural decision will
 #   be priced in.
 #
-# ### D4. Four walls
+# ### 4.4 Four walls
 #
 # **Exercise 9.** For each Manhattan class $k = 0..3$, with normal angle $a_k = \theta_0 + k\pi/2$:
 # 1. initialise $d_k$ as the median of $n(a_k)^\top p$ over the points whose normal is within 15° of
@@ -611,7 +610,7 @@ ax.fill(*np.vstack([room, room[:1]]).T, fc="royalblue", alpha=0.15, ec="royalblu
 draw.robot([0, 0, 0], ax); ax.set_aspect("equal"); ax.set_title("the room, from one scan, in the map frame")
 
 # %% [markdown]
-# ### D5. The price of a shape
+# ### 4.5 The price of a shape
 #
 # Real rooms are not always four walls. The thesis prices every extra edge by **minimum
 # description length**. To transmit an edge you must say which of the four Manhattan directions it
@@ -647,7 +646,7 @@ print(f"L_edge = {L_edge:.2f} nats;  the table face would earn {evidence:.0f} na
 # beyond an edge counts as evidence against that edge.
 
 # %% [markdown]
-# ## E. Localising in the room you just built
+# ## 5. Localising in the room (in class: Exercise 12)
 #
 # Now the room is a constant (the operating regime) and the robot drives. Each step has two
 # parts:
@@ -661,6 +660,14 @@ print(f"L_edge = {L_edge:.2f} nats;  the table face would earn {evidence:.0f} na
 # then take their distance to the polygon.
 
 # %%
+# the room in the map frame: the one you built in section 4, or the true one if you skipped it
+truth_room = world.room("living").polygon
+try:
+    room
+except NameError:
+    room = se2.to_frame(TRUE0, truth_room)
+
+
 def pose_residual(P_robot, polygon):
     # BEGIN SOLUTION
     return lambda X: distance_to_polygon(se2.transform_points(X, P_robot), polygon)
@@ -730,7 +737,7 @@ ax.set_aspect("equal"); ax.legend(); ax.set_title("localising against the estima
 #
 # **Exercise 13.** Compute the mean NEES over 4 seeds for three maps:
 # - the true polygon;
-# - the one-scan estimate from Part D;
+# - the one-scan estimate from section 4 (or the true room again, if you skipped it);
 # - the true polygon with its east wall moved 1.5 cm.
 
 # %%
@@ -738,11 +745,11 @@ true_room = se2.to_frame(TRUE0, truth_room)
 bad_room = true_room.copy()
 east = np.argsort(true_room @ np.array([np.cos(-0.3), np.sin(-0.3)]))[-2:]   # the two east corners
 bad_room[east] += 0.015 * np.array([np.cos(-0.3), np.sin(-0.3)])
-for name, poly in (("true room", true_room), ("estimated (part D)", room), ("east wall +1.5 cm", bad_room)):
+for name, poly in (("true room", true_room), ("estimated (sec. 4)", room), ("east wall +1.5 cm", bad_room)):
     # BEGIN SOLUTION
     score = np.mean([nees(*drive(poly, seed)).mean() for seed in range(4)])
     # END SOLUTION
-    print(f"{name:20s} mean NEES = {score:6.2f}   (3 = honest)")
+    print(f"{name:20s} mean NEES = {score:6.2f}   (3 = right)")
 
 # %% [markdown]
 # **Lesson.** A wall 1.5 cm out of place makes the localiser **confidently wrong**: its error
@@ -753,7 +760,7 @@ for name, poly in (("true room", true_room), ("estimated (part D)", room), ("eas
 # else, the acquisition regime, must be right, or know when it is not.
 
 # %% [markdown]
-# ## F. The room's symmetry
+# ## 6. The room's symmetry (optional)
 #
 # A 6 × 4 m rectangle looks the same after a half-turn about its centre. Take the robot's final
 # scan and evaluate the Laplace free energy at the true pose and at its half-turn image, with a weak
@@ -796,7 +803,7 @@ for name, X0 in (("true pose", X_true), ("half-turn", X_flip)):
 #   later uses the fridge as a room landmark for exactly this purpose.
 
 # %% [markdown]
-# ## G. The common-mode ceiling
+# ## 7. The common-mode ceiling (optional)
 #
 # Before there is a room to localise against, the robot only has odometry, and its pose
 # uncertainty grows. Suppose it maps the **table's south face** from there, using a dense sensor
@@ -865,7 +872,7 @@ for N, a, n_, w_ in zip(Ns, rms, naive, wood):
 # under a millimetre while being off by about seven. That is the over-confidence every concept agent in
 # the thesis must guard against, and the reason the agents carry this term explicitly.
 #
-# ## H. Why the two regimes are kept apart
+# ## 8. Why the two regimes are kept apart (reading)
 #
 # You have now run both regimes. A natural question is why not estimate the room and the pose
 # together all the time, as SLAM does. The thesis answers that a room changes over years and a pose
@@ -898,7 +905,7 @@ room = world.room("living").polygon     # today the room is given: the operating
 START = np.array([1.0, 0.8, 0.0])
 
 # %% [markdown]
-# ## I. Where to look at one wall
+# ## 9. Where to look at one wall (in class: Exercises 16 and 18)
 #
 # The smallest case of choosing a viewpoint: Day 2's north wall, held as a Laplace
 # belief after one scan. The cell below rebuilds that belief exactly as Day 2 left it (90° LiDAR,
@@ -940,7 +947,7 @@ wall0 = laplace(residual(pts0), [np.pi / 2, 4.0], incidence_sigma(pts0, bear0), 
 print(f"Day 2's wall: alpha = {np.degrees(wall0.mu[0]):.3f}° ± {np.degrees(wall0.sd[0]):.3f}°,  d = {wall0.mu[1]:.4f} ± {wall0.sd[1]:.4f} m")
 
 # %% [markdown]
-# ### I1. Information gain
+# ### 9.1 Information gain
 #
 # At decision time the current scan has already happened, so $\partial F / \partial a = 0$.
 # Actions are scored by the free energy they are *expected* to produce. For a Gaussian belief and
@@ -950,7 +957,7 @@ print(f"Day 2's wall: alpha = {np.degrees(wall0.mu[0]):.3f}° ± {np.degrees(wal
 # $$ \Delta H(v) = \tfrac12 \ln\frac{|\Lambda + J_v^\top R_v^{-1} J_v|}{|\Lambda|}. $$
 #
 # `info_gain(Lambda, J, R)` computes this. To predict *which* points a viewpoint $v$ would see we
-# cheat: we ray-cast the true world (with zero noise). In C2 below the robot predicts it from its
+# cheat: we ray-cast the true world (with zero noise). In section 10 the robot predicts it from its
 # own beliefs instead.
 #
 # **Exercise 16.** Compute $\Delta H$ for each candidate below and rank them. Before running, guess
@@ -1020,7 +1027,7 @@ plt.plot(ks, np.log((ks + 1) / ks), "-", label=r"$\ln\frac{k+1}{k}$")
 plt.xlabel("look number k"); plt.ylabel("ΔH (nats)"); plt.legend()
 
 # %% [markdown]
-# ### I2. Paying for travel in the same currency
+# ### 9.2 Paying for travel in the same currency
 #
 # The expected free energy has a **pragmatic** term too. The simplest one is a preference for not
 # driving far: $G(v) = \beta\,\lVert v - x\rVert - \Delta H(v)$, with $\beta$ in nats per metre.
@@ -1054,7 +1061,7 @@ for beta in np.linspace(0, 0.2, 21):
 # not for how often it has been seen (post-thesis result, work in progress).
 
 # %% [markdown]
-# ### I3. Go there and look
+# ### 9.3 Go there and look (at home)
 #
 # **Exercise 19.** Move to "far west", scan, and update the belief. The update is another Laplace
 # fit, with the current belief as the **prior**. Compare the realised entropy drop with the
@@ -1077,9 +1084,9 @@ print(f"alpha sd: {np.degrees(wall0.sd[0]):.4f}° -> {np.degrees(wall1.sd[0]):.4
 # be computed before the robot moves. That is what makes an expected free energy computable.
 
 # %% [markdown]
-# ## J. Priced offers on the shared graph
+# ## 10. Priced offers on the shared graph (at home)
 #
-# Part I let one belief choose. A real robot has many beliefs, and a single body to serve them. Each
+# Section 9 let one belief choose. A real robot has many beliefs, and a single body to serve them. Each
 # concept agent knows what *it* would gain from a look; only the controller knows what a trip costs.
 # So the agents publish **offers** in the shared graph and the controller compares them. No agent
 # calls another. The currency is the nat.
@@ -1092,7 +1099,7 @@ print(f"alpha sd: {np.degrees(wall0.sd[0]):.4f}° -> {np.degrees(wall1.sd[0]):.4
 # so *where you stand* decides which direction you learn. A door offers a **pragmatic** value: nothing
 # to learn, but the robot's task is to end up there.
 #
-# ### J1. What a view is worth
+# ### 10.1 What a view is worth
 #
 # Pointing the sensor from viewpoint $c$ at an object believed at $\mu$, with $u$ the unit vector
 # from $c$ to $\mu$ and $r$ the distance, gives a position measurement with
@@ -1133,7 +1140,7 @@ def view_gain(belief, c, size):
 
 
 # %% [markdown]
-# ### J2. A producer writes to the graph
+# ### 10.2 A producer writes to the graph
 #
 # `Producer` below is a concept agent in miniature. It owns a node for its object and, while it still
 # wants something, a child node of type `affordance` holding a ranked list of offers. An offer says
@@ -1186,7 +1193,7 @@ class Producer:
 
 
 # %% [markdown]
-# ### J3. The controller reads offers and chooses
+# ### 10.3 The controller reads offers and chooses
 #
 # The executor sees only the graph. For each offer it resolves the object-relative request into a
 # standpoint, tests it against what only *it* knows (the room polygon and the footprint), and scores
@@ -1244,10 +1251,10 @@ def select(g, x, incumbent):
 
 
 # %% [markdown]
-# ### J4. Run it
+# ### 10.4 Run it
 #
 # Each cycle the controller selects, the robot moves up to 0.4 m towards the chosen standpoint in a
-# straight line (routes are Part D's business), and the camera, pointed at the object of the offer
+# straight line (routes are in `day4_extra.ipynb`), and the camera, pointed at the object of the offer
 # being served, takes one look at whatever falls within ±45° of that direction. The door's offer is one standpoint
 # in front of it, worth 1.0 nat of preference. Reaching it ends the run.
 #

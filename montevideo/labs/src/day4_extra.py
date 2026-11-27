@@ -148,14 +148,14 @@ for seed in range(4):
         pred_total, real_total = sum(l[1] for l in lk), sum(l[2] for l in lk)
         stopped = len(lk) < 15
         # END SOLUTION
-        print(f"seed {seed}  {'through matter' if tm else 'honest        '}  looks {len(lk):2d}  "
+        print(f"seed {seed}  {'through matter' if tm else 'line of sight '}  looks {len(lk):2d}  "
               f"stopped {str(stopped):5s}  predicted {pred_total:6.0f}  realised {real_total:6.0f}  "
               f"left inside the table {g_.entropy(in_table):4.0f} nats")
 
 # %% [markdown]
 # **Questions.**
 # - Why does the explorer that predicts through matter never stop?
-# - Most of the entropy the honest explorer leaves behind sits inside the table. Is that a
+# - Most of the entropy the line-of-sight explorer leaves behind sits inside the table. Is that a
 #   failure?
 
 # %% [markdown] solution

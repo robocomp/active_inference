@@ -390,6 +390,14 @@ $\\[1.2em]
   \lesson{An object is born when what it explains outweighs what it costs, both in nats.}
 \end{frame}
 
+% the robot approaches a chair; unexplained points pile up until one more object pays for itself (30 s,
+% no sound, illustrative numbers); click once in pympress to start. Made by figures/make_birth_video.py.
+\begin{frame}[plain,noframenumbering]
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, showcontrols=false]{\includegraphics[width=\paperwidth]{chair_birth_poster.png}}{media/chair_birth.mp4}};
+  \end{tikzpicture}
+\end{frame}
+
 \begin{frame}{A miss is evidence only where the object would have been seen}
   \centering
   \begin{tikzpicture}[scale=0.8]
@@ -487,15 +495,57 @@ $\\[1.2em]
   \lesson{Each object infers how fast to forget from its own surprise.}
 \end{frame}
 
-\begin{frame}{Example 2: the chair's life in simulation and on the real robot}
+\begin{frame}{The chair the camera sees, and the belief the chair agent keeps of it}
   \centering
-  \begin{tikzpicture}
-    \node[draw=good, thick, dashed, rounded corners=4pt, fill=good!6, minimum width=5.6cm, minimum height=3.4cm, align=center, font=\small] at (-3.2,0)
-      {\textbf{simulation}\\[0.3em][figure to add: one tour,\\a chair born, seen, forgotten]};
-    \node[draw=accent, thick, dashed, rounded corners=4pt, fill=accent!6, minimum width=5.6cm, minimum height=3.4cm, align=center, font=\small] at (3.2,0)
-      {\textbf{real robot}\\[0.3em][real-robot clip/figure to add]};
+  \includegraphics[height=0.64\textheight]{figures/d4_chair_overlay.png}\\[0.2em]
+  {\footnotesize orange: YOLO, inside the retina, labels this mask ``chair 0.87''; its pixels, with their depth, become the 3-D points the chair agent fits\\
+   blue: \texttt{chair\_292}, the agent's fitted box (0.48 $\times$ 0.52 $\times$ 1.03\,m, $\sigma$ 2\,cm), projected into the image\par}
+  {\scriptsize\color{muted} simulated ZED frame (Webots); the box sits 4.5\,cm from the true chair; the cabinet's colours are the simulator's, not an overlay\par}
+  \lesson{The mask is evidence in pixels; the belief is a box in the room, with its doubt.}
+\end{frame}
+
+\begin{frame}{The chair's $F$ is the localiser's $F$ with the roles swapped}
+  \centering
+  \vspace{0pt plus 1filll}
+  \renewcommand{\arraystretch}{1.55}
+  {\small
+  \begin{tabular}{@{}r|c|c@{}}
+    & \textbf{the robot in its room} & \textbf{a chair in the room} \\ \hline
+    unknown & pose $X = (x, y, \varphi)$ & pose $\theta = (x, y, \psi)$; shape: the class template \\
+    data & LiDAR returns $q_n$ & the mask's 3-D points $p_k$, placed with the robot's pose \\
+    distance & $d(\cdot)$: to the nearest wall & $s_\theta(\cdot)$: to the chair's surface at $\theta$ \\
+    prior & where the wheels say: $\bar X, \bar P$ & the last belief, predicted: $\bar\theta, \bar P_\theta$ \\
+    off-model data & a chair in front of a wall & a point on the floor or the wall behind \\
+  \end{tabular}}
+
+  \vspace{0.9em}
+  {\normalsize
+  $F(X) = \tfrac12\lVert X - \bar X\rVert^2_{\bar P^{-1}} + \dfrac{1}{2\sigma^2}\displaystyle\sum_n w_n\, d\big(X \oplus q_n\big)^2$
+  \qquad
+  $F(\theta) = \tfrac12\lVert \theta - \bar\theta\rVert^2_{\bar P_\theta^{-1}} + \dfrac{1}{2\sigma^2}\displaystyle\sum_k w_k\, s_\theta(p_k)^2$\par}
+  \vspace{0.6em}
+  {\footnotesize $w$: how much the model explains a point, against clutter (the agent uses the full mixture, ``chair or clutter'');\;
+   $X \oplus q_n$: return $n$ placed at $X$\par}
+  \vspace{0pt plus 1filll}
+  \ask{what does the chair agent read from the robot to place its points?}{The robot's pose with its covariance (Day~3): a pose error moves every point of the mask together.}
+\end{frame}
+
+\begin{frame}{Example 2 in simulation: one chair's life, from birth to recall}
+  \centering
+  \vspace{0pt plus 1filll}
+  \begin{tikzpicture}[chcap/.style={font=\footnotesize, align=center, text width=3.8cm, anchor=north}]
+    \node[inner sep=0] (g) at (0,0)    {\includegraphics[width=3.9cm]{figures/d3_chair_geometry.png}};
+    \node[inner sep=0] (l) at (4.15,0) {\includegraphics[width=3.9cm]{figures/d3_chair_lifecycle.png}};
+    \node[inner sep=0] (f) at (8.3,0)  {\includegraphics[width=3.9cm]{figures/d3_chair_function.png}};
+    \node[chcap] at ([yshift=-2pt]g.south) {\textbf{born and sharpened}\\ $\sigma$ 14\,cm at birth, 5\,cm after 105\,s of looking; + is the truth};
+    \node[chcap] at ([yshift=-2pt]l.south) {\textbf{removed, moved, recalled}\\ the memory offers the old place; a new belief is born at the new one};
+    \node[chcap] at ([yshift=-2pt]f.south) {\textbf{its offer taken}\\ ``come and look at me'', worth 5\,nats: the robot drives to the view};
   \end{tikzpicture}
-  \lesson{Placeholder: the same chair rules, simulated and real.}
+
+  \vspace{0.6em}
+  {\scriptsize\color{muted} one chair in a Webots tour (run g1x\_c3b\_on\_r1); times in seconds from the start; shaded bands: door crossings\par}
+  \vspace{0pt plus 1filll}
+  \lesson{One chair is born, sharpened, removed, recalled and approached: each step lowers $F$ or $G$.}
 \end{frame}
 
 % =================================================================================================
