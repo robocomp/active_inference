@@ -79,22 +79,22 @@ The lecture is long (about 115 min). If you are behind at 1:15, go faster throug
 
 ## Day 3 — The CORTEX architecture: concepts and memories (`slides/day3.pdf`, `labs/day3.ipynb`, `handouts/handout_day3.pdf`)
 
-**Rewritten 2026-11-27.** 36 numbered frames plus 8 backups (five more were parked in `slides/parked_day3_backups.tex`: the CRDT exchange and its tie rule, amortisation, "one belief asks four questions", the factorised belief). Frame numbers are the footers (n/36). Hand out the Day 3 handout; its glossary carries the day's new words (node, edge, RT edge, owner, CRDT, DDS, factor, cut, NEES).
+**Rewritten 2026-11-27.** 37 numbered frames plus 8 backups (five more were parked in `slides/parked_day3_backups.tex`: the CRDT exchange and its tie rule, amortisation, "one belief asks four questions", the factorised belief). Frame numbers are the footers (n/37). Hand out the Day 3 handout; its glossary carries the day's new words (node, edge, RT edge, owner, CRDT, DDS, factor, cut, NEES).
 
 | time | block | frames |
 |---|---|---|
 | 0:00–0:12 | Who holds the belief: Day 2's one q against a dozen processes; cognitive architectures (SOAR/ACT-R, layered robots, blackboards) and where CORTEX sits; CORTEX, the whole picture | 1–3 |
 | 0:12–0:30 | Infrastructure: a shared graph instead of messages, copies merged by a CRDT, the protocol, sensor data beside the graphs; the CORTEX-in-action video | 4–8 |
-| 0:30–0:50 | The working memory: the scene as a graph, a real one, two kinds of change, typed records, the RT tree, the ring of past poses | 9–15 |
-| 0:50–1:05 | Concepts: four dimensions, the retina, one object from many fragments, class against instances | 16–19 |
-| 1:05–1:20 | Memories: timescales, episodic (one episode drawn), long-term spatial | 20–26 |
-| 1:20–1:40 | One belief, cut among many agents: the product of factors, inside a factor, each agent's F, a pose crosses a cut with its covariance, the cost of cutting | 27–31 |
-| 1:40–1:50 | No thresholds: precision against threshold, the tuned threshold that fails, the one threshold that stays | 32–34 |
+| 0:30–0:50 | The working memory: the scene as a graph, a real one, the same graph in 3-D (a QR code and link to the interactive page: let students open it on their phones), two kinds of change, typed records, the RT tree, the ring of past poses | 9–16 |
+| 0:50–1:05 | Concepts: four dimensions, the retina, one object from many fragments, class against instances | 17–20 |
+| 1:05–1:20 | Memories: timescales, episodic (one episode drawn), long-term spatial | 21–27 |
+| 1:20–1:40 | One belief, cut among many agents: the product of factors, inside a factor, each agent's F, a pose crosses a cut with its covariance, the cost of cutting | 28–32 |
+| 1:40–1:50 | No thresholds: precision against threshold, the tuned threshold that fails, the one threshold that stays | 33–35 |
 | 1:50–2:05 | break | |
-| 2:05–3:00 | Lab: Exercises 3, 4, 5, 6, 8 in class (about 55 min); 1, 2, 7, 9 at home | 35 |
-| — | Tomorrow (Day 4's three blocks: the room, the chair's life, choosing a look) | 36 |
+| 2:05–3:00 | Lab: Exercises 3, 4, 5, 6, 8 in class (about 55 min); 1, 2, 7, 9 at home | 36 |
+| — | Tomorrow (Day 4's three blocks: the room, the chair's life, choosing a look) | 37 |
 
-**Questions in the bottom bar** (ask, wait, click): 2 (in a layered robot, where is the belief about the room: spread over layers and messages; in CORTEX one node), 6 (two agents write one node: every copy ends with one of the writes; hence one owner per node), 14 (the robot's pose becomes less sure: Σ' grows, since room←Shadow is on the path), 19 (a third chair: one more node, not another agent), 30 (the pose becomes exact: the two scenes no longer differ), 31 (chair_1 placed 10 cm too far left: table_1 too, the same δ_t moves both), 32 (a chair at 5.1 m: the threshold drops it, the precision weighs it a little less than at 4.9 m).
+**Questions in the bottom bar** (ask, wait, click): 2 (in a layered robot, where is the belief about the room: spread over layers and messages; in CORTEX one node), 6 (two agents write one node: every copy ends with one of the writes; hence one owner per node), 15 (the robot's pose becomes less sure: Σ' grows, since room←Shadow is on the path), 20 (a third chair: one more node, not another agent), 31 (the pose becomes exact: the two scenes no longer differ), 32 (chair_1 placed 10 cm too far left: table_1 too, the same δ_t moves both), 33 (a chair at 5.1 m: the threshold drops it, the precision weighs it a little less than at 4.9 m).
 
 **Frame 3.** The procedural memory is not running; the frame now says that CORTEX puts its weight on building the representation more than on planning and executing missions. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out.
 
@@ -104,15 +104,15 @@ The lecture is long (about 115 min). If you are behind at 1:15, go faster throug
 
 **Sensor data (frame 8 and the backup "On one computer").** The bars are to scale. Zero copy means readers do not pay again per reader; the driver still writes the frame once. A story if time allows: for months the plane was silently NOT zero-copy, because FastDDS turns data-sharing off for keyed types and logs it only at INFO. Removing one `@key` took the bench from 494 µs at 1.4 % CPU to 186 µs at 0.8 % (commit 48543c5; post-thesis). The configuration said on, and nothing measured it.
 
-**Working memory (frames 9–15).** Frame 13 now says that each node is a belief. Frames 13 and 14 both show the RT tree; 13 adds how a point's covariance is composed along the path. The `root` in frame 10's picture is the viewer's World layer; frame 9 starts from the robot.
+**Working memory (frames 9–16).** Frame 14 now says that each node is a belief. Frames 14 and 15 both show the RT tree; 13 adds how a point's covariance is composed along the path. The `root` in frame 10's picture is the viewer's World layer; frame 9 starts from the robot.
 
-**Concepts (frames 16–19).** Frame 16 is the map of the next days; the four dimensions are the course's framing, not the thesis's. Frame 19 is Day 1 again: the class is the prior, an instance the posterior. For a chair the belief is pose only and the shape is the class template; a table's shape is fitted.
+**Concepts (frames 17–20).** Frame 17 is the map of the next days; the four dimensions are the course's framing, not the thesis's. Frame 20 is Day 1 again: the class is the prior, an instance the posterior. For a chair the belief is pose only and the shape is the class template; a table's shape is fitted.
 
-**Memories (frames 20–26): say what is not built.** Working, episodic and long-term spatial run. Long-term object memory (LTOM) is work in progress and not in the thesis (backup frame). Semantic and procedural are not built, although `cortex.tex` l.519–537 and l.549–570 describe them in the present tense. Frame 22 draws one real episode (a 4-second record from a run on 2026-11-22). What not to claim about LTOM (state on 2026-11-09, re-check): it only offers; recall uses position only; only chairs have done this live.
+**Memories (frames 21–27): say what is not built.** Working, episodic and long-term spatial run. Long-term object memory (LTOM) is work in progress and not in the thesis (backup frame). Semantic and procedural are not built, although `cortex.tex` l.519–537 and l.549–570 describe them in the present tense. Frame 23 draws one real episode (a 4-second record from a run on 2026-11-22). What not to claim about LTOM (state on 2026-11-09, re-check): it only offers; recall uses position only; only chairs have done this live.
 
-**One belief, cut (frames 27–31).** Frame 27 is the argument of the day: every boundary between processes is a conditional-independence assumption, and whatever crosses it is what survived a marginalisation. Frame 31 is the surprise: each object's spread is right; only the relation between objects is lost (lab Exercise 6: one object 2.50 cm both ways; the relation 1.58 cm exact, 3.54 cm from the agents). The price of that loss does not fall with more frames (Exercise 7): it is information the objects carry about each other, and the product of factors has no place to keep it. The joint in causal order, the seven assumptions and the matrix C are backups.
+**One belief, cut (frames 28–32).** Frame 28 is the argument of the day: every boundary between processes is a conditional-independence assumption, and whatever crosses it is what survived a marginalisation. Frame 32 is the surprise: each object's spread is right; only the relation between objects is lost (lab Exercise 6: one object 2.50 cm both ways; the relation 1.58 cm exact, 3.54 cm from the agents). The price of that loss does not fall with more frames (Exercise 7): it is information the objects carry about each other, and the product of factors has no place to keep it. The joint in causal order, the seven assumptions and the matrix C are backups.
 
-**No thresholds (frames 32–34).** The rule is not "never a threshold": frame 34 shows one must stay (a bias shared across frames), and the backup "The rule is" names the three that exist and their verdicts. Say that the thesis has not finished this.
+**No thresholds (frames 33–35).** The rule is not "never a threshold": frame 35 shows one must stay (a bias shared across frames), and the backup "The rule is" names the three that exist and their verdicts. Say that the thesis has not finished this.
 
 **Expected lab numbers** (seed 0; r = (5 cm)², s² = (10 cm)²):
 - Exercise 1: bottle_concept's write to table_1 is refused; the sweep removes bottle_1.

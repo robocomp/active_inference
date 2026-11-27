@@ -21,6 +21,7 @@
 
 \usepackage{appendixnumberbeamer}
 \usepackage{multimedia}
+\usepackage{qrcode}
 % \robot{x,y}{heading in degrees}: the robot seen from above.
 \newcommand{\robot}[2]{\fill[muted!45, draw=black] (#1) circle (5pt);
   \draw[-{Stealth[length=1.6mm]}, thick] (#1) -- ++(#2:0.42);}
@@ -349,6 +350,30 @@
     \end{column}
   \end{columns}
   \lesson{The working memory holds the scene, the robot, its offers and the agents that keep them.}
+\end{frame}
+
+\begin{frame}{The same working memory in 3-D: open it and explore the layers}
+  \begin{columns}[c]
+    \begin{column}{0.4\textwidth}
+      \centering
+      \qrcode[height=4.2cm]{https://claude.ai/artifact/3rYiv3EaG9zaKGXLuHkJB8}\\[0.6em]
+      {\footnotesize\href{https://claude.ai/artifact/3rYiv3EaG9zaKGXLuHkJB8}{\textcolor{cool}{claude.ai/artifact/3rYiv3EaG9zaKGXLuHkJB8}}\par}
+    \end{column}
+    \begin{column}{0.56\textwidth}
+      \small
+      One scene graph, in layers, bottom to top:
+      \begin{itemize}
+        \item the apartment, reconstructed;
+        \item the robot and the room it is localised in;
+        \item the objects in the room, and what they offer;
+        \item groups of objects used together (proposed).
+      \end{itemize}
+      \vspace{0.4em}
+      Solid: in the graph now.\; Dashed and hollow: no agent has perceived it yet.\\[0.5em]
+      {\footnotesize\color{black!70} orbit, zoom, click a node to inspect it, switch layers on and off\par}
+    \end{column}
+  \end{columns}
+  \lesson{The working memory is one graph in layers: robot, room, objects, offers.}
 \end{frame}
 
 \begin{frame}[t]{A belief changes in two ways: its numbers, or its structure}

@@ -58,15 +58,18 @@ TRUE0 = np.array([1.0, 0.6, 0.3])       # where the robot starts in the world; g
 # - **With it**, each detection scatters about an unknown centre, $z_t\sim\mathcal N(\theta,\sigma_t^2 I)$,
 #   and $\theta$ has a broad prior over the room.
 #
-# Both worlds also carry a prior probability of the object existing, $\pi$. Then
+# Both worlds also carry a prior probability of the object existing, $p_0$. Then
 #
 # $$\Delta F = F_\text{with} - F_\text{without}, \qquad F_\text{with} =
-#   -\ln\pi + F_\text{Laplace}, \qquad F_\text{without} = -\ln(1-\pi) + n\ln A,$$
+#   -\ln p_0 + F_\text{Laplace}, \qquad F_\text{without} = -\ln(1-p_0) + n\ln A,$$
 #
 # and the object is warranted when $\Delta F<0$. Note that each detection carries its **own** $\sigma_t$:
 # a detector reports how far it should be trusted, and the comparison reads that.
 #
 # **Exercise 1.** Write `delta_F`, using Day 2's `laplace` for $F_\text{Laplace}$.
+#
+# *Hint:* `fit = laplace(residual, x0, sigma, prior=CLASS_PRIOR, jacobian=...)`; then `fit.free_energy`
+# is $F_\text{Laplace}$. `P_EXIST` is $p_0$ and `AREA` is $A$.
 
 # %%
 AREA, P_EXIST = 24.0, 0.1                                     # the living room's area; prior that a new object is here
@@ -228,7 +231,7 @@ def predicted_beams(b, pose, beliefs, use_walls=True):
 # afterwards. With `weight_count=True`, apply the weight to the count instead, before the ceiling.
 
 # %%
-LOCC, PER_BEAM, L0, LMAX, L_DEAD = 0.4, 1.0, 2.0, 4.0, -3.5
+LOCC, PER_BEAM, L0, LMAX, L_DEAD = 0.4, 1.0, 2.0, 4.0, -3.5   # toy values (the chair agent: birth 1.0, removal -3.0)
 R_SEE = 3.0
 
 
@@ -654,7 +657,8 @@ print(f"L_edge = {L_edge:.2f} nats;  the table face would earn {evidence:.0f} na
 #   Jacobian. No constant process noise is added.
 # - **Correct.** A Laplace fit of the scan against the room, with the prediction as the prior. The
 #   residual of each scan point is its distance to the nearest wall: the localiser's
-#   distance field.
+#   distance field. Here each point is weighted by a wall-or-clutter mixture; the robot's running
+#   localiser uses Huber weights instead, $w = \min(1, \delta/|d|)$: both bound the pull of a stray point.
 #
 # **Exercise 12.** Write the pose residual: map the robot-frame points through a candidate pose $X$,
 # then take their distance to the polygon.
@@ -889,7 +893,7 @@ for N, a, n_, w_ in zip(Ns, rms, naive, wood):
 # %% [markdown]
 # ## Action: setup
 #
-# Parts I and J work in the living room with the pose known: the operating regime.
+# Sections 9 and 10 work in the living room with the pose known: the operating regime.
 
 # %%
 from toyworld import Gaussian, Grid, Lidar, Robot, draw, laplace, se2, two_room_apartment
@@ -962,6 +966,9 @@ print(f"Day 2's wall: alpha = {np.degrees(wall0.mu[0]):.3f}° ± {np.degrees(wal
 #
 # **Exercise 16.** Compute $\Delta H$ for each candidate below and rank them. Before running, guess
 # which wins.
+#
+# *Hint:* `belief.precision` is $\Lambda$; `jacobian(p)(belief.mu)` is $J$; `incidence_sigma(p, b, alpha)`
+# gives each point's noise, so $R$ is the diagonal of their squares; `info_gain(Lambda, J, R)` returns $\Delta H$.
 
 # %%
 views = {
@@ -1030,23 +1037,23 @@ plt.xlabel("look number k"); plt.ylabel("ΔH (nats)"); plt.legend()
 # ### 9.2 Paying for travel in the same currency
 #
 # The expected free energy has a **pragmatic** term too. The simplest one is a preference for not
-# driving far: $G(v) = \beta\,\lVert v - x\rVert - \Delta H(v)$, with $\beta$ in nats per metre.
+# driving far: $G(v) = \lambda\,\lVert v - x\rVert - \Delta H(v)$, with $\lambda$ in nats per metre.
 #
-# **Exercise 18.** For $\beta \in [0, 0.2]$ nats/m, which candidate minimises $G$? Find the $\beta$
+# **Exercise 18.** For $\lambda \in [0, 0.2]$ nats/m, which candidate minimises $G$? Find the $\lambda$
 # at which the robot stops moving and simply scans again.
 
 # %%
 gains = {name: predicted_gain(wall0, v)[0] for name, v in views.items()}
 dists = {name: np.hypot(v[0] - pose0[0], v[1] - pose0[1]) for name, v in views.items()}
-for beta in np.linspace(0, 0.2, 21):
+for lam in np.linspace(0, 0.2, 21):
     # BEGIN SOLUTION
-    G = {name: beta * dists[name] - gains[name] for name in views}
+    G = {name: lam * dists[name] - gains[name] for name in views}
     best = min(G, key=G.get)
     # END SOLUTION
-    print(f"beta = {beta:.2f} nats/m  ->  {best}")
+    print(f"lambda = {lam:.2f} nats/m  ->  {best}")
 
 # %% [markdown]
-# **Question (the key one of this part).** For any $\beta$ above about 0.07, the robot prefers to
+# **Question (the key one of this part).** For any $\lambda$ above about 0.07, the robot prefers to
 # stay and re-scan, because a repeat look is "worth" $\ln 2$ nats for free. What does the model
 # *assume* that makes the repeat look so valuable? Would that assumption hold on a real robot?
 
@@ -1054,7 +1061,7 @@ for beta in np.linspace(0, 0.2, 21):
 # *Answer.* The value $\ln 2$ assumes the second scan's errors are **independent** of the first's.
 # On a real robot, both scans share the same pose error, the same sensor-mount error and the same
 # calibration error. Those common-mode errors do not average away, so the second look is worth far
-# less than $\ln 2$. Averaging removes independent error, not shared error. Day 4 put a number on
+# less than $\ln 2$. Averaging removes independent error, not shared error. Section 7 puts a number on
 # this (the common-mode ceiling). The robot's real layout explorer takes the opposite extreme: its
 # map keeps one point per voxel, so a repeat look adds nothing at all, and its "precision" term
 # turned out to be inert. What carries that explorer is credit for what a viewpoint can *resolve*,
@@ -1096,8 +1103,8 @@ print(f"alpha sd: {np.degrees(wall0.sd[0]):.4f}° -> {np.degrees(wall1.sd[0]):.4
 # - The **executor** owns feasibility, the cost of getting there, and which offer wins.
 #
 # The toy: two objects with position beliefs and a sensor that measures range well and bearing badly,
-# so *where you stand* decides which direction you learn. A door offers a **pragmatic** value: nothing
-# to learn, but the robot's task is to end up there.
+# so *where you stand* decides which direction you learn. A door offers a **pragmatic** term: nothing
+# to learn, but the robot's task is to end up there, so its pragmatic cost is negative (a value of `door_value` nats).
 #
 # ### 10.1 What a view is worth
 #
@@ -1198,7 +1205,9 @@ class Producer:
 # The executor sees only the graph. For each offer it resolves the object-relative request into a
 # standpoint, tests it against what only *it* knows (the room polygon and the footprint), and scores
 #
-# $$ G = \lambda\,\text{dist} - \mathbb E[\Delta H] - \text{pragmatic}, \qquad \lambda = 0.2\ \text{nats/m}. $$
+# $$ G = -\,\mathbb E[\Delta H] + \text{pragmatic} + \lambda\,\text{dist}, \qquad \lambda = 0.2\ \text{nats/m}, $$
+#
+# with the pragmatic term a cost, as on the slides (the door's is negative).
 #
 # The offer in hand is re-scored with everything else, every cycle. A challenger takes over only if
 # it is better by more than a **switching margin** $m$, the price of abandoning work under way.
@@ -1234,7 +1243,7 @@ def select(g, x, incumbent):
         best = None
         for c, gain in resolve(g, aff):
             # BEGIN SOLUTION
-            G = LAMBDA * np.hypot(*(c - x)) - gain - aff.attrs["pragmatic"]
+            G = LAMBDA * np.hypot(*(c - x)) - gain + aff.attrs["pragmatic"]
             if best is None or G < best[0]:
                 best = (G, c)
             # END SOLUTION
@@ -1275,7 +1284,7 @@ def run_offers(seed=0, lam=None, margin=None, door_value=1.0, max_cycles=60):
              Producer(g, "bottle", 0.2, bottle_t.pose[:2] + [-0.3, 0.3], 0.50, truth=bottle_t.pose[:2])]
     g.add_node("door", "object", parent="living", pose=[5.5, 2.05, 0.0], owner="door_agent")
     g.add_node("aff_door", "affordance", parent="door", owner="door_agent",
-               offers=[dict(bearing=0.0, standoff=0.0, gain=0.0)], pragmatic=door_value)
+               offers=[dict(bearing=0.0, standoff=0.0, gain=0.0)], pragmatic=-door_value)
     x, incumbent, trace = START[:2].copy(), None, []
     for t in range(max_cycles):
         name, c, G, scores = select(g, x, incumbent)

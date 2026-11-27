@@ -1,0 +1,81 @@
+% Day 4 backup frames removed 2026-11-27 as duplicates of other frames. Not built.
+
+\begin{frame}{Backup: The common-mode ceiling}
+  $N$ residuals that share one offset $\delta\sim\N(0,\Sigma_\delta)$, a pose error, plus independent
+  noise. Marginalise $\delta$:
+  \[
+    \mathcal I = J_z^\top\big(\sigma^2 I + J_z\Sigma_\delta J_z^\top\big)^{-1}J_z
+    \;\overset{\text{Woodbury}}{=}\;
+    \big(\sigma^2(J_z^\top J_z)^{-1} + \Sigma_\delta\big)^{-1}
+    \;\xrightarrow[N\to\infty]{}\; \Sigma_\delta^{-1}
+  \]
+  \begin{itemize}
+    \item A denser mask eventually stops helping. The ceiling is set by the \emph{pose} error, not
+          by the pixel count.
+    \item The joint information on (object, offset) has rank 6, not 12: the data cannot tell a
+          displaced object from a displaced robot.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Backup: Association: the factor the free energy cannot see}
+  \begin{columns}[c]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[cool, thick, fill=cool!10, rotate around={25:(0,0)}] (0,0) ellipse (1.25 and 0.65);
+        \fill[cool] (0,0) circle (2pt); \node[lab, below] at (0,-0.05) {poorly known};
+        \draw[cool, thick, fill=cool!10] (2.9,0.15) ellipse (0.45 and 0.4);
+        \fill[cool] (2.9,0.15) circle (2pt); \node[lab, above] at (2.9,0.55) {precise};
+        \fill[accent] (0.85,0.55) circle (2.5pt);
+        \fill[accent] (3.0,0.05) circle (2.5pt);
+        \fill[accent] (1.9,-0.75) circle (2.5pt);
+        \node[lab, right, text=accent] at (1.95,-0.75) {opens a candidate};
+      \end{tikzpicture}\\[0.4em]
+      {\small a poorly known instance accepts detections from further away}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \small
+      \[
+        P(M\given X,Z,\Phi)\approx\mathbf 1[M=\hat M],\quad
+        S=\Sigma^{xy}_{\theta_i}+\sigma_\text{det}^2 I
+      \]
+      Squared Mahalanobis distance at most 9, assigned greedily, lowest cost first.\\[0.5em]
+      A distribution on one value has no entropy and no expectation: the matching is free, in the
+      literal sense that $F$ cannot see it. \alert{A wrong match is invisible to the quantity that
+      would have registered it.}\\[0.5em]
+      The repair comes later and from elsewhere: merging, and the existence belief.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Backup: The room supplies the likelihood}
+  \begin{columns}[c]
+    \begin{column}{0.58\textwidth}
+      \small
+      For a scan $\{p_i\}$ and a candidate pose $X$:
+      \[
+        d_i(X)=\operatorname{dist}\big(R(\phi)p_i+t,\ \mathcal R\big)
+      \]
+      \[
+        \mathcal L_\text{obs}=\frac{1}{2\sigma^2}\cdot\frac1N\sum_i w_i\,\mathrm{Huber}(d_i)
+      \]
+      \begin{itemize}
+        \item The residual \emph{is} the prediction error: no expected scan is rendered.
+        \item Note the $\frac1N$: the precision does not grow with scan density.
+        \item Range and incidence weights are precisions on a covariate, not gates.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.75]
+        \draw[very thick, muted] (0,0) rectangle (4.6,3);
+        \fill[black!55] (1.6,1.2) circle (0.14);
+        \foreach \px/\py/\qx/\qy in {4.36/2.2/4.6/2.2, 4.25/0.55/4.6/0.55, 2.9/2.75/2.9/3, 0.8/2.8/0.8/3} {
+          \fill[cool] (\px,\py) circle (2pt);
+          \draw[accent, thick, -{Stealth[length=1.5mm]}] (\px,\py) -- (\qx,\qy);
+        }
+        \node[lab, align=center] at (2.3,-0.42) {each return is pulled onto its nearest wall};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+\end{frame}

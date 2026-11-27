@@ -2,8 +2,9 @@
 
 A 3-D room. The robot drives towards a chair; its camera's field of view is a cone on the floor.
 The chair's surface points it sees pile up as red, unexplained points. A panel on the right weighs
-what one more object would explain (it grows with every point) against what it costs (fixed), both in
-nats. When the first passes the second the chair's model, a blue box at its fitted pose, is born; as
+accuracy, the surprise a chair removes from the points (2 ln(range limit / range) nats per point, so
+nearer views count more), against complexity, the KL of the fitted belief from the class prior
+(which grows slowly as the fit sharpens), both in nats. When the first passes the second the chair's model, a blue box at its fitted pose, is born; as
 the robot keeps looking, the box sharpens. Numbers are illustrative.
 
 Writes media/chair_birth.mp4 and figures/chair_birth_poster.png (run from slides/).
@@ -31,8 +32,21 @@ ACCENT = "#C0392B"; COOL = "#2E6DB4"; GOOD = "#2E8B57"; MUTED = "#7A7A7A"; INK =
 ROOM = (6.0, 4.0, 1.2)                         # x, y, wall height drawn (low walls, to see inside)
 CHAIR = np.array([4.4, 2.4])                   # chair centre on the floor
 CH_W, CH_SEAT, CH_BACK = 0.48, 0.46, 0.95      # width/depth, seat height, back top
-COST = 14.0                                    # nats: what one more object costs (complexity)
-PER_POINT = 0.15                               # nats per explained point (illustrative)
+# Illustrative numbers, with the right SHAPES:
+#  - accuracy: each point removes surprise, -ln p(z|clutter) + ln p(z|chair). The clutter density is
+#    flat; the chair's is a Gaussian whose sd grows as range^2 (stereo depth), equal to the clutter
+#    spread at the sensor's range limit. So one point is worth 2 ln(RANGE / range) nats, times
+#    CORR_W: points of one view share their error, so each counts for less than an independent one
+#  - the cost grows as the fit sharpens: COST0 (existence prior) + for each of 3 unknowns
+#    1/2 ln(1 + n * (prior sd / point sd)^2): the KL of the fitted belief from the class prior
+COST0, N_UNKNOWN, PRIOR_TO_POINT = 3.0, 3, 8.0
+CORR_W = 0.3
+
+def point_gain(dist):
+    return CORR_W * 2 * np.log(RANGE / dist)
+
+def cost(n):
+    return COST0 + N_UNKNOWN * 0.5 * np.log(1 + n * PRIOR_TO_POINT ** 2)
 FOV, RANGE = np.deg2rad(42), 4.2
 
 # ---- the chair as boxes (seat, back, four legs) -------------------------------------------------------
@@ -73,7 +87,7 @@ PATH = ((1 - s) ** 2)[:, None] * P0 + (2 * s * (1 - s))[:, None] * mid + (s ** 2
 HEAD = np.unwrap(np.arctan2(CHAIR[1] - PATH[:, 1], CHAIR[0] - PATH[:, 0]))
 
 # ---- evidence over time ---------------------------------------------------------------------------------
-seen = np.zeros((0, 3)); explained = []; born_at = None; frame_pts = []
+seen = np.zeros((0, 3)); explained = []; costs = []; acc = 0.0; born_at = None; frame_pts = []
 for f in range(n_frames):
     p, h = PATH[f], HEAD[f]
     d = CHAIR - p; dist = np.linalg.norm(d)
@@ -82,8 +96,9 @@ for f in range(n_frames):
     if in_view and f % 6 == 0:
         k = int(np.clip(4 * (RANGE - dist) / RANGE, 1, 4))
         seen = np.vstack([seen, sample_chair_points(k)])
-    explained.append(PER_POINT * len(seen))
-    if born_at is None and explained[-1] > COST:
+        acc += k * point_gain(dist)
+    explained.append(acc); costs.append(cost(len(seen)))
+    if born_at is None and len(seen) and explained[-1] > costs[-1]:
         born_at = f
     frame_pts.append(len(seen))
 if "--dry" in sys.argv:
@@ -147,14 +162,16 @@ for f in range(n_frames):
     # evidence panel
     bar.clear()
     e = explained[f]
-    bar.barh([1], [min(e, COST * 2.5)], color=COOL, height=0.55)
-    bar.barh([0], [COST], color=ACCENT, height=0.55, alpha=0.75)
-    bar.axvline(COST, color=ACCENT, ls="--", lw=1.5)
-    bar.set_yticks([0, 1], ["its cost", "what a chair\nwould explain"], fontsize=14)
-    bar.set_xlim(0, COST * 2.5); bar.set_xlabel("nats", fontsize=13)
+    c = costs[f]; XMAX = 45.0
+    bar.barh([1], [min(e, XMAX)], color=COOL, height=0.55)
+    bar.barh([0], [c], color=ACCENT, height=0.55, alpha=0.75)
+    bar.axvline(c, color=ACCENT, ls="--", lw=1.5)
+    bar.set_yticks([0, 1], ["complexity:\nKL from class prior", "accuracy: surprise\nremoved from points"], fontsize=14)
+    bar.set_xlim(0, XMAX); bar.set_xlabel("nats", fontsize=13)
     for sp in ("top", "right"):
         bar.spines[sp].set_visible(False)
     bar.set_title("one more object?", fontsize=16, color=INK)
+    bar.text(0.0, -0.42, "illustrative numbers", transform=bar.transAxes, ha="left", fontsize=12, color=MUTED)
     born = born_at is not None and f >= born_at
     bar.text(0.98, -0.42, "born" if born else "not yet", transform=bar.transAxes, ha="right",
              fontsize=18, color=COOL if born else MUTED, weight="bold")

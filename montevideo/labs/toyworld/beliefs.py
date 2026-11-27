@@ -76,7 +76,7 @@ class LaplaceResult:
 
 
 def laplace(residual, x0, sigma, prior=None, jacobian=None, iters=50, tol=1e-10):
-    """Gauss–Newton MAP fit with a Laplace posterior.
+    """MAP fit (repeated quadratic steps to the minimum of F) with a Laplace posterior.
 
     residual(x) -> r (N,), whitened by `sigma` (scalar or (N,) array): the likelihood is
     N(r; 0, diag(sigma²)). `prior` is an optional Gaussian on x. Returns the belief
