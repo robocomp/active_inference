@@ -36,6 +36,81 @@ def rd(root, rel):
 
 def norm(s): return re.sub(r'\s+', ' ', s.strip())
 
+
+def code_part(s):
+    s = re.sub(r'"(?:[^"\\]|\\.)*"', '""', s); return re.sub(r'//.*$', '', s)
+
+def code_lines(text):
+    """per line: (code with comments and string contents blanked, comment text, code with comments removed and strings kept)."""
+    out = []; incm = False
+    for ln in text.split('\n'):
+        s = ln; code = ''; keep = ''; cm = ''; i = 0; q = None
+        while i < len(s):
+            two = s[i:i + 2]
+            if incm:
+                j = s.find('*/', i)
+                if j < 0: cm += s[i:]; i = len(s)
+                else: cm += s[i:j]; i = j + 2; incm = False
+                continue
+            ch = s[i]
+            if q:
+                if ch == '\\': i += 2; code += '  '; keep += s[i - 2:i]; continue
+                if ch == q: q = None; code += ch
+                else: code += ' '
+                keep += ch; i += 1; continue
+            if two == '//': cm += s[i + 2:]; break
+            if two == '/*': incm = True; i += 2; continue
+            if ch in '"\'': q = ch; code += ch; keep += ch; i += 1; continue
+            code += ch; keep += ch; i += 1
+        out.append((code, cm.strip(), keep))
+    return out
+
+_FN_CACHE = {}
+CTRL = re.compile(r'^\s*(?:\}\s*)?(?:else\s+)?(?:if|for|while|switch|catch|do|else|try)\b')
+def functions(root, rel):
+    """outermost function bodies of a C++ file: list of dict(sig, start, end, body). Heuristic brace scan (no parser)."""
+    key = (root, rel)
+    if key in _FN_CACHE: return _FN_CACHE[key]
+    t = rd(root, rel)
+    res = []
+    if t is not None:
+        cl = code_lines(t); stack = []; pre = ''; pre_line = None
+        for i, (c, cm, keep) in enumerate(cl):
+            ln = i + 1
+            if c.strip().startswith('#'): pre = ''; pre_line = None; continue
+            for ch in c:
+                if ch in ';{}':
+                    if ch == '{':
+                        in_fn = any(k == 'func' for k, _, _ in stack)
+                        kind = 'inner'
+                        if not in_fn:
+                            ps = pre.strip()
+                            core = re.sub(r'(?:\bconst\b|\bnoexcept\b(?:\([^)]*\))?|\boverride\b|\bfinal\b|\bmutable\b|\bvolatile\b|&&?|->\s*[\w:<>,\s\*&]+?|\brequires\b[^)]*\))\s*$', '', ps).strip()
+                            if re.search(r'\b(?:namespace|class|struct|union|enum)\b', ps) and not ps.endswith(')'): kind = 'other'
+                            elif ps.endswith('=') or ps == '': kind = 'other'
+                            elif core.endswith(')') or ps.endswith(')'): kind = 'func'
+                            else: kind = 'other'
+                        stack.append((kind, pre_line or ln, norm(pre)))
+                    elif ch == '}':
+                        if stack:
+                            kind, st, sig = stack.pop()
+                            if kind == 'func' and not any(k == 'func' for k, _, _ in stack):
+                                body = [norm(x[2]) for x in cl[st - 1:ln] if x[2].strip()]
+                                res.append(dict(sig=sig, start=st, end=ln, body=body))
+                    pre = ''; pre_line = None
+                else:
+                    if pre_line is None and not ch.isspace(): pre_line = ln
+                    pre += ch
+            pre += ' '
+    _FN_CACHE[key] = res
+    return res
+def enclosing(root, rel, line):
+    for fn in functions(root, rel):
+        if fn['start'] <= line <= fn['end']: return fn
+    return None
+def fn_text(root, rel, fn):
+    ls = rd(root, rel).split('\n'); return ls[fn['start'] - 1:fn['end']]
+
 # ------------------------------------------------------------------ 1. baseline rows + ids
 L = open(DOC, encoding='utf-8').read().split('\n')
 end = next(i for i, l in enumerate(L) if l.startswith('## After part 1'))
@@ -173,7 +248,8 @@ def loader_stmts(root, rel):
                 if ch == qq and t[k - 1] != '\\': qq = None
             elif ch in '"\'': qq = ch
             elif ch == ';': stmt_end = k; break
-        stmt = t[m.start():stmt_end if stmt_end else m.end()]
+        sstart = max(t.rfind(ch_, 0, m.start()) for ch_ in ';{}') + 1
+        stmt = t[sstart:stmt_end if stmt_end else m.end()]
         rest = t[m.end():]
         mm = re.match(r'\s*,\s*', rest)
         what = ''
@@ -247,13 +323,39 @@ for toml, cd, lk in AFTER_TOMLS:
 MOVED_CFG_SUFFIX = ('AI2CommonModePosStd', 'AI2CommonModeSizeStd', 'AI2CommonModeYawStd')   # countable path, patch -> sensor?
 def is_moved_cfg(key, reader): return reader == 'countable_config.cpp' and key.endswith(MOVED_CFG_SUFFIX)
 
+CONSUMER_NOTE = {}
+def consumer_lines(root, files, field):
+    c = collections.Counter()
+    pat = re.compile(r'\b' + re.escape(field) + r'\b')
+    for f in files:
+        if not f.endswith(('.h', '.hpp', '.cpp')): continue
+        t = rd(root, f)
+        if t is None: continue
+        for x in t.split('\n'):
+            cp = code_part(x)
+            if pat.search(cp): c[norm(cp)] += 1
+    return c
 def loader_changed(loaderkey, key):
-    b = {x[2] for x in LB[loaderkey].get(key, [])}; a = {x[2] for x in LA[loaderkey].get(key, [])}
-    if not b: return None
+    """'' = unchanged (reading line unchanged, or description-only edit with every consumer unchanged); else the reason."""
+    bs = LB[loaderkey].get(key, []); as_ = LA[loaderkey].get(key, [])
+    b = {x[2] for x in bs}; a = {x[2] for x in as_}
+    if not bs: return None
     if a == b: return ''
-    # classify: only the description string changed, or the read call / default changed
-    strip = lambda s: re.sub(r'"[^"]*"', '""', s)
-    return 'default/read call changed' if {strip(x) for x in a} != {strip(x) for x in b} else 'description text changed'
+    strip = lambda t: re.sub(r'"(?:[^"\\]|\\.)*"', '""', t)
+    if {strip(x) for x in a} != {strip(x) for x in b}: return 'reading line changed (default/read call)'
+    # description-only edit of the reading line: the role is judged by use. Every consumer of the value must be unchanged.
+    m = re.match(r'\s*([\w.\[\]>-]+)\s*=\s*[\w:]+\(\s*"', next(iter(a)))
+    if not m:
+        m2 = re.search(r'([\w.]+)\s*=\s*(?:\w+\()?\s*$', '')
+        return 'description-only edit, consumer field not identifiable'
+    field = re.split(r'[.>-]+', m.group(1))[-1]
+    tgt = 'countable_concept' if loaderkey == 'countable' else loaderkey
+    files = sorted(SCOPE[tgt] | {LOADER[loaderkey].replace('.cpp', '.h')})
+    cb = consumer_lines(TB, files, field); ca = consumer_lines(TA, files, field)
+    CONSUMER_NOTE[(loaderkey, key)] = 'field %s: %d consumer lines before, %d after' % (field, sum(cb.values()), sum(ca.values()))
+    if cb == ca: return ''
+    diff = (ca - cb) + (cb - ca)
+    return 'description-only edit but a consumer of %s changed (%d lines differ)' % (field, sum(diff.values()))
 
 LOADER_OF_READER = {os.path.basename(v): k for k, v in LOADER.items()}
 bycfg = collections.defaultdict(list)   # (key, reader) -> baseline rows
@@ -301,8 +403,6 @@ def nums_of(s):
         try: out.append(float(m.group(1)) * (10 ** int(m.group(2)) if m.group(2) else 1))
         except ValueError: pass
     return out
-def code_part(s):
-    s = re.sub(r'"(?:[^"\\]|\\.)*"', '""', s); return re.sub(r'//.*$', '', s)
 unlocated = []
 src_after_pos = {}   # (file,line) -> after row, for the diff scan to avoid duplicates
 for r in base:
@@ -330,9 +430,25 @@ for r in base:
     al = at.split('\n'); occ = [i + 1 for i, x in enumerate(al) if norm(code_part(x)) == ev]
     if not occ: removed[r['id']] = 'evidence line text changed or gone (%s:%d: %s)' % (f, best[1] + 1, ev[:90]); continue
     nl = min(occ, key=lambda x: abs(x - (best[1] + 1)))
-    matched_ids.add(r['id'])
-    a = add_after(kind='src', key=r['name'], value=r['value'], where='%s:%d' % (f, nl), file=f, cd=None, reader=f, tgt=targets_of(f) or [], role=r['role'],
-                  mid=r['id'], frozen=r['frozen'])
+    # the enclosing function must be unchanged too (same signature, same body without comments)
+    fb = enclosing(TB, f, best[1] + 1); fa = enclosing(TA, f, nl)
+    ctx = None
+    if (fb is None) != (fa is None) or (fb and (fb['sig'] != fa['sig'] or fb['body'] != fa['body'])):
+        import difflib
+        bt_l = fn_text(TB, f, fb) if fb else []; at_l = fn_text(TA, f, fa) if fa else []
+        sm = difflib.SequenceMatcher(None, [norm(x) for x in bt_l], [norm(x) for x in at_l], autojunk=False)
+        hunks = []
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag != 'equal': hunks.append((tag, (fb['start'] if fb else 1) + i1, bt_l[i1:i2], (fa['start'] if fa else 1) + j1, at_l[j1:j2]))
+        ctx = dict(sig=(fa or fb)['sig'][:160], bstart=fb['start'] if fb else None, astart=fa['start'] if fa else None, hunks=hunks,
+                   ev_before='%s:%d' % (f, best[1] + 1), ev_text=norm(bl[best[1]]), ev_after='%s:%d' % (f, nl),
+                   fn_lines=(len(bt_l), len(at_l)))
+    a = add_after(kind='src', key=r['name'], value=r['value'], where='%s:%d' % (f, nl), file=f, cd=None, reader=f, tgt=targets_of(f) or [], role='',
+                  mid='' if ctx else r['id'], frozen='' if ctx else r['frozen'], base_role=r['role'])
+    if ctx:
+        a['ctx'] = ctx; a['note'] = 'context changed (enclosing function %s differs between the trees); baseline %s' % (ctx['sig'][:60], r['id'])
+        removed[r['id']] = 'context changed: enclosing function of the evidence line changed (%s)' % ctx['sig'][:80]
+    else: matched_ids.add(r['id'])
     src_after_pos[(f, nl)] = a
 
 # ------------------------------------------------------------------ 4. diff scan of added lines
@@ -340,31 +456,6 @@ PRINT = re.compile(r'std::print|println|printf|qDebug|qInfo|qWarning|qCritical|s
 NAMED = re.compile(r'\b(?:constexpr|static\s+const|static\s+constexpr|inline\s+constexpr)\b[^=;(){}]*?\b([A-Za-z_]\w*)\s*(?:=|\{)\s*([^;]*)')
 KNAME = re.compile(r'\b(k[A-Z]\w*)\s*(?:=|\{)\s*([^;,]*)')
 DECL = re.compile(r'\b([A-Za-z_]\w*)\s*(?:=|\{)\s*[-+(]*\s*\d')
-def code_lines(text):
-    """per line: code with comments and string contents removed; plus the raw comment text of that line."""
-    out = []; incm = False
-    for ln in text.split('\n'):
-        s = ln; code = ''; cm = ''; i = 0; q = None
-        while i < len(s):
-            two = s[i:i + 2]
-            if incm:
-                j = s.find('*/', i)
-                if j < 0: cm += s[i:]; i = len(s)
-                else: cm += s[i:j]; i = j + 2; incm = False
-                continue
-            ch = s[i]
-            if q:
-                if ch == '\\': i += 2; code += '  '; continue
-                if ch == q: q = None; code += ch
-                else: code += ' '
-                i += 1; continue
-            if two == '//': cm += s[i + 2:]; break
-            if two == '/*': incm = True; i += 2; continue
-            if ch in '"\'': q = ch; code += ch; i += 1; continue
-            code += ch; i += 1
-        out.append((code, cm.strip()))
-    return out
-
 def added_lines(f):
     at = rd(TA, f); bt = rd(TB, f)
     n = at.count('\n') + 1
@@ -386,16 +477,16 @@ for f in scope_files:
     cl = code_lines(at)
     # statements: a statement starts after a line ending in ; { } or after a blank / preprocessor line
     stmt_id = []; sid = 0; prev_end = True
-    for i, (c, cm) in enumerate(cl):
+    for i, (c, cm, _k) in enumerate(cl):
         s = c.strip()
         if prev_end: sid += 1
         stmt_id.append(sid)
         prev_end = (not s) or s.startswith('#') or s.endswith((';', '{', '}', ':')) or s.endswith('*/')
     stmt_print = collections.defaultdict(bool)
-    for i, (c, cm) in enumerate(cl):
+    for i, (c, cm, _k) in enumerate(cl):
         if PRINT.search(c): stmt_print[stmt_id[i]] = True
         if KEYCALL.search(c): stmt_print[stmt_id[i]] = True     # a loader read: its constant is a config row
-    for i, (c, cm) in enumerate(cl):
+    for i, (c, cm, _k) in enumerate(cl):
         ln = i + 1
         if ln not in add: continue
         s = c.strip()
@@ -465,18 +556,45 @@ for nm, val, wh2, f, ln, note in ac_added:
     add_after(kind='src', key=re.sub(r'[`*]', '', nm), value=re.sub(r'[`*]', '', val), where=(f + ':%d' % ln) if f and ln else wh2, file=f, cd=None, reader=f,
               tgt=targets_of(f) if f else [], role=('code: ' + code[:200]) if code else '(location not a single file:line in the doc)', note='after-count row (doc) not found on an added line')
 
+# ------------------------------------------------------------------ 5b. the unresolved baseline rows go to the packet (auro ruling)
+_CL = {}
+def code_role(root, f, ln):
+    """the code's own text at file:line: the comment lines directly above, the trailing comment, and the line itself."""
+    if (root, f) not in _CL: _CL[(root, f)] = code_lines(rd(root, f) or '')
+    cl = _CL[(root, f)]
+    if not (1 <= ln <= len(cl)): return ''
+    above = []; j = ln - 2
+    while j >= 0 and not cl[j][0].strip() and cl[j][1] and len(above) < 3: above.insert(0, cl[j][1]); j -= 1
+    return ' / '.join(x for x in above + [cl[ln - 1][1]] if x)
+for r, why in unlocated:
+    f = r['file']; ln = r['line_no']
+    txt = ''
+    if f and ln and rd(TB, f) is not None:
+        bl_ = rd(TB, f).split('\n'); txt = ' ; '.join(norm(x) for x in bl_[max(0, ln - 2):ln + 1] if x.strip())
+    a = add_after(kind='src', key=r['name'], value=r['value'], where=('%s:%s [BASELINE tree 535d57ec, not found by name or value]' % (f, ln)) if f else r['where'],
+                  file=f, cd=None, reader=f, tgt=targets_of(f) if f else [], role='', note='moved or removed?; baseline %s; %s' % (r['id'], why))
+    a['moved_or_removed'] = dict(text=txt, comment=code_role(TB, f, ln) if f and ln else '')
+
 # ------------------------------------------------------------------ 6. ids, outputs
 for k, a in enumerate(after): a['aid'] = 'A%04d' % (k + 1)
 def tg(a): return '+'.join(a['tgt']) if a['tgt'] else '(none)'
 for a in after:
     if a['kind'] in ('config', 'hidden') and a['loader'] == 'countable' and a['cd'] not in ('nightstand_concept', 'bed_concept', 'toilet_concept'):
         pass
-unmatched = [a for a in after if not a['mid']]
-matched = [a for a in after if a['mid']]
+UNREAD_FILE = 'table_concept/etc/countable.toml'   # see report: opened by no table_concept code path
+for a in after:
+    if a.get('file') == UNREAD_FILE and a['kind'] in ('config', 'hidden'):
+        a['unread'] = True; a['frozen'] = 'excluded'
+        a['note'] = 'present but unread (rule 0): ' + ('was ' + a['note'] + '; ' if a['note'] else '') + 'no table_concept code path opens etc/countable.toml'
+        a['inherited'] = ''
+unread = [a for a in after if a.get('unread')]
+unmatched = [a for a in after if not a['mid'] and not a.get('unread')]
+matched = [a for a in after if a['mid'] and not a.get('unread')]
 for r in base:
     if r['id'] in matched_ids or r['id'] in removed: continue
     if r['id'] in moved_ids: removed[r['id']] = 'role moved / reader text changed: ' + moved_ids[r['id']]; continue
     if any(x is r for x, _ in unlocated): continue
+    if r['id'] in removed: continue
     if r['kind'] in ('config', 'hidden'):
         own = [a for a in after if a['kind'] in ('config', 'hidden') and a['cd'] == r['home'] and a['key'] == r['name']]
         removed[r['id']] = ('key now has another reader (%s)' % ','.join(sorted({a['reader'] for a in own}))) if own else 'key gone from the class tomls and from the loaders'
@@ -493,7 +611,7 @@ with open(os.path.join(OUT, '2026-11-27-after-count-removed.tsv'), 'w', encoding
     for r in base:
         if r['id'] in removed: f.write('\t'.join(esc(x) for x in [r['id'], r['sec'], r['name'], r['where'], r['label'], r['frozen'], removed[r['id']]]) + '\n')
     for r, why in unlocated:
-        f.write('\t'.join(esc(x) for x in [r['id'], r['sec'], r['name'], r['where'], r['label'], r['frozen'], 'UNRESOLVED (not mapped mechanically): ' + why]) + '\n')
+        f.write('\t'.join(esc(x) for x in [r['id'], r['sec'], r['name'], r['where'], r['label'], r['frozen'], 'UNRESOLVED, now in the packet as "moved or removed?" (not counted removed): ' + why]) + '\n')
 
 # packet
 pk = open(PKT, encoding='utf-8').read()
@@ -503,23 +621,44 @@ for l in open(REF, encoding='utf-8'):
     if l.startswith('# Rules applied') or (rules and l.startswith('#') and not l.startswith('# Totals')): rules.append(l.rstrip('\n'))
     elif rules: break
 def qrole(a):
+    if a.get('moved_or_removed'):
+        m = a['moved_or_removed']
+        return '**moved or removed?** baseline location %s; baseline code: "%s"%s; after tree %s' % (a['where'].split(' [')[0], m['text'][:260].replace('"', "'"), ('; comment: "' + m['comment'] + '"') if m['comment'] else '', TREE_HASH)
+    if a.get('ctx'):
+        return '**context changed** (enclosing function differs between 535d57ec and cf65a471; before/after text below). Baseline name: %s. Code comment: %s' % (a['key'], ('"' + (code_role(TA, a['file'], int(a['where'].rsplit(':', 1)[1])) or '') + '"') if code_role(TA, a['file'], int(a['where'].rsplit(':', 1)[1])) else '(none)')
     t = a['role'] or ''
     t = re.sub(r'\s+', ' ', t).strip()
     return ('"' + t[:320] + ('…' if len(t) > 320 else '') + '"') if t else '(no comment in the code)'
 def loc_file(a): return a['file'] if a['file'] else '(unlocated)'
 byfile = collections.defaultdict(list)
 for a in unmatched: byfile[loc_file(a)].append(a)
+def lineno(a):
+    m = re.search(r':(\d+)', a['where']); return int(m.group(1)) if m else 0
+def ctx_block(a):
+    c = a['ctx']; o = ['\n<details><summary>%s: context changed, function `%s` (%d lines before, %d after)</summary>\n' % (a['aid'], c['sig'].replace('`', "'"), c['fn_lines'][0], c['fn_lines'][1]),
+                    'Evidence line (before, %s): `%s`; found unchanged at %s.\n' % (c['ev_before'], c['ev_text'].replace('`', "'"), c['ev_after'])]
+    budget = 80
+    for tag, bl, bt_, al, at_ in c['hunks']:
+        take = lambda xs: xs[:max(0, budget)]
+        o.append('```\nBEFORE (from line %d)\n%s%s\nAFTER (from line %d)\n%s%s\n```' % (bl, '\n'.join(take(bt_)), ('\n... (%d more lines)' % (len(bt_) - budget)) if len(bt_) > budget else '', al, '\n'.join(take(at_)), ('\n... (%d more lines)' % (len(at_) - budget)) if len(at_) > budget else ''))
+        budget -= max(len(bt_), len(at_))
+        if budget <= 0: o.append('(remaining changed hunks of this function trimmed)'); break
+    o.append('</details>\n')
+    return '\n'.join(o)
 with open(os.path.join(OUT, '2026-11-27-after-referee-packet.md'), 'w', encoding='utf-8') as f:
     f.write('# Blind referee packet: unmatched rows of the after-count\n\n')
     f.write('Source: active_inference commit cf65a471, tree hash `%s` (branch feat/shared-engine, the end of K3).\n' % TREE_HASH)
-    f.write('Rows are the after-count rows whose key, reader or role is new relative to the labelled baseline. No label, no proposed label. The role column quotes the code\'s own comment or the loader text, not a reading.\n\n')
+    f.write('Rows are the after-count rows whose key, reader or role is new relative to the labelled baseline, rows whose enclosing function changed ("context changed"), and baseline rows that were not found by name or value ("moved or removed?"). No label, no proposed label. The role column quotes the code\'s own comment or the loader text, not a reading.\n\n')
     f.write(pre + '\n')
     f.write("## Referee's rules (header of referee_labels_2026-11-27.tsv, verbatim)\n\n```\n" + '\n'.join(rules) + '\n```\n\n')
     f.write('## Rows to label\n\nColumns: id | key or constant | value | location (file:line at cf65a471) | role (quoted from the code)\n\n')
     for fl in sorted(byfile):
         f.write('\n### %s\n\n' % fl)
-        for a in sorted(byfile[fl], key=lambda x: int(x['where'].rsplit(':', 1)[1]) if re.search(r':\d+', x['where']) else 0):
+        rs = sorted(byfile[fl], key=lineno)
+        for a in rs:
             f.write('| %s | %s | %s | %s | %s |\n' % (a['aid'], a['key'].replace('|', '\\|'), str(a['value']).replace('|', '\\|')[:120], a['where'].replace('|', '\\|'), qrole(a).replace('|', '\\|')))
+        for a in rs:
+            if a.get('ctx'): f.write(ctx_block(a) + '\n')
 
 # stats
 st = collections.OrderedDict()
@@ -528,10 +667,17 @@ st['inherited via reader'] = sum(1 for a in matched if a['inherited']); st['unma
 st['removed'] = len(removed); st['unresolved'] = len(unlocated)
 perfile = collections.Counter(a['cd'] for a in matched if a['inherited'])
 st['baseline reader fixed from loader'] = READER_FIX
+st['present but unread (table countable.toml)'] = len(unread)
+st['packet: context changed'] = sum(1 for a in unmatched if a.get('ctx'))
+st['packet: moved or removed?'] = sum(1 for a in unmatched if a.get('moved_or_removed'))
+st['packet: moved (after-count)'] = sum(1 for a in unmatched if a['note'].startswith('moved (after-count'))
+st['packet: loader/consumer changed'] = sum(1 for a in unmatched if 'consumer' in a['note'] or 'reading line' in a['note'])
+st['packet: config/hidden other'] = sum(1 for a in unmatched if a['kind'] in ('config','hidden')) - st['packet: moved (after-count)'] - st['packet: loader/consumer changed']
+st['packet: src scan/doc rows'] = sum(1 for a in unmatched if a['kind']=='src' and not a.get('ctx') and not a.get('moved_or_removed'))
 json.dump(dict(stats=st, inherited_by_class=perfile, unmatched_by_kind=collections.Counter(a['kind'] + ('/scan' if a.get('named') is not None else '') for a in unmatched),
                removed_reasons=collections.Counter(re.sub(r'\(.*', '', v)[:60] for v in removed.values()),
                scope_missing=SCOPE_MISSING, scope_sizes={t: len(s) for t, s in SCOPE.items()},
                unmatched_config_notes=collections.Counter(a['note'][:70] for a in unmatched if a['kind'] in ('config', 'hidden')),
-               inherited_disagree=[a['aid'] for a in matched if 'DISAGREE' in a['note']]),
+               consumer_notes={'%s/%s'%k:v for k,v in CONSUMER_NOTE.items()}, inherited_disagree=[a['aid'] for a in matched if 'DISAGREE' in a['note']]),
           open(os.path.join(SCR, 'stats.json'), 'w'), indent=1)
 print(json.dumps(dict(st), indent=1)); print(dict(perfile))
