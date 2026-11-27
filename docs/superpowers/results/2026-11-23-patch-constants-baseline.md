@@ -4694,6 +4694,52 @@ The growth from addendum 1 comes from the newly counted common/ files. Most are 
 
 ---
 
+## Addendum 3: the blind referee's labels replace the `?` rows (2026-11-27)
+
+- Labels file: `registry/referee_labels_2026-11-27.tsv` in the AuRo paper folder (read-only), sha256
+  `495b5e83e54a1bc86c3c334890bbd6c09ed5a41917384c50806326a09a64cb09`. 340 rows R001–R340, labelled by a blind referee who
+  read the code at 80738627 and nothing under docs/superpowers. Its labels: 177 patch, 70 class, 67 sensor, 26 excluded.
+- Row map: `registry/counter_labels_2026-11-27.tsv`, sha256 `f846ff04a0cb838035e758115e95a8555b4dca7c4eede87e43faa1b15c409c8a`
+  (id, section, key, this file's best label).
+- Method, mechanical, with no relabelling: `docs/superpowers/results/2026-11-27-addendum3-recount.py <this file> <counter
+  labels> <referee labels> <out.json>`. It reads every `?` row of this file in document order up to "After part 1". All
+  340 rows align with the counter_labels ids on both section and best label (0 mismatches). Each row is charged to a
+  class with the addendum 2 rule: own sections and own-directory rows to that class; countable-engine rows to
+  nightstand, bed and toilet; a common/ row to every target whose build file list (addendum 2, "Per-target file
+  lists") contains the file in its `where` column.
+- Check: with the best labels, the script reproduces addendum 2's "ambiguous split" column exactly for all seven
+  classes. Every other column is unchanged from addendum 2; only the ambiguous column is redistributed, so the total
+  rows are the same.
+
+### Combined totals per class (build rule, referee labels in place of `?`)
+
+| class | class | sensor | patch | switches (patch) | excluded | switches (other) | patch total | addendum 2 patch total (`?` not counted) | referee split of the `?` rows | total rows |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chair | 12 | 18 | 142 | 9 | 70 | 6 | 151 | 110 | class 6, patch 41, sensor 9, excluded 13 | 257 |
+| table | 15 | 34 | 156 | 13 | 83 | 3 | 169 | 120 | class 10, patch 49, sensor 18, excluded 12 | 304 |
+| refrigerator | 25 | 33 | 172 | 8 | 85 | 4 | 180 | 129 | class 16, patch 51, sensor 17, excluded 12 | 327 |
+| hood | 27 | 30 | 172 | 8 | 85 | 4 | 180 | 128 | class 16, patch 52, sensor 17, excluded 12 | 326 |
+| nightstand | 30 | 40 | 171 | 11 | 92 | 4 | 182 | 131 | class 17, patch 51, sensor 20, excluded 12 | 348 |
+| bed | 30 | 40 | 171 | 11 | 92 | 4 | 182 | 131 | class 17, patch 51, sensor 20, excluded 12 | 348 |
+| toilet | 30 | 40 | 171 | 11 | 92 | 4 | 182 | 131 | class 17, patch 51, sensor 20, excluded 12 | 348 |
+
+### Counting rules for the after-count (owner, 2026-11-27)
+
+The referee's rules 0–8 (the header of the labels file) are now counting rules, alongside the definition, for the
+after-count:
+- label a row by the meaning of its key, not its present value;
+- a dead constant (one no code reads) is excluded;
+- the pose process noise is patch;
+- inflated sensor noise and floors are patch;
+- a class prior times a free gain is patch;
+- a composite row keeps its id and its dominant label.
+
+The "After part 1" section below was counted before these labels existed. Its `?` rows still need the same treatment
+before before/after totals are compared.
+
+
+---
+
 ## After part 1 (shared engine, Task G1x, 2026-11-26)
 
 ### How this count was made
