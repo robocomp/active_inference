@@ -2,6 +2,16 @@
 
 > **Status: GRADED (Parts A, B and C of the batch, 2026-11-26 21:29 – 11-27 01:30, room session, g1x-live @ 91598c88).** The graded columns of §3 and the section "Graded results" below are the
 > result; the other columns are the earlier single runs, kept for context.
+>
+> **Registry.** Batch 1 is graded against `REGISTERED_TESTS.md` in the AuRo paper folder, the registry the owner approved
+> (registered 2026-11-24, before the batch; graded there by the auro session on 2026-11-27, section "Grading of graded batch
+> 1"). Where this file differs from it, the registry wins. The two differences:
+> - **(a)** The registry's pass band is the two-sided 95 % χ² interval for 6n DOF (n = 10: [0.675, 1.388]), narrower than the
+>   [0.5, 2] used below; the verdicts are the same. A class with n < 10 is "not graded (n = k)", not failed. The registry also
+>   registers a **last-visit** statistic with the same rule; it is computed in "Test (a), last visit" below.
+> - **(b)** The registry's test is the median ratio of promise to delivery in [0.5, 2] plus a pooled slope (delivery on
+>   promise) whose 95 % interval contains 1, applied only to classes that pass (a). No class passes (a), so **(b) is not
+>   graded**. The Spearman ρ below (from the spec's table, §1) is reported, not graded.
 
 - Branch feat/shared-engine. Build commit for the batch: **91598c88** (code = fix wave 17f13198), tree `2d0c2d5107011e10da553ad8ac569535b7b33c48`.
 - Spec: `docs/superpowers/specs/2026-11-23-shared-engine-design.md` (Tests, Graded quantities). Plan revision 2, Task G1x.
@@ -13,7 +23,7 @@
 | test | statistic (as registered; amended for AuRo on 11-24) | pass |
 |---|---|---|
 | (a) first-visit calibration | 6-DOF NEES/DOF with the full θ covariance, e = (graded quantity − mesh truth), averaged over **n ≥ 10 independent first visits per class** | mean in [0.5, 2] |
-| (b) promise tracks delivery | scripted A/B/A visit per object; promise = the engine's gain logged at the claim; delivered = the NET θ-entropy change over the visit; Spearman over the visits | ρ > 0, with spread in the promises |
+| (b) promise tracks delivery | scripted A/B/A visit per object; promise = the engine's gain logged at the claim; delivered = the NET θ-entropy change over the visit; Spearman over the visits (spec form; **the registry's form is the median ratio + pooled slope, only for classes passing (a): see Registry above**) | ρ > 0, with spread in the promises |
 | (c) patch-constant count | the baseline's build-derived scope rule, on the same five targets | the registered rows removed (spec table) |
 | (d) held-out world | one world not used for tuning | **no world exists and no one is assigned (Fable review risk 10): not gradable in part 1** |
 
@@ -130,7 +140,31 @@ dP_live = 0). No definition changed between the passes.
 - **Frame-fit error** (the room-frame transform's own error, not in P) is small against P for bed, nightstand and chair;
   comparable to P for the toilet and the fridge. It does not change any verdict.
 
-### Test (b): PASSES as registered (ρ > 0, with spread)
+### Test (a), last visit (registered in REGISTERED_TESTS.md 2026-11-24, A1; computed 2026-11-27): FAILS for every class
+
+Same runs, same scorer (`first_visit_nees.py` at f2d456a3, unchanged), same matching, the same bit-identity gate. The only
+difference is the visit window: the robot's LAST stay in the object's room, not its first
+(`scripts/last_visit_nees.py`, which imports the scorer and substitutes that one function). The draw is the node's last
+update up to the end of that stay. For an object whose room the route enters once, the last visit is the first visit.
+Output: `crossing/g1x_tour_last_nees.txt`. The replay binary is the pre-F1 BASE build, and it reproduces the committed first-visit
+table line for line. The registry's pass band is the two-sided 95 % χ² interval for 6n DOF, given per class.
+
+| class | visits | matched | graded n | mean NEES/DOF (last) | 95 % CI | registry band for n | verdict (registry) | first visit, for comparison |
+|---|---|---|---|---|---|---|---|---|
+| nightstand | 24 | 18 | 17 | 4.46 | 2.40–6.92 | [0.745, 1.293] | fail (over-confident) | 4.51 |
+| bed | 12 | 12 | 11 | 2.62 | 1.82–3.59 | [0.688, 1.369] | fail (over-confident) | 3.06 |
+| toilet | 12 | 9 | 9 | 3.92 | 2.43–6.31 | — | not graded (n = 9) | 4.09 |
+| refrigerator | 12 | 3 | 3 | 1.96 | 1.04–3.01 | — | not graded (n = 3) | 3.27 (n = 4) |
+| hood | 12 | 2 | 2 | 1.63 | 1.19–2.07 | — | not graded (n = 2) | 2.20 (n = 1) |
+| chair | 72 | 36 | 35 | 3442 | 106–9546 | [0.818, 1.200] | fail (yaw: e²/P_yaw 2.1e4) | 6751 (n = 30) |
+| table (old engine, diagonal) | 24 | 2 | 2 | 2.00 | 0.61–3.40 | — | not graded (n = 2) | 2.33 |
+
+- At the last visit the over-confidence is the same size as at the first: nightstand 4.5, bed 2.6, toilet 3.9. More updates
+  do not bring the estimate back to calibration. The chair is again carried by its yaw mode error.
+- Fridge and hood: the matched instances change between the first and the last stay (a node born or re-matched later),
+  so these n are not the first-visit instances.
+
+### Test (b): NOT GRADED under REGISTERED_TESTS.md (no class passes (a)); spec-form Spearman reported, not graded
 
 Pairs (claim promise, visit net) over the matched objects' segments: **n = 17, Spearman ρ = +0.36**, promises 0.107–1.343
 nats (bed 6, chair 4, refrigerator 4, nightstand 3). Not in ρ: toilet 2/2 and hood 2/2 unmatched (NO VERDICT), and
