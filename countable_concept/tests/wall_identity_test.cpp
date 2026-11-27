@@ -4,6 +4,7 @@
 // only; (2) the nearest wall alternates A → B → A → B (a box in a corner) — the priors entered on the first A and the first B
 // only, never again (CW1 fix round 2: on the first update of each that converged, since an entry is committed only when absorbed).
 // Run: ./wall_identity_test
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 #include "countable_belief.h"
@@ -82,6 +83,7 @@ int main()
             for (int k = parity; k < 6; k += 2)
                 if (conv[std::size_t(k)]) { expect[std::size_t(k)] = 1; break; }
         CHECK(entered == expect);
+        CHECK(std::ranges::count(entered, 1) == 2);   // both walls DID enter, once each (catches "a wall never enters")
     }
     std::printf(bad ? "wall_identity_test: %d FAILED\n" : "wall_identity_test: OK\n", bad);
     return bad != 0;

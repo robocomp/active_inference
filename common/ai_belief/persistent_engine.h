@@ -187,10 +187,12 @@ struct GnTraceFd
 //                                              it carries (see WallAnchor; absent: no wall latent, K unchanged);
 //   accumulate_lidar_override(s, f, I*, b*, E*) -> bool   route the LiDAR channel elsewhere (a test hook; absent: never).
 //   accumulate_containment(s, f, wo, I, b, E)  CW1: the SUPPORT of the prior on θ (no part of the object past a room wall), a term
-//                                              that is exactly 0 on the legal side, on EVERY measured update. It is a prior on θ
-//                                              ONLY (selector 0, fix round 1): the walls' errors are profiled out of it with their
-//                                              own marginals — for the staged wall the wall latent's CARRIED mean and variance,
-//                                              wo = WallOffset{δ̄, P̄_δδ} (fixed over the update), so δ is never moved by it. It
+//                                              that is exactly 0 on the legal side, on EVERY measured update. It is a prior on θ:
+//                                              the walls' errors are profiled out of it with their own marginals — for the staged
+//                                              wall the wall latent's CARRIED mean and variance, wo = WallOffset{δ̄, P̄_δδ} (fixed
+//                                              over the update) — and it acts on the part of θ uncorrelated with δ, r = θ − κ(δ − δ̄)
+//                                              (fix round 2, N1; κ and the selector −κ in update()), so δ's posterior mean is what
+//                                              the data and the attachment make it, not moved by the support. It
 //                                              is in the energy the GN minimises (the posterior MODE respects it) and in the move
 //                                              statistic's factor (a support is common to "stayed" and "moved"), NOT in the
 //                                              posterior covariance: a support restriction is idempotent (1[c]·1[c] = 1[c]), so
@@ -1155,6 +1157,9 @@ public:
         // keeps P = P̄ (above), so the priors it carried in its energy are not in P; recording the wall as entered anyway lost them
         // for the instance's life (same_physical_wall never re-enters it). This is bookkeeping, not a gate: it decides nothing about
         // the model, it only makes the "entered once" record say what P actually holds, so the next measured update enters them.
+        // ⚠ Residual semantics (fix round 3, review): on a capped entry update the MEAN keeps the point the GN reached, so it keeps
+        // part of the priors' pull while P falls back to P̄; re-entering them next update counts that pull on the mean somewhat more
+        // than once. It is what F1 round 9(b) already does to a capped update's data, stated here.
         if constexpr (W > 0)
             if (wall_enter and converged) walls_entered_.push_back(wall_pending);
         last_wall_entered_ = wall_enter and converged;

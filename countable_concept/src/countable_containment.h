@@ -18,9 +18,10 @@
 // The PROFILE (MAP) likelihood of the corner under the support, jointly over the real corner and δ_j, is
 //     E = ½ · min(0, d_k − δ̄_j)² / (σ_s² + v_j)
 // (minimise ½(g − g_r)²/σ_s² + ½(δ − δ̄)²/v subject to g_r ≥ δ: for g < δ̄ the optimum splits the violation in proportion to the
-// two variances and leaves exactly this). So each wall's error is counted ONCE, as its own marginal, inside the term, and no state
-// is moved by it: the term is a prior on θ only (engine selector 0), so δ's carried mean is never pushed without information
-// (review I1). The profile, not the marginal: the marginal −log Φ((d − δ̄)/σ) has a nonzero gradient on the legal side and,
+// two variances and leaves exactly this). So each wall's error is counted ONCE, as its own marginal, inside the term. The term is a
+// prior on θ; in the engine it acts on the part of θ uncorrelated with δ, r = θ − κ(δ − δ̄), κ = Σ_θδ/Σ_δδ (fix round 2, N1), so
+// δ's posterior mean is what the data and the attachment make it — the support never pushes it (review I1, and N1's route
+// through the θ–δ correlation). The profile, not the marginal: the marginal −log Φ((d − δ̄)/σ) has a nonzero gradient on the legal side and,
 // re-applied every update, would push a flush object into the room until d ≈ 3σ; the profile's fixed-point set is exactly
 // "every corner legal".
 //

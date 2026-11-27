@@ -332,6 +332,12 @@ target_include_directories(containment_test PRIVATE ../src ../../common ../../co
 target_compile_options(containment_test PRIVATE -O2)
 target_link_libraries(containment_test PRIVATE Eigen3::Eigen)
 add_test(NAME containment_test COMMAND containment_test)
+# CW1 fix round 3: the brief's side-on requirement (ii) on the parked items, registered as EXPECTED failures — each passes while it
+# fails and FAILS loudly once the parked item is fixed (then remove WILL_FAIL). a_isolated: review I7; a_production: I7 + M5.
+add_test(NAME containment_known_failure_a_isolated COMMAND containment_test --known-failure a_isolated)
+set_tests_properties(containment_known_failure_a_isolated PROPERTIES WILL_FAIL TRUE)
+add_test(NAME containment_known_failure_a_production COMMAND containment_test --known-failure a_production)
+set_tests_properties(containment_known_failure_a_production PROPERTIES WILL_FAIL TRUE)
 
 # F1 round 6.2: the birth seed's H is the class-prior MAP with the top of the points the BOX explains (box-vs-headboard shares),
 # not the p95 of a cloud holding the headboard. Run: ./birth_seed_headboard_test

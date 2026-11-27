@@ -39,11 +39,13 @@
 //  (h) fix round 2 (N1, the reviewer's case): back-on flush objects whose points put the back D past the staged wall, the
 //      attachment's entry converged on update 1 (the θ–δ correlation live), 200 updates, δ̂ at 1e-6: the support's own step does not
 //      move δ (below 10 % of the review's leak κ·push, plus the solver's resolution), and δ̂ converges (no ratchet).
-//  (m5) printed only: review M5 (parked) — the parallel term turns a side-on chair a quarter turn once the attachment's entry is
-//      absorbed. (a), (e) and (f) run with the parallel term off so that they test CW1 and not M5.
+//  (m5) a known-failure record of review M5 (parked): asserts the recorded quarter turn of a side-on chair once the attachment's
+//      entry is absorbed (fails loudly if M5 changes). (a), (e) and (f) run with the parallel term off so that they test CW1 and not
+//      M5; the brief's side-on asserts on (a) are the WILL_FAIL entries a_isolated (I7) and a_production (I7 + M5) — see below.
 // Run: ./containment_test
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 #include "countable_belief.h"
 #include "countable_containment.h"
@@ -226,8 +228,39 @@ void print(const char* name, const Result& r)
 }
 }   // namespace
 
-int main()
+// ── KNOWN (EXPECTED) FAILURES — the brief's side-on requirement (ii), parked for the owner (fix round 3) ───────────────────────────
+// Each is its own ctest entry with WILL_FAIL TRUE (tests/CMakeLists.txt): it asserts what the BRIEF requires, fails today, and so
+// shows as passing-by-failing; the day the parked item is fixed it exits 0 and that ctest entry FAILS, loudly. Run one with
+//   ./containment_test --known-failure NAME
+//  a_isolated    (review I7) the side-on chair of (a), parallel term OFF (containment isolated), with the brief's original asserts:
+//                no corner past the true wall beyond σ_s, and the side not pulled flush (side gap ≥ 0.05 − 2σ_s). Fails since N2: the
+//                once-entered stand-off acts through back_centre of a side-on body and pulls its side toward the wall.
+//  a_production  (review I7 + M5) the same chair in the production configuration (parallel term ON), the same asserts plus "still
+//                side-on". Fails: the parallel term at its maximum turns it a quarter turn to back-on (M5), and the stand-off pull (I7).
+static int known_failure(const std::string& name)
 {
+    const float sig_s = CountableBeliefParams{}.model_sigma_m;
+    constexpr float kQuarter = 0.7853982f, kHalfPi = 1.5707963f;
+    const Truth t{-1.5f, -(0.05f + 0.5f * kW), kW, kD, -kHalfPi};
+    Opts o;
+    if (name == "a_isolated") o.parallel = false;
+    else if (name != "a_production") { std::printf("unknown known-failure '%s'\n", name.c_str()); return 2; }
+    const Result on = run(t, kW, kD, true, true, o);
+    const float side_gap = -(on.s.cy + 0.5f * on.s.w * std::abs(std::sin(on.s.yaw)) + 0.5f * on.s.h * std::abs(std::cos(on.s.yaw)));
+    std::printf("containment_test --known-failure %s (EXPECTED to fail: review %s)\n", name.c_str(), name == "a_isolated" ? "I7" : "I7 + M5");
+    print("AFTER", on);
+    std::printf("      side gap %+.4f (brief: >= %.4f), |sin yaw| %.4f\n", side_gap, 0.05f - 2.0f * sig_s, std::abs(std::sin(on.s.yaw)));
+    CHECK(on.min_true >= -sig_s);
+    CHECK(side_gap >= 0.05f - 2.0f * sig_s);
+    if (name == "a_production") CHECK(std::abs(std::sin(on.s.yaw)) > std::cos(kQuarter));
+    std::printf(bad ? "known failure %s: still failing (%d checks), as recorded\n" : "known failure %s: PASSES — the parked item is fixed; "
+                "remove WILL_FAIL and this record\n", name.c_str(), bad);
+    return bad != 0;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc == 3 and std::string(argv[1]) == "--known-failure") return known_failure(argv[2]);
     std::printf("containment_test (CW1)\n");
     const float sig_s = CountableBeliefParams{}.model_sigma_m;
     const float sig_c = std::sqrt(sig_s * sig_s + 0.02f * 0.02f);   // the term's scale: σ_s² + the staged wall's σ² (the stand-in for every edge)
@@ -249,8 +282,10 @@ int main()
         // Fix round 2: since N2 the attachment's entry is absorbed here (it was lost before, update 1 capping on the parallel term).
         // The stand-off then acts through back_centre of a side-on body (its centre's gap) and pulls the SIDE toward the wall — in
         // BASE 5.4 cm through it. That pull is the attachment's (review I7, parked: π × f / a back-face share), not the containment's.
-        // What CW1 must guarantee, and is asserted: no corner past the true wall beyond the term's scale σ_c, and the one-sided term
-        // never pulls toward the wall — AFTER's side gap is at least BASE's.
+        // Here: what the containment term itself guarantees — no corner past the true wall beyond its own profiled scale σ_c =
+        // √(σ_s² + v) (countable_containment.h, the profile derivation; v = the staged σ² stand-in), and the one-sided term never pulls
+        // toward the wall (AFTER's side gap ≥ BASE's). The BRIEF's assert on this chair (σ_s, side gap ≥ 0.05 − 2σ_s) is the known
+        // failure `a_isolated` (review I7), registered with WILL_FAIL.
         CHECK(on.min_true >= -sig_c);
         CHECK(side_gap(on) >= side_gap(off));
     }
@@ -466,7 +501,7 @@ int main()
             CHECK(on.gap.back() >= -c.D);
         }
     }
-    // (m5) REVIEW M5, parked for the owner, printed only: the chair of (a) with the attachment's parallel term ON. Since N2 the
+    // (m5) REVIEW M5, parked for the owner, a known-failure record (fix round 3): the chair of (a) with the attachment's parallel term ON. Since N2 the
     //      attachment's entry is no longer lost when update 1 caps, so the parallel residual par = ux·n, at its MAXIMUM for a
     //      side-on body (|par| = 1, energy ≈ ½·f·(L/σ_w)² ≈ 7760 nats, zero gradient exactly there), turns the chair a quarter turn
     //      to back-on as soon as the yaw is off the exact maximum. BASE (no CW1) does the same: this is the attachment, not the
@@ -474,9 +509,14 @@ int main()
     {
         const Truth t{-1.5f, -(0.05f + 0.5f * kW), kW, kD, -kHalfPi};
         const Result off = run(t, kW, kD, false, true), on = run(t, kW, kD, true, true);
-        std::printf(" (m5) the side-on chair of (a) with the parallel term ON (printed only; review M5, parked)\n");
+        std::printf(" (m5) the side-on chair of (a) with the parallel term ON (recorded known behaviour; review M5, parked)\n");
         print("BASE (containment off)", off);
         print("AFTER", on);
+        // KNOWN-FAILURE RECORD (M5): assert the RECORDED behaviour — both runs end a quarter turn away, back-on (|sin yaw| < sin 45°).
+        // If this check fails, M5's behaviour changed (or was fixed): update this record and the WILL_FAIL entry a_production.
+        const bool turned = std::abs(std::sin(off.s.yaw)) < std::sin(kQuarter) and std::abs(std::sin(on.s.yaw)) < std::sin(kQuarter);
+        if (not turned) std::printf("      M5 record: the quarter turn did NOT happen — M5 changed; update the known-failure records\n");
+        CHECK(turned);
     }
     // (d) mid-room
     {
