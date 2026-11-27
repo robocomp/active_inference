@@ -4888,6 +4888,26 @@ Totals: 57 rows in 40 lines. Rows labelled patch in pass 2 and then dropped by a
 - Row counts include every row of the class's binary (excluded rows too), as in addendum 3, so "total rows" grows with the engine files the countable binary pulls.
 
 
+### Pending merges under rule (i) and the tree of the graded binaries (auro rulings 2026-11-27; applied at the next recompute, NOT in the totals above)
+
+Rule: one parameter at two literal sites, that is the same quantity and the same mechanism, shown by the code. Nothing below changes the table above.
+
+After-side merges (the dropped row is not counted):
+- A2550 (`countable_fitter.cpp:1181`, `z_lo = ... + 3.0f * ai2_sigma_base_m`) into A2288 (`:1180`, `z_hi = ... + 3.0f * ai2_sigma_base_m`): the two edges of one band, one factor 3 (auro ruling).
+- A2269 (`countable_belief.cpp:1221`, re-baseline `clamp(..., -6.0f, 6.0f)`) into A2268 (`:1380`, `kFrontClamp = 6.0f`): both clamp the same accumulator `front_acc_`.
+- A2464 (`persistent_engine.h:116`, `memory = 0.995`) into R256 (`kLambda = 0.995f`, `countable_belief.cpp:268`): the same volatility-statistic memory, same comment ("~200 ... long enough to earn stiffness, short enough to recant").
+- A2565 (`specificworker.h:250`, `ExistenceBelief{0.0f, 4.0f}`) into the log-odds cap literals B1162 (`existence_belief.h:483`) and B1165 (`:754`): one cap, overridden at run time by `Model.ExistenceLogoddsMax` (`specificworker_consumers.cpp:177`, `countable_existence.cpp:79`, `specificworker_lifecycle.cpp:584-585, 602`). B1162 and B1165 are merged with each other on the baseline side below.
+
+Baseline-side merges:
+- B0116 `flip evidence clamps (uses)` into B0114 `kFlipClamp` (chair): one named constant used at `chair_belief.cpp:257` and `:274`.
+- B0443 into B0442 (refrigerator), B0613 into B0612 (hood), B1135 into B1134 (countable): the re-baseline `clamp(..., -6.0f, 6.0f)` literal and `constexpr kFrontClamp = 6.0f` clamp the same `front_acc_`.
+- R291 `control offsets (cpp copy)` into R290 `kControlOffsets` (`contour_edge_check.cpp:86` and `contour_edge_project.h:95`): the same four offsets {-1.6, -1, 1, 1.6}.
+- B1165 `RemovalPolicy.logodds_max` and R022 `existence initial/max L` (`chair_instance.h:118`, the chair's own copy) into B1162 `ExistenceBelief L_max default`: one log-odds cap.
+
+Examined and NOT merged: the toml key / loader default / library struct default pairs of one key (for example `ExistenceBelief L_max default` against the key `Model.ExistenceLogoddsMax`, `TrackerParams` defaults against the class keys): addendum 1 lists library defaults as constants on purpose and merging them moves every class total, so it needs the owner. `front_view_budget_` (no config key in the countable build, one site). The table's `flip evidence clamp` B0267 against the chair's `kFlipClamp` (different binaries, one site each). `kRigKappaMax = 0.25 * kFlipClamp` (derived, another quantity). The three 0.10 size floors in the countable engine (`countable_belief.cpp:197`, `countable_model.cpp:115`, the birth width floor): same value, different mechanisms.
+
+The count above is on `cf65a471`, an intermediate count that stays recorded. The graded binaries were built from `17f13198` (`91598c88` is docs-only on top). Its file lists are the same as at `cf65a471`: between the two commits no `#include` line and no CMake file changed and no source file was added or removed (`git diff cf65a471 17f13198`, ten modified code files and tests), and the list of a target depends only on those. The map at `17f13198` is `2026-11-27-after-count-map-17f13198.tsv` (made by `2026-11-27-after-count-17f13198.py`): ids of unchanged rows are kept, new and changed rows are in `2026-11-27-after-referee-packet-17f13198.md` (ids from A2589). Totals are recomputed after that packet is labelled.
+
 ---
 
 ## After part 1 (shared engine, Task G1x, 2026-11-26)
