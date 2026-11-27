@@ -28,7 +28,10 @@
 // the signed distance is to that polygon. The variance v at a corner outside is the variance of the nearest boundary point along
 // the corner's way back in u: v_j on edge j's interior (u = n_j), Σ_j (u·n_j)² v_j at a vertex (both edges). For a right-angled
 // room corner the two agree on the vertex region's boundary (u·n_other = 0 there); for other angles v jumps by cos²(angle)·v_other
-// across it — flagged, a geometric approximation of the vertex's displacement.
+// across it — flagged, a geometric approximation of the vertex's displacement. At a vertex v depends on θ through u, and the
+// gradient carries that term (fix round 2, review M-a); the curvature stays Gauss–Newton. ⚠ shifted_polygon moves both staged
+// vertices along the staged n: that keeps each adjacent wall's LINE only for right-angled corners; otherwise it rotates the adjacent
+// wall by about δ̄/L (review M-b), flagged with the vertex-variance note.
 //
 // Corner switching. Each corner is its own smooth term with its own Jacobian. The support-function gap of one wall,
 // g(θ) = min_k (p_k − x_w)·n_w, is what the sum reduces to while one corner penetrates; when two corners penetrate (a face through

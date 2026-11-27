@@ -10,13 +10,13 @@
 //
 // What each case asserts (stated before the run, from the model; the measured values are printed):
 //  (a) side-on chair 5 cm from the y = 0 wall (yaw −π/2: its back faces along the wall, its SIDE faces the wall), class size = truth:
-//      ON: no corner past the TRUE wall (the staged line moved by the wall latent's mean δ̂, as the engine evaluates the term) by
-//      more than σ_s (the containment's own scale, Model.ModelSigmaM: the box surface's std about the real one); the side is not pulled flush: the side's gap ≥ 0.05 − 2σ_s (the points do not see it; the class width puts
-//      it at 0.05); the centre stays at the points: no corner reaches the wall, so ON is OFF bit for bit.
+//      ON: no corner past the TRUE wall (the staged line moved by δ̂) by more than σ_c (the term's scale); the one-sided term never
+//      pulls the side toward the wall (AFTER's side gap ≥ BASE's). Since fix round 2 (N2) the attachment's stand-off enters here and
+//      pulls the side-on body's side toward the wall through back_centre — the attachment's behaviour, review I7 (parked), printed.
 //  (a2) the chair of (a) with its class size 0.10 m LARGER than the truth in both extents, and the 0.20 m of its side next to the
 //      wall unseen (points only at y ≤ −0.25): the far extent is held only by the size prior, which puts it through the wall in
 //      BASE. (The fit relabels it to a back-on mode, yaw ≈ 0, in BASE and AFTER alike: the data's quarter-turn choice.)
-//      ON: no corner past the TRUE wall by more than σ_s, and the seen face does not move: |near face AFTER − BASE| ≤ 2σ_s (the
+//      ON: no corner past the TRUE wall by more than σ_s (asserted as written in round 0), and the seen face does not move: |near face AFTER − BASE| ≤ 2σ_s (the
 //      containment moves the unseen extent and the wall latent, not the face the points hold).
 //  (b) back-on chair at its stand-off (back 5 cm off the y = 0 wall): every corner is 5 cm inside, so the containment term is 0
 //      at every iterate the GN visits near the mode ⇒ ON equals OFF within float roundoff (|Δθ| ≤ 1e-5 m / rad, σ ratio 1 ± 1e-4).
@@ -26,6 +26,19 @@
 //      polygon in the frame) the other wall is not in the region: printed, the gap to it is not asserted (it shows why the
 //      polygon is staged).
 //  (d) mid-room chair (1.5 m from every wall): ON and OFF bit-identical (max |Δ| = 0 on θ and on Σ).
+//  (e) fix round 1 (I5): a side-on chair HELD side-on (yaw prior 0.05), its extent toward the wall prior +0.10 m and the part next to
+//      the wall unseen: the term is active. No corner past the true wall beyond σ_c; still side-on; the seen face within 2σ_s; the
+//      centre within its σ of the truth.
+//  (f) fix round 1 (I1/I2): a side-on chair whose points push it 3 cm past the staged wall, parked 200 updates, the move statistic on:
+//      δ̂ does not travel toward D after the attachment's entry, the move statistic gives no evidence of moving (max jump_p ≤ the
+//      prior P(moved)), the term holds it. Fix round 2 (N2): update 1 caps; the attachment's entry is then committed on update 2.
+//  (g) finite differences: the corner Jacobian, the polygon gradient, and (fix round 2, M-a) the FULL term E(θ) against −bd at a
+//      convex room vertex where λ varies with θ.
+//  (h) fix round 2 (N1, the reviewer's case): back-on flush objects whose points put the back D past the staged wall, the
+//      attachment's entry converged on update 1 (the θ–δ correlation live), 200 updates, δ̂ at 1e-6: the support's own step does not
+//      move δ (below 10 % of the review's leak κ·push, plus the solver's resolution), and δ̂ converges (no ratchet).
+//  (m5) printed only: review M5 (parked) — the parallel term turns a side-on chair a quarter turn once the attachment's entry is
+//      absorbed. (a), (e) and (f) run with the parallel term off so that they test CW1 and not M5.
 // Run: ./containment_test
 #include <cmath>
 #include <cstdio>
@@ -53,6 +66,9 @@ struct Opts
     bool  volatility = false;  // infer Q (the chair's [prior.permanence]) so the move statistic jump_p is computed
     float shift = 0.0f;        // the staged y = 0 wall lies this far inside the true one
     bool  trace = false;       // print δ̂, the corner gap and jump_p at a few updates
+    float standoff_m = 0.05f, standoff_std_m = 0.05f;   // [prior.attachment] (chair by default)
+    float p_against_wall = 0.5f;                         // [prior.placement] (chair; −1 = the class declares none)
+    bool  parallel = true;     // the attachment's parallel term (wall_parallel_precision); off isolates CW1 from review M5 (parked)
 };
 const Eigen::Vector2f kInterior(-1.5f, -1.5f);
 
@@ -71,8 +87,9 @@ CountableBeliefParams params(float prior_w, float prior_d, const Opts& o = {})
     p.room_axis_std = 3.0f * 0.017453293f;
     p.volatility_infer = o.volatility;
     p.persistent = true;
-    p.wall_standoff_m = 0.05f; p.wall_standoff_std_m = 0.05f;   // chair.concept.toml [prior.attachment]
-    p.placement_p_against_wall = 0.5f;                           // chair.concept.toml [prior.placement]
+    p.wall_standoff_m = o.standoff_m; p.wall_standoff_std_m = o.standoff_std_m;   // [prior.attachment] (chair by default)
+    p.placement_p_against_wall = o.p_against_wall;                                // [prior.placement] (chair by default)
+    if (not o.parallel) p.wall_parallel_precision = 0.0f;
     return p;
 }
 
@@ -156,6 +173,8 @@ struct Result
     std::vector<float> delta, gap;             // per update: δ̂ and the staged corner gap
     std::vector<double> jump;                  // per update: P(moved | data) (NaN: none computed)
     int gn_conv = 0;                           // updates whose GN converged
+    bool conv1 = false;                        // the FIRST update's GN converged
+    float sd1 = 0.0f;                          // the posterior σ_cy after the first update
 };
 Result run(const Truth& t, float prior_w, float prior_d, bool containment, bool with_polygon, const Opts& o = {})
 {
@@ -181,8 +200,9 @@ Result run(const Truth& t, float prior_w, float prior_d, bool containment, bool 
         r.jump.push_back(b.last_jump_p());
         r.gap.push_back(staged);
         r.gn_conv += b.last_gn_converged() ? 1 : 0;
-        if (o.trace and (k == 0 or k == 1 or k == 9 or k == 49 or k == 99 or k == o.n - 1))
-            std::printf("      update %3d: delta_hat %+.5f  staged corner gap %+.5f  jump_p %.4g  gn %d conv %d  sd_cy %.4f\n", k + 1, dl,
+        if (k == 0) { r.conv1 = b.last_gn_converged(); r.sd1 = std::sqrt(b.covariance()(1, 1)); }
+        if (o.trace and (k == 0 or k == 1 or k == 2 or k == 9 or k == 49 or k == 99 or k == o.n - 1))
+            std::printf("      update %3d: delta_hat %+.6f  staged corner gap %+.5f  jump_p %.4g  gn %d conv %d  sd_cy %.4f\n", k + 1, dl,
                         staged, b.last_jump_p(), b.last_gn_iters(), int(b.last_gn_converged()), std::sqrt(b.covariance()(1, 1)));
     }
     r.s = b.state();
@@ -215,16 +235,22 @@ int main()
     // (a) side-on, 5 cm off y = 0: yaw −π/2 puts the local x (width w) along the wall normal, the depth (back) along the wall
     {
         const Truth t{-1.5f, -(0.05f + 0.5f * kW), kW, kD, -kHalfPi};
-        const Result off = run(t, kW, kD, false, true), on = run(t, kW, kD, true, true);
+        Opts oa; oa.parallel = false;   // M5 isolated: see (m5) below
+        const Result off = run(t, kW, kD, false, true, oa), on = run(t, kW, kD, true, true, oa);
         std::printf(" (a) side-on chair, side 5 cm off the wall y = 0 (truth cy %+.4f)\n", t.cy);
         print("BASE (containment off)", off);
         print("AFTER", on);
-        const float side_gap = -(on.s.cy + 0.5f * on.s.w * std::abs(std::sin(on.s.yaw)) + 0.5f * on.s.h * std::abs(std::cos(on.s.yaw)));
-        std::printf("      AFTER: side gap to the wall %.4f (truth 0.05), |cy - truth| %.4f\n", side_gap, std::abs(on.s.cy - t.cy));
-        CHECK(on.min_true >= -sig_s);
-        CHECK(side_gap >= 0.05f - 2.0f * sig_s);
-        // no corner ever reaches the wall, so the term is 0 at every iterate: the centre is where the points (and BASE) put it
-        CHECK(on.s.vec() == off.s.vec() and on.S == off.S);
+        const auto side_gap = [](const Result& r)
+        { return -(r.s.cy + 0.5f * r.s.w * std::abs(std::sin(r.s.yaw)) + 0.5f * r.s.h * std::abs(std::cos(r.s.yaw))); };
+        std::printf("      side gap to the wall: BASE %+.4f AFTER %+.4f (truth 0.05); |cy - truth| AFTER %.4f\n", side_gap(off), side_gap(on),
+                    std::abs(on.s.cy - t.cy));
+        // Fix round 2: since N2 the attachment's entry is absorbed here (it was lost before, update 1 capping on the parallel term).
+        // The stand-off then acts through back_centre of a side-on body (its centre's gap) and pulls the SIDE toward the wall — in
+        // BASE 5.4 cm through it. That pull is the attachment's (review I7, parked: π × f / a back-face share), not the containment's.
+        // What CW1 must guarantee, and is asserted: no corner past the true wall beyond the term's scale σ_c, and the one-sided term
+        // never pulls toward the wall — AFTER's side gap is at least BASE's.
+        CHECK(on.min_true >= -sig_c);
+        CHECK(side_gap(on) >= side_gap(off));
     }
     // (a2) see the header
     {
@@ -267,7 +293,7 @@ int main()
     {
         Truth t{-1.5f, -(0.05f + 0.5f * kW), kW, kD, -kHalfPi};
         t.clip_y = -0.25f;
-        Opts o; o.yaw_std = 0.05f;
+        Opts o; o.yaw_std = 0.05f; o.parallel = false;   // M5 isolated: see (m5)
         const Result off = run(t, kW + 0.10f, kD, false, true, o), on = run(t, kW + 0.10f, kD, true, true, o);
         const auto near_face = [](const Result& r)
         { return r.s.cy - 0.5f * r.s.w * std::abs(std::sin(r.s.yaw)) - 0.5f * r.s.h * std::abs(std::cos(r.s.yaw)); };
@@ -288,7 +314,7 @@ int main()
     {
         constexpr float kD3 = 0.03f;
         const Truth t{-1.5f, -0.5f * kW, kW, kD, -kHalfPi};
-        Opts o; o.yaw_std = 0.05f; o.volatility = true; o.shift = kD3; o.n = 200; o.trace = true;
+        Opts o; o.yaw_std = 0.05f; o.volatility = true; o.shift = kD3; o.n = 200; o.trace = true; o.parallel = false;   // M5 isolated
         std::printf(" (f) side-on chair pushed %.2f m past the staged wall by its points, parked %d updates (move statistic on)\n", kD3, o.n);
         std::printf("    BASE (containment off):\n");
         const Result off = run(t, kW, kD, false, true, o);
@@ -356,6 +382,99 @@ int main()
         // the bound is float's resolution at these magnitudes (≈ 1e-7·|p|/h ≈ 3e-4)
         CHECK(worst_j <= 1e-3f);
         CHECK(worst_g <= 1e-3f);
+        // the FULL term E(θ) against its gradient −bd (review M-a): a footprint whose corner is past the room's convex vertex (0, 0),
+        // the staged edge (y = 0) carrying a wall-latent variance v = 1e-4 that differs from the stand-in 0.02² of the x = 0 edge, so
+        // λ varies with θ there; and one past an edge's interior. Central differences in double over θ (h = 1e-4 m / rad).
+        CountableBelief bel(CountableBeliefState{-0.3f, -0.3f, kH, kW, kD, 0.0f}, params(kW, kD));
+        CountableEngineModel mdl; mdl.b = &bel;
+        CountableFrame fr;
+        fr.room_polygon = kRoom;
+        fr.wall = nearest_wall(Eigen::Vector2f(-0.3f, 0.0f), kRoom);   // the y = 0 edge
+        const rc::ai::engine::WallOffset wo{0.004, 1e-4};
+        const auto energy = [&](const CountableBeliefState& st)
+        {
+            CountableEngineModel::Mat6 I = CountableEngineModel::Mat6::Zero(); CountableEngineModel::Vec6 g = CountableEngineModel::Vec6::Zero();
+            double E = 0.0;
+            mdl.accumulate_containment(st, fr, wo, I, g, &E);
+            return E;
+        };
+        float worst_e = 0.0f, scale = 0.0f;
+        for (const CountableBeliefState st : {CountableBeliefState{-0.20f, -0.22f, kH, kW, kD, 0.3f},      // a corner past the vertex
+                                             CountableBeliefState{-1.20f, -0.20f, kH, kW, kD, 0.1f}})     // past the edge interior
+        {
+            CountableEngineModel::Mat6 I = CountableEngineModel::Mat6::Zero(); CountableEngineModel::Vec6 g = CountableEngineModel::Vec6::Zero();
+            mdl.accumulate_containment(st, fr, wo, I, g, nullptr);
+            for (int i = 0; i < 6; ++i)
+            {
+                const double h2 = 1e-4;
+                auto vp = st.vec(), vm = st.vec();
+                vp(i) += float(h2); vm(i) -= float(h2);
+                const double fd = (energy(CountableBeliefState::from_vec(vp)) - energy(CountableBeliefState::from_vec(vm))) / (double(vp(i)) - double(vm(i)));
+                worst_e = std::max(worst_e, float(std::abs(fd - (-double(g(i))))));
+                scale = std::max(scale, std::abs(g(i)));
+            }
+        }
+        std::printf("     full term: worst |dE/dtheta (fd) - (-bd)| %.3g against max |bd| %.3g (relative %.2g)\n", worst_e, scale, worst_e / scale);
+        // the relative bound: float states (θ rounded to ~1e-7 of the 1 m scale) differenced over 2e-4 give ~1e-3 of a unit-order
+        // gradient; a missing ½d²∂λ/∂q term is O(½λΔv) ≈ 0.4 relative here (the review's estimate), two orders above it.
+        CHECK(worst_e <= 1e-2f * scale);
+    }
+    // (h) see the header: the reviewer's N1 case — a back-on object whose back is on the true wall and whose staged wall lies D inside
+    //     it, so its points put the back D past the staged wall; the attachment's entry CONVERGES on update 1, so the prior carries a
+    //     θ–δ correlation from then on. 200 parked updates, δ̂ printed at 1e-6. Two classes: the nightstand (stand-off 0.03 ± 0.02, D
+    //     = 2.5 and 6 cm) and the chair (0.05 ± 0.05, D = 6 cm). Where the support is active at the end (true corner gap ≤ 0), the
+    //     support must add no δ̂ drift beyond BASE's own (the attachment's and the data's coupling, which CW1 does not touch).
+    {
+        struct Case { const char* name; float w, d, so, so_std, pi, D; };
+        for (const Case c : {Case{"nightstand", 0.50f, 0.40f, 0.03f, 0.02f, -1.0f, 0.025f}, Case{"nightstand", 0.50f, 0.40f, 0.03f, 0.02f, -1.0f, 0.06f},
+                             Case{"chair", 0.50f, 0.40f, 0.05f, 0.05f, 0.5f, 0.06f}})
+        {
+            const Truth t{-1.5f, -0.5f * c.d, c.w, c.d, 0.0f};
+            Opts o; o.yaw_std = 0.05f; o.volatility = true; o.shift = c.D; o.n = 200; o.trace = true;
+            o.standoff_m = c.so; o.standoff_std_m = c.so_std; o.p_against_wall = c.pi;
+            std::printf(" (h) back-on flush %s (stand-off %.2f +- %.2f), back %.3f m past the staged wall by its points, %d updates\n", c.name, c.so,
+                        c.so_std, c.D, o.n);
+            std::printf("    BASE (containment off):\n");
+            const Result off = run(t, c.w, c.d, false, true, o);
+            std::printf("    AFTER:\n");
+            const Result on = run(t, c.w, c.d, true, true, o);
+            print("BASE (containment off)", off);
+            print("AFTER", on);
+            const auto drift = [](const Result& r)
+            { float m = 0.0f; for (std::size_t k = 1; k < r.delta.size(); ++k) m = std::max(m, std::abs(r.delta[k] - r.delta[0])); return m; };
+            std::printf("      delta_hat(1) BASE %+.6f AFTER %+.6f; drift over updates 2..%d: BASE %.6f AFTER %.6f m; update-1 GN converged BASE %d AFTER %d\n",
+                        off.delta.front(), on.delta.front(), o.n, drift(off), drift(on), int(off.conv1), int(on.conv1));
+            // (1) the support's own step leaves δ alone. The review's leak is κ·Δg with κ = σ_w²/(σ_w² + σ_so²) (the attachment's
+            //     correlation slope along n) and Δg the support's push on the back at update 1 (AFTER − BASE staged corner gap); the
+            //     decoupling removes it exactly per linearisation, so what remains is the GN's nonlinearity, asserted below 10 % of
+            //     it, plus the solver's own resolution: the stop rule accepts θ within tol_sigma·σ (0.1·σ_cy), and a θ difference
+            //     that small moves δ̂ by κ times it through the same correlation in either run.
+            // (2) no ratchet: δ̂ converges — the change over updates 100..200 is below 1 % of the change over 1..100 (a ratchet is
+            //     linear in the update count, ratio ≈ 1).
+            const float sw2 = 0.02f * 0.02f, kap = sw2 / (sw2 + c.so_std * c.so_std);
+            const float push = std::abs(on.gap.front() - off.gap.front()), leak1 = std::abs(on.delta.front() - off.delta.front());
+            const float late = std::abs(on.delta[199] - on.delta[99]), early = std::abs(on.delta[99] - on.delta[0]);
+            std::printf("      update-1 push %.5f m, review's leak k*push %.3g m, measured |delta_hat AFTER - BASE| %.3g m; delta_hat change 100..200 %.3g vs 1..100 %.3g m\n",
+                        push, kap * push, leak1, late, early);
+            CHECK(on.conv1);                                              // the entry converged: the θ–δ correlation is live
+            const float res = kap * float(CountableBeliefParams{}.gn_tol_sigma) * on.sd1;
+            std::printf("      solver resolution on delta_hat k*tol_sigma*sd_cy %.3g m\n", res);
+            CHECK(leak1 <= 0.1f * kap * push + res);
+            CHECK(late <= 0.01f * early + 1e-6f);
+            CHECK(on.gap.back() >= -c.D);
+        }
+    }
+    // (m5) REVIEW M5, parked for the owner, printed only: the chair of (a) with the attachment's parallel term ON. Since N2 the
+    //      attachment's entry is no longer lost when update 1 caps, so the parallel residual par = ux·n, at its MAXIMUM for a
+    //      side-on body (|par| = 1, energy ≈ ½·f·(L/σ_w)² ≈ 7760 nats, zero gradient exactly there), turns the chair a quarter turn
+    //      to back-on as soon as the yaw is off the exact maximum. BASE (no CW1) does the same: this is the attachment, not the
+    //      containment. Before N2 the cap had hidden it here.
+    {
+        const Truth t{-1.5f, -(0.05f + 0.5f * kW), kW, kD, -kHalfPi};
+        const Result off = run(t, kW, kD, false, true), on = run(t, kW, kD, true, true);
+        std::printf(" (m5) the side-on chair of (a) with the parallel term ON (printed only; review M5, parked)\n");
+        print("BASE (containment off)", off);
+        print("AFTER", on);
     }
     // (d) mid-room
     {

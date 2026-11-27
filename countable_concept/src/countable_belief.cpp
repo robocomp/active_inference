@@ -910,6 +910,7 @@ void CountableEngineModel::accumulate_containment(const State& s, const Frame& f
         const ct::Signed sd = ct::signed_distance(k.p, region, f.wall.ok, wp, f.wall.n);
         if (not (sd.d < 0.0f)) continue;                                  // inside (or on the boundary): exactly 0
         float v = vstaged;                                                // the half-plane: the staged wall
+        Eigen::Vector2f dv_term = Eigen::Vector2f::Zero();                // Σ_j (u·n_j) v_j (I − uuᵀ) n_j at a vertex (M-a)
         if (poly)
         {
             const int m = int(region.size());
@@ -918,14 +919,22 @@ void CountableEngineModel::accumulate_containment(const State& s, const Frame& f
             {   // a vertex: the two edges meeting there, weighted by (u·n_j)² (u = the corner's way back in)
                 const int e0 = sd.t <= 0.0f ? (sd.edge + m - 1) % m : sd.edge;
                 const int e1 = (e0 + 1) % m;
-                const float c0 = sd.grad.dot(ct::inward_normal(region, e0)), c1 = sd.grad.dot(ct::inward_normal(region, e1));
+                const Eigen::Vector2f n0 = ct::inward_normal(region, e0), n1 = ct::inward_normal(region, e1);
+                const float c0 = sd.grad.dot(n0), c1 = sd.grad.dot(n1);
                 v = c0 * c0 * edge_var(e0) + c1 * c1 * edge_var(e1);
+                const Eigen::Matrix2f Pu = Eigen::Matrix2f::Identity() - sd.grad * sd.grad.transpose();
+                dv_term = c0 * edge_var(e0) * (Pu * n0) + c1 * edge_var(e1) * (Pu * n1);
             }
         }
         const float lam = 1.0f / (s2 + v);
-        const Vec6 J = (sd.grad.transpose() * ct::corner_jacobian(k, s.w, s.h, s.yaw)).transpose();
+        const Eigen::Matrix<float, 2, 6> Jp = ct::corner_jacobian(k, s.w, s.h, s.yaw);
+        const Vec6 J = (sd.grad.transpose() * Jp).transpose();
         Id.noalias() += lam * (J * J.transpose());
-        bd.noalias() += -lam * J * sd.d;
+        // ∂E/∂q = λ d u + ½ d² ∂λ/∂q. At a vertex λ depends on q through u = (vertex − q)/|d|: ∂u/∂q = −(I − uuᵀ)/|d|, so
+        // ½ d² ∂λ/∂q = −½ d² λ² ∂v/∂q = −d λ² Σ_j (u·n_j) v_j (I − uuᵀ) n_j  (|d| = −d outside). Zero on an edge's interior (v fixed)
+        // and on the half-plane. The curvature keeps the Gauss–Newton λJJᵀ (review M-a: the gradient is now the energy's).
+        const Eigen::Vector2f gq = lam * sd.d * sd.grad - sd.d * lam * lam * dv_term;
+        bd.noalias() += -(Jp.transpose() * gq);
         if (E) *E += 0.5 * double(lam) * double(sd.d) * double(sd.d);
     }
 }

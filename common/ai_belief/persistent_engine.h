@@ -798,6 +798,7 @@ public:
         // F1.4: the wall latent — transported when the staged edge is the same one, a new source (and its priors' one entry) when
         // the instance associates with an edge for the first time.
         bool wall_enter = false;
+        WallAnchor wall_pending;                                           // N2: the wall whose priors this update enters
         Eigen::Matrix<double, N, K> B_w = Eigen::Matrix<double, N, K>::Zero();
         if constexpr (W > 0)
         {
@@ -805,7 +806,14 @@ public:
             if (a.ok and a.sigma_m > 0.0)
             {
                 if (wall_set_ and same_wall(a))
+                {
                     b_(kWall) -= (a.p - wall_.p).dot(a.n);                // the same wall, its staged line moved: transport
+                    // N2: the same δ source, but its priors were never absorbed (the update that carried them did not converge):
+                    // they enter on this update
+                    const auto it = std::ranges::find_if(walls_entered_, [&](const WallAnchor& e) { return same_physical_wall(a, e); });
+                    if (it == walls_entered_.end()) { wall_enter = true; wall_pending = a; }
+                    else *it = a;
+                }
                 else
                 {
                     const int j = N + kWall;                               // a new source: the old δ is marginalised out
@@ -815,7 +823,8 @@ public:
                     sig_prev_(kWall) = a.sigma_m;
                     // the priors enter once per PHYSICAL wall: not again for a wall already entered (its stored line transported)
                     const auto it = std::ranges::find_if(walls_entered_, [&](const WallAnchor& e) { return same_physical_wall(a, e); });
-                    if (it == walls_entered_.end()) { walls_entered_.push_back(a); wall_enter = true; }
+                    // fix round 2 (N2): the entry is recorded only once this update has absorbed it (after the solve, below)
+                    if (it == walls_entered_.end()) { wall_enter = true; wall_pending = a; }
                     else *it = a;
                 }
                 wall_ = a;
@@ -823,7 +832,7 @@ public:
             }
             if (wall_set_) { B_w(0, kWall) = -wall_.n.x(); B_w(1, kWall) = -wall_.n.y(); }
         }
-        last_wall_entered_ = wall_enter;
+        last_wall_entered_ = false;                                        // set after the solve (N2)
         const bool had_posterior = first_update_done_;                     // the volatility learns from a posterior's step only
         const VecNf q_used = process_noise(m);                             // the Q of this update's (and the interval's) predicts
         FrameLatents<N> fl_used = fl;
@@ -860,6 +869,9 @@ public:
         // CW1: the staged wall latent's CARRIED belief (the predicted mean and variance; after a transport or a new source above),
         // fixed over this update — what the containment profiles the staged wall's error out with.
         WallOffset wo;
+        // fix round 2 (N1): the support's decoupling selector −κ on δ (set per linearisation in build) and δ̄'s reference point
+        Eigen::Matrix<double, N, K> kappa_B = Eigen::Matrix<double, N, K>::Zero();
+        const VecKd b_bar_c = x_bar.template tail<K>();
         if constexpr (W > 0)
             if (wall_set_) { wo.mean = x_bar(N + kWall); wo.var = P_bar(N + kWall, N + kWall); }
         pu::FreshInfo<N> theta_only;
@@ -883,12 +895,25 @@ public:
                 }
             n_info = channels.size();                                      // the channels whose information the posterior keeps
             if constexpr (kContainment)
-            {   // CW1: the prior's support on θ ONLY (selector 0: δ is profiled out with its carried belief wo, never moved), LAST,
-                // so chans_info() can leave it out of P (see the hook's note and Step 4)
+            {   // CW1: the prior's support on θ, LAST, so chans_info() can leave it out of P (see the hook's note and Step 4).
+                // Fix round 2 (N1): a factor on θ alone still moves δ through the joint's θ–δ correlation (δ̂ − δ̄ = Σ_δθ Σ_θθ⁻¹ Δθ),
+                // and that correlation is the attachment's: the support is not information about the wall. So the support acts on
+                // the part of θ that is UNCORRELATED with δ in the posterior the information channels give at this linearisation,
+                // r = θ − κ(δ − δ̄), κ = Σ_θδ / Σ_δδ (Σ = joint_cov of P̄ and chans_info()). A Gaussian factor on r moves the mean by
+                // Σ·[Jᵀ; −κᵀJᵀ]·s, whose δ row is Σ_δθJᵀ − Σ_δδ(Σ_θδ/Σ_δδ)ᵀJᵀ = 0: δ's posterior mean is exactly what the data and the
+                // attachment make it. Without a wall latent (W = 0, or none staged yet) κ = 0: the round-1 θ-only form.
+                kappa_B.setZero();
+                if constexpr (W > 0)
+                    if (wall_set_)
+                    {
+                        const MatJd Sg = pu::joint_cov<N, K, NP>(P_bar, std::span<const Chan>(channels).first(channels.size()), theta_only);
+                        const double sdd = Sg(N + kWall, N + kWall);
+                        if (sdd > 0.0) kappa_B.col(kWall) = -Sg.template block<N, 1>(0, N + kWall) / sdd;
+                    }
                 MatN Ic = MatN::Zero(); VecN bc = VecN::Zero();
-                m.accumulate_containment(S(th), f, wo, Ic, bc, nullptr);
+                m.accumulate_containment(S(th + kappa_B * (bb - b_bar_c)), f, wo, Ic, bc, nullptr);
                 if (not Ic.isZero(0.0f) or not bc.isZero(0.0f))
-                { Chan c; c.info = pu::marginalise_fresh<N>(Ic, bc, MatN::Zero()); c.B.setZero(); channels.push_back(c); }
+                { Chan c; c.info = pu::marginalise_fresh<N>(Ic, bc, MatN::Zero()); c.B = kappa_B; channels.push_back(c); }
             }
         };
 
@@ -910,9 +935,9 @@ public:
                     m.accumulate_wall_prior(S(th + B_w * bb), f, Iw, bw, &E);
                 }
             if constexpr (kContainment)
-            {
+            {   // at the decoupled state of the current linearisation (κ of the last build, see there)
                 MatN Ic = MatN::Zero(); VecN bc = VecN::Zero();
-                m.accumulate_containment(S(th), f, wo, Ic, bc, &E);
+                m.accumulate_containment(S(th + kappa_B * (bb - b_bar_c)), f, wo, Ic, bc, &E);
             }
             return E;
         };
@@ -1091,6 +1116,9 @@ public:
         // (review I2). It is left out of P below: its information is not data and must not be absorbed — 1[g ≥ δ] re-applied is
         // 1[g ≥ δ], but a Gaussian factor λJJᵀ re-applied on every update is n·λJJᵀ, the hinge that pinned the parked toilet
         // (design doc, F1 amendment). P stays the data's covariance (conservative: the truncated posterior is narrower along g).
+        // ⚠ (review M-c) the support's Gaussian surrogate λJJᵀ in Λ̂ is two-sided, so in the "moved" integral it also charges
+        // positions on the LEGAL side of x̂ along g. It exists only while the term is active at x̂ (the data push outward); a genuine
+        // inward move leaves x̂ legal and the term absent. Accepted under the same Laplace step as the data's.
         pu::detail::information<N, K, NP>(chans(), theta_only, Lambda_data, eta_data);
         {
             VecXd x_hat; x_hat << theta_post, (consistent ? b_post : b_);
@@ -1123,6 +1151,13 @@ public:
         // The cap binds at most 5 times per graded dump. ROOT FIX (post-12-02 owner list): remove why fits cap at all —
         // kinked energies (mixture / beam panel boundaries) and λ escalation in the damped GN.
         if (not converged) P_ = P_bar;
+        // Fix round 2 (N2): the attachment priors' ONE entry is committed only when this update absorbed it. An unconverged update
+        // keeps P = P̄ (above), so the priors it carried in its energy are not in P; recording the wall as entered anyway lost them
+        // for the instance's life (same_physical_wall never re-enters it). This is bookkeeping, not a gate: it decides nothing about
+        // the model, it only makes the "entered once" record say what P actually holds, so the next measured update enters them.
+        if constexpr (W > 0)
+            if (wall_enter and converged) walls_entered_.push_back(wall_pending);
+        last_wall_entered_ = wall_enter and converged;
         const VecNd post_var = P_.diagonal().template head<N>();          // the model's posterior, before the solver's last-step term
         if (converged) P_.template topLeftCorner<N, N>() += d_last * d_last.transpose();
         if (cfg.gn_trace >= 2 or (cfg.gn_trace == 1 and not converged))
@@ -1186,7 +1221,11 @@ public:
         b_ = b_post;
         set_q(m, b_);                                                      // the model evaluates at the posterior proportions
         m.set_covariance(Sigma_theta());
-        if (had_posterior) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, Lambda_data, eta_data, theta_post);
+        // Fix round 2 (N2): an update that carries the attachment priors' one entry teaches the volatility nothing, for the reason
+        // the first update does not (the class prior's entry): its step is a prior's correction of the mean, not evidence of motion.
+        // Before N2 the entry was always on the first update and this was implied; now a capped first update defers it to a later
+        // one, and the move statistic read the prior's pull from x̄ as a move (synthetic containment_test (f): jump_p = 1 on it).
+        if (had_posterior and not wall_enter) learn_volatility(m, q_used, x_bar.template head<N>(), P_bar, post_var, Lambda_data, eta_data, theta_post);
         steps_since_update_ = 0.0;
         dbg_Id_th_ = Id_th; dbg_Id_cam_ = Id_cam; dbg_Id_L_ = Id_L;
         // G5: what this update delivered (the θ-marginal entropy drop of the published Σ), and what the next offer's
