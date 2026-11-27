@@ -144,30 +144,45 @@ inline Viewpoint advance_viewpoint(Viewpoint x, const Eigen::Vector2f& sensor_xy
 // referenced so its LEADING edge stays put (m ← max(m, |x_k − a|) − |shift|): on a straight drive the next update pays exactly
 // its own increment again. The trailing edge is pulled in by twice the shift, so the latent forgets the views it leaves behind
 // at its own rate (on a long drive the anchor lags ~ℓ and views up to ~2ℓ behind still count as drawn — the conservative side).
+// The symmetric half-width alone would put that trailing edge BEHIND the first view on any excursion shorter than ~1.26ℓ (the
+// edge sits at x − 2ℓ(1 − e^{−x/ℓ})), counting views never visited as paid. So the paid region is also clipped to the extent
+// [lo, hi] of the views actually committed, per coordinate: region = [max(a − m, lo), min(a + m, hi)]. x* is then always a view
+// that was drawn, as the derivation above needs (review F1-I1). The anchor lies in [lo, hi] (a convex combination of committed
+// views), so the region always contains it.
+// Stated limits (both conservative, review F1-M1): every coordinate's anchor moves with the latent's joint ρ, not its own
+// coordinate's factor; and the per-coordinate regions make a rectangle, so a corner never visited (moved in φ at one range and
+// in z at another bearing) counts as paid.
 struct ViewAnchor
 {
     bool set = false;   // false until the latent's first update (born at its prior: ρ irrelevant, the engine's new source)
     Viewpoint a;        // anchor
     float m_phi = 0.f;  // paid frontier half-widths (rad, m)
     float m_z = 0.f;
+    Viewpoint lo, hi;   // the extent of the committed views (φ unwrapped about the anchor)
 };
 
 // The separation of view x beyond the anchor's paid frontier, per coordinate, as the ViewpointPath the kernels read. Unset ⇒ 0.
 inline ViewpointPath anchor_separation(const ViewAnchor& A, const Viewpoint& x)
 {
     if (not A.set) return {};
+    // d beyond the paid region [max(−m, lo − a), min(m, hi − a)] (offsets from the anchor), 0 inside it: ★ the feasibility bound
+    const auto beyond = [](float d, float m, float lo_off, float hi_off)
+    { return std::max({0.f, d - std::min(m, hi_off), std::max(-m, lo_off) - d}); };
     ViewpointPath p;
-    p.dphi_rad = std::max(0.f, std::abs(detail::wrap_pi(x.phi - A.a.phi)) - A.m_phi);   // ★ the feasibility bound, see above
-    p.dz_m     = std::max(0.f, std::abs(x.z - A.a.z) - A.m_z);                         // ★ the same bound
+    p.dphi_rad = beyond(detail::wrap_pi(x.phi - A.a.phi), A.m_phi, A.lo.phi - A.a.phi, A.hi.phi - A.a.phi);
+    p.dz_m     = beyond(x.z - A.a.z, A.m_z, A.lo.z - A.a.z, A.hi.z - A.a.z);
     return p;
 }
 
 // After the latent's update with view x and the ρ it used: the first update sets the anchor at x; later ones move it.
 inline ViewAnchor anchor_commit(ViewAnchor A, const Viewpoint& x, float rho)
 {
-    if (not A.set) return {true, x, 0.f, 0.f};
+    if (not A.set) return {true, x, 0.f, 0.f, x, x};
     const float k = 1.f - rho;
     const float dphi = detail::wrap_pi(x.phi - A.a.phi), dz = x.z - A.a.z;
+    const float xphi = A.a.phi + dphi;                                  // x's φ unwrapped about the anchor
+    A.lo.phi = std::min(A.lo.phi, xphi); A.hi.phi = std::max(A.hi.phi, xphi);
+    A.lo.z   = std::min(A.lo.z, x.z);    A.hi.z   = std::max(A.hi.z, x.z);
     A.m_phi = std::max(A.m_phi, std::abs(dphi)) - k * std::abs(dphi);   // ≥ 0: max(m, s) ≥ s ≥ (1 − ρ)s
     A.m_z   = std::max(A.m_z, std::abs(dz)) - k * std::abs(dz);
     A.a.phi += k * dphi;

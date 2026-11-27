@@ -282,7 +282,7 @@ static void rho_chain_never_above_one()
 // One update per sensor position s_k (object at the origin): dr = s_k − s_{k−1}. F1 = view_stage / anchor_separation /
 // view_commit, exactly as the fitter calls them; OLD = the path reset after every update, accumulate_path over the same step
 // (what the fitter did before F1; integrated in 1000 chords so it is the step's arc length, not a one-chord approximation).
-struct F1Run { std::vector<float> rho_new, rho_old; };
+struct F1Run { std::vector<float> rho_new, rho_old; double lat_shift = 0.0, phi_lo = 0.0, phi_hi = 0.0; };
 static F1Run run_f1(const std::vector<V2>& s, float g, float w)
 {
     F1Run out;
@@ -296,7 +296,10 @@ static F1Run run_f1(const std::vector<V2>& s, float g, float w)
         const float rl = rho_lidar_lateral(anchor_separation(v.a_lat, v.L), g);
         const float rc = rho_camera(anchor_separation(v.a_cam, v.cam), z, w);
         const float rh = rho_lidar_height(anchor_separation(v.a_H, v.L), z, 0.3f, g);
+        const float a_before = v.a_lat.a.phi;
         v = view_commit(v, true, true, rc, rl, rh);
+        if (k > 0) out.lat_shift += std::abs(double(v.a_lat.a.phi) - double(a_before));
+        out.phi_lo = std::min(out.phi_lo, double(v.L.phi)); out.phi_hi = std::max(out.phi_hi, double(v.L.phi));
         ViewpointPath p;   // the old arc length of the step, integrated finely (1000 chords): the path's own length
         if (k > 0) for (int j = 0; j < 1000; ++j) accumulate_path(p, s[k - 1] + (float(j + 1) / 1000.f) * dr, dr / 1000.f, obj);
         if (k > 0) { out.rho_new.push_back(rl); out.rho_old.push_back(rho_lidar_lateral(p, g)); }
@@ -336,9 +339,17 @@ static void f1_jitter_does_not_accumulate()
         std::printf("  jitter N=%5d  Σ(1-ρ²) lateral: F1 %.4f  old %.3f   camera: F1 %.5f old %.4f   height: F1 %.5f old %.4f\n",
                     Ns[i], new_n[i], old_n[i], redraws(f.rho_new, 1), redraws(f.rho_old, 1), redraws(f.rho_new, 2),
                     redraws(f.rho_old, 2));
-        // O(r/ℓ): the separations stay inside the jitter's hull (2r across), so Σ −ln ρ ≤ (2r/z)/g to first order and
-        // Σ(1 − ρ²) ≤ 2·Σ −ln ρ. 4.5 = 2 · 2 + the anchor's own small drift.
-        CHECK(new_n[i] <= 4.5 * double(r / z) / double(g));
+        // O(r/ℓ), derived: a payment only widens the paid region, which is clipped to the committed views' φ extent W (inside
+        // the jitter's hull, W ≤ 2r/z), and the region only shrinks by twice each anchor shift (what can be paid again).
+        // So Σ −ln ρ ≤ (W + 2 Σ|shift|)/g, and Σ(1 − ρ²) ≤ 2 Σ −ln ρ. W and Σ|shift| are measured on this run, not fitted.
+        double lnsum = 0.0;
+        for (std::size_t j = 0; j < f.rho_new.size(); j += 3) lnsum += -std::log(double(f.rho_new[j]));
+        const double W = f.phi_hi - f.phi_lo;
+        std::printf("           Σ −ln ρ_lat %.5f ≤ (W %.5f + 2 Σ|shift| %.2e)/g = %.5f;  W ≤ 2r/z = %.5f\n", lnsum, W, f.lat_shift,
+                    (W + 2.0 * f.lat_shift) / double(g), 2.0 * double(r / z));
+        CHECK(lnsum <= (W + 2.0 * f.lat_shift) / double(g) * (1.0 + 1e-4));   // 1e-4: float summation of the ρ's
+        CHECK(W <= 2.0 * double(r / z) * (1.0 + 1e-3));
+        CHECK(new_n[i] <= 2.0 * lnsum);
     }
     CHECK(new_n[2] < 2.0 * new_n[0]);          // does not grow with N (×100 samples)
     CHECK(old_n[2] > 50.0 * old_n[0]);         // the old arc length does (linearly)
@@ -371,7 +382,8 @@ static void f1_monotone_drive_matches_arc_length()
 
 // (3) Out and back along the circle (pure bearing): on the way back ρ = 1 while the view is inside what the latent was already
 //     decorrelated over (★ the feasibility bound active), so a short excursion is not re-drawn twice; a long one is re-drawn
-//     only beyond the frontier (≈ 2ℓ behind the turn), never the full way back as the arc length does.
+//     only beyond the frontier (≈ 2ℓ behind the turn), never the full way back as the arc length does. Out PAST the start
+//     (review F1-I1): views beyond the first one were never drawn, so they are paid again, exactly, step by step.
 static void f1_out_and_back()
 {
     const float g = 0.0392f, w = 0.5f, z = 2.f;
@@ -381,6 +393,24 @@ static void f1_out_and_back()
         std::vector<V2> s;
         for (int k = 0; k <= n; ++k) { const float th = D * g * float(k) / n; s.emplace_back(z * std::cos(th), z * std::sin(th)); }
         for (int k = n - 1; k >= 0; --k) s.push_back(s[std::size_t(k)]);
+        if (D < 1.f)
+        {   // then on past the start by 0.5ℓ (the symmetric frontier's trailing edge sat 0.29ℓ beyond it)
+            const int n_past = 100;
+            double past = 0.0;
+            std::vector<V2> sp = s;
+            for (int k = 1; k <= n_past; ++k) { const float th = -0.5f * g * float(k) / n_past; sp.emplace_back(z * std::cos(th), z * std::sin(th)); }
+            const F1Run fp = run_f1(sp, g, w);
+            int past_paid = 0;
+            for (std::size_t i = std::size_t(2 * n) * 3; i < fp.rho_new.size(); i += 3)
+            {
+                past += -std::log(double(fp.rho_new[i]));
+                if (fp.rho_new[i] < 1.f) ++past_paid;
+            }
+            std::printf("  out-and-back D=%.1fℓ then 0.5ℓ past the start: Σ −ln ρ_lateral past the start %.4f (each step paid: %d of %d)\n",
+                        D, past, past_paid, n_past);
+            CHECK(past_paid == n_past);                            // no view beyond the first is treated as already drawn
+            CHECK(std::abs(past - 0.5) < 1e-3);                    // and each pays its own step: 0.5ℓ in all
+        }
         const F1Run f = run_f1(s, g, w);
         double out_new = 0.0, back_new = 0.0, out_old = 0.0, back_old = 0.0;
         int back_one = 0;

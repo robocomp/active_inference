@@ -140,7 +140,7 @@ template <class V> void fields(V& v, rc::ai::beam::ForeignBox& x)
 { v("c", x.c); v("H", x.H); v("w", x.w); v("h", x.h); v("yaw", x.yaw); v("std", x.std); v("z0", x.z0); v("cls", x.cls); }
 
 template <class V> void fields(V& v, rc::ai::view::Viewpoint& x) { v("phi", x.phi); v("z", x.z); }
-template <class V> void fields(V& v, rc::ai::view::ViewAnchor& x) { v("set", x.set); v("a", x.a); v("m_phi", x.m_phi); v("m_z", x.m_z); }
+template <class V> void fields(V& v, rc::ai::view::ViewAnchor& x) { v("set", x.set); v("a", x.a); v("m_phi", x.m_phi); v("m_z", x.m_z); v("lo", x.lo); v("hi", x.hi); }
 template <class V> void fields(V& v, rc::ai::view::ViewState& x)
 {
     v("on", x.on); v("cam", x.cam); v("L", x.L); v("cam_xy", x.cam_xy); v("L_xy", x.L_xy);
