@@ -82,8 +82,11 @@ struct CountableInstance
 
     // ── Camera attributes, LiDAR measures (Model.LidarMeasuresOnGated; spec 2026-11-15 lidar-measures §7c.2). Read and
     //    written only when the flag is on. ───────────────────────────────────────────────────────────────────────────
-    // Odometry path of each sensor about this object since its channel last updated the instance (ρ_cam, ρ_L).
-    rc::ViewpointPath path_cam, path_L;
+    // F1 (task-F1): the sensors' viewpoints about this object at the last accepted update and the latents' anchors (ρ_cam, ρ_L
+    // from the SEPARATION of views, rc::ai::view::ViewState), and the odometry displacement since that update that will advance
+    // them (integrable steps only: a stretch the odometry cannot integrate moves no viewpoint — fails closed, ρ → 1).
+    rc::ViewState   view;
+    Eigen::Vector2f view_dr = Eigen::Vector2f::Zero();
     // The localiser's correction since the chain latent's last update (robot body centre, room frame): ρ_chain =
     // exp(−½cᵀΣ⁻¹c), c = rc::chain_correction(chain). Fails closed on a stretch whose odometry cannot be integrated.
     rc::ChainTracker chain;

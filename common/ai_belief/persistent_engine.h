@@ -83,6 +83,10 @@ struct FrameLatents
     Eigen::Vector2f robot_xy   = Eigen::Vector2f::Zero();   // the robot's room position at the capture stamp
     // The camera's room position (floor plane) at this update (G5): where the offer gain's ρ path starts. Absent ⇒ robot_xy.
     std::optional<Eigen::Vector2f> camera_xy;
+    // F1 (task-F1): the sensors' viewpoints about the object and the latents' anchors BEFORE this update, as the fitter staged
+    // them (rc::ai::view::view_stage). The engine commits them with this update's ρ for the offer (predicted_gain). off ⇒ the
+    // offer's ρ is the straight path from the last update's position, as before F1.
+    rc::ai::view::ViewState view;
     bool camera_measured = false;        // the camera channel measures this update
     bool lidar_measured  = false;        // the LiDAR channel measures this update
     // G3 (spec shared-engine, "Answers to the builder check" 5): the neighbours' boxes, a FIXED foreign density for this update
@@ -1152,6 +1156,13 @@ public:
             last_cam_n_ = f.points.size();
         }
         if (lidar) last_lidar_origin_ = m.beam_rays(f).origin;
+        // F1: the anchors after this update (the fitter commits the same on acceptance), where the offer's ρ is measured from.
+        if (fl.view.on)
+        {
+            float rho_H = fl.rho_L[0];
+            if constexpr (requires { { M::kHeight } -> std::convertible_to<int>; }) rho_H = fl.rho_L[M::kHeight];
+            last_view_ = rc::ai::view::view_commit(fl.view, camera, lidar, fl.rho_cam[0], fl.rho_L[0], rho_H);
+        }
         if constexpr (HasOfferContext<M>)
             last_ctx_ = m.offer_context(f);                            // the offer's extra terms' context (G5), not the frame
         offer_cache_.valid = false;                                    // Ω at the last camera position is recomputed once
@@ -1249,7 +1260,9 @@ public:
     //   - the latents predicted on a copy of exactly (P, b, σ_prev, lever, Σ_pose): ρ_cam = rho_camera of the straight path
     //     from the last camera update's position to the standpoint's camera (10 equal chords of accumulate_path), z and w⊥
     //     there; ρ_L = rho_lidar_lateral / rho_lidar_height of the straight path from the last LiDAR origin, g = the widest
-    //     ring gap (height on M::kHeight when the model names it); ρ_chain = 1 (no localiser correction predicted), e carried
+    //     ring gap (height on M::kHeight when the model names it) — with F1 viewpoints staged (FrameLatents::view), the
+    //     argument is instead the look's view's separation from the latent's anchor beyond its frontier, as the update reads it;
+    //     ρ_chain = 1 (no localiser correction predicted), e carried
     //     by the straight robot displacement; the latents' marginals as at the last update; no fresh ego-motion share (the
     //     look is taken standing at the standpoint);
     //   - the channels the update uses: the camera points (offer_observation) and the model's camera extra terms at
@@ -1299,19 +1312,36 @@ public:
             for (int k = 0; k < kOfferPathSteps; ++k) vw::accumulate_path(path, from + float(k) * step, step, c);
             return path;
         };
+        // F1: with the fitter's viewpoints staged, the look's ρ is its view's separation from the latent's anchor beyond the
+        // frontier (as the update's), the view reached by the same straight 10-chord path from the last update's sensor position
+        // (signed increments, rc::ai::view::advance_viewpoint). Without them (older callers), the straight path as before.
+        const auto view_from = [&](vw::Viewpoint x, const Eigen::Vector2f& from, const Eigen::Vector2f& to)
+        {
+            const Eigen::Vector2f step = (to - from) / float(kOfferPathSteps);
+            for (int k = 0; k < kOfferPathSteps; ++k) x = vw::advance_viewpoint(x, from + float(k) * step, step, c);
+            return x;
+        };
+        const bool f1_cam = last_view_.has_value() and last_view_->cam_xy.has_value() and last_view_->a_cam.set;
+        const bool f1_L   = last_view_.has_value() and last_view_->L_xy.has_value() and last_view_->a_lat.set;
         FrameLatents<N> fl;
         float rho_cam = 1.0f;
         if (camera and last_cam_xy_.has_value())
         {
             const float z = (cam3.head<2>() - c).norm(), w_perp = of::extent_across(parts, cam3.head<2>(), c);
-            if (z > 0.0f and w_perp > 0.0f) rho_cam = vw::rho_camera(straight(*last_cam_xy_, cam3.head<2>()), z, w_perp);
+            if (z > 0.0f and w_perp > 0.0f)
+                rho_cam = f1_cam ? vw::rho_camera(vw::anchor_separation(last_view_->a_cam,
+                                                      view_from(last_view_->cam, *last_view_->cam_xy, cam3.head<2>())), z, w_perp)
+                                 : vw::rho_camera(straight(*last_cam_xy_, cam3.head<2>()), z, w_perp);
         }
         fl.rho_cam.fill(rho_cam);
         fl.rho_L.fill(1.0f);
         if (lidar and last_lidar_origin_.has_value())
         {
             const Eigen::Vector3f o = obs.rays.origin.template cast<float>();
-            const vw::ViewpointPath path = straight(last_lidar_origin_->head<2>().template cast<float>(), o.head<2>());
+            const vw::Viewpoint xL = f1_L ? view_from(last_view_->L, *last_view_->L_xy, o.head<2>()) : vw::Viewpoint{};
+            const vw::ViewpointPath path = f1_L ? vw::anchor_separation(last_view_->a_lat, xL)
+                                                : straight(last_lidar_origin_->head<2>().template cast<float>(), o.head<2>());
+            const vw::ViewpointPath path_H = f1_L ? vw::anchor_separation(last_view_->a_H, xL) : path;
             const float g = of::max_ring_gap(sn.lidar->ring_elev_rad);
             fl.rho_L.fill(vw::rho_lidar_lateral(path, g));
             if constexpr (requires { { M::kHeight } -> std::convertible_to<int>; })
@@ -1319,7 +1349,7 @@ public:
                 double top = -std::numeric_limits<double>::infinity();
                 for (const auto& P0 : parts) top = std::max(top, P0.c.z() + P0.half.z());
                 const float zl = (o.head<2>() - c).norm();
-                if (zl > 0.0f) fl.rho_L[M::kHeight] = vw::rho_lidar_height(path, zl, float(std::atan2(top - o.z(), zl)), g);
+                if (zl > 0.0f) fl.rho_L[M::kHeight] = vw::rho_lidar_height(path_H, zl, float(std::atan2(top - o.z(), zl)), g);
             }
         }
         fl.sig2_cam = last_sig2_cam_;
@@ -1786,6 +1816,7 @@ private:
     std::array<float, N> last_sig2_cam_{};            // the latents' marginals at the last measured update
     std::array<float, N> last_sig2_L_{};
     std::optional<Eigen::Vector3d> last_lidar_origin_;   // the LiDAR origin at the last LiDAR update
+    std::optional<rc::ai::view::ViewState> last_view_;   // F1: viewpoints + anchors after the last update (off ⇒ none staged)
     std::optional<typename detail::OfferContextOf<M>::type> last_ctx_;   // the extra terms' context at the last measured update
     struct OfferCache
     {

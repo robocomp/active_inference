@@ -139,6 +139,14 @@ template <class V> void fields(V& v, rc::ai::beam::BeamRays& x)
 template <class V> void fields(V& v, rc::ai::beam::ForeignBox& x)
 { v("c", x.c); v("H", x.H); v("w", x.w); v("h", x.h); v("yaw", x.yaw); v("std", x.std); v("z0", x.z0); v("cls", x.cls); }
 
+template <class V> void fields(V& v, rc::ai::view::Viewpoint& x) { v("phi", x.phi); v("z", x.z); }
+template <class V> void fields(V& v, rc::ai::view::ViewAnchor& x) { v("set", x.set); v("a", x.a); v("m_phi", x.m_phi); v("m_z", x.m_z); }
+template <class V> void fields(V& v, rc::ai::view::ViewState& x)
+{
+    v("on", x.on); v("cam", x.cam); v("L", x.L); v("cam_xy", x.cam_xy); v("L_xy", x.L_xy);
+    v("a_cam", x.a_cam); v("a_lat", x.a_lat); v("a_H", x.a_H);
+}
+
 template <class V> void fields(V& v, CountableFrame& x)
 {
     v("points", x.points); v("R", x.R); v("cam_origin", x.cam_origin); v("has_rays", x.has_rays);
@@ -147,7 +155,7 @@ template <class V> void fields(V& v, CountableFrame& x)
     v("z_top_obs", x.z_top_obs); v("wall", x.wall); v("room_axis_ok", x.room_axis_ok); v("room_axis", x.room_axis);
     v("lidar", x.lidar); v("lidar_extra", x.lidar_extra); v("lidar_only", x.lidar_only);
     v("rho_cam", x.rho_cam); v("rho_L", x.rho_L); v("rho_chain", x.rho_chain); v("sigma_pose", x.sigma_pose);
-    v("chain_dr", x.chain_dr); v("robot_xy", x.robot_xy); v("camera_xy", x.camera_xy);
+    v("chain_dr", x.chain_dr); v("robot_xy", x.robot_xy); v("camera_xy", x.camera_xy); v("view", x.view);
     v("sig2_cam", x.sig2_cam); v("sig2_L", x.sig2_L); v("fresh_cam", x.fresh_cam); v("fresh_L", x.fresh_L);
     v("beam", x.beam); v("foreign_boxes", x.foreign_boxes); v("mask_error_rate", x.mask_error_rate);
 }
@@ -569,9 +577,11 @@ struct NoChange { void operator()(const CountableBelief&) const {} };
 struct NoFrame  { void operator()(CountableFrame&) const {} };
 struct NoSeed   { void operator()(SeedEv&) const {} };
 // on_seed(SeedEv&), when given, may rewrite the recorded seed (its params) before the belief is built from it.
-template <class OnUpdate, class OnResult, class OnChange = NoChange, class OnFrame = NoFrame, class OnSeed = NoSeed>
+// on_restore(const CountableBelief&), when given, runs after a RestoreEv (the last update was rejected and undone).
+template <class OnUpdate, class OnResult, class OnChange = NoChange, class OnFrame = NoFrame, class OnSeed = NoSeed,
+          class OnRestore = NoChange>
 bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& on_result, OnChange&& on_change = {},
-          OnFrame&& on_frame = {}, OnSeed&& on_seed = {})
+          OnFrame&& on_frame = {}, OnSeed&& on_seed = {}, OnRestore&& on_restore = {})
 {
     bool seeded = false;
     CountableBelief pre;   // the belief before the last update (RestoreEv)
@@ -594,7 +604,7 @@ bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& o
             else if constexpr (std::is_same_v<E, ResultEv>) on_result(ev, std::as_const(b));
             else if constexpr (std::is_same_v<E, PredictEv>) b.predict();
             else if constexpr (std::is_same_v<E, InflateEv>) b.inflate_for_age(ev.dt_s, ev.dt_nominal_s);
-            else if constexpr (std::is_same_v<E, RestoreEv>) b = pre;
+            else if constexpr (std::is_same_v<E, RestoreEv>) { b = pre; on_restore(std::as_const(b)); }
             else if constexpr (std::is_same_v<E, ResolveFrontEv>) b.resolve_front(ev.cue, ev.weight);
             if constexpr (not std::is_same_v<E, ResultEv>) on_change(std::as_const(b));
         }, e);

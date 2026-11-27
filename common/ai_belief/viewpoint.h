@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -89,6 +90,122 @@ inline float wrap_pi(float a)
     return a - static_cast<float>(M_PI);
 }
 }  // namespace detail
+
+// ── F1 (task-F1, D2's T1): ρ from the SEPARATION of viewpoints, not from the arc length of the odometry ───────────────────
+// The kernels above are exp(−d(x, x′)/ℓ) in viewpoint space x = (φ, z) — φ the sensor's bearing seen from the object, z its
+// range. Their argument used to be the SUM of |odometry steps| since the channel's last update (ViewpointPath). Parked, zero-
+// mean odometry jitter sums to ~0.04 rad / 0.1 m per dwell against < 1 mm of true motion, so b_L was re-drawn about twice per
+// dwell from motion that did not happen. The argument must be how far the views are APART, which does not grow under jitter.
+//
+// Viewpoint: odometric coordinates of a sensor about the object. A robot displacement dr that brought the sensor to its room
+// position s (from s − dr) adds the EXACT bearing and range change of that move as seen from the object c:
+// φ += wrap(∠(s − c) − ∠(s − dr − c)), z += |s − c| − |s − dr − c|. (accumulate_path's first-order |dr·t̂|/z, |dr·r̂| summed with
+// signs would leave a one-signed second-order residue |dr⊥|²/2z per step in z, which a long jitter integrates into drift; the
+// exact increments telescope when the sensor returns.) The odometry, not the localised pose, moves it — as before, so a
+// localiser correction is ρ_chain's business, not ρ_cam's / ρ_L's, and a rotation in place moves neither coordinate. Only
+// DIFFERENCES of viewpoints are read; the origin is arbitrary.
+// (Measured on g1x_aba_bed_1's parked dwells: the localised camera position drifts 6–38 mm per dwell, the signed odometry
+// viewpoint 2–4 mrad / 5–6 mm — against the old |step| sums of 34–38 mrad / 97–105 mm.)
+struct Viewpoint { float phi = 0.f, z = 0.f; };
+inline Viewpoint advance_viewpoint(Viewpoint x, const Eigen::Vector2f& sensor_xy_room, const Eigen::Vector2f& dr_room,
+                                   const Eigen::Vector2f& object_xy)
+{
+    const Eigen::Vector2f r1 = sensor_xy_room - object_xy, r0 = r1 - dr_room;
+    const float z1 = r1.norm(), z0 = r0.norm();
+    if (z1 < 1e-3f or z0 < 1e-3f) return x;   // degenerate geometry (bearing undefined), as accumulate_path — not a tuning threshold
+    x.phi += detail::wrap_pi(std::atan2(r1.y(), r1.x()) - std::atan2(r0.y(), r0.x()));
+    x.z   += z1 - z0;
+    return x;
+}
+
+// A latent's anchor: the viewpoint a at which its current value was established, and the half-width m (per coordinate) of the
+// views it has ALREADY been decorrelated over — its paid frontier.
+//
+// The kernel is an L1 exponential, i.e. a PRODUCT of one-dimensional exponential (Ornstein–Uhlenbeck) kernels, one per
+// coordinate, and an OU process is Markov in its own coordinate: given the value at the nearest view already drawn, a view
+// beyond it at distance Δ has correlation exp(−Δ/ℓ) with it, exactly, whatever came before. So, per coordinate, the new view's
+// excess separation beyond the frontier, Δ = max(0, |x − a| − m), is the argument the unchanged kernel reads:
+//     ρ_k = k(x_k, a) / k(x*, a),  x* = the farthest view already paid for (|x* − a| = m).
+// On a monotone drive the frontier is the previous update's view, so this is D2's ratio k(x_k, x_a)/k(x_{k−1}, x_a) and the per-
+// update ρ equals the old arc-length ρ (the arc length of a monotone path is its separation; same kernel).
+//
+// ★ THE BOUND (controller ruling, task-F1 brief; flagged, not tuned). A view INSIDE the frontier makes that ratio exceed 1. A
+//   lag-1 (Markov) latent predicted b′ = ρb + √(1−ρ²)ε cannot RAISE its correlation — ρ > 1 makes the innovation variance
+//   negative — so ρ = 1 there (the max(0, ·) below) is the FEASIBILITY BOUND of the Markov latent, not a threshold. It errs
+//   conservative: frames that return toward views already drawn are treated as sharing the latent, so they add less
+//   information than the exact model would. The honest form is a per-view latent bank (a non-Markov latent keyed by viewpoint,
+//   D2 Concern 3), NOT built.
+//   The bound is applied against the FRONTIER, not against the previous view x_{k−1} (D2's literal ratio): with x_{k−1} the
+//   bound re-pays every outward half-swing of a jitter that keeps returning, so Σ(1 − ρ²) still grows linearly with the dwell
+//   (measured on g1x_aba_bed_1's dwells: Σ −ln ρ_L = 0.42–0.53 per dwell with x_{k−1}, 0.05–0.11 with the frontier, 0.87–0.96
+//   for the old arc length). With the frontier the bound is the same statement — a Markov latent cannot be re-correlated —
+//   applied once per view instead of once per swing; the kernel ratio and the anchor rule are unchanged.
+// The anchor then follows the view at the latent's own rate (D2's rule), a ← a + (1 − ρ_k)(x_k − a), and the frontier is re-
+// referenced so its LEADING edge stays put (m ← max(m, |x_k − a|) − |shift|): on a straight drive the next update pays exactly
+// its own increment again. The trailing edge is pulled in by twice the shift, so the latent forgets the views it leaves behind
+// at its own rate (on a long drive the anchor lags ~ℓ and views up to ~2ℓ behind still count as drawn — the conservative side).
+struct ViewAnchor
+{
+    bool set = false;   // false until the latent's first update (born at its prior: ρ irrelevant, the engine's new source)
+    Viewpoint a;        // anchor
+    float m_phi = 0.f;  // paid frontier half-widths (rad, m)
+    float m_z = 0.f;
+};
+
+// The separation of view x beyond the anchor's paid frontier, per coordinate, as the ViewpointPath the kernels read. Unset ⇒ 0.
+inline ViewpointPath anchor_separation(const ViewAnchor& A, const Viewpoint& x)
+{
+    if (not A.set) return {};
+    ViewpointPath p;
+    p.dphi_rad = std::max(0.f, std::abs(detail::wrap_pi(x.phi - A.a.phi)) - A.m_phi);   // ★ the feasibility bound, see above
+    p.dz_m     = std::max(0.f, std::abs(x.z - A.a.z) - A.m_z);                         // ★ the same bound
+    return p;
+}
+
+// After the latent's update with view x and the ρ it used: the first update sets the anchor at x; later ones move it.
+inline ViewAnchor anchor_commit(ViewAnchor A, const Viewpoint& x, float rho)
+{
+    if (not A.set) return {true, x, 0.f, 0.f};
+    const float k = 1.f - rho;
+    const float dphi = detail::wrap_pi(x.phi - A.a.phi), dz = x.z - A.a.z;
+    A.m_phi = std::max(A.m_phi, std::abs(dphi)) - k * std::abs(dphi);   // ≥ 0: max(m, s) ≥ s ≥ (1 − ρ)s
+    A.m_z   = std::max(A.m_z, std::abs(dz)) - k * std::abs(dz);
+    A.a.phi += k * dphi;
+    A.a.z   += k * dz;
+    return A;
+}
+
+// One instance's viewpoint bookkeeping, carried across updates (fitter) and staged on each frame (what the update used).
+// cam / L: the camera's / LiDAR's viewpoint; cam_xy / L_xy: their room positions there (the geometry of the next increment
+// and of the offer). Anchors: b_cam (one ρ for every DOF), b_L lateral (the ring gap, reads φ), b_L height (reads z).
+struct ViewState
+{
+    bool on = false;                        // staged by an F1 fitter (absent in older dumps / other callers)
+    Viewpoint cam, L;
+    std::optional<Eigen::Vector2f> cam_xy, L_xy;
+    ViewAnchor a_cam, a_lat, a_H;
+};
+// The view of THIS frame: the last accepted update's viewpoints advanced by the odometry dr since then, at the sensors' current
+// positions (nullopt ⇒ that sensor's viewpoint is not advanced: no position, nothing integrated — fails closed, ρ → 1).
+inline ViewState view_stage(ViewState v, const std::optional<Eigen::Vector2f>& cam_xy,
+                            const std::optional<Eigen::Vector2f>& L_xy, const Eigen::Vector2f& dr, const Eigen::Vector2f& c)
+{
+    v.on = true;
+    if (cam_xy.has_value()) { v.cam = advance_viewpoint(v.cam, *cam_xy, dr, c); v.cam_xy = cam_xy; }
+    if (L_xy.has_value())   { v.L   = advance_viewpoint(v.L,   *L_xy,   dr, c); v.L_xy = L_xy; }
+    return v;
+}
+// After an ACCEPTED update with that frame: the measuring channels' anchors move (ρ_cam, ρ_L lateral, ρ_L height as used).
+inline ViewState view_commit(ViewState v, bool camera, bool lidar, float rho_cam, float rho_lat, float rho_H)
+{
+    if (camera) v.a_cam = anchor_commit(v.a_cam, v.cam, rho_cam);
+    if (lidar)
+    {
+        v.a_lat = anchor_commit(v.a_lat, v.L, rho_lat);
+        v.a_H   = anchor_commit(v.a_H,   v.L, rho_H);
+    }
+    return v;
+}
 
 // ── The localiser's correction for ρ_chain (§7c.2), as testable bookkeeping. ─────────────────────────────────────────
 // c = (pose at the last odometry-consistent sample − ref) − odometry integrated since ref. It must FAIL CLOSED like the

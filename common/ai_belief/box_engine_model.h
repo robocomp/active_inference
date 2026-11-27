@@ -49,6 +49,7 @@ struct PersistentInputs
     Eigen::Vector2f chain_dr   = Eigen::Vector2f::Zero();   // the robot's room displacement since the last update
     Eigen::Vector2f robot_xy   = Eigen::Vector2f::Zero();   // the robot's room position at the capture stamp
     std::optional<Eigen::Vector2f> camera_xy;               // the camera's room position (the offer's ρ path start)
+    rc::ai::view::ViewState view;                           // F1: viewpoints + anchors before this update (off ⇒ none)
     rc::ai::beam::BeamRays beam;                            // the staged LiDAR rays (the beam channel)
     std::vector<rc::ai::beam::ForeignBox> foreign_boxes;    // G3: the neighbours' previous-cycle published beliefs
     double mask_error_rate = 0.0;                           // ε, their prior weight (Model.MaskPixelErrorRate)
@@ -67,6 +68,7 @@ FrameLatents<N> frame_latents(const PersistentInputs<N>& in, bool camera, bool l
     fl.chain_dr   = in.chain_dr;
     fl.robot_xy   = in.robot_xy;
     fl.camera_xy  = in.camera_xy;
+    fl.view       = in.view;
     fl.camera_measured = camera;
     fl.lidar_measured  = lidar;
     fl.foreign_boxes   = in.foreign_boxes;

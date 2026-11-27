@@ -409,6 +409,9 @@ struct CountableFrame
     // The camera's room position (floor plane) at this frame — where the offer gain's ρ path starts (shared-engine G5;
     // FrameLatents::camera_xy). Absent ⇒ robot_xy.
     std::optional<Eigen::Vector2f> camera_xy;
+    // F1 (task-F1): the sensors' viewpoints about the object at this frame and the latents' anchors BEFORE this update
+    // (rc::ai::view::view_stage) — what ρ_cam / ρ_L were computed from, and where the offer's ρ starts. off ⇒ not staged.
+    rc::ai::view::ViewState view;
     // The latents' marginal variances at THIS frame (σ_now²): b_cam = floors + range + obliquity + moments (no chain, no
     // ego-motion); b_L = the config floors. 0 = a zero-variance latent.
     std::array<float, 6> sig2_cam{};

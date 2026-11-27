@@ -250,24 +250,26 @@ void CountableFitter::integrate_odometry(CountableInstance& inst)
     // (the robot did move; the localiser's share of it is what ρ_chain already reads as a correction).
     if (step3.has_value())         inst.chain_dr += step3->head<2>();
     else if (inst.chain.have)      inst.chain_dr += robot_xy_now_ - inst.chain.prev.head<2>();
-    if (step3.has_value())
-    {
-        const Eigen::Vector2f step = step3->head<2>();
-        const auto& s = inst.ai2_belief.state();
-        const Eigen::Vector2f centre(s.cx, s.cy);
-        rc::accumulate_path(inst.path_cam, zed_xy_now_, step, centre);
-        if (have_helios_) rc::accumulate_path(inst.path_L, helios_now_.head<2>(), step, centre);
-    }
+    // The viewpoints' odometry (F1): integrable steps only, signed; stage_persistent applies them at the sensors' positions.
+    if (step3.has_value()) inst.view_dr += step3->head<2>();
     rc::chain_observe(inst.chain, Eigen::Vector3f(robot_xy_now_.x(), robot_xy_now_.y(), robot_yaw_now_), step3);
     if (odo_ts_ > inst.last_odo_ts) inst.last_odo_ts = odo_ts_;
 }
 
-// Stage the persistent-path inputs on a frame: ρ of each latent from the paths accumulated since its channel's last update
-// (§7c.2), the latents' marginals and the fresh ego-motion variances. Pure function of the instance + this cycle's pose.
+// Stage the persistent-path inputs on a frame: ρ of each latent from the SEPARATION of this frame's viewpoint from the latent's
+// anchor (§7c.2; F1, rc::ai::view::anchor_separation — the kernels unchanged, only their argument), the latents' marginals and
+// the fresh ego-motion variances. Pure function of the instance + this cycle's pose.
 void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& frame, const LatentInputs& li) const
 {
     const auto& s = inst.ai2_belief.state();
     const Eigen::Vector2f c(s.cx, s.cy);
+    // This frame's viewpoints: the last accepted update's, advanced by the odometry since (at the sensors' current positions).
+    frame.view = rc::view_stage(inst.view, have_pose_now_ ? std::optional<Eigen::Vector2f>(zed_xy_now_) : std::nullopt,
+                                have_helios_ ? std::optional<Eigen::Vector2f>(helios_now_.head<2>()) : std::nullopt,
+                                inst.view_dr, c);
+    const rc::ViewpointPath sep_cam = rc::anchor_separation(frame.view.a_cam, frame.view.cam);
+    const rc::ViewpointPath sep_lat = rc::anchor_separation(frame.view.a_lat, frame.view.L);
+    const rc::ViewpointPath sep_H   = rc::anchor_separation(frame.view.a_H,   frame.view.L);
     // Camera: ρ_cam = exp(−|Δφ|/atan(w⊥/2z) − |Δz|/z), w⊥ = the box's extent across the line of sight.
     float rho_cam = 1.0f;
     if (have_pose_now_)
@@ -279,7 +281,7 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
             const Eigen::Vector2f t(-r.y() / z, r.x() / z);
             const Eigen::Vector2f ux(std::cos(s.yaw), std::sin(s.yaw)), uy(-std::sin(s.yaw), std::cos(s.yaw));
             const float w_perp = s.w * std::abs(ux.dot(t)) + s.h * std::abs(uy.dot(t));
-            if (w_perp > 0.0f) rho_cam = rc::rho_camera(inst.path_cam, z, w_perp);   // degenerate geometry ⇒ parked
+            if (w_perp > 0.0f) rho_cam = rc::rho_camera(sep_cam, z, w_perp);   // degenerate geometry ⇒ parked
         }
     }
     // LiDAR: lateral DOFs and yaw by the ring gap; H by the ring ε that grazes the edge which tells H, moving over it with
@@ -289,11 +291,11 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
     if (helios_ring_gap_rad_ > 0.0f and have_helios_)
     {
         const float zl = (helios_now_.head<2>() - c).norm();
-        rho_lat = rc::rho_lidar_lateral(inst.path_L, helios_ring_gap_rad_);
+        rho_lat = rc::rho_lidar_lateral(sep_lat, helios_ring_gap_rad_);
         const auto span = inst.ai2_belief.params().span();
         const float z_edge = span.hangs() ? span.z0(s.H) : s.H;
         if (zl > 0.0f)
-            rho_H = rc::rho_lidar_height(inst.path_L, zl, std::atan2(z_edge - helios_now_.z(), zl), helios_ring_gap_rad_);
+            rho_H = rc::rho_lidar_height(sep_H, zl, std::atan2(z_edge - helios_now_.z(), zl), helios_ring_gap_rad_);
     }
     else if (helios_ring_gap_rad_ <= 0.0f and not inst.dbg_rhoL_absent_logged)
     {
@@ -328,23 +330,23 @@ void CountableFitter::stage_persistent(CountableInstance& inst, CountableFrame& 
     frame.fresh_L    = li.fresh;
 }
 
-// After an ACCEPTED persistent update: the measuring channels' paths restart, and the chain's reference pose moves here.
+// After an ACCEPTED persistent update: the viewpoints become this frame's and the measuring channels' anchors move (F1), and
+// the chain's reference pose moves here.
 void CountableFitter::consume_paths(CountableInstance& inst, const CountableFrame& frame, bool camera, bool lidar)
 {
-    // The log records the ρ THIS accepted update used, per channel that measured (neutral 1 / 0 otherwise, see run_inference).
+    // The log records the ρ THIS accepted update used, per channel that measured (neutral 1 / 0 otherwise, see run_inference);
+    // Δφ/Δz = the camera's separation beyond its anchor's frontier that ρ_cam read.
     if (camera)
     {
         inst.dbg_rho_cam  = frame.rho_cam[0];
-        inst.dbg_dphi_cam = inst.path_cam.dphi_rad; inst.dbg_dz_cam = inst.path_cam.dz_m;
-        inst.path_cam = {};
+        const rc::ViewpointPath sep = rc::anchor_separation(frame.view.a_cam, frame.view.cam);
+        inst.dbg_dphi_cam = sep.dphi_rad; inst.dbg_dz_cam = sep.dz_m;
     }
-    if (lidar)
-    {
-        inst.dbg_rho_L = frame.rho_L[0];
-        inst.path_L    = {};
-    }
+    if (lidar) inst.dbg_rho_L = frame.rho_L[0];
     if (camera or lidar)
     {
+        inst.view    = rc::view_commit(frame.view, camera, lidar, frame.rho_cam[0], frame.rho_L[0], frame.rho_L[2]);
+        inst.view_dr.setZero();
         inst.dbg_rho_chain = frame.rho_chain;
         rc::chain_rebase(inst.chain);
         inst.chain_dr.setZero();                   // e's lever and transport have consumed this displacement

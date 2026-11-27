@@ -5,6 +5,8 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <span>
+#include <cstdint>
+#include <vector>
 #include "ai_belief/viewpoint.h"
 #include "place_memory/place_map.h"
 
@@ -275,6 +277,137 @@ static void rho_chain_never_above_one()
     CHECK(r >= 0.0 and r <= 1.0);
 }
 
+
+// ── F1 (task-F1): ρ from the SEPARATION of viewpoints (anchor + paid frontier), not from the odometry arc length ────────────
+// One update per sensor position s_k (object at the origin): dr = s_k − s_{k−1}. F1 = view_stage / anchor_separation /
+// view_commit, exactly as the fitter calls them; OLD = the path reset after every update, accumulate_path over the same step
+// (what the fitter did before F1; integrated in 1000 chords so it is the step's arc length, not a one-chord approximation).
+struct F1Run { std::vector<float> rho_new, rho_old; };
+static F1Run run_f1(const std::vector<V2>& s, float g, float w)
+{
+    F1Run out;
+    const V2 obj(0.f, 0.f);
+    ViewState v;
+    for (std::size_t k = 0; k < s.size(); ++k)
+    {
+        const V2 dr = k == 0 ? V2::Zero() : V2(s[k] - s[k - 1]);
+        v = view_stage(v, s[k], s[k], dr, obj);
+        const float z = s[k].norm();
+        const float rl = rho_lidar_lateral(anchor_separation(v.a_lat, v.L), g);
+        const float rc = rho_camera(anchor_separation(v.a_cam, v.cam), z, w);
+        const float rh = rho_lidar_height(anchor_separation(v.a_H, v.L), z, 0.3f, g);
+        v = view_commit(v, true, true, rc, rl, rh);
+        ViewpointPath p;   // the old arc length of the step, integrated finely (1000 chords): the path's own length
+        if (k > 0) for (int j = 0; j < 1000; ++j) accumulate_path(p, s[k - 1] + (float(j + 1) / 1000.f) * dr, dr / 1000.f, obj);
+        if (k > 0) { out.rho_new.push_back(rl); out.rho_old.push_back(rho_lidar_lateral(p, g)); }
+        if (k > 0) { out.rho_new.push_back(rc); out.rho_old.push_back(rho_camera(p, z, w)); }
+        if (k > 0) { out.rho_new.push_back(rh); out.rho_old.push_back(rho_lidar_height(p, z, 0.3f, g)); }
+    }
+    return out;
+}
+// Σ(1 − ρ²) of one latent (stride 3: 0 = lateral, 1 = camera, 2 = height), the number of fresh views it was re-drawn by.
+static double redraws(const std::vector<float>& r, int which)
+{
+    double a = 0.0;
+    for (std::size_t i = std::size_t(which); i < r.size(); i += 3) a += 1.0 - double(r[i]) * double(r[i]);
+    return a;
+}
+
+// (1) Zero-mean jitter of radius r around one view: Σ(1 − ρ²) stays O(r/ℓ) and does not grow with N; the old arc length grows
+//     linearly. Jitter uniform in a disc of r = 2 mm at z = 2 m (r/z = 1 mrad against g = 39 mrad).
+static void f1_jitter_does_not_accumulate()
+{
+    const float g = 0.0392f, w = 0.5f, r = 0.002f, z = 2.f;
+    std::uint32_t st = 12345u;
+    const auto u01 = [&] { st = st * 1664525u + 1013904223u; return float(st >> 8) / float(1u << 24); };
+    std::vector<V2> s;
+    for (int k = 0; k <= 10000; ++k)
+    {
+        float x, y;
+        do { x = 2.f * u01() - 1.f; y = 2.f * u01() - 1.f; } while (x * x + y * y > 1.f);
+        s.emplace_back(z + r * x, r * y);
+    }
+    double new_n[3] = {}, old_n[3] = {};
+    const int Ns[3] = {100, 1000, 10000};
+    for (int i = 0; i < 3; ++i)
+    {
+        const F1Run f = run_f1(std::vector<V2>(s.begin(), s.begin() + Ns[i] + 1), g, w);
+        new_n[i] = redraws(f.rho_new, 0); old_n[i] = redraws(f.rho_old, 0);
+        std::printf("  jitter N=%5d  Σ(1-ρ²) lateral: F1 %.4f  old %.3f   camera: F1 %.5f old %.4f   height: F1 %.5f old %.4f\n",
+                    Ns[i], new_n[i], old_n[i], redraws(f.rho_new, 1), redraws(f.rho_old, 1), redraws(f.rho_new, 2),
+                    redraws(f.rho_old, 2));
+        // O(r/ℓ): the separations stay inside the jitter's hull (2r across), so Σ −ln ρ ≤ (2r/z)/g to first order and
+        // Σ(1 − ρ²) ≤ 2·Σ −ln ρ. 4.5 = 2 · 2 + the anchor's own small drift.
+        CHECK(new_n[i] <= 4.5 * double(r / z) / double(g));
+    }
+    CHECK(new_n[2] < 2.0 * new_n[0]);          // does not grow with N (×100 samples)
+    CHECK(old_n[2] > 50.0 * old_n[0]);         // the old arc length does (linearly)
+    CHECK(old_n[2] > 100.0 * new_n[2]);
+}
+
+// (2) Monotone straight drive: the per-update ρ (and so the product) equals the old arc-length ρ to float precision, on every
+//     latent — radially outward, and on a line whose bearing and range both grow.
+static void f1_monotone_drive_matches_arc_length()
+{
+    const float g = 0.0392f, w = 0.5f;
+    for (const V2 dir : {V2(1.f, 0.f), V2(0.6f, 0.8f)})
+    {
+        std::vector<V2> s;
+        for (int k = 0; k <= 200; ++k) s.push_back(V2(2.f, 0.3f) + 0.005f * float(k) * dir);
+        const F1Run f = run_f1(s, g, w);
+        double worst = 0.0, lp_new = 0.0, lp_old = 0.0;
+        for (std::size_t i = 0; i < f.rho_new.size(); ++i)
+        {
+            worst = std::max(worst, std::abs(double(f.rho_new[i]) - double(f.rho_old[i])));
+            lp_new += std::log(double(f.rho_new[i])); lp_old += std::log(double(f.rho_old[i]));
+        }
+        std::printf("  monotone dir (%.1f,%.1f): max |ρ_F1 − ρ_old| %.2e, Σ ln ρ F1 %.6f old %.6f\n", dir.x(), dir.y(), worst,
+                    lp_new, lp_old);
+        CHECK(worst < 2e-5);                                       // float: φ is a running sum, the difference is ~1e-7 rad
+        CHECK(std::abs(lp_new - lp_old) < 1e-4 * std::abs(lp_old));
+        CHECK(lp_old < -1.0);                                      // positive control: the drive does decorrelate
+    }
+}
+
+// (3) Out and back along the circle (pure bearing): on the way back ρ = 1 while the view is inside what the latent was already
+//     decorrelated over (★ the feasibility bound active), so a short excursion is not re-drawn twice; a long one is re-drawn
+//     only beyond the frontier (≈ 2ℓ behind the turn), never the full way back as the arc length does.
+static void f1_out_and_back()
+{
+    const float g = 0.0392f, w = 0.5f, z = 2.f;
+    for (const float D : {0.5f, 3.f})   // out-leg length in units of ℓ = g (angle)
+    {
+        const int n = 200;
+        std::vector<V2> s;
+        for (int k = 0; k <= n; ++k) { const float th = D * g * float(k) / n; s.emplace_back(z * std::cos(th), z * std::sin(th)); }
+        for (int k = n - 1; k >= 0; --k) s.push_back(s[std::size_t(k)]);
+        const F1Run f = run_f1(s, g, w);
+        double out_new = 0.0, back_new = 0.0, out_old = 0.0, back_old = 0.0;
+        int back_one = 0;
+        for (std::size_t i = 0; i < f.rho_new.size(); i += 3)
+        {
+            const bool back = i / 3 >= std::size_t(n);
+            (back ? back_new : out_new) += -std::log(double(f.rho_new[i]));
+            (back ? back_old : out_old) += -std::log(double(f.rho_old[i]));
+            if (back and f.rho_new[i] == 1.f) ++back_one;
+        }
+        std::printf("  out-and-back D=%.1fℓ: Σ −ln ρ_lateral out F1 %.4f old %.4f | back F1 %.4f old %.4f | back ρ==1 on %d of %d\n",
+                    D, out_new, out_old, back_new, back_old, back_one, n);
+        CHECK(std::abs(out_new - out_old) < 1e-3 * out_old);       // the out leg is a monotone drive
+        if (D < 1.f)
+        {
+            CHECK(back_one == n);                                  // every return update at the bound: no second draw
+            CHECK(back_new == 0.0);
+        }
+        else
+        {   // the frontier's trailing edge sits x − 2L(x) behind the turn, L(x) = ℓ(1 − e^{−x/ℓ}) (the anchor's lag)
+            const double L = 1.0 - std::exp(-double(D)), want = double(D) - 2.0 * L;
+            CHECK(std::abs(back_new - want) < 0.03 * want);
+            CHECK(back_one > 0 and back_new < 0.5 * back_old);
+        }
+    }
+}
+
 int main()
 {
     chain_fails_closed(); rho_chain_zero_correction_is_one_se2(); pose_cov_round_trip(); pose_cov_absent_is_zero();
@@ -283,6 +416,7 @@ int main()
     parked_is_one(); stale_odometry_is_parked(); odometry_axes(); camera_efold_is_half_width(); lidar_efold();
     composes(); rotation_in_place_is_one(); absent_ring_gap_is_one();
     degenerate_geometry_unchanged();
+    f1_jitter_does_not_accumulate(); f1_monotone_drive_matches_arc_length(); f1_out_and_back();
     std::printf(bad == 0 ? "viewpoint_rho_test: PASS\n" : "viewpoint_rho_test: %d FAILED\n", bad);
     return bad == 0 ? 0 : 1;
 }
