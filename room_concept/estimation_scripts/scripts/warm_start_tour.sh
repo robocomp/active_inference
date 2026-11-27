@@ -25,7 +25,10 @@ export WT=${WT:-$B} WT_AGENTS=${WT_AGENTS:-"controller door_concept room_concept
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
 DOOR1_Y=9.3796; DOOR2_X=-1.705
 # ── the two switches, for THIS run only (restored on exit) ──
-RC_CFG=$WT/room_concept/etc/config.toml; LT_CFG=$WT/ltsm_agent/etc/config.toml
+# the config of the checkout each agent RUNS from (run_crossing.sh: $WT only when WT_AGENTS names it, else main). G1x 2026-11-26:
+# WT=<worktree> WT_AGENTS="controller" ran room_concept from main but switched the worktree's config.
+RC_CFG=$B/room_concept/etc/config.toml; [[ " $WT_AGENTS " == *" room_concept "* ]] && RC_CFG=$WT/room_concept/etc/config.toml
+LT_CFG=$B/ltsm_agent/etc/config.toml;   [[ " $WT_AGENTS " == *" ltsm_agent "* ]] && LT_CFG=$WT/ltsm_agent/etc/config.toml
 cp $RC_CFG $RC_CFG.warm_bak; cp $LT_CFG $LT_CFG.warm_bak
 trap 'mv -f $RC_CFG.warm_bak $RC_CFG; mv -f $LT_CFG.warm_bak $LT_CFG; rm -f $LOCK; [ -n "$REC_PID" ] && kill -TERM $REC_PID 2>/dev/null' EXIT
 sed -i 's/^MapMode = "[a-z]*"/MapMode = "ltsm"/' $RC_CFG
