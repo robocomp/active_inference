@@ -2,7 +2,8 @@
 // room, same facing, within 3σ in offset and angle on the lines' own σ), not room_concept's edge index: (1) the outline is
 // renumbered between updates (edge 0 → 3 → 7 → 0) and the staged line jitters by 5 mm — the priors entered on the first update
 // only; (2) the nearest wall alternates A → B → A → B (a box in a corner) — the priors entered on the first A and the first B
-// only, never again. Run: ./wall_identity_test
+// only, never again (CW1 fix round 2: on the first update of each that converged, since an entry is committed only when absorbed).
+// Run: ./wall_identity_test
 #include <cstdio>
 #include <vector>
 #include "countable_belief.h"
@@ -63,14 +64,24 @@ int main()
         const WallRef B = wall(1.0f, 0.0f, -1.0f, 0.0f, 1);
         CountableBelief b(CountableBeliefState{0.7f, -0.28f, 0.6f, 0.5f, 0.5f, 0.0f}, params());
         b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
-        std::vector<int> entered;
+        std::vector<int> entered, conv;
         for (int k = 0; k < 6; ++k)
         {
             b.update(frame(k % 2 ? B : A0));
             entered.push_back(b.last_wall_entered() ? 1 : 0);
+            conv.push_back(b.last_gn_converged() ? 1 : 0);
         }
-        std::printf("  alternating A,B,A,B,A,B: entered %d %d %d %d %d %d\n", entered[0], entered[1], entered[2], entered[3], entered[4], entered[5]);
-        CHECK(entered == (std::vector<int>{1, 1, 0, 0, 0, 0}));
+        std::printf("  alternating A,B,A,B,A,B: entered %d %d %d %d %d %d  (GN converged %d %d %d %d %d %d)\n", entered[0], entered[1], entered[2],
+                    entered[3], entered[4], entered[5], conv[0], conv[1], conv[2], conv[3], conv[4], conv[5]);
+        // CW1 fix round 2 (N2): a wall's priors are recorded as entered only on an update that ABSORBED them (converged; an unconverged
+        // update keeps P = P̄). So each physical wall enters exactly once, on its first converged update: A on the first A update that
+        // converged, B on the first converged B update, and never again. (Here the B updates are side-on to B, where the parallel term
+        // sits at its maximum — review M5, parked — and the first B updates cap.)
+        std::vector<int> expect(6, 0);
+        for (const int parity : {0, 1})
+            for (int k = parity; k < 6; k += 2)
+                if (conv[std::size_t(k)]) { expect[std::size_t(k)] = 1; break; }
+        CHECK(entered == expect);
     }
     std::printf(bad ? "wall_identity_test: %d FAILED\n" : "wall_identity_test: OK\n", bad);
     return bad != 0;
