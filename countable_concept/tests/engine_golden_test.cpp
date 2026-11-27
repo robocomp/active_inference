@@ -43,6 +43,8 @@
 // back corners sit at the term's boundary from record 0 and the trajectory moves from there; no other change enters.
 // Re-recorded for CW1 fix round 1: the containment is a prior on θ only (selector 0) with each wall's error profiled out
 // (σ_s² + v_j, the staged wall latent's carried δ̄ / v), and it enters the move statistic's factor; records move from 0 again.
+// Re-recorded for CW1 fix round 2: the support acts on θ decoupled from δ (κ = Σ_θδ/Σ_δδ), the vertex gradient carries ∂λ, and
+// the attachment entry commits only on a converged update; records move from 0.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
