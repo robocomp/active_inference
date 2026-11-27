@@ -4,7 +4,8 @@
 # Everything in this course is built from three operations on a joint distribution: **factorise**,
 # **marginalise**, **condition**. You will run them on the door table from the slides, then on the
 # Gaussian wall, then use them to see why we write the joint in causal order, and why the robot's
-# action depends on the world only through what it has seen.
+# action depends on the world only through what it has seen. Last, you run them over time: the
+# Kalman filter, and what happens when the model leaves something out.
 
 # %%
 import sys
@@ -25,7 +26,7 @@ world = two_room_apartment()
 # %% [markdown]
 # # The three operations, by hand
 #
-# ## A1. The door table
+# ## 1. The door table
 #
 # $S$: is the door open (the state)? $O$: does the LiDAR see a gap where the door is? We store a joint over
 # discrete variables as a numpy array with one axis per variable.
@@ -36,7 +37,7 @@ p_O_given_S = np.array([[0.9, 0.1],           # row s: p(O = [gap, wall] | S = s
                         [0.2, 0.8]])
 
 # %% [markdown]
-# **Exercise A1 — factorise, marginalise, condition.** Build the joint `joint[s, o]` with the
+# **Exercise 1 — factorise, marginalise, condition.** Build the joint `joint[s, o]` with the
 # product rule $p(s, o) = p(o \mid s)\,p(s)$. Then compute the marginal $p(O)$ by summing out $S$,
 # and the posterior $p(S \mid O = \text{gap})$ by taking the gap column and dividing it by its sum.
 # (Check yourself: the joint is $0.27, 0.03, 0.14, 0.56$; $p(O=\text{gap}) = 0.41$;
@@ -52,7 +53,7 @@ print("joint:\n", joint, "\nsums to", joint.sum())
 print("p(O) =", p_O, "  p(S | gap) =", p_S_given_gap.round(3))
 
 # %% [markdown]
-# **Exercise A2 — the other factorisation.** Compute $p(S \mid O)$ for both values of $O$ and
+# **Exercise 2 — the other factorisation (homework).** Compute $p(S \mid O)$ for both values of $O$ and
 # check that $p(S \mid O)\,p(O)$ rebuilds the same joint. Bayes' rule is nothing but this identity:
 # two factorisations of one joint.
 
@@ -64,13 +65,13 @@ print("each column of p(S|O) adds to 1:", p_S_given_O.sum(axis=0))
 print("rebuilt from p(S|O) p(O):", np.allclose(p_S_given_O * p_O[None, :], joint))
 
 # %% [markdown]
-# ## A2. The Gaussian wall
+# ## 2. The Gaussian wall
 #
 # $s$ is the distance to a wall, prior $\mathcal N(2, 0.5^2)$; $o$ is a range reading,
 # $o \mid s \sim \mathcal N(s, 0.2^2)$. The joint over $(s, o)$ is Gaussian, with the mean and
 # covariance below (built on the slides from the model).
 #
-# **Exercise A3 — marginalise and condition a Gaussian.**
+# **Exercise 3 — marginalise and condition a Gaussian.**
 # 1. Marginal $p(o)$: cross out the row and column of $s$. (Check: $\mathcal N(2, 0.29)$.)
 # 2. Conditional $p(s \mid o = 2.6)$ in gain form: $k = \Sigma_{so}/\Sigma_{oo}$,
 #    mean $\mu_s + k\,(o - \mu_o)$, variance $\Sigma_{ss} - k\,\Sigma_{os}$. (Check: $k = 0.86$,
@@ -94,7 +95,7 @@ print(f"p(o) = N({m_o:.2f}, {v_o:.2f})    gain k = {k:.2f}")
 print(f"formula: {m_post:.3f} ± {np.sqrt(v_post):.3f}    samples ({len(kept)} kept): {kept.mean():.3f} ± {kept.std():.3f}")
 
 # %% [markdown]
-# **Exercise A4 — Bayes on a grid: the three operations in a row.** Without the Gaussian formulas:
+# **Exercise 4 — Bayes on a grid: the three operations in a row.** Without the Gaussian formulas:
 # on a grid of $s$ values, (1) **factorise**: multiply the prior $p(s)$ by the sensor model
 # $p(o = 2.6 \mid s)$; (2) **marginalise**: the area under that product is $p(o = 2.6)$;
 # (3) **condition**: divide the product by the area. Plot all three, and check the area is 0.40
@@ -126,10 +127,10 @@ for ax_, y, t in zip(axs, [product, product, posterior], ["1. factorise", "2. ma
 
 # %% [markdown] solution
 # *Answer.* 11 dimensions at 2001 points each: $2001^{11} \approx 2 \times 10^{36}$ grid points.
-# The area $p(o)$ cannot be computed by brute force; the afternoon is about not computing it.
+# The area $p(o)$ cannot be computed by brute force; Day 2 is about not computing it.
 
 # %% [markdown]
-# ## A3. Three variables, six orderings, one causal order
+# ## 3. Three variables, six orderings, one causal order
 #
 # Now the names used all week: $S$ the state (is the door open?), $O$ the observation (does the
 # LiDAR see a gap?), $A$ the action (does the robot point its LiDAR towards the door, or away?).
@@ -153,10 +154,10 @@ def causal_joint(p_S, p_A, p_O_given_SA):
 joint3 = causal_joint(p_S, p_A, p_O_given_SA)
 
 # %% [markdown]
-# **Exercise A5 — count the numbers.** A factor $p(X \mid \text{parents})$ over binary variables
+# **Exercise 5 — count the numbers.** A factor $p(X \mid \text{parents})$ over binary variables
 # needs one free number per combination of its parents' values (the other value of $X$ is
 # 1 minus it). Write `n_numbers(n_parents)` and count each ordering. (Check: causal
-# $1 + 1 + 4 = 6$; anti-causal $p(O)\,p(A \mid O)\,p(S \mid O, A)$: $1 + 2 + 4 = 7$.) Then count
+# $1 + 1 + 4 = 6$; anti-causal $p(O)\,p(A \mid O)\,p(S \mid O, A)$: $1 + 2 + 4 = 7$.) At home, count
 # $N = 20$ binary variables, with every factor keeping all earlier variables, against at most
 # $k = 3$ parents each.
 
@@ -169,10 +170,10 @@ def n_numbers(n_parents):
 
 print("causal     :", n_numbers(0) + n_numbers(0) + n_numbers(2))
 print("anti-causal:", n_numbers(0) + n_numbers(1) + n_numbers(2))
-print("N = 20, nothing dropped:", sum(n_numbers(i) for i in range(20)), "   at most 3 parents:", 20 * n_numbers(3))
+print("N = 20, nothing dropped:", sum(n_numbers(i) for i in range(20)), "   at most 3 parents (an upper bound):", 20 * n_numbers(3))
 
 # %% [markdown]
-# **Exercise A6 — read the anti-causal factors off the joint.** From `joint3` alone (axes
+# **Exercise 6 — read the anti-causal factors off the joint.** From `joint3` alone (axes
 # `[s, o, a]`), compute the three factors of $p(O)\,p(A \mid O)\,p(S \mid O, A)$, and check that
 # their product is `joint3` again. Then:
 #
@@ -211,7 +212,7 @@ for name, x, y in zip(["p(O)", "p(A|O)", "p(S|O,A)"], (p_O3, p_A_given_O, p_S_gi
 # (0.30, the prior).
 
 # %% [markdown]
-# ## A4. The robot acts on what it sees, not on the world
+# ## 4. The robot acts on what it sees, not on the world
 #
 # Two steps. At step 1 the robot looks at the door and gets $o_1$ (gap or wall). At step 2 it
 # chooses $a_2$: it looks at the door again with a probability equal to how unsure it is,
@@ -222,7 +223,7 @@ for name, x, y in zip(["p(O)", "p(A|O)", "p(S|O,A)"], (p_O3, p_A_given_O, p_S_gi
 def run_two_steps(n):
     s = rng.random(n) < p_S[0]                                     # True = open
     gap = rng.random(n) < np.where(s, 0.9, 0.2)                    # o1, LiDAR towards the door
-    belief = np.where(gap, joint[0, 0] / p_O[0], joint[0, 1] / p_O[1])   # p(open | o1), from A1
+    belief = np.where(gap, joint[0, 0] / p_O[0], joint[0, 1] / p_O[1])   # p(open | o1), from Exercise 1
     look_again = rng.random(n) < 1 - np.abs(2 * belief - 1)        # a2
     return s, gap, look_again
 
@@ -230,11 +231,9 @@ def run_two_steps(n):
 s_, gap_, a2_ = run_two_steps(1_000_000)
 
 # %% [markdown]
-# **Exercise A7 — the umbrella test.** From the samples, estimate
+# **Exercise 7 — the action depends on what was seen.** From the samples, estimate
 # 1. $p(a_2 = \text{look} \mid S)$ for $S$ = open and closed. Is $a_2$ independent of $S$?
 # 2. $p(a_2 = \text{look} \mid S, o_1 = \text{gap})$ for $S$ = open and closed. And now?
-#
-# (You take an umbrella because of the forecast, not because of tomorrow's rain.)
 
 # %%
 # BEGIN SOLUTION
@@ -246,5 +245,73 @@ print("p(look | S = open, closed, o1 = gap)  :", np.round(by_S_gap, 3))
 
 # %% [markdown] solution
 # Without $o_1$, the action depends on the door: 0.62 against 0.22, because an open door tends
-# to produce a gap, a gap makes the robot fairly sure, and a sure robot does not look again. Given
+# to produce a gap, a gap leaves the robot unsure ($p(\text{open} \mid \text{gap}) = 0.66$), and an unsure
+# robot looks again; a closed door tends to produce a wall, which leaves it sure (0.05). Given
 # $o_1$, both are 0.68: the door reaches the action only through what the robot has seen.
+
+# %% [markdown]
+# ## 5. Time: the Kalman filter
+#
+# The wall of the slides: $s$ is the distance to the wall. Each step the robot drives $a$ metres
+# towards it, then reads the LiDAR. The model (frame "Gaussian and linear"):
+# $s_t = s_{t-1} - a_t + w$, $w \sim \mathcal N(0, \sigma_w^2)$, and $o_t = s_t + v$, $v \sim \mathcal N(0, \sigma_v^2)$.
+#
+# **Exercise 8 — one step.** Write `kalman_step`: predict with the motion model, then update with
+# the reading. Reproduce the slide "The effect on the belief": from $2.00 \pm 0.50$, drive 0.5 m
+# with $\sigma_w = 0.2$, read $1.3$ with $\sigma_v = 0.2$. You should get $1.50 \pm 0.54$, then $1.32 \pm 0.19$.
+
+# %%
+def kalman_step(mu, var, a, o, var_w, var_v):
+    """One predict + update. Returns (predicted mean, predicted var, mean, var)."""
+    # BEGIN SOLUTION
+    mu_p, var_p = mu - a, var + var_w              # predict: move, and widen
+    k = var_p / (var_p + var_v)                    # the gain
+    mu_u, var_u = mu_p + k * (o - mu_p), (1 - k) * var_p   # update: pull to the reading, narrow
+    # END SOLUTION
+    return mu_p, var_p, mu_u, var_u
+
+
+mu_p, var_p, mu_u, var_u = kalman_step(2.0, 0.5**2, 0.5, 1.3, 0.2**2, 0.2**2)
+print(f"predicted {mu_p:.2f} ± {np.sqrt(var_p):.2f}   after the reading {mu_u:.2f} ± {np.sqrt(var_u):.2f}")
+
+# %% [markdown]
+# **Exercise 9 — a loop, and a wheel bias (homework).** The robot starts 5 m from the wall, believing
+# $4.8 \pm 0.5$, and drives 0.3 m per step for 12 steps. Its wheels err by $\sigma_w = 0.02$ m; the
+# LiDAR by $\sigma_v = 0.2$ m. Run the filter and plot the true distance, the mean and a $\pm 2\sigma$ band.
+# Then make the wheels drive 30% further than commanded (`bias = 1.3`), **without telling the
+# model**. Is the belief still inside its band? How sure is it?
+
+# %%
+def run(bias, steps=12, a=0.3, var_w=0.02**2, var_v=0.2**2, seed=1):
+    g = np.random.default_rng(seed)
+    s, mu, var = 5.0, 4.8, 0.5**2
+    S, M, V = [s], [mu], [var]
+    for _ in range(steps):
+        # BEGIN SOLUTION
+        s = s - bias * a + g.normal(0, np.sqrt(var_w))   # the world: the wheels may be biased
+        o = s + g.normal(0, np.sqrt(var_v))              # the reading
+        _, _, mu, var = kalman_step(mu, var, a, o, var_w, var_v)   # the model: no bias
+        # END SOLUTION
+        S.append(s); M.append(mu); V.append(var)
+    return np.array(S), np.array(M), np.array(V)
+
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 3.5), sharey=True)
+for ax, bias in zip(axes, (1.0, 1.3)):
+    S_, M_, V_ = run(bias)
+    t = np.arange(len(S_))
+    ax.plot(t, S_, "k-", label="true distance")
+    ax.plot(t, M_, color="C3", label="belief mean")
+    ax.fill_between(t, M_ - 2 * np.sqrt(V_), M_ + 2 * np.sqrt(V_), color="C3", alpha=0.2, label="±2σ")
+    ax.set_title(f"bias = {bias}"); ax.set_xlabel("step")
+    print(f"bias {bias}: final error {M_[-1] - S_[-1]:+.2f} m, belief σ {np.sqrt(V_[-1]):.2f} m, "
+          f"error / σ = {(M_[-1] - S_[-1]) / np.sqrt(V_[-1]):+.1f}")
+axes[0].set_ylabel("distance to the wall (m)"); axes[0].legend()
+
+# %% [markdown] solution
+# Without the bias, the truth stays inside the band, and the belief's σ narrows to about 0.07 m: the
+# precise wheels carry the belief between noisy readings. With the bias, the belief stays just as
+# narrow but lags the truth by several σ: the robot is **sure and wrong**. The readings pull it
+# back each step, but the model trusts its wheels (σ_w = 0.02) far more than the LiDAR (σ_v = 0.2),
+# so the pull is weak. The cure is not a threshold: put the bias in the state $s$, as a variable to
+# estimate (Markov's warning on the slides; Day 4).

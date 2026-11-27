@@ -34,6 +34,10 @@
 % \lesson{...}: the one sentence a frame exists to say.
 % one full-width band, no empty title bar above it
 \newcommand{\lesson}[1]{\par\vspace{0pt plus 1filll}\begin{beamercolorbox}[wd=\linewidth, sep=0.45em, center]{block body alerted}#1\end{beamercolorbox}}
+% \ask{question}{answer}: in key frames, the bottom band asks the room (first click, blue)
+% and shows the answer on the next click (in the lesson's colours)
+\setbeamercolor{question box}{bg=cool!18, fg=black}
+\newcommand{\ask}[2]{\par\vspace{0pt plus 1filll}\alt<2->{\begin{beamercolorbox}[wd=\linewidth, sep=0.45em, center]{block body alerted}#2\end{beamercolorbox}}{\begin{beamercolorbox}[wd=\linewidth, sep=0.45em, center]{question box}\textbf{\color{cool!70!black}Question:} #1\end{beamercolorbox}}}
 % space under every frame title, so content never starts flush against the title bar
 \addtobeamertemplate{frametitle}{}{\vspace*{0.8em minus 0.8em}}
 % a measurement story

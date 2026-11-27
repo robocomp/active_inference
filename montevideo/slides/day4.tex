@@ -251,15 +251,11 @@ $\\[1.2em]
   \lesson{A solver lowers $F$ over the pose; the curvature of $F$ at the minimum is its covariance.}
 \end{frame}
 
-\begin{frame}{Example 1: the same $F$ in simulation and on the real robot}
+\begin{frame}{Example 1 in simulation: the pose stays within centimetres of the truth}
   \centering
-  \begin{tikzpicture}
-    \node[draw=good, thick, dashed, rounded corners=4pt, fill=good!6, minimum width=5.6cm, minimum height=3.4cm, align=center, font=\small] at (-3.2,0)
-      {\textbf{simulation}\\[0.3em][figure to add: the Webots run,\\pose against ground truth]};
-    \node[draw=accent, thick, dashed, rounded corners=4pt, fill=accent!6, minimum width=5.6cm, minimum height=3.4cm, align=center, font=\small] at (3.2,0)
-      {\textbf{real robot}\\[0.3em][real-robot clip/figure to add]};
-  \end{tikzpicture}
-  \lesson{Placeholder: the same localiser, simulated and real.}
+  \includegraphics[height=0.64\textheight]{d4_loc_error_sim.png}\\[0.2em]
+  {\footnotesize\color{muted} a Webots tour, 650\,s, four door crossings (shaded); the simulator gives the true pose. The real robot has no ground truth.\par}
+  \lesson{Median error 2.3\,cm and $0.6^\circ$; the peaks come at the door crossings.}
 \end{frame}
 
 % =================================================================================================

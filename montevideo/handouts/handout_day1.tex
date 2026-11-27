@@ -1,0 +1,485 @@
+\documentclass[11pt]{article}
+\input{handout_preamble}
+\graphicspath{{../slides/figures/}}
+\setlength{\parskip}{0.4em}
+\emergencystretch=3em
+\newcommand{\slide}[1]{\textit{``#1''}}
+\newcommand{\psm}[1]{\bigl(\begin{smallmatrix}#1\end{smallmatrix}\bigr)}
+\newcommand{\cs}[1]{cheatsheet~\S#1}
+\begin{document}
+
+{\LARGE\bfseries A robot that acts to know}\\[0.2em]
+{\Large Day 1 handout: the challenge and probability}\hfill{\small\color{muted} Montevideo, Monday 30 November 2026}
+
+\vspace{0.6em}
+\textbf{What today is about.}
+The robot in the video is put down in an apartment it has never seen. Everything it does is built from beliefs:
+it does not know which room it is in, whether a door is open, or how far the wall is, and it must still decide where to drive.
+Today we build the language in which a belief is written and updated. A belief is a probability distribution.
+Three operations on a joint distribution (\emph{factorise}, \emph{marginalise}, \emph{condition}) are enough to write down a model of the robot and its world,
+and to update the belief when a reading arrives. In the lab you run these operations on a door, on a wall, and finally in a loop over time (the Kalman filter).
+The rest of the week reuses exactly these operations: Day 2 explains what the robot does when they cannot be computed exactly,
+and Days 3--5 apply them to rooms, objects and doors.
+
+\textbf{How to use this handout.} It follows the lecture in order (Parts 1--6), then gives the lab guide (Part 7) and a symbol glossary (Part 8).
+Every derivation is written out. The numpy idioms are in the cheatsheet (\cs{1} arrays and broadcasting, \cs{2} the three operations, \cs{3} Gaussians); they are not repeated here.
+Slides are named by their title.
+
+%==================================================================
+\section{Beliefs: random variables and their distributions}
+
+\subsection*{What the robot is uncertain about}
+On the slide \slide{What the robot is uncertain about} the robot is in an apartment of two rooms joined by a door. We call \emph{random variable} any quantity the robot does not know exactly.
+The slide shows four kinds:
+\begin{itemize}[nosep]
+\item $R$, which room the robot is in (room~1 or room~2): a \emph{categorical} variable, a choice among named values.
+\item $S$, whether the door is open or closed; $O$, whether the LiDAR sees a gap or a wall at the door. Both are categorical with two values.
+\item $K$, how many of the $N$ LiDAR returns pass through the door, $K\in\{0,1,\dots,N\}$: a \emph{discrete count}, whose values are ordered numbers.
+\item The pose $x,y,\theta$, the room size $w,d$, the returns $z_i$ and the commands $v,\omega$: \emph{continuous} variables.
+\end{itemize}
+A \emph{belief} about a variable is its probability distribution: how much probability the robot gives to each value.
+
+\subsection*{Discrete beliefs}
+For a categorical variable, a belief is one number per value, each between 0 and 1, adding to 1.
+On the slide \slide{A belief over a categorical discrete variable: one number per value}, $p(R)=(0.70, 0.20, 0.10)$ over three rooms. The more spread the numbers are, the more uncertain the belief
+(a belief of $0.34, 0.33, 0.33$ is almost as unsure as possible; $1, 0, 0$ is certain).
+For a count, the values are numbers, so the belief also has a \emph{mean} $\E[K]=\sum_k k\,p(k)$ and a \emph{spread} $\sigma_K=\sqrt{\E[(K-\E[K])^2]}$ (the slide \slide{A belief over a numerical discrete variable}:
+for $N=10$ and a closed door, mean 3.0 and spread $\pm1.4$).
+
+\subsection*{Continuous beliefs: a density}
+A continuous variable has no ``probability of one exact value''. Its belief is a \emph{density} $p(s)\ge0$ whose \emph{area} is probability:
+\[
+P(a<s<b)=\int_a^b p(s)\,ds,\qquad \int p(s)\,ds=1 .
+\]
+On the slide \slide{A belief over a continuous variable: a density}, $s$ is the distance to a wall and $P(1.5<s<2.5)=0.46$ is the shaded area.
+
+\subsection*{The Gaussian}
+A Gaussian density is described by two numbers, a mean $\mu$ (the most likely value) and a standard deviation $\sigma$ (the spread); $\sigma^2$ is the \emph{variance}:
+\[
+\N(s;\mu,\sigma^2)=\frac{1}{\sqrt{2\pi\sigma^2}}\exp\!\Big(-\frac{(s-\mu)^2}{2\sigma^2}\Big).
+\]
+For $\mu=2$ m and $\sigma=0.5$ m, $P(1.5<s<2.5)=0.68$: about 68\% of the area lies within one $\sigma$ of the mean. With several variables, $\mu$ becomes a vector and $\sigma^2$ a matrix $\Sigma$
+(the \emph{covariance matrix}); see below.
+
+\begin{keyidea}
+\textbf{Take-away.} A belief is a distribution: one number per value for a discrete variable, a density (area is probability) for a continuous one, and for a Gaussian just a mean and a spread.
+\end{keyidea}
+
+%==================================================================
+\section{The joint distribution and the three operations}
+
+\subsection*{The joint}
+The \emph{joint distribution} $p(S,O)$ gives a probability to every combination of values. It contains everything the robot believes about both variables.
+For the door, the slide \slide{The joint distribution: everything there is to know} uses
+\begin{center}
+\begin{tabular}{l|cc|c}
+& $O=$gap & $O=$wall & $p(S)$\\\hline
+$S=$open & 0.27 & 0.03 & 0.30\\
+$S=$closed & 0.14 & 0.56 & 0.70\\\hline
+$p(O)$ & 0.41 & 0.59 & 1
+\end{tabular}
+\end{center}
+The four numbers add to 1. The margins (the row and column sums) are the beliefs about one variable alone.
+In the notebook this table is a 2-D array \texttt{joint[s, o]} with one axis per variable (\cs{1}).
+
+\subsection*{Marginalisation: drop a variable by summing it out}
+\[
+p(O)=\sum_{S}p(S,O),\qquad\text{so}\quad p(O{=}\text{gap})=0.27+0.14=0.41,\quad p(O{=}\text{wall})=0.03+0.56=0.59 .
+\]
+\emph{Why:} the event ``$O=$gap'' happens when the door is open and a gap is seen, or when the door is closed and a gap is seen. These are exclusive cases, so their probabilities add.
+For a density the sum becomes an integral, $p(o)=\int p(s,o)\,ds$ (slide \slide{Marginalisation: the belief about one variable, integrating over the others}): the joint is a surface over $(s,o)$, and we add up the surface along $s$.
+
+\subsection*{Conditioning: how a reading enters a belief}
+The robot sees a gap. It now keeps only the joint entries where $O=$gap, and rescales them so they add to 1:
+\[
+p(S\given O):=\frac{p(S,O)}{p(O)},\qquad p(\text{open}\given\text{gap})=\frac{0.27}{0.41}=0.66,\quad p(\text{closed}\given\text{gap})=\frac{0.14}{0.41}=0.34 .
+\]
+\emph{Why divide by $p(O)$:} the column $O=$gap adds to $0.41$, not 1. Dividing by that sum makes it add to 1 while keeping the ratio $0.27:0.14$.
+Before the reading the robot gave the open door probability 0.30; the gap raises it to 0.66. For a density the slice $p(s,o{=}2.1)$ has area $0.38$ (slide \slide{Conditioning: how a reading enters a belief}, continuous version), and dividing by $0.38$ makes the area 1.
+
+\subsection*{Factorisation: a marginal times a conditional rebuilds the joint}
+Rearranging the definition of conditioning gives the \emph{product rule}
+\[
+p(S,O)=p(S)\,p(O\given S)=p(O)\,p(S\given O).
+\]
+On the slide \slide{Factorisation: a marginal times a conditional gives the joint}, with $p(S{=}\text{open})=0.3$ and $p(O{=}\text{gap}\given S{=}\text{open})=0.9$, the entry is $0.3\times0.9=0.27$.
+With the other order, $p(O{=}\text{gap})\,p(S{=}\text{open}\given\text{gap})=0.41\times0.66=0.27$. Same joint, two factorisations. This identity is all of Bayes' rule (Part~5).
+
+Dividing both sides of $p(S)\,p(O\given S)=p(O)\,p(S\given O)$ by $p(O)$ gives $p(S\given O)=p(O\given S)\,p(S)/p(O)$: this is Bayes' rule (Part~5).
+
+
+\subsection*{The covariance matrix}
+For two continuous variables $(s,o)$ with means $\mu_s,\mu_o$, the covariance matrix collects
+\[
+\Sigma=\begin{pmatrix}\Sigma_{ss}&\Sigma_{so}\\\Sigma_{os}&\Sigma_{oo}\end{pmatrix},\quad
+\Sigma_{ss}=\E[(s-\mu_s)^2],\quad \Sigma_{so}=\Sigma_{os}=\E[(s-\mu_s)(o-\mu_o)].
+\]
+The diagonal entries are the variances. The off-diagonal entry $\Sigma_{so}$ says whether the two variables move together: positive if $o$ tends to be above its mean when $s$ is above its mean, zero if unrelated, negative if opposed (slide \slide{The covariance matrix: what each number means}).
+
+\subsection*{The wall's covariance, built from its model}
+On the slide \slide{The wall's covariance, built from its model}, we write a prior $s\sim\N(2,0.5^2)$ for the distance to the wall and a sensor $o=s+\text{noise}$, with noise $\sim\N(0,0.2^2)$ independent of $s$. Then:
+\begin{align*}
+\Sigma_{ss}&=\mathrm{Var}(s)=0.5^2=0.25,\\
+\Sigma_{so}&=\E[(s-\mu_s)(s+\text{noise}-\mu_s)]=\E[(s-\mu_s)^2]+\E[(s-\mu_s)\,\text{noise}]=0.25+0=0.25,\\
+\Sigma_{oo}&=\mathrm{Var}(s+\text{noise})=0.25+0.2^2=0.29 .
+\end{align*}
+(The cross term is 0 because the noise is independent of $s$; the variances of independent quantities add.) The means are $\mu_s=\mu_o=2$. This is the joint $\N\!\big((2,2),\psm{0.25&0.25\\0.25&0.29}\big)$ used in the lab.
+
+\subsection*{Marginalising and conditioning a Gaussian}
+\textbf{Marginal.} Cross out the row and column of the variable you drop. Dropping $s$ leaves $p(o)=\N(2,0.29)$.
+
+\textbf{Conditional.} Given a reading $o=o^\star$, the belief about $s$ is Gaussian with
+\[
+k=\frac{\Sigma_{so}}{\Sigma_{oo}},\qquad
+\mu_{s\given o}=\mu_s+k\,(o^\star-\mu_o),\qquad
+\Sigma_{s\given o}=\Sigma_{ss}-k\,\Sigma_{os}.
+\]
+For $o^\star=2.6$: $k=0.25/0.29=0.86$, mean $2+0.86\times0.6=2.52$, variance $0.25-0.86\times0.25=0.0345$, so $2.52\pm0.19$ m.
+The robot trusts the reading in proportion $k$: it moves its mean towards $o^\star$ by the fraction $k$ of the surprise $o^\star-\mu_o$, and the variance shrinks by the same fraction $k$ of $\Sigma_{ss}$.
+
+\emph{Check by a second route (precisions).} Multiply the prior by the likelihood as functions of $s$. Up to a constant,
+\[
+p(s\given o^\star)\ \propto\ \exp\!\Big(-\tfrac{(s-2)^2}{2\cdot0.25}\Big)\exp\!\Big(-\tfrac{(o^\star-s)^2}{2\cdot0.04}\Big).
+\]
+Collect the $s^2$ terms in the exponent: $-\tfrac12 s^2\,(1/0.25+1/0.04)$. The coefficient is the new \emph{precision} (precision is $1/\text{variance}$): $4+25=29$, so variance $1/29=0.0345$. The $s$ terms give $s\,(2/0.25+2.6/0.04)=73\,s$, and the mean is $73/29=2.52$.
+So the posterior mean is a precision-weighted average of the prior mean and the reading, and precisions add. This is the same answer as the gain form; in the lab you check it three ways.
+
+\begin{keyidea}
+\textbf{Take-away.} Marginalise by summing (or integrating) out the variable you drop; condition by keeping the slice at the reading and rescaling it to area 1; factorise by multiplying a marginal and a conditional. For a Gaussian these are a few lines of arithmetic.
+\end{keyidea}
+
+%==================================================================
+\section{Modelling the joint by factorisation}
+
+\subsection*{The chain rule}
+For any variables, repeatedly applying the product rule peels them off one at a time (slide \slide{The chain rule: $N$ variables, $N$ factors}):
+\[
+p(X_1,X_2,X_3,X_4)=p(X_1\given X_2,X_3,X_4)\,p(X_2\given X_3,X_4)\,p(X_3\given X_4)\,p(X_4).
+\]
+It holds for any joint, so on its own it simplifies nothing: the last variable's factor has $N-1$ conditioning variables. Simplification comes only from knowledge we inject (below).
+
+\subsection*{Orderings}
+The chain rule works for any order of the variables. Two variables give $2!=2$ factorisations ($p(S)p(O\given S)$ or $p(O)p(S\given O)$); three give $3!=6$; $N$ give $N!$. All of them are exactly equal. We have to write down one.
+The first, $p(S)\,p(O\given S)$, is a \emph{generative model}: the door state makes a reading. The second, $p(O)\,p(S\given O)$, is a \emph{classifier}: given a reading, which door state matches.
+
+With a third variable $A$ (the action: does the robot aim the LiDAR at the door, or away from it), the slide \slide{Six orders, one joint: only the reading last follows how the world works} lists the six orders. 
+At the first step the robot has seen nothing, so its aim $A$ cannot depend on the door $S$, and the reading $O$ depends on both. The \emph{causal} order is
+\[
+p(S,A,O)=p(S)\,p(A)\,p(O\given S,A),
+\]
+the order in which the world produces them: door, aim, reading.
+
+\subsection*{Why the causal order is the one to write}
+Slide \slide{Causal order: one factor per mechanism}: each causal factor is one mechanism with one owner. $p(S)$ is the door (the world), $p(A)$ is the robot's policy (the robot decides it), $p(O\given S,A)$ is the sensor (physics).
+If we give the robot a new policy, only $p(A)$ changes. If we swap the sensor, only $p(O\given S,A)$ changes.
+In the order $O\to S\to A$ (the worst on the slide), the factors are $p(O)$, $p(S\given O)$ and $p(A\given S,O)$. Each of them mixes door, policy and sensor, because $p(O)=\sum_S\sum_A p(O\given S,A)\,p(S)\,p(A)$ already contains the policy. A new policy then rewrites all three.
+Lab exercise 6 makes you measure exactly this.
+
+\textbf{Counting numbers.} A factor $p(X\given\text{parents})$ over binary variables needs one free number per combination of parent values (the other value of $X$ has probability 1 minus it): $2^{n}$ numbers for $n$ parents.
+Causal order: $p(S)$ 1, $p(A)$ 1, $p(O\given S,A)$ 4: total 6. Anti-causal $p(O)\,p(A\given O)\,p(S\given O,A)$: $1+2+4=7$. For $N=20$ binary variables with every factor keeping all earlier variables, the total is $\sum_{i=0}^{19}2^i=2^{20}-1\approx10^6$. If each variable has at most $k=3$ parents, the count is at most $20\cdot2^3=160$. This is what ``injecting knowledge'' buys.
+
+\subsection*{Model-free reinforcement learning against the generative model}
+The slide \slide{Model-free RL against the generative model: what each can do} compares a controller $p(A\given O)$ (a mapping from reading to action) with the generative model $p(S)\,p(A)\,p(O\given S,A)$.
+Both can act in the world they were tuned in. Only the generative model also says what the robot expects to see, so only it can notice that a reading is surprising, say how sure it is about the door, and survive a change of sensor (swap one factor).
+
+\subsection*{Injecting knowledge simplifies the model}
+Slide \slide{Injecting knowledge about the problem simplifies the model}. Two examples with $(s,o)$:
+\begin{itemize}[nosep]
+\item \emph{Assume independence}, $p(o\given s)=p(o)$: the joint becomes $p(s)p(o)$, the covariance is diagonal (2 numbers instead of 3). The price: if the assumption is false, the model is wrong, and no amount of data fixes it.
+\item \emph{Know a value}, $s=2.0$ m: all of the probability of $s$ sits on that value, and only $p(o\given s{=}2.0)$ remains, one variable.
+\end{itemize}
+Each piece of knowledge removes an arrow or a variable, so fewer numbers must be filled in.
+
+\begin{keyidea}
+\textbf{Take-away.} All orderings of the joint are equal, but we write the causal one: each factor is one mechanism with one owner, so a change to the policy or the sensor touches one factor.
+\end{keyidea}
+
+%==================================================================
+\section{Introducing time}
+
+\subsection*{Notation}
+One copy of each variable per step: $s_t$ is the state at step $t$, $o_t$ the reading, $a_t$ the action. A subscript $a{:}b$ means every step from $a$ to $b$; $<t$ means before $t$; $\le t$ means up to $t$. So $o_{<t}=o_{1:t-1}$ is everything seen before step $t$.
+If each reading depends only on its own state, $p(o_{1:T}\given s_{1:T})=\prod_{t=1}^{T}p(o_t\given s_t)$ (slide \slide{Time: one copy of each variable per step}).
+
+\subsection*{The Markov assumption}
+By the chain rule alone, the state $s_t$ would depend on every earlier state, reading and action. We inject knowledge (slide \slide{The Markov assumption: the current state carries what the next step needs}): the next state depends only on the current state and action, and a reading only on its own state:
+\[
+\begin{aligned}
+p(s_t\given s_{0:t-1},o_{1:t-1},a_{1:t})&\;\to\;p(s_t\given s_{t-1},a_t)&&\text{(motion model)},\\
+p(o_t\given s_{0:t},o_{1:t-1},a_{1:t})&\;\to\;p(o_t\given s_t)&&\text{(sensor model)}.
+\end{aligned}
+\]
+The robot still uses every reading, through its belief over $s_t$. The assumption fails if something that persists is left out of $s$, for example a wheel bias; lab exercise 9 shows what happens (Day 4 fixes it).
+
+\subsection*{The robot acts on what it sees, not on the world}
+Slide \slide{The robot acts on what it sees, not on the world}. In the model, the policy is $p(a_t\given o_{<t})$: the action depends on past readings, with no arrow from the true state $s$.
+Consequence: once we know $o_{<t}$, knowing $s$ adds nothing about $a_t$, i.e.\ $p(a_t\given s,o_{<t})=p(a_t\given o_{<t})$. Without $o_{<t}$, however, $a_t$ is related to $s$ through the readings that $s$ produced. Lab exercise 7 measures both statements.
+
+\subsection*{The robot's joint}
+Writing the chain rule in the order the world produces the variables ($s_0$; then $a_1,s_1,o_1$; then $a_2,s_2,o_2$; \dots) and keeping only the arrows that point into each variable (slide \slide{The robot's joint, in causal order}):
+\[
+p(s_{0:T},o_{1:T},a_{1:T})=p(s_0)\prod_{t=1}^{T}\underbrace{p(a_t\given o_{<t})}_{\text{policy}}\ \underbrace{p(s_t\given s_{t-1},a_t)}_{\text{motion model}}\ \underbrace{p(o_t\given s_t)}_{\text{sensor model}} .
+\]
+This is the \emph{generative model}: one prior and the same three factors at every step.
+
+\subsection*{Filling in the model}
+Slide \slide{Filling in the model: a form and numbers for each factor}. For the wall ($s$ the distance to the wall, $a_t$ the metres driven towards it, $o_t$ the LiDAR reading), we write for each factor a \emph{form} and measure its numbers:
+\begin{center}
+\begin{tabular}{llp{0.42\linewidth}}
+\toprule factor & form we write & where the numbers come from\\\midrule
+prior $p(s_0)$ & $\N(2.0,\,0.5^2)$ & what we know before looking\\
+motion $p(s_t\given s_{t-1},a_t)$ & $\N(s_{t-1}-a_t,\,0.2^2)$ & drive known distances, measure the wheels' error\\
+sensor $p(o_t\given s_t)$ & $\N(s_t,\,0.2^2)$ & read a wall at known distances, measure the LiDAR's error\\
+policy $p(a_t\given o_{<t})$ & a rule or a plan & a human sets the target, or the robot chooses (Day 2)\\\bottomrule
+\end{tabular}
+\end{center}
+(In the lab Kalman exercises the motion noise is $\sigma_w$ and the sensor noise $\sigma_v$; their values change from exercise to exercise.)
+
+\begin{keyidea}
+\textbf{Take-away.} The model is one prior and three factors repeated at each step (motion, sensor, policy); the Markov assumption lets the robot carry a belief over $s_t$ alone, and the policy depends on what was seen, not on the true state.
+\end{keyidea}
+
+%==================================================================
+\section{Inference and why exact Bayes is out of reach}
+
+\subsection*{The goal of inference}
+Given the model we wrote and the readings the robot has, what should it believe about a hidden state? We call that belief the \emph{posterior}. For example $p(s_3\given o_{1:3},a_{1:3})$: the seen variables are fixed to their values, the wanted variable is $s_3$, and every other hidden variable is summed out (slide \slide{The goal of inference: a belief about what the robot cannot see}).
+
+\subsection*{Why the robot needs the posterior}
+Slide \slide{Why the robot needs the posterior: four things it does with it}, with the wall belief $\N(1.32,0.19^2)$:
+(1) a best guess and how sure it is (1.32 m, $\pm0.19$); (2) decisions, e.g.\ the probability that the wall is nearer than 1.0 m is $P(s<1.0)=\Phi\big((1.0-1.32)/0.19\big)\approx0.05$ where $\Phi$ is the standard Gaussian cumulative distribution; (3) memory: every past reading is summarised in two numbers; (4) prediction of the next reading, $\int p(o\given s)\,p(s\given o_{\le t})\,ds$.
+
+\subsection*{Bayes' rule}
+We wrote the model in generative order, $p(s)\,p(o\given s)$, but inference needs $p(s\given o)$. Both are the same joint (slide \slide{Bayes' rule: solve the model we wrote for the belief we want}):
+\[
+p(s)\,p(o\given s)=p(s,o)=p(o)\,p(s\given o)\ \Longrightarrow\
+\underbrace{p(s\given o)}_{\text{posterior}}=\frac{\overbrace{p(o\given s)}^{\text{likelihood}}\ \overbrace{p(s)}^{\text{prior}}}{\underbrace{p(o)}_{\text{evidence}}},\qquad p(o)=\int p(o\given s)\,p(s)\,ds .
+\]
+The \emph{likelihood} is the sensor model read as a function of $s$ with the reading $o$ fixed. The \emph{evidence} is the same for every $s$: it only rescales the product likelihood$\times$prior to area 1, and it is the area of that product (this is what lab exercise 4 computes).
+
+\begin{backupbox}{Backup: Bayes' rule with the action, which stays on the right of every bar}
+In the first step the aim $a$ is chosen without seeing $s$, so the model is $p(s)\,p(a)\,p(o\given s,a)$. We can also write it as $p(a)\,p(o\given a)\,p(s\given o,a)$: two orders of one joint. Divide by $p(a)\,p(o\given a)$:
+\[
+p(s\given o,a)=\frac{p(o\given s,a)\,p(s)}{p(o\given a)},\qquad p(o\given a)=\sum_s p(o\given s,a)\,p(s).
+\]
+The action is not inferred: it is given, like the reading, so it stays to the right of the bar and the rule keeps its shape. Knowing $a$ does not shorten the evidence: it still sums over every $s$.
+For a door that is two values; for a whole room it is far too many to add up (next subsection, and Day 2). This is exactly the factor $p(S\given O,A)$ of lab exercise 6: a gap is strong evidence for an open door when the LiDAR aimed at it ($0.66$) and none when it aimed away ($0.30$, the prior).
+\end{backupbox}
+
+\subsection*{Why the robot cannot apply exact Bayes}
+The evidence needs one product $p(o\given s)p(s)$ for every possible $s$ on a grid (slide \slide{Why the robot cannot apply exact Bayes}). Take 2001 values for each unknown number (every 2 mm over 4 m) and $10^9$ products per second:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule & one wall distance & robot pose $(x,y,\theta)$ & pose + four walls\\\midrule
+unknown numbers & 1 & 3 & $3+4\times2=11$\\
+grid points & 2001 & $2001^3\approx8\times10^9$ & $2001^{11}\approx2\times10^{36}$\\
+time & 2\,\textmu s & 8 s & $6\times10^{19}$ years\\\bottomrule
+\end{tabular}
+\end{center}
+The universe is $1.4\times10^{10}$ years old, and the robot needs a new answer every 0.1 s. Exact Bayes needs $p(o)$: easy for one wall, impossible for a robot in its room. Day 2 is about what it does instead.
+
+\begin{keyidea}
+\textbf{Take-away.} Bayes' rule inverts the model we wrote into the belief we want, but its denominator is a sum over every possible hidden state, which is easy for one number and impossible for a room.
+\end{keyidea}
+
+%==================================================================
+\section{Making inference recursive: the Kalman filter}
+
+\subsection*{One step of the wall example}
+The slide \slide{One step: the robot drives 0.5\,m towards the wall, then reads}: the robot believes $s\sim\N(2.0,0.5^2)$, drives $a=0.5$ m (the wheels err by $\pm0.2$ m), and the LiDAR returns $o_t=1.3$ m with error $\pm0.2$ m.
+Each step is the same two events: the robot moves, then it reads.
+
+\subsection*{The recursion}
+Slide \slide{The same factors give a recursion: the last belief, one motion, one reading}. Let $p(s_{t-1}\given o_{<t})$ be the belief at the last step.
+
+\textbf{Predict} (marginalise the last state, with the motion model):
+\[
+p(s_t\given o_{<t})=\int p(s_t\given s_{t-1},a_t)\,p(s_{t-1}\given o_{<t})\,ds_{t-1}.
+\]
+\emph{Why:} the joint of $(s_t,s_{t-1})$ is motion model times last belief (product rule, using the Markov assumption that $s_t$ needs only $s_{t-1},a_t$); the belief about $s_t$ alone sums out $s_{t-1}$.
+
+\textbf{Update} (Bayes' rule, with the predicted belief as the prior and the sensor model as the likelihood):
+\[
+p(s_t\given o_{\le t})=\frac{p(o_t\given s_t)\,p(s_t\given o_{<t})}{p(o_t\given o_{<t})}.
+\]
+It works because of the Markov assumption: predict needs only $s_{t-1}$ and $a_t$; update needs only $s_t$. Each step needs only the last belief, one motion and one reading. The actions, like the readings, are known and stay to the right of the bars.
+
+\subsection*{Gaussian and linear: the Kalman filter}
+Assume the belief is $\N(\mu,\sigma^2)$, the motion is $s_t=s_{t-1}-a_t+w$ with $w\sim\N(0,\sigma_w^2)$, and the reading is $o_t=s_t+v$ with $v\sim\N(0,\sigma_v^2)$. Then the integral and the product are done exactly:
+
+\textbf{Predict.} A sum of independent Gaussians is Gaussian, with means added and variances added: $s_t=(s_{t-1}-a_t)+w$ gives
+\[
+\mu^-=\mu-a_t,\qquad (\sigma^-)^2=\sigma^2+\sigma_w^2 .
+\]
+\textbf{Update.} This is the Gaussian conditioning of Part~2 with prior $\N(\mu^-,(\sigma^-)^2)$ and reading $o_t=s_t+v$, so $\Sigma_{ss}=(\sigma^-)^2$, $\Sigma_{so}=(\sigma^-)^2$, $\Sigma_{oo}=(\sigma^-)^2+\sigma_v^2$:
+\[
+k=\frac{(\sigma^-)^2}{(\sigma^-)^2+\sigma_v^2},\qquad \mu=\mu^-+k\,(o_t-\mu^-),\qquad \sigma^2=(1-k)(\sigma^-)^2 ,\qquad \frac1{\sigma^2}=\frac1{(\sigma^-)^2}+\frac1{\sigma_v^2}.
+\]
+The last form shows that the update \emph{adds precisions}. A precise reading ($\sigma_v$ small) gives $k$ near 1 and pulls the mean hard; a sure belief ($\sigma^-$ small) gives $k$ near 0. The robot never integrates: it updates a mean and a variance.
+
+\subsection*{Worked numbers: moving spreads, reading sharpens}
+From $2.00\pm0.50$, $a=0.5$, $\sigma_w=0.2$, $\sigma_v=0.2$, $o_t=1.3$:
+\begin{align*}
+\text{predict:}\quad&\mu^-=2.0-0.5=1.5,\quad(\sigma^-)^2=0.25+0.04=0.29\ \Rightarrow\ 1.50\pm0.54,\\
+\text{gain:}\quad&k=0.29/(0.29+0.04)=0.879,\\
+\text{update:}\quad&\mu=1.5+0.879\,(1.3-1.5)=1.32,\quad\sigma^2=(1-0.879)\times0.29=0.035\ \Rightarrow\ 1.32\pm0.19 .
+\end{align*}
+If the robot drives three times without reading, it widens three times: $\sigma^2=0.5^2+3\times0.2^2=0.37$, so $\pm0.61$ m, and the mean moves by $-3a$. Only a reading narrows the belief again.
+
+\begin{keyidea}
+\textbf{Take-away.} Moving spreads the belief; reading sharpens it. In the Gaussian linear case this is the Kalman filter: a few lines on a mean and a variance, one step at a time.
+\end{keyidea}
+
+%==================================================================
+\section{Lab guide}
+
+Open \texttt{labs/day1.ipynb}. Cells marked \emph{Exercise} contain a block for you to write; run the cell below it and compare with the numbers printed in the notebook (shown in orange on the slide \slide{Your turn: the notebook}). The notebook has five parts. Part titles are those of the notebook; the exercises are numbered 1--9 across the parts.
+
+\subsection*{Part ``The door table'' (exercises 1, 2)}
+\textbf{Goal.} Run factorise, marginalise, condition on discrete arrays. \textbf{Slides:} \slide{The joint distribution}, \slide{Marginalisation}, \slide{Conditioning}, \slide{Factorisation}. \textbf{Given:} \texttt{p\_S}=$(0.3,0.7)$ and \texttt{p\_O\_given\_S}, where \emph{row} $s$ is $p(O\given S{=}s)$, so each row adds to 1.
+
+\begin{labhelp}{Exercise 1: factorise, marginalise, condition}
+\begin{enumerate}[nosep]
+\item Factorise: \texttt{joint[s, o]} $=p(o\given s)\,p(s)$. The shapes are $(2,2)$ and $(2,)$; \texttt{p\_S} must become a column to multiply along the rows: \texttt{p\_S[:, None]} (\cs{1}).
+\item Marginalise: $p(O)=\sum_s$ joint, i.e.\ add over the \emph{first} axis (\texttt{axis=0}) (\cs{2}).
+\item Condition: take the column $O=$gap (index 0), \texttt{joint[:, 0]}, and divide by $p(O{=}\text{gap})$.
+\end{enumerate}
+\textbf{Check:} joint $0.27,0.03,0.14,0.56$; $p(O)=(0.41,0.59)$; $p(\text{open}\given\text{gap})=0.659$.\\
+\textbf{Common mistakes:} \texttt{sum(axis=1)} gives $p(S)$, not $p(O)$; forgetting \texttt{[:, None]} multiplies the wrong axis without any error message; dividing by \texttt{joint.sum()} (which is 1) instead of the column sum.
+\end{labhelp}
+
+\begin{labhelp}{Exercise 2: the other factorisation (homework)}
+\begin{enumerate}[nosep]
+\item $p(S\given O)$ for both values of $O$ at once: divide each column of \texttt{joint} by the matching entry of $p(O)$. With shapes $(2,2)$ and $(2,)$, broadcasting already divides each column by its own entry if \texttt{p\_O} is a row, \texttt{p\_O[None, :]}.
+\item Rebuild: multiply back, $p(S\given O)\,p(O)$, and compare with the joint using \texttt{np.allclose}.
+\end{enumerate}
+\textbf{Check:} each column of $p(S\given O)$ adds to 1, and the rebuilt array equals the joint (\texttt{True}).\\
+\textbf{Idea:} Bayes' rule is nothing but this identity (Part~5).
+\end{labhelp}
+
+\subsection*{Part ``The Gaussian wall'' (exercises 3, 4 and the question)}
+\textbf{Slides:} \slide{The wall's covariance, built from its model}, \slide{Conditioning} (continuous), \slide{Bayes' rule}. Given $\mu=(2,2)$, $\Sigma=\psm{0.25&0.25\\0.25&0.29}$, \texttt{o\_star}=2.6.
+
+\begin{labhelp}{Exercise 3: marginalise and condition a Gaussian}
+\begin{enumerate}[nosep]
+\item Marginal $p(o)$: the mean is \texttt{mu\_so[1]} and the variance \texttt{Sigma\_so[1, 1]}. Check: $\N(2,0.29)$.
+\item Gain $k=\Sigma_{so}/\Sigma_{oo}$ (indices \texttt{[0, 1]} and \texttt{[1, 1]}); posterior mean $\mu_s+k\,(o^\star-\mu_o)$; posterior variance $\Sigma_{ss}-k\,\Sigma_{os}$. Check: $k=0.86$, $2.52\pm0.19$. (The posterior standard deviation is the square root of the variance.)
+\item Without any formula: \texttt{rng.multivariate\_normal(mu, Sigma, size=1\_000\_000)} gives an array of shape $(10^6,2)$ of pairs $(s,o)$. Keep the rows whose $o$ (column 1) is within 0.01 of 2.6, using a boolean mask \texttt{np.abs(samples[:, 1] - o\_star) < 0.01}, and take the mean and standard deviation of their $s$ (column 0) (\cs{1}, boolean masks). About 8000 rows are kept; expect $2.52\pm0.19$ within $\approx0.005$.
+\end{enumerate}
+\textbf{Why the third route works:} keeping the samples with $o$ near $o^\star$ \emph{is} conditioning, done by counting. \textbf{Mistake:} using a window much wider than 1 cm biases the mean towards the prior mean.
+\end{labhelp}
+
+\begin{labhelp}{Exercise 4: Bayes on a grid, the three operations in a row}
+The grid \texttt{s\_grid} has 2001 points on $[0,4]$ and spacing \texttt{ds}. The helper \texttt{npdf(x, m, v)} is the Gaussian density with mean \texttt{m} and variance \texttt{v} (variance, not standard deviation).
+\begin{enumerate}[nosep]
+\item Factorise: \texttt{product} $=p(s)\;p(o^\star\given s)$ on the grid. The prior is \texttt{npdf(s\_grid, 2.0, 0.5**2)}. For the likelihood, the density of $o^\star$ given $s$ with mean $s$ and variance $0.2^2$ is \texttt{npdf(o\_star, s\_grid, 0.2**2)}: the grid goes in the \emph{mean} slot and $o^\star$ in the \emph{point} slot.
+\item Marginalise: the area, $p(o^\star)=\sum\text{product}\times\texttt{ds}$ (a Riemann sum for the integral). Check: $0.398\approx0.40$, equal to the density of $\N(2,0.29)$ at 2.6.
+\item Condition: divide the product by the area, \texttt{posterior = product / area}.
+\end{enumerate}
+\textbf{Check:} area $0.398$; posterior $2.517\pm0.186$ (the printed mean and standard deviation, computed for you). The three plots are the three steps.\\
+\textbf{Mistake:} forgetting \texttt{ds} in the area gives an ``area'' near $800$ and a posterior that does not integrate to 1.
+\end{labhelp}
+
+\begin{labhelp}{Question: how big would the grid be?}
+The unknowns are $x,y,\theta$ (3) plus four walls with two parameters each (8): 11 dimensions. At 2001 points per dimension, $2001^{11}\approx2\times10^{36}$ points. Step~2 (the area) is where exact inference becomes impossible; Day 2 is about not computing it.
+\end{labhelp}
+
+\subsection*{Part ``Three variables, six orderings, one causal order'' (exercises 5, 6)}
+\textbf{Slides:} \slide{Three variables: one joint, $3!=6$ factorisations}, \slide{Causal order: one factor per mechanism}. The notebook builds the causal joint \texttt{joint3[s, o, a]} $=p(s)\,p(a)\,p(o\given s,a)$ with axes (door, reading, aim).
+
+\begin{labhelp}{Exercise 5: count the numbers}
+Write \texttt{n\_numbers(n\_parents)}: a binary variable with $n$ binary parents needs one free number per combination of parent values, so $2^{n}$.
+\textbf{Check:} causal $n(0)+n(0)+n(2)=1+1+4=6$; anti-causal $n(0)+n(1)+n(2)=1+2+4=7$. For $N=20$ with nothing dropped, factor $i$ has $i$ parents: $\sum_{i=0}^{19}2^i=1\,048\,575$. With at most 3 parents, the notebook prints $20\times2^3=160$ (an upper bound: the first variables have fewer than 3 parents).\\
+\textbf{Mistake:} writing $2^{n}-1$ or $n$; the counted number is per combination of parents.
+\end{labhelp}
+
+\begin{labhelp}{Exercise 6: read the anti-causal factors off the joint}
+Write \texttt{anticausal\_factors(j)} with \texttt{j} of axes \texttt{[s, o, a]}. The three factors of $p(O)\,p(A\given O)\,p(S\given O,A)$ are marginals and ratios of the joint:
+\begin{enumerate}[nosep]
+\item $p(O)$: sum over $s$ and $a$, \texttt{j.sum(axis=(0, 2))}, shape $(2,)$.
+\item The pair marginal $p(O,A)$: sum over $s$ only, \texttt{j.sum(axis=0)}, shape $(2,2)$ [o, a]. Then $p(A\given O)=p(O,A)/p(O)$: divide the rows by \texttt{p\_O[:, None]}.
+\item $p(S\given O,A)=p(S,O,A)/p(O,A)$: divide \texttt{j} (shape $(2,2,2)$) by \texttt{p\_OA[None, :, :]} (shape $(1,2,2)$, line the axes up yourself).
+\end{enumerate}
+The test prints whether their product equals \texttt{joint3} (\texttt{True}).
+
+\textbf{Questions (the printed answers).}
+(1) $p(A{=}\text{towards}\given S)$ is $0.5$ for both door states: $A$ does not depend on $S$, as we wrote. $p(S{=}\text{open}\given O{=}\text{gap},A)$ is $0.659$ for ``towards'' and $0.30$ for ``away'': it does depend on $A$. A gap is evidence for an open door only if the LiDAR actually looked at the door; with the LiDAR aimed away, the probability stays at the prior $0.30$.
+(2) With the worse sensor ($0.6/0.4$ instead of $0.9/0.2$), \emph{only} the causal factor $p(O\given S,A)$ changes. All three anti-causal factors change, and none of them is something one could write from physics.
+\end{labhelp}
+
+\subsection*{Part ``The robot acts on what it sees, not on the world'' (exercise 7)}
+\textbf{Slide:} \slide{The robot acts on what it sees, not on the world}. The sampler \texttt{run\_two\_steps} runs the world in causal order, a million times: the door \texttt{s\_} (True = open), the first reading \texttt{gap\_} (True = gap), and the second action \texttt{a2\_} (True = looks at the door again). The robot looks again with probability $1-|2\,p(\text{open}\given o_1)-1|$: $0.683$ after a gap (belief $0.659$) and $0.102$ after a wall (belief $0.051$). The more unsure it is, the more often it looks again.
+
+\begin{labhelp}{Exercise 7: the umbrella test}
+Estimate conditional probabilities by averaging a True/False array over the samples where a condition holds.
+\begin{enumerate}[nosep]
+\item $p(a_2=\text{look}\given S)$: for each door state \texttt{v} in (True, False), \texttt{a2\_[s\_ == v].mean()}.
+\item Add the reading: \texttt{a2\_[(s\_ == v) \& gap\_].mean()}. Parentheses around each comparison are required, and \texttt{\&} (not \texttt{and}) combines arrays.
+\end{enumerate}
+\textbf{Check:} (1) $0.627$ and $0.218$: $a_2$ \emph{does} depend on $S$ if we do not know $o_1$. (2) $0.685$ and $0.685$ (exactly $0.683$): given the reading, both are the same. 
+\textbf{Why:} an open door tends to produce a gap, a gap makes the robot fairly sure, and a sure robot looks again less often than an unsure one; so $S$ and $a_2$ are related only through $o_1$. Once $o_1$ is known, the door reaches the action only through what the robot has seen. (The notebook calls this the umbrella test.)\\
+\textbf{Mistake:} if the two numbers in (2) differ by more than about $0.01$, check that you used \texttt{\&} with both conditions.
+\end{labhelp}
+
+\subsection*{Part ``Time: the Kalman filter'' (exercises 8, 9)}
+\textbf{Slides:} \slide{Gaussian and linear: the integrals become a few lines of arithmetic}, \slide{The effect on the belief: moving spreads it, reading sharpens it}. The model is $s_t=s_{t-1}-a_t+w$, $o_t=s_t+v$, and the variances are \texttt{var\_w}$=\sigma_w^2$, \texttt{var\_v}$=\sigma_v^2$ (pass variances, not standard deviations).
+
+\begin{labhelp}{Exercise 8: one Kalman step}
+Write \texttt{kalman\_step(mu, var, a, o, var\_w, var\_v)}, returning the predicted mean and variance and the updated mean and variance.
+\begin{enumerate}[nosep]
+\item Predict: \texttt{mu\_p = mu - a}, \texttt{var\_p = var + var\_w}.
+\item Gain: \texttt{k = var\_p / (var\_p + var\_v)}.
+\item Update: \texttt{mu\_u = mu\_p + k * (o - mu\_p)}, \texttt{var\_u = (1 - k) * var\_p}.
+\end{enumerate}
+\textbf{Check:} from $2.0$, variance $0.25$, $a=0.5$, $o=1.3$, $\sigma_w=\sigma_v=0.2$: predicted $1.50\pm0.54$, after the reading $1.32\pm0.19$ (the worked numbers in Part~6).\\
+\textbf{Mistake:} the predict step must \emph{widen} ($+\sigma_w^2$) and the update must \emph{narrow}; and the gain uses the \emph{predicted} variance, not the old one.
+\end{labhelp}
+
+\begin{labhelp}{Exercise 9: a loop, and a wheel bias (homework)}
+The robot starts 5 m from the wall believing $4.8\pm0.5$ and drives \texttt{a}$=0.3$ m per step for 12 steps; \texttt{var\_w}$=0.02^2$, \texttt{var\_v}$=0.2^2$. \texttt{g} is the random generator; use \texttt{g.normal(0, std)} with the standard deviation. In each iteration, write in this order:
+\begin{enumerate}[nosep]
+\item The \emph{world} moves: $s\leftarrow s-\text{bias}\cdot a+\text{noise}_w$, with noise standard deviation $\sigma_w$. The true wheels may drive $\text{bias}\times$ the commanded distance.
+\item The LiDAR reads: $o=s+\text{noise}_v$, noise standard deviation $\sigma_v$.
+\item The \emph{model} updates, and knows only the commanded $a$: call \texttt{kalman\_step(mu, var, a, o, var\_w, var\_v)} and keep its last two outputs as the new \texttt{mu, var}.
+\end{enumerate}
+The plot shows the true distance (black), the belief mean (red) and a $\pm2\sigma$ band for \texttt{bias} $=1.0$ and $1.3$.\\
+\textbf{Check (printed):} bias 1.0: final error $+0.03$ m, belief $\sigma=0.07$ m, error$/\sigma=+0.4$. Bias 1.3: error $+0.47$ m, $\sigma=0.07$ m, error$/\sigma=+7.0$.\\
+\textbf{Reading the result.} Without bias the truth stays inside the band and the band narrows to about $\pm0.07$ m: the precise wheels ($\sigma_w=0.02$) carry the belief between noisy readings. With the bias the belief stays just as narrow but lags the truth by several $\sigma$: the robot is \emph{sure and wrong}. Each reading pulls the belief back, but the model trusts its wheels ($\sigma_w=0.02$) ten times more than the LiDAR ($\sigma_v=0.2$), so the gain $k$ is small. The model left out something that persists (the bias), which is exactly the failure of the Markov assumption described in Part~4. The cure is not a threshold: put the bias in the state as a variable to estimate (Day 4).\\
+\textbf{Mistake:} the bias belongs to the \emph{world} line only; if you also use it in the \texttt{kalman\_step} call you have told the model, and the experiment shows nothing.
+\end{labhelp}
+
+%==================================================================
+\section{Symbol glossary}
+\begin{center}
+\small
+\begin{tabular}{p{0.17\linewidth}p{0.75\linewidth}}
+\toprule symbol & meaning\\\midrule
+$S$ & the state: is the door open or closed (a random variable)\\
+$O$ & the observation: the LiDAR sees a gap or a wall at the door\\
+$A$ & the action: the LiDAR is aimed towards the door, or away\\
+$R,\ K$ & which room the robot is in; how many LiDAR returns pass through the door\\
+$s,\ o$ & lower case: a continuous state (distance to the wall) and a continuous reading (range)\\
+$p(X)$ & the belief (distribution) about $X$; a density for a continuous variable\\
+$p(X,Y)$ & the joint distribution of $X$ and $Y$\\
+$p(X\given Y)$ & the belief about $X$ once $Y$ is known: $p(X,Y)/p(Y)$\\
+$\sum,\ \int$ & sum or integral over the values of a variable (marginalise)\\
+$\mu,\ \sigma^2$ & mean and variance of a Gaussian; $\sigma$ the standard deviation\\
+$\N(x;\mu,\sigma^2)$ & the Gaussian density with mean $\mu$ and variance $\sigma^2$\\
+$\Sigma,\ \Sigma_{so}$ & the covariance matrix; its entry $(s,o)$, how $s$ and $o$ move together\\
+precision & one over the variance; precisions add when a Gaussian prior meets a Gaussian reading\\
+$k$ & the gain: the fraction by which a reading moves the mean\\
+$t,\ s_t,o_t,a_t$ & step number; state, reading and action at step $t$\\
+$o_{<t},\ o_{\le t},\ o_{1:T}$ & the readings before step $t$; up to and including $t$; steps 1 to $T$\\
+$p(s_t\given s_{t-1},a_t)$ & the motion model\\
+$p(o_t\given s_t)$ & the sensor model; as a function of $s_t$ it is the likelihood\\
+$p(a_t\given o_{<t})$ & the policy\\
+$w,\ \sigma_w^2$ & motion noise and its variance\\
+$v,\ \sigma_v^2$ & sensor noise and its variance\\
+$\mu^-,(\sigma^-)^2$ & the predicted mean and variance, before the reading\\
+posterior, prior & the belief after, and before, the reading\\
+evidence & $p(o)$: the denominator of Bayes' rule, the area of likelihood$\times$prior\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}

@@ -1,0 +1,149 @@
+% Day 3 backup frames removed 2026-11-27 (redundant with main frames or about unbuilt parts). Not built.
+
+\begin{frame}{Backup: Every agent holds a copy of the graph and sends its changes}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \foreach \a/\n/\l in {90/A/room, 210/B/table, 330/C/retina} {
+          \node[mem, minimum size=1.2cm, font=\scriptsize, align=center] (\n) at (\a:1.75) {copy of\\the graph};
+          \node[lab, font=\scriptsize\bfseries, text=cool] at (\a:2.85) {\l};
+        }
+        \draw[flow, accent] (A) to[bend left=12] node[right, lab, text=black] {a change} (C);
+        \draw[flow, accent] (A) to[bend right=12] node[left, lab, text=black] {a change} (B);
+        \draw[link] (B) -- (C);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      No central server, and nobody waits for a lock. Changes merge by themselves. Two consequences:
+      \vspace{0.5em}
+      \begin{itemize}\small
+        \item Changes are signed by their writer, so \alert{two agents with one name corrupt the
+              graph}.
+        \item Your copy may be a moment behind mine. Nothing may assume we see the same instant.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \lesson{Changes merge by themselves; no copy may assume it sees the same instant as another.}
+\end{frame}
+
+\begin{frame}{Backup: Same changes, any order, same result: a fixed rule decides}
+  \begin{columns}[c]
+    \begin{column}{0.62\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm,
+          disp/.style={draw, very thick, rounded corners=3pt, fill=white, minimum width=1.05cm, minimum height=0.8cm, font=\normalsize\bfseries},
+          final/.style={disp, draw=good, fill=good!20},
+          stp/.style={-{Stealth[length=2mm]}, thick, color=muted}]
+        \node[lab, anchor=west, font=\footnotesize\bfseries] at (-0.55,2.72) {One copy receives agent 2's letter first};
+        \node[disp] (a0) at (0,1.65) {1.0};
+        \letter{1.75,1.65}{good}{2.4}{agent 2}
+        \node[disp] (a1) at (3.5,1.65) {2.4};
+        \letter{5.25,1.65}{cool}{2.0}{agent 1}
+        \node[final] (a2) at (7,1.65) {2.0};
+        \draw[stp] (a0) -- (1.1,1.65); \draw[stp] (2.4,1.65) -- (a1);
+        \draw[stp] (a1) -- (4.6,1.65); \draw[stp] (5.9,1.65) -- (a2);
+        \node[lab, text=cool!80!black] at (5.25,0.98) {1 outranks 2: it replaces};
+
+        \node[lab, anchor=west, font=\footnotesize\bfseries] at (-0.55,0.35) {Another copy receives agent 1's letter first};
+        \node[disp] (b0) at (0,-0.72) {1.0};
+        \letter{1.75,-0.72}{cool}{2.0}{agent 1}
+        \node[disp] (b1) at (3.5,-0.72) {2.0};
+        \letter{5.25,-0.72}{good}{2.4}{agent 2}
+        \draw[accent, line width=2pt] (4.7,-1.1) -- (5.8,-0.34);
+        \draw[accent, line width=2pt] (4.7,-0.34) -- (5.8,-1.1);
+        \node[final] (b2) at (7,-0.72) {2.0};
+        \draw[stp] (b0) -- (1.1,-0.72); \draw[stp] (2.4,-0.72) -- (b1);
+        \draw[stp] (b1) -- (4.6,-0.72); \draw[stp] (5.9,-0.72) -- (b2);
+        \node[lab, text=accent] at (5.25,-1.39) {2 does not outrank 1: dropped};
+      \end{tikzpicture}\\[0.5em]
+      \small\raggedright Each wrote before receiving the other's change, so a fixed rule decides, the same in
+      every copy: \textbf{the lower id wins}. A writer that had already received the other's change
+      simply replaces it.
+    \end{column}
+    \begin{column}{0.34\textwidth}
+      \small\textbf{But the ids are arbitrary!}\\[0.4em]
+      \centering
+      \begin{tikzpicture}[c/.style={draw, thick, rounded corners=2pt, fill=white, minimum width=0.72cm, minimum height=0.5cm, font=\scriptsize\bfseries}]
+        \node[lab, anchor=east] at (-0.55,0.75) {ids as given};
+        \node[lab, anchor=east] at (-0.55,0) {ids swapped};
+        \foreach \x in {0,0.85,1.7} {
+          \node[c, draw=good, fill=good!20] at (\x,0.75) {2.0};
+          \node[c, draw=good, fill=good!20] at (\x,0) {2.4};
+        }
+        \node[lab] at (0.85,1.22) {three copies};
+      \end{tikzpicture}\\[0.5em]
+      \raggedright\footnotesize
+      The id picks \emph{who} wins, never \emph{whether} the copies agree: every copy ranks the same
+      two letters the same way. The rule gives agreement, not the better value.
+    \end{column}
+  \end{columns}
+  \lesson{One of two colliding writes is always lost, so each node has a single owner.}
+\end{frame}
+
+\begin{frame}{Backup: Still to build: a habit distilled from past missions (amortisation)}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm]
+    \node[lab, anchor=west, font=\footnotesize\bfseries] at (-1.4,1.95) {today: worked out afresh, every cycle};
+    \node[lanebox=cool] (b1) at (0,1) {the beliefs};
+    \node[lanebox=accent] (c1) at (4.2,1) {compare every offer\\(the EFE of Day 5)};
+    \node[lanebox=muted] (a1) at (8.4,1) {act};
+    \draw[flow] (b1) -- (c1); \draw[flow] (c1) -- (a1);
+    \node[lab, anchor=west, font=\footnotesize\bfseries, text=muted] at (-1.4,-0.1) {to do: distilled from what already worked};
+    \node[lanebox=cool] (e) at (0,-1) {episodic records\\missions, outcomes};
+    \node[lanebox=accent, densely dashed] (p) at (4.2,-1) {a procedure\\$p(a\mid o)$};
+    \node[lanebox=muted, densely dashed] (a2) at (8.4,-1) {act};
+    \draw[flow, densely dashed] (e) -- node[above, lab] {amortise} (p); \draw[flow, densely dashed] (p) -- (a2);
+  \end{tikzpicture}
+
+  \vspace{0.7em}
+  \small Missions run today, and their results are kept. Nothing generalises from them yet.\\[0.2em]
+  $p(a\mid o)$ is the factor from Day 1 that control and RL learn directly.
+  \lesson{The open problem: a learned habit must also know when it no longer applies.}
+\end{frame}
+
+\begin{frame}{Backup: One belief about everything asks four questions at once}
+  \centering
+  \begin{tikzpicture}[card/.style={rounded corners=4pt, minimum width=2.9cm, minimum height=2.7cm}]
+    \foreach \x/\c/\q/\o in {0/cool/{What objects\\are here?}/object agents,
+                              3.15/good/{Where am I,\\in what room?}/room\_concept,
+                              6.3/muted/{Whose mask\\is whose?}/the matching,
+                              9.45/accent/{How do surfaces\\become pixels?}/where they meet} {
+      \node[card, fill=\c!14] at (\x,0) {};
+      \node[align=center, font=\footnotesize\bfseries] at (\x,0.95) {\q};
+      \node[lab, text=\c!70!black] at (\x,-1.1) {\textbf{\o}};
+    }
+    \fill[cool!35, draw=cool, thick] (-0.55,-0.5) rectangle (0.55,0.15);
+    \node[font=\small\bfseries, text=cool] at (0,-0.18) {?};
+    \draw[very thick, muted] (2.55,-0.65) rectangle (3.75,0.3);
+    \robot{3.05,-0.25}{30}
+    \draw[accent, thick, fill=accent!25] (6.3,-0.45) ellipse (0.3 and 0.15);
+    \draw[flow] (6.1,-0.28) -- (5.65,0.2); \draw[flow] (6.5,-0.28) -- (6.95,0.2);
+    \node[lab] at (6.3,0.2) {?};
+    \draw[muted, thick] (8.85,-0.25) -- (9.55,0.15) -- (9.55,-0.65) -- cycle;
+    \fill[accent!35, draw=accent, thick] (9.75,-0.45) rectangle (10.15,-0.05);
+  \end{tikzpicture}
+
+  \vspace{0.7em}
+  \small Before any data, the objects and the robot's pose are independent: objects do not know where the
+  robot is. The matching and the masks depend on both.\\[0.2em]
+  Once data arrive, objects and pose are tangled: the scan that locates the wall also hits the
+  refrigerator standing against it.
+  \lesson{Objects and pose start independent and become tangled by the data: splitting them has a price.}
+\end{frame}
+
+\begin{frame}{Backup: the factorised belief, and one agent's objective}
+  \[
+    q(\theta,\ell,M,X,\mathcal R) =
+    \underbrace{q(X,\mathcal R)}_{\text{foreign}}\;
+    \underbrace{\mathbf 1[M=\hat M]}_{\text{degenerate}}\;
+    \prod_{c}\prod_{i}
+    \underbrace{q(\theta_i)}_{\N(\mu_i,\Sigma_i)}\;
+    \underbrace{q(\ell_i)}_{\text{log-odds}}
+  \]
+  \[
+    F_i = \underbrace{\E_q\!\big[-\ln P(\bar Z_i\given\theta_i,\hat X)\big]}_{\text{misfit} \,=\, -\text{accuracy}}
+    + \underbrace{\KL{q(\theta_i)}{P(\theta_i\given\ell_i)}}_{\text{complexity}}
+  \]
+  \small The localisation block is held fixed; the matching contributes nothing to $F$.
+\end{frame}

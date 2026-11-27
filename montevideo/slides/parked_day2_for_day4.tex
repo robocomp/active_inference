@@ -336,3 +336,45 @@ $\qquad{\small\color{muted}(frame~\ref{d2f:10})}\\[1.2em]
   \vfill
   \lesson{Perception lowers $F$ by changing the belief; action lowers it by changing the reading.}
 \end{frame}
+
+% ---- parked 2026-11-27: the G derivation (Day 2 keeps G as an idea only) ----
+\begin{frame}{The expected free energy $G$: built like $F$, averaged over imagined readings}
+  \label{d2f:gdef}
+  \centering
+  \vspace{0pt plus 1filll}
+  {\normalsize
+  \[
+  \begin{array}{r@{\;}l@{\qquad}l}
+    F &= \E_{q(s)}\big[\ln q(s) - \ln p(o,s)\big] & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}$F$ for one reading $o$ the robot has\\ (frame~\ref{d2f:fbox})\end{tabular}}\\[2.2em]
+    G(a) &= \E_{q(o,s\given a)}\big[\ln q(s\given a) - \ln \tilde p(o,s)\big] & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}the same form, for readings\\ the robot only imagines\end{tabular}}
+  \end{array}
+  \]}
+  \vspace{0.8em}
+  \renewcommand{\arraystretch}{1.5}
+  \begin{tabular}{@{}r@{\quad}l@{}}
+    $q(s\given a)$: & the belief after action $a$, before any reading \\
+    $q(o,s\given a) = q(s\given a)\,p(o\given s)$: & states and readings imagined with the robot's own model (frame~\ref{d2f:imagine}) \\
+    $\tilde p(o,s)$: & the model, with the goal $\tilde p(o)$ as the prior over readings \\
+  \end{tabular}
+  \vspace{0pt plus 1filll}
+  \lesson{$G$ is $F$ averaged over the readings an action would bring, with the goal as prior.}
+\end{frame}
+
+\begin{frame}{Splitting $G$: what the action would teach, and how far it leaves the goal}
+  \centering
+  \vspace{0pt plus 1filll}
+  {\normalsize
+  \[
+  \begin{array}{r@{\;}l@{\qquad}l}
+    G(a) &= \E\big[\ln q(s\given a) - \ln \tilde p(o,s)\big] & \text{\footnotesize\color{muted} frame~\ref{d2f:gdef}}\\[1.2em]
+    \uncover<2->{&= \E\big[\ln q(s\given a) - \ln q(s\given o,a) - \ln \tilde p(o)\big] & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}$\tilde p(o,s) \approx q(s\given o,a)\,\tilde p(o)$:\\ the belief after reading $\times$ the goal\end{tabular}}}\\[2.4em]
+    \uncover<3->{&= -\underbrace{\E\big[\ln q(s\given o,a) - \ln q(s\given a)\big]}_{\text{what the action would teach}} \;\underbrace{- \E\big[\ln \tilde p(o)\big]}_{\text{how far it leaves the goal}} & \text{\footnotesize\color{muted} regroup}}
+  \end{array}
+  \]}
+  \vspace{0.6em}
+  {\footnotesize\color{muted} $q(s\given o,a)$: the belief after reading $o$;\; every $\E$ is over $q(o,s\given a)$\par}
+  \uncover<3->{{\footnotesize\color{muted} the learning term has a minus because $G$ uses the belief before the reading, $q(s\given a)$: a choice\\ (Millidge, Tschantz \& Buckley, \emph{Neural Computation}, 2021)\par}}
+  \vspace{0pt plus 1filll}
+  \uncover<3->{\lesson{$G$ splits into a learning term and a goal term, both in nats.}}
+\end{frame}
+

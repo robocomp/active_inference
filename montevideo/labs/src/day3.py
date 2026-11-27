@@ -4,12 +4,14 @@
 # Yesterday there was one robot, one belief and one free energy. Today the belief is spread over
 # processes that never talk to each other. They only read and write a shared graph.
 #
-# - **A. The shared graph.** Who may write what, and what is left when a process dies.
-# - **B. Agents that only read and write.** What has to cross the boundary: a mean is not enough.
-# - **C. One free energy, many owners.** When the sum of the agents' objectives is the global one,
-#   when it is not, and what the difference costs, in nats.
-# - **D. No thresholds.** A range threshold against a precision that falls with range.
-# - **E. The threshold that stays.** A bias shared across frames, which no per-frame precision can hold.
+# 1. **The shared graph** (homework). Who may write what, and what is left when a process dies.
+# 2. **Agents that only read and write** (in class, 15 min). What has to cross the boundary: a mean is not enough.
+# 3. **One free energy, many owners** (in class, 25 min; Exercise 7 is homework). When the sum of the
+#    agents' objectives is the global one, when it is not, and what the difference costs, in nats.
+# 4. **No thresholds** (in class, 15 min). A range threshold against a precision that falls with range.
+# 5. **The threshold that stays** (homework). A bias shared across frames, which no per-frame precision can hold.
+#
+# In class: Exercises 3, 4, 5, 6 and 8, about 55 minutes. At home: Exercises 1, 2, 7 and 9.
 #
 # Every part is small on purpose. The robot's real agents are C++ processes on a distributed graph,
 # but the questions are exactly these.
@@ -29,7 +31,7 @@ from toyworld import Graph
 rng = np.random.default_rng(0)
 
 # %% [markdown]
-# ## A. The shared graph
+# ## 1. The shared graph (homework)
 #
 # `toyworld.Graph` holds nodes, and a tree of RT edges (parent → child, a pose and a covariance).
 # There are no messages between agents: all coordination is a read or a write on this object.
@@ -39,7 +41,7 @@ rng = np.random.default_rng(0)
 #   longer contains something);
 # - **non-structural**: an attribute or a pose changes (something known has moved).
 #
-# ### A1. Ownership
+# ### Exercise 1 — ownership
 #
 # Each node has one owner, and only the owner may change it. That is what makes "one process per
 # factor" true at run time. Complete `write` and `delete` so that any other writer gets a
@@ -106,7 +108,7 @@ print(g.log)
 print("bottle in the table's frame:", g.transform("table_1", "bottle_1"))
 
 # %% [markdown]
-# ### A2. A factor nothing is minimising
+# ### Exercise 2 — a factor nothing is minimising
 #
 # The `bottle_concept` process crashes. It cannot clean up, so its node stays in the graph, it looks
 # like any other node, and it no longer answers to any evidence. From inside any single agent this
@@ -132,7 +134,7 @@ print("swept:", sweep(g, alive={"room_concept", "table_concept"}))
 assert [n.name for n in g.by_type("object")] == ["table_1"]
 
 # %% [markdown]
-# ## B. Agents that only read and write
+# ## 2. Agents that only read and write (in class)
 #
 # A robot drives along a corridor; everything here is one coordinate, $x$. The localiser publishes
 # its pose estimate, wrong by a **frame error** $\delta_t \sim \mathcal N(0, s^2)$, on the RT edge
@@ -143,7 +145,7 @@ assert [n.name for n in g.by_type("object")] == ["table_1"]
 #
 # The object agent never calls the localiser. It reads the edge.
 #
-# ### B1. The object agent
+# ### Exercise 3 — the object agent
 #
 # Complete `ObjectAgent.step`: read the robot's pose and variance from the graph, form $z$, and do
 # Day 2's update (precisions add) with noise $R = r + s^2$ if `use_cov`, or $R = r$ if the
@@ -209,7 +211,7 @@ mu, var = run_trial(rng, use_cov=True)
 print("published means:", np.round(mu, 3), " sd:", np.round(np.sqrt(var), 3))
 
 # %% [markdown]
-# ### B2. Is the published covariance needed?
+# ### Exercise 4 — is the published covariance needed?
 #
 # Over many runs, compute the mean NEES $(\mu_i-\theta_i)^2/\mathrm{var}_i$ with and without
 # `use_cov`. A belief whose claimed spread is right gives 1. Before running: **how far off do you expect the agent that
@@ -236,7 +238,7 @@ print(f"NEES with the published covariance: {NEES_USE:.2f}   ignoring it: {NEES_
 # estimate as evidence rather than as ground truth. A mean alone is half a belief.
 
 # %% [markdown]
-# ## C. One free energy, many owners
+# ## 3. One free energy, many owners (in class; Exercise 7 at home)
 #
 # Stack the world's data. $z_t$ collects the sightings of one frame: all $n$ objects share that
 # frame's error, so once the error is integrated out, the noise of one frame has covariance
@@ -247,7 +249,7 @@ print(f"NEES with the published covariance: {NEES_USE:.2f}   ignoring it: {NEES_
 # agent instead minimises its *own* objective over its own instance: Day 2's complexity and
 # accuracy, on its own sightings alone, with $R = r + s^2$.
 #
-# ### C1. Write the agent's free energy
+# ### Exercise 5 — write the agent's free energy
 #
 # $$ F_i(\mu_i,v_i) = \sum_t \tfrac12\Big[\frac{(z_{it}-\mu_i)^2+v_i}{R}+\ln 2\pi R\Big]
 #    + \mathrm{KL}\big[\mathcal N(\mu_i,v_i)\,\|\,\mathcal N(m_0,p_0)\big] $$
@@ -292,7 +294,7 @@ assert np.isclose(total, F_global(q_mu, np.diag(q_v), z0, R_SIGHT, 0.0))
 # With $s^2=0$ the boundary between processes costs nothing: nothing couples them. With $s^2>0$ a
 # frame's error is common to all objects, and the division is an **assumption**.
 #
-# ### C2. What is right and what is wrong
+# ### Exercise 6 — what is right and what is wrong
 #
 # Compute each agent's optimum (precisions add, with $R=r+s^2$) and the exact joint posterior. Then
 # compare the standard deviation of each object, and of the **relation** $\theta_0-\theta_1$. For the
@@ -332,7 +334,7 @@ print(f"the relation:  exact sd {SD_REL[0] * 100:.2f} cm   agents sd {SD_REL[1] 
 # the difference. Two independent beliefs cannot say that.
 
 # %% [markdown]
-# ### C3. The price of the boundary, in nats
+# ### Exercise 7 — the price of the boundary, in nats (homework)
 #
 # The price of a factorised belief is $\mathrm{KL}[q\,\|\,p(\theta\mid z)]$. It should also equal the
 # difference of global free energies (yesterday's identity). Check that, then plot the price against
@@ -380,14 +382,16 @@ print("3 objects, 10/40/160 frames:", [round(float(v), 2) for v in PRICE_FRAMES]
 # between processes is a conditional-independence assumption, and it has a price you can compute.
 
 # %% [markdown]
-# ## D. No thresholds
+# ## 4. No thresholds (in class)
 #
 # The robot drives past an object along a straight line ($x_t$ from $-8$ to $8$ m), at lateral
 # distance $\ell$, and measures $\ell$ with a noise that grows with range:
 #
 # $$ \sigma(\rho) = 0.02\,\big(1+(\rho/2)^2\big)\ \text{m}. $$
 #
-# The classical move is a **threshold**: "ignore detections beyond $k$ metres". Complete both estimators.
+# The classical move is a **threshold**: "ignore detections beyond $k$ metres".
+#
+# **Exercise 8.** Complete both estimators.
 # `gated` averages the sightings closer than $k$, and returns the prior guess 3.0 m when none
 # qualifies. `weighted` uses every sighting, with precision $1/\sigma(\rho)^2$.
 
@@ -446,11 +450,11 @@ print(f"the threshold tuned on the near pass, used on the far pass: rmse {CROSS 
 # 1. A small threshold throws away useful sightings; a large one lets in sightings that are far noisier
 #    than the rest but count the same. 2. None: the best threshold on one scene returns no sightings at all
 #    on the other. 3. It needs $\sigma(\rho)$, a model of how the sensor degrades. That is the
-#    modelling the threshold was postponing. A wrong $\sigma(\rho)$ is a wrong model, and part B showed how
+#    modelling the threshold was postponing. A wrong $\sigma(\rho)$ is a wrong model, and section 2 showed how
 #    to test one with NEES; a threshold gives you nothing to test.
 
 # %% [markdown]
-# ## E. The threshold that stays
+# ## 5. The threshold that stays (homework)
 #
 # Variances handle errors that average out. Now take a run of $n$ frames that all share **one bias**
 # $b$ (the robot's motion smears consecutive frames in the same direction). With prior precision
@@ -459,7 +463,7 @@ print(f"the threshold tuned on the near pass, used on the far pass: rmse {CROSS 
 #
 # $$ \Delta\mu_n = \frac{n\alpha\Lambda}{\Lambda_0 + n\alpha\Lambda}\, b . $$
 #
-# Complete `displacement`, then check it by running the recursive update on biased frames. Plot it
+# **Exercise 9.** Complete `displacement`, then check it by running the recursive update on biased frames. Plot it
 # for $\alpha = 1, 0.3, 0.05, 0$. What does attenuation change, and what does it not change?
 
 # %%

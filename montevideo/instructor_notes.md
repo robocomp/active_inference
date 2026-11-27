@@ -3,126 +3,125 @@
 Every number on a slide carries a `source:` line: either a thesis file and line, or a lab exercise.
 Before each session, re-check the thesis lines; the thesis is still moving.
 
-## Days 1 and 2 — The challenge and probability; free energy (`slides/day1.pdf`, `slides/day2.pdf`, `labs/day1.ipynb`, `labs/day2.ipynb`)
+## Day 1 — The challenge and probability (`slides/day1.pdf`, `labs/day1.ipynb`, `handouts/cheatsheet.pdf`, `handouts/handout_day1.pdf`)
 
-**Split on 2026-11-21.** Sessions are now three hours, and the old Day 1 became two days: Day 1 ends with notebook part A (the old lab part A); Day 2 starts at "Active Inference begins" and ends with the wall lab (the old part B). Every later day moved one day forward, and the old Day 5 (structure, evidence) was dropped. The frame numbers and timings below are from before the split and need redoing.
-
-Frame numbers are the slide footers (n/45).
+**Rewritten 2026-11-27.** The deck has 49 numbered frames plus one backup ("Bayes' rule with the action"). Frame numbers below are the slide footers (n/49). Hand out the two-page **cheatsheet** at the start (numpy broadcasting, the three operations, Gaussians, logs, derivatives, F in one box) and the **Day 1 handout** (every derivation written out, a guide for each exercise; no solution code). Start with a show of hands: who has seen Bayes' rule, a Kalman filter, numpy? It tells you which optional parts to drop.
 
 | time | block | frames |
 |---|---|---|
-| 0:00–0:16 | The idea in 46 s (unnumbered slide after the title); the challenge: the video, the cycle, every stage is a belief, toyworld | 1–5 |
-| 0:15–0:55 | The grammar of uncertainty: variables, the joint table, marginalise, condition, product rule, the Gaussian picture and its two forms, chain rule, N! orderings, causal order, perception / control / generative, the robot's joint, Bayes as the three operations | 6–19 |
-| 0:55–1:00 | Behind a sensory boundary; where exact inference dies (a short recap: Bayes is already on the board) | 20–21 |
-| 1:00–1:30 | VFE: rearrangement, identity, complexity − accuracy, Kalman worked example (do it on the board), F differentiated twice (belief and action, EFE in one line), Rényi aside | 22–27 |
-| 1:30–1:50 | Laplace: Σ = H⁻¹, Gauss–Newton, the wall, honesty, Occam | 28–32 |
-| — | break | |
-| 2:10–4:00 | Lab 1: warm-up P1–P4 (~15 min), then exercises 1–6 (about 50 min of material: **an hour is spare, see below**) | 35–36 |
+| 0:00–0:15 | The challenge: the apartment, the cycle, the toy version, how the course is built | 1–4 |
+| 0:15–0:55 | The grammar of uncertainty: discrete beliefs, the joint, marginalise, condition, factorise; three videos (bars to densities, the three operations, Gaussian operations); continuous beliefs, the Gaussian, the covariance, the wall's covariance | 6–20 |
+| 0:55–1:15 | Modelling: chain rule, two and three variables, how the world works, six orders, causal order (second table on the next click), model-free RL, injecting knowledge | 22–29 |
+| 1:15–1:30 | Time: notation, Markov, the robot acts on what it sees, the robot's joint, filling in the model | 30–34 |
+| 1:30–1:45 | Inference: its goal, why the posterior, Bayes as inversion, the boxed rule, why exact Bayes fails | 36–40 |
+| 1:45–1:55 | Recursion: one step, the recursion, Gaussian and linear = Kalman, the effect on the belief | 42–45 |
+| 1:55–2:10 | break | |
+| 2:10–3:00 | Lab: Exercises 1, 3, 4, 5, 6, 7, 8 in class; 2, the N = 20 count of 5, and 9 are homework | 47 |
 
-**The opening video (unnumbered full-screen slide after the title, `media/InferenciaActiva.mp4`, 46 s).** A robot in an orchard loses sight of a person behind leaves: it predicts, compares, feels the surprise, and has two ways out, change what it believes or move to see. Click once in pympress to start; it loops. Its captions are in **Spanish**: read the four steps aloud in English (believe, predict, compare, correct or act). Point at the second way out, acting to resolve doubt: that is the title of the course and the subject of Day 5. It is an illustration, as its corner label says, not a run of the robot.
+The lecture is long (about 115 min). If you are behind at 1:15, go faster through frames 24–29: the lab's Exercises 5–6 rebuild the orderings by hand.
 
-**Moved to Day 5 (2026-10-17).** Day 1 had 44 frames. The action section (∂F/∂a = 0, EFE, three
-names for one number, where to look, ln 2, travel, time scales) and the two measured results that
-need it (explorer equivalence on 594 layouts; stopping as an epistemic act) now live in
-`slides/day5_efe.tex`, `\input` by `day5.tex`. Day 1's lab exercises 7–10 moved with them:
-`labs/src/day5.py`, part A. Day 1 is now perception, plus one frame of action
-(frame 26, added 2026-11-08): F is differentiated with respect to the belief and with respect to the
-action, and G appears in one line with its two terms. It is a pointer; the derivation stays on Day 5.
+**Questions in the bottom bar.** Seven frames end with a blue question bar instead of the lesson; the next click shows the answer. Ask, wait 30 s, take one or two answers, then click. Frames: 11 conditioning (p(open | wall) = 0.03/0.59 ≈ 0.05), 20 the wall's covariance (only Σ_oo changes, to 0.50), 31 Markov (a wheel bias must join s), 42 one step (perfect wheels: still ±0.5), 43 recursion (read again: ±0.14), 44 Kalman (equal noise: halfway, 1.40 m, σ/√2 = 0.38), 45 the effect (three drives: ±0.61). The macro is `\ask{question}{answer}` in `slides/preamble.tex`.
 
-**Graphics (2026-11-08).** Several frames lost bullets to pictures, so the spoken text now carries
-them: the door table as a mosaic (area = probability, used for the joint, conditioning and the
-product rule), the identity bars, complexity against inaccuracy, the Laplace bowls. The "how this
-course is built" frame no longer lists the thread's four guises (common-mode ceiling, re-centred
-prior, fused precision better than its best member, a metric scoring what the robot never saw): say
-them. The averaging curve on it is a schematic, not data. The previous deck is
-`slides/backup_day1_v35_2026-11-08.{tex,pdf}`.
+**The opening.** Frames 1–4 pose the whole problem. The "how this course is built" frame no longer lists the thread's four guises (common-mode ceiling, re-centred prior, fused precision better than its best member, a metric scoring what the robot never saw): say them. The averaging curve on it is a schematic, not data.
 
-**Probability block.** Keep the door table (0.27 / 0.03 / 0.14 / 0.56) on the board for the whole
-block: marginals in the margins, the gap column for conditioning, both products for the product
-rule. Frames 17–18 switch to the week's names S, O, A (action = where the LiDAR points, so
-S→O←A, a collider; a chain S→O→A would be just as sparse reversed and lose the argument). The causal-order frames carry the argument the rest of the week depends on: every
-ordering is exactly equal, so the data cannot choose one; physics chooses. Modularity is the
-argument students remember (swap the sensor and only one causal factor changes). Frame 17 places
-a plain controller or an RL policy in the picture: it is p(a|o), the anti-causal factor alone. It can
-act well but cannot predict, be surprised, know what it does not know, or survive a sensor swap.
-The precision-
-form table pays off on Day 3 and later: forgetting an old pose is a Schur complement.
+**Probability block.** Keep the door table (0.27 / 0.03 / 0.14 / 0.56) on the board for the whole block: marginals in the margins, the gap column for conditioning, both products for factorisation (0.30 × 0.9 and 0.41 × 0.66 both give 0.27). The marginalisation frame squeezes each column into one cell of the p(O) strip: p(O) is two numbers, p(o) is one of them. The Gaussian comes before it is used: the 1-D bell (μ, σ, 68 %), the covariance entry by entry, and the wall's Σ built from its model (Var s = 0.5², Var o = 0.25 + 0.2², Cov = 0.25 because the noise is independent of s). If asked why the *precision* form must pay when marginalising: Λ_ss is the curvature of −ln p(s,o) in s with o fixed (the conditional), so the marginal must add back what o was explaining (the Schur complement).
 
-**The session is 4 h, 9:00–13:00.** This table was timed for 3 h, and Lab 1 does not yet fill the hour left over.
+**Modelling block.** The argument the rest of the week depends on: every ordering gives exactly the same joint, so data cannot choose one; physics chooses. Modularity is what students remember (frame 27: a new policy rewrites one causal factor, all three in O → S → A). Frame 28 places a plain controller or an RL policy: it is p(a|o) alone; it can act well but cannot predict, be surprised, or survive a sensor swap. It starts discussions: park them until Day 4.
 
-**Video.** The user supplies a Webots or real-apartment recording of the full cycle; drop it on
-frame 2. If it is a file, `\usepackage{multimedia}` + `\movie` works in Okular / Acrobat only, so
-it is safer to play it from a separate player.
+**Time and inference.** Frame 31 (Markov) carries the warning that returns in the lab (Exercise 9) and on Day 4: leave something that persists out of s, such as a wheel bias, and the filter becomes sure and wrong. Frame 36 states the goal of inference before Bayes appears: a belief about what is hidden. Frame 40 is the bridge to Day 2 (p(o) needs every s); Day 2 frame 6 points back to it. Bayes' rule with the action is now a backup: say only that the action, like the reading, is known and stays on the right of the bar.
 
-**Kalman frame.** The derivation is the single most useful thing to do on the board: it shows
-students that "free energy" is something they already know, and that the variance comes from a
-different term from the mean.
+**Kalman.** Frame 44 gives the equations and the precision form (precisions add), which Day 2 frame 24 reuses. Doing one step on the board with the frame-45 numbers (2.00 ± 0.50 → 1.50 ± 0.54 → 1.32 ± 0.19) is the most useful five minutes of the day.
 
-**Frames 8, 10, 12–15, the grammar made graphical (2026-11-12).** Frame 8 squeezes each column of the mosaic into one cell of the p(O) strip: p(O) is two numbers, p(o) is one of them (students read the single formula as one number). Frame 10 labels every cell and colours the factors (blue = first, red = second); 0.30 × 0.9 and 0.41 × 0.66 both give 0.27. Then the Gaussian is introduced before it is used: **12** the 1-D bell (μ, σ, 68 %) and the 2-D formula, σ² → Σ, dividing → multiplying by Σ⁻¹; **13** the covariance matrix entry by entry, and the wall's Σ built from its model (Var s = 0.5², Var o = 0.25 + 0.2², Cov = 0.25 because the noise is independent of s); **14** marginalising = crossing out the o row and column: the shadow of a Gaussian is Gaussian, and its mean and variance are *defined* with s alone, so they are already entries of μ and Σ. If a student wants the integral: write p(s,o) = p(s) p(o|s) (frame 10) and ∫p(o|s)do = 1. If asked why the *precision* form must pay: Λ_ss is the curvature of −ln p(s,o) in s with o held fixed — the conditional — so the marginal must add back what o was explaining (the Schur complement). **15** shows the four cases with the wall's numbers (Σ = [.25 .25; .25 .29], Λ = [29 −25; −25 25]): keep 0.25, or 29 − 25²/25 = 4 → 0.25; keep 29 → 0.035, or 0.25 − 0.25²/0.29 = 0.035.
+**Expected lab numbers** (seed 0):
+- Exercise 1: joint 0.27 / 0.03 / 0.14 / 0.56; p(O) = 0.41 / 0.59; p(open | gap) = 0.659.
+- Exercise 3: p(o) = N(2.00, 0.29), gain k = 0.86, posterior 2.517 ± 0.186 (samples 2.521 ± 0.185).
+- Exercise 4: area p(o = 2.6) = 0.398; posterior 2.517 ± 0.186 on the grid.
+- Exercise 5: causal 6 numbers, anti-causal 7; N = 20: 1 048 575 against at most 160 (an upper bound; the exact count is 143).
+- Exercise 6: p(A = towards | S) = 0.5 for both S; p(S = open | gap, A) = 0.659 / 0.30; a new sensor changes all three anti-causal factors and one causal factor.
+- Exercise 7: p(look | S) = 0.627 / 0.218; given o₁ = gap, 0.685 for both (exact 0.625 / 0.218 / 0.683).
+- Exercise 8: 1.50 ± 0.54, then 1.32 ± 0.19.
+- Exercise 9 (homework): no bias, final error +0.03 m with σ 0.07 m; 30 % bias, +0.47 m with the same σ: 7σ off.
 
-**Expected lab numbers** (seed 0; students' numbers differ slightly with other seeds):
-- warm-up: p(O=gap) = 0.41, p(open | gap) = 0.659; P3 (S, O, A collider S→O←A): p(A=towards | S) =
-  0.5 for both S, p(S=open | gap, A) = 0.659 towards / 0.30 away; a new sensor changes all three
-  anti-causal factors p(O), p(A|O), p(S|O,A), and only p(O|S,A) in the causal order;
-  Gaussian conditional 2.517 ± 0.186 in both forms;
-- wall fit: α ≈ 89.9° ± 0.12°, d ≈ 4.01 ± 0.01 m, ρ(α, d) ≈ −0.97;
-- honesty: uniform σ ratio ≈ 1.10 / 1.13; incidence σ ≈ 1.02–1.05;
-- Occam: ΔF from +0.1 (s = 0.1°) to +5.2 nats (s = 30°); tilted wall −70 nats;
+## Day 2 — Free energy: perception and action (`slides/day2.pdf`, `labs/day2.ipynb`, `handouts/handout_day2.pdf`)
 
-## Day 3 — The CORTEX architecture: concepts and memories (`slides/day3.pdf`, `labs/day3.ipynb`)
+**Rewritten 2026-11-27.** 34 numbered frames plus two backups (the spread check; F compares models). Gauss–Newton is not taught: the lab's section 6 uses `laplace()` as a tool. Expected Free Energy stays an idea on this day (its derivation is lab Exercise 3 and returns on Day 4).
 
 | time | block | frames |
 |---|---|---|
-| 0:00–0:15 | Who holds the belief; CORTEX, the whole picture (name the four colours and stop: the rest of the day is its centre circle); modules against a shared graph | 1–3 |
-| 0:15–0:30 | Concepts, the fabric of CORTEX: what a concept agent is, one chair across four dimensions, the class in the agent against the instances on the graph | 4–6 |
-| 0:30–0:50 | The shared graph: the small graph then the real one, structural / non-structural, replicas, eventual consistency (frames 11–12), DDS domains and shared memory (frames 13–14) | 7–14 |
-| 0:50–1:10 | Memories as concepts kept for longer: timescales, episodic, long-term spatial, long-term object, amortisation | 15–19 |
-| 1:10–1:45 | One free energy, many owners: one big belief, what to report, cutting it into pieces, F_i as a balance, the toy scene and its price, a mean is half a belief, two failures | 20–28 |
-| 1:45–2:00 | No thresholds: gate against precision, the toy, the gate that survives | 29–31 |
-| 2:00–2:15 | break | |
-| 2:15–4:00 | Lab 3 | 32–33 |
+| 0:00–0:05 | Friston's definition; the amoeba video (a model of the pond grows inside it); the Spanish orchard video | 1 + videos |
+| 0:05–0:15 | Active Inference is a Bayesian theory; tools: KL, expectation and entropy, −ln p in nats | 2–5 |
+| 0:15–0:45 | Variational Bayes: replace the posterior, the KL, Bayes in logs, substitute, F, the boxed F, surprise + KL, springs (with a question), complexity − accuracy, two slopes | 6–15 |
+| 0:45–1:05 | Laplace: the curved map, a Gaussian at the peak, the parabola; F under Laplace (four clicks), the boxed F_Laplace, why σ² = 1/ℋ | 16–21 |
+| 1:05–1:20 | Perception and action: lowering F, perception gradient, Kalman as the bottom of F, action, the proportional controller | 22–26 |
+| 1:20–1:30 | Planning: the timeline after now, two actions imagined, two reasons to act, how G is computed, the boxed G | 27–31 |
+| 1:30–1:45 | break | |
+| 1:45–2:50 | Lab, sections 1–4 (about 60 min); sections 5–6 are homework | 33 |
+| 2:50–3:00 | Tomorrow | 34 |
 
-**CORTEX in action (the unnumbered full-screen slide after frame 2).** In pympress, click on it once to start; it loops (40.5 s), and the presenter window has the controls. pympress cannot autostart beamer's `\movie`. In another viewer the slide shows a still. It is a schematic: the order is illustrative, and the slide says so; on the robot everything runs at once. Point at the last line: every path went through the centre. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out, to match frame 7. The movie's route never goes through semantic or procedural memory (re-rendered 2026-11-09), but the drawing behind it still shows both circles, as the figure on frame 2 does. Frame 2 says they are not built.
+**Questions in the bottom bar** (same mechanics as Day 1): 12 (q equals the posterior: F is the surprise), 13 springs (LiDAR ±0.4: the belief rests at 2.37), 14 (belief at the prior: complexity 0, accuracy poor), 16 (s = ±0.6 give the same range: two humps), 24 (prior ±0.5, LiDAR ±0.4: ±0.31), 25 (predicts 2.0, reads 2.6: drive towards the wall), 29 (wall known to 1 mm: nothing to learn), 30 (σ halved: ln 2 ≈ 0.69 nats).
 
-**Eventual consistency (frames 11–12).** Walk frame 11 one agent at a time, from the left. The surprise to land: agent 2's write is simply lost, and nothing reports it; hence one owner per node. Students will ask why an arbitrary id may decide: frame 12 answers it. The id is arbitrary and so is the winner; what matters is that every copy applies the same ranking, so they agree. Swap the ids and they all agree on the other value. Agreement is what the CRDT promises; which value is right is what ownership is for. The rule shown is cortex's default CRDT mode (`core/crdt/delta_crdt.h`, `join_replace_conflict`): a change that has seen another replaces it, and otherwise the lower writer id wins. It is idealised: a comment in that file records that the causal test (`dotin`) carries a known workaround. The optional LWW mode, same-host only, orders by (timestamp, agent id), which is what the thesis sentence at `cortex.tex` l.257 describes.
+**The derivation block (frames 7–11).** It is 25 minutes of algebra; the springs question on frame 13 is the first chance for the room to think. Write the four steps of frame 9 on the board as they appear. Neal & Hinton (1998) is the source of the rearrangement.
 
-**Shared memory (frame 14).** 85 GB/s is the whole DDR5 bus; one core copies well below that, so 33 µs is a lower bound. The driver still writes the frame once into the slot, so zero copy is about not paying again per reader, not about avoiding the first write. A story if time allows: for months the plane was silently NOT zero-copy, because FastDDS turns data-sharing off for keyed types and only logs it at INFO. Removing one `@key` took the bench from 494 µs at 1.4% CPU to 186 µs at 0.8% (memory note `zero-copy-was-never-on-keyed-types`, commit 48543c5; post-thesis). The configuration said on, and nothing measured it.
+**Laplace (frames 18–21).** Frame 18 expands at the bottom of the bowl (no slope). Frame 19 expands around any μ, which has a slope b; it averages to zero under q because E_q[s − μ] = 0. Say this out loud: it is the step students miss. Frame 21 plots the two σ terms of F (drawn with ℋ = 4) and their sum; the minimum is at σ = 1/√ℋ.
 
-**Concepts first (2026-11-09).** Frame 5 is the map of the next three days: geometry, life cycle and aspect tomorrow, function on Day 5. The four dimensions are the course's framing; the thesis does not name them. Frame 6 is Day 1 again: the class is the prior, an instance the posterior. For a chair the belief is pose only and the shape is the class template; a table's shape is fitted.
+**Perception and action.** Frame 24: Kalman reaches the bottom of F in one step; the gradient steps of frame 23 reach it in many (the lab's Exercise 4 shows both, and the step-size limit η < 2/ℋ). Frame 26: with ∂o/∂a = −1 (driving towards the wall shortens the range) the gain K_P is negative; the set point is the robot's own prediction, and a prior that holds a desire turns the prediction into a goal (Day 4).
 
-**The graph from a run (frame 8).** The bottom layer is the simulator's apartment, not a belief. The `root` at the top of this picture is the viewer's World layer; frame 7 starts from the robot.
+**Expected Free Energy.** Frame 27 draws the timeline: real readings before now, imagined ones after. Frame 30 is how the robot computes G: imagine a state, imagine a reading, update as if it were real (Kalman), score how much narrower the belief gets and how far the reading is from the goal, average. The boxed G (frame 31) is that average written with beliefs. The minus sign of the learning term is a choice (Millidge, Tschantz & Buckley 2021): the derivation is in the handout and in lab Exercise 3.
 
-**Memories (frames 15–19): say what is not built.** Working, episodic and long-term spatial run. Long-term object memory (LTOM) is work in progress and is not in the thesis. Semantic and procedural are not built, although `cortex.tex` l.519–537 and l.549–570 describe them in the present tense; that text also says the spatial memory holds objects, which stopped being true with a2baaebe. There is no semantic memory beyond LTOM, which is per-instance today, and classes stay inside the concept agents.
+**Expected lab numbers** (seed 0):
+- Exercise 1: p(o) = 0.398, surprise 0.921 nats; F − KL = 0.921 for every belief tried (F = 6.935, 1.284, 0.921).
+- Exercise 2: the grid minimum at μ = 2.515, σ = 0.185 (1/√ℋ = 0.186); F there = 0.921, the surprise.
+- Exercise 3: learning term, imagined average 1.626 against the formula 1.629 nats (good sensor), 0.111 against 0.112 (poor sensor).
+- Exercise 4: η = 0.01 and 0.06 settle at 2.517 (the Kalman mean); η = 0.08 diverges, since η(π_p + π_o) = 2.32 > 2.
+- Exercises 5–6: 65 points; μ = 4.0015 m, ℋ = 162 500, σ_d = 2.48 mm both ways; 16 points: 5.00 mm (×2.02).
+- Exercises 7–8 (homework): 400 scans; uniform σ: scatter 2.29 mm against 2.48 predicted (ratio 1.08); noise along the beam: 2.28 against 2.31 (1.01).
+- Exercises 9–10 (homework): ΔF positive and growing with the prior width (fixed model wins at 90°); tilted 1.5°: −87.4 nats, free wins. The backup figure uses another scan (−70.2 nats); the verdicts agree.
 
-**What not to claim about LTOM (state on 2026-11-09, re-check before the course).** It only offers: in `ltom_chair2` the chair was absent about 35 s after re-entry, until detected. Recall uses position only, so a moved chair is not established (offline atlas replay re-identified one 15/53 = 28%). Only chairs have done this live. Renaming, learned permanence and relations are designed, not built. The atlas exists only in `chair_concept` in shadow mode, and thumbnails are on a branch.
+## Day 3 — The CORTEX architecture: concepts and memories (`slides/day3.pdf`, `labs/day3.ipynb`, `handouts/handout_day3.pdf`)
 
-**Amortisation (frame 19) is a plan.** Missions run and their results are kept; nothing generalises from them yet.
+**Rewritten 2026-11-27.** 36 numbered frames plus 8 backups (five more were parked in `slides/parked_day3_backups.tex`: the CRDT exchange and its tie rule, amortisation, "one belief asks four questions", the factorised belief). Frame numbers are the footers (n/36). Hand out the Day 3 handout; its glossary carries the day's new words (node, edge, RT edge, owner, CRDT, DDS, factor, cut, NEES).
 
-**The main line is plain on purpose (2026-11-08).** The form admits cognitive-science students. The joint in full, the seven assumptions, the factorised q and the matrix C are backup frames after "Tomorrow", outside the frame count: show them if someone asks.
+| time | block | frames |
+|---|---|---|
+| 0:00–0:12 | Who holds the belief: Day 2's one q against a dozen processes; cognitive architectures (SOAR/ACT-R, layered robots, blackboards) and where CORTEX sits; CORTEX, the whole picture | 1–3 |
+| 0:12–0:30 | Infrastructure: a shared graph instead of messages, copies merged by a CRDT, the protocol, sensor data beside the graphs; the CORTEX-in-action video | 4–8 |
+| 0:30–0:50 | The working memory: the scene as a graph, a real one, two kinds of change, typed records, the RT tree, the ring of past poses | 9–15 |
+| 0:50–1:05 | Concepts: four dimensions, the retina, one object from many fragments, class against instances | 16–19 |
+| 1:05–1:20 | Memories: timescales, episodic (one episode drawn), long-term spatial | 20–26 |
+| 1:20–1:40 | One belief, cut among many agents: the product of factors, inside a factor, each agent's F, a pose crosses a cut with its covariance, the cost of cutting | 27–31 |
+| 1:40–1:50 | No thresholds: precision against threshold, the tuned threshold that fails, the one threshold that stays | 32–34 |
+| 1:50–2:05 | break | |
+| 2:05–3:00 | Lab: Exercises 3, 4, 5, 6, 8 in class (about 55 min); 1, 2, 7, 9 at home | 35 |
+| — | Tomorrow (Day 4's three blocks: the room, the chair's life, choosing a look) | 36 |
 
-**Say it, don't read it.** Frame 22 is the argument of the day: every boundary between processes is a
-conditional-independence assumption, and whatever crosses it is what survived a marginalisation.
+**Questions in the bottom bar** (ask, wait, click): 2 (in a layered robot, where is the belief about the room: spread over layers and messages; in CORTEX one node), 6 (two agents write one node: every copy ends with one of the writes; hence one owner per node), 14 (the robot's pose becomes less sure: Σ' grows, since room←Shadow is on the path), 19 (a third chair: one more node, not another agent), 30 (the pose becomes exact: the two scenes no longer differ), 31 (chair_1 placed 10 cm too far left: table_1 too, the same δ_t moves both), 32 (a chair at 5.1 m: the threshold drops it, the precision weighs it a little less than at 4.9 m).
 
-**Frame 25 is the surprise.** Ask before showing it whether the agents' standard deviations are right.
-Most say no. Each marginal is exact; only the correlation is lost. Relations between objects are what
-the factorisation cannot hold.
+**Frame 3.** The procedural memory is not running; the frame now says that CORTEX puts its weight on building the representation more than on planning and executing missions. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out.
 
-**Frame 26: the price does not fall with more data.** Students expect it to. It is the information the
-objects carry about each other, and no number of frames creates a place to keep it.
+**CORTEX in action (the full-screen slide after frame 8).** In pympress, click once to start; it loops (40.5 s). It is a schematic: the order is illustrative; on the robot everything runs at once. Point at the last line: every path went through the centre. The movie's route never goes through semantic or procedural memory.
 
-**The rule is not "never a gate".** Frame 31 proves one must stay, and the backup frame "The rule is" names the three that do
-exist and their verdicts: admissibility justified, birth due to be replaced, the peer grace period a
-recorded debt. Say explicitly that the thesis has not finished this.
+**Copies and the CRDT (frames 5–6).** If asked why an arbitrary id may decide which write survives: the winner is arbitrary, but every copy applies the same ranking, so they agree. Agreement is what the CRDT promises; which value is right is what ownership is for. The rule is cortex's default CRDT mode (`core/crdt/delta_crdt.h`, `join_replace_conflict`): a change that has seen another replaces it, otherwise the lower writer id wins; a comment there records that the causal test (`dotin`) carries a known workaround. The optional LWW mode, same-host only, orders by (timestamp, agent id), as `cortex.tex` l.257 describes. The two frames that walked this through are parked.
+
+**Sensor data (frame 8 and the backup "On one computer").** The bars are to scale. Zero copy means readers do not pay again per reader; the driver still writes the frame once. A story if time allows: for months the plane was silently NOT zero-copy, because FastDDS turns data-sharing off for keyed types and logs it only at INFO. Removing one `@key` took the bench from 494 µs at 1.4 % CPU to 186 µs at 0.8 % (commit 48543c5; post-thesis). The configuration said on, and nothing measured it.
+
+**Working memory (frames 9–15).** Frame 13 now says that each node is a belief. Frames 13 and 14 both show the RT tree; 13 adds how a point's covariance is composed along the path. The `root` in frame 10's picture is the viewer's World layer; frame 9 starts from the robot.
+
+**Concepts (frames 16–19).** Frame 16 is the map of the next days; the four dimensions are the course's framing, not the thesis's. Frame 19 is Day 1 again: the class is the prior, an instance the posterior. For a chair the belief is pose only and the shape is the class template; a table's shape is fitted.
+
+**Memories (frames 20–26): say what is not built.** Working, episodic and long-term spatial run. Long-term object memory (LTOM) is work in progress and not in the thesis (backup frame). Semantic and procedural are not built, although `cortex.tex` l.519–537 and l.549–570 describe them in the present tense. Frame 22 draws one real episode (a 4-second record from a run on 2026-11-22). What not to claim about LTOM (state on 2026-11-09, re-check): it only offers; recall uses position only; only chairs have done this live.
+
+**One belief, cut (frames 27–31).** Frame 27 is the argument of the day: every boundary between processes is a conditional-independence assumption, and whatever crosses it is what survived a marginalisation. Frame 31 is the surprise: each object's spread is right; only the relation between objects is lost (lab Exercise 6: one object 2.50 cm both ways; the relation 1.58 cm exact, 3.54 cm from the agents). The price of that loss does not fall with more frames (Exercise 7): it is information the objects carry about each other, and the product of factors has no place to keep it. The joint in causal order, the seven assumptions and the matrix C are backups.
+
+**No thresholds (frames 32–34).** The rule is not "never a threshold": frame 34 shows one must stay (a bias shared across frames), and the backup "The rule is" names the three that exist and their verdicts. Say that the thesis has not finished this.
 
 **Expected lab numbers** (seed 0; r = (5 cm)², s² = (10 cm)²):
-- NEES with the published covariance 1.09; ignoring it 5.57 (predicted (r+s²)/r = 5);
-- sum of agents' F equals global F exactly at s² = 0;
-- one object: exact sd 2.50 cm, agent 2.50 cm; the relation θ0−θ1: exact 1.58 cm, agents 3.54 cm;
-- KL = F(agents) − F(exact) = 2.56 nats, the same at 10, 40 and 160 frames;
-- price at s²/r = 4: 1.27 / 5.12 / 11.37 nats for 2 / 5 / 10 objects;
-- near pass: best gate 2.0 m, rmse 1.01 cm, precision 0.86 cm; far pass: best gate 8.0 m, 4.79 cm,
-  precision 4.22 cm; the near pass's gate on the far pass: 300 cm;
-- biased frames: at n = 2000 the displacement is 3.00 / 3.00 / 2.99 / 0 cm for α = 1 / 0.3 / 0.05 / 0.
+- Exercise 1: bottle_concept's write to table_1 is refused; the sweep removes bottle_1.
+- Exercise 4: NEES with the published covariance 1.09; ignoring it 5.57 (predicted (r + s²)/r = 5).
+- Exercise 5: the sum of the agents' F equals the global F (81.530351) when s² = 0.
+- Exercise 6: one object, exact sd 2.50 cm and agent 2.50 cm; the relation θ₀ − θ₁, exact 1.58 cm and agents 3.54 cm.
+- Exercise 7 (home): KL = F(agents) − F(exact) = 2.56 nats, the same at 10, 40 and 160 frames; at s²/r = 4: 1.27 / 5.12 / 11.37 nats for 2 / 5 / 10 objects.
+- Exercise 8: near pass, best threshold 2.0 m, rmse 1.01 cm against 0.86 cm with the precision; far pass, best 8.0 m, 4.79 cm against 4.22 cm; the near threshold used on the far pass, 300 cm.
+- Exercise 9 (home): at n = 2000 the displacement is 3.00 / 3.00 / 2.99 / 0 cm for α = 1 / 0.3 / 0.05 / 0.
 
 ## Day 4 — Concepts: geometry, life cycle, aspect (`slides/day4.pdf`, `labs/day4.ipynb`)
 

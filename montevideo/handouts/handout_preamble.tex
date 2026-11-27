@@ -1,0 +1,33 @@
+% Shared preamble for the course handouts and the cheatsheet (article class).
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[a4paper, margin=2cm]{geometry}
+\usepackage{amsmath, amssymb, bm, booktabs, graphicx, xcolor, enumitem, tcolorbox, multicol, listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc}
+\usepackage[hidelinks]{hyperref}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.5em}
+
+% same colours and macros as the slides (slides/preamble.tex)
+\definecolor{accent}{HTML}{C0392B}
+\definecolor{cool}{HTML}{2E6DB4}
+\definecolor{muted}{HTML}{7A7A7A}
+\definecolor{good}{HTML}{2E8B57}
+\definecolor{prob}{HTML}{E67E22}
+\newcommand{\given}{\,|\,}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\KL}[2]{D_{\mathrm{KL}}\!\left[#1\,\middle\|\,#2\right]}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\Hess}{\mathcal{H}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% boxes
+\newtcolorbox{keyidea}{colback=accent!5, colframe=accent!70!black, boxrule=0.6pt, arc=2pt, left=6pt, right=6pt, top=4pt, bottom=4pt}
+\newtcolorbox{labhelp}[1]{colback=good!5, colframe=good!60!black, boxrule=0.6pt, arc=2pt, title={\small\bfseries #1}, fonttitle=\small, left=6pt, right=6pt, top=4pt, bottom=4pt}
+\newtcolorbox{backupbox}[1]{colback=cool!5, colframe=cool!70!black, boxrule=0.6pt, arc=2pt, title={\small\bfseries #1}, left=6pt, right=6pt, top=4pt, bottom=4pt}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, keepspaces=true, showstringspaces=false,
+  commentstyle=\color{muted}, keywordstyle=\color{cool}\bfseries, language=Python, frame=none,
+  backgroundcolor=\color{black!3}, xleftmargin=4pt, aboveskip=4pt, belowskip=4pt}
