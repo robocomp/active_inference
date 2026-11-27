@@ -32,10 +32,12 @@
 // P(moved), hence Q, in the 6 cm moved-box phase.
 // Re-recorded for F1 round 7 A1: the move evidence reads the data linearised at the stayed posterior mode (written about x̄), so
 // P(moved), hence Q, moves again in the moved-box phase.
-// Re-recorded for CB1: the persistent update now ADOPTS the yaw mode its clearance prior favours (resolve_front_geometric at the
-// end of update_persistent_cycle). The sequence's deliberate quarter-turn relabel (record 32, apply_mode_rotation_for_test(1))
-// is undone by the next update: the box stands with its back on the staged wall at yaw 0, so θ from record 33 on is the same
-// body in its unrotated labels (w ↔ h back, yaw 1.571 → 0.000); the other records are unchanged.
+// Re-recorded for CB1 fix round 1 (owner rulings I2/I3, 11-27): the persistent update ADOPTS the MAP yaw mode
+// (resolve_front_geometric at the end of update_persistent_cycle), and its wall prior now decides only between the held mode and
+// its half-turn. After the sequence's deliberate quarter-turn relabel (record 32, apply_mode_rotation_for_test(1), yaw 1.5706)
+// the held front is side-on, 0.0002 rad INTO the staged wall (front·n = −2e−4), so the prior's half-turn is the MAP and the next
+// update turns it to yaw −1.5706: still side-on (the prior never touches the quarter turns), same w/h labels as BASE. Records
+// 0–32 are BASE's; 33–42 differ from BASE only by that half-turn of a side-on box (a near-tie, owner ruling I1: kept).
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
