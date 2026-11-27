@@ -4910,6 +4910,200 @@ The count above is on `cf65a471`, an intermediate count that stays recorded. The
 
 ---
 
+## Addendum 4b: totals at 17f13198, all merges (2026-11-27)
+
+Addendum 4 above is the intermediate count at `cf65a471` and is left as it was. This section is the count at the registered tree of the graded binaries, `17f13198` (tree `5572d3e8d46cebde6a5d52804e30a9e067a3ea7b`; `91598c88` is docs-only on top), with every merge of rule (i) applied on both sides. Mechanical: `2026-11-27-addendum4b-totals.py` (runs `2026-11-27-after-count-17f13198.py`, which runs the map script).
+
+- Labels, all frozen and read-only in the AuRo registry: the baseline labels and referee pass 1 (`referee_labels_2026-11-27.tsv`); referee pass 2 (`after_referee_labels_2026-11-27.tsv`, sha256 `8a8802e6871201142f8a0e9bd65059049cbbbe8c3a85a4cd887de5f0e508b722`, 286 rows A0001-A2588); referee pass 3 (`after2_referee_labels_2026-11-27.tsv`, sha256 `18d2ee67e632bbb2238a20d09adf38261a67ad0158034affb4156b99810c53d3`, 11 rows A2589-A2599, no new rule). Rules 9-13 apply to both counts; the only first-pass row they change is R057 (excluded), shown as the second baseline version.
+- Binaries (Addendum 4, rule iii, same evidence): table = the legacy `table_concept` build; chair, refrigerator, hood = `countable_concept` plus the class's own `etc/countable.toml`; nightstand, bed, toilet = `countable_concept` plus their own `etc/config.toml`. The graded chair runs `countable_concept` (`2026-11-26-part1-grading.md:220-222`), so A2584 (`chair_belief.cpp:257`) is charged to the chair before only. BEFORE = the addendum 2 build rule.
+- File lists at `17f13198` are those of `cf65a471` (no `#include` line, CMake file or source file changed between them; see the end of Addendum 4), so the build scope is the same.
+
+### A2599 was sent to the referee by mistake
+
+A2599 (the Sigma cap, `persistent_engine.h`) was placed at the after-count doc's line 1514, which at `17f13198` is inside `learn_volatility`; its real function is `predict_theta_on` (now `persistent_engine.h:1551-1560`, code identical to `cf65a471`). The doc row was relocated by function and offset (the script now does this for every doc row): it is the row A2580 with its pass-2 label, status "matched, cf65a471 id A2580" in `2026-11-27-after-count-map-17f13198.tsv`, counted once. The referee labelled A2599 patch; the pass-2 label of A2580 is patch: they agree. The packet `2026-11-27-after-referee-packet-17f13198.md` stays as it was sent (11 rows); the map has 10 rows from it (A2589-A2598).
+
+### Totals per class
+
+Merged on both sides. "before, unmerged" is the Addendum 4 figure for comparison (cf65a471 build rule, no merge).
+
+| class | version | class | sensor | patch | switches (patch) | excluded | switches (other) | patch total | total rows |
+|---|---|---|---|---|---|---|---|---|---|
+| chair | before, unmerged (frozen) | 12 | 18 | 142 | 9 | 70 | 6 | 151 | 257 |
+| chair | before, frozen, merged | 12 | 15 | 127 | 9 | 69 | 6 | 136 | 238 |
+| chair | before, R057 excluded, merged | 12 | 15 | 127 | 9 | 69 | 6 | 136 | 238 |
+| chair | after, unmerged | 42 | 45 | 190 | 11 | 212 | 10 | 201 | 510 |
+| chair | after, merged | 36 | 38 | 167 | 11 | 210 | 10 | 178 | 472 |
+| table | before, unmerged (frozen) | 15 | 34 | 156 | 13 | 83 | 3 | 169 | 304 |
+| table | before, frozen, merged | 15 | 28 | 139 | 13 | 82 | 3 | 152 | 280 |
+| table | before, R057 excluded, merged | 15 | 28 | 138 | 13 | 83 | 3 | 151 | 280 |
+| table | after, unmerged | 15 | 34 | 159 | 13 | 105 | 3 | 172 | 329 |
+| table | after, merged | 15 | 28 | 143 | 13 | 104 | 3 | 156 | 306 |
+| refrigerator | before, unmerged (frozen) | 25 | 33 | 172 | 8 | 85 | 4 | 180 | 327 |
+| refrigerator | before, frozen, merged | 25 | 27 | 153 | 8 | 84 | 4 | 161 | 301 |
+| refrigerator | before, R057 excluded, merged | 25 | 27 | 153 | 8 | 84 | 4 | 161 | 301 |
+| refrigerator | after, unmerged | 42 | 45 | 190 | 11 | 212 | 10 | 201 | 510 |
+| refrigerator | after, merged | 36 | 38 | 167 | 11 | 210 | 10 | 178 | 472 |
+| hood | before, unmerged (frozen) | 27 | 30 | 172 | 8 | 85 | 4 | 180 | 326 |
+| hood | before, frozen, merged | 27 | 27 | 154 | 8 | 84 | 4 | 162 | 304 |
+| hood | before, R057 excluded, merged | 27 | 27 | 154 | 8 | 84 | 4 | 162 | 304 |
+| hood | after, unmerged | 42 | 45 | 190 | 11 | 212 | 10 | 201 | 510 |
+| hood | after, merged | 36 | 38 | 167 | 11 | 210 | 10 | 178 | 472 |
+| nightstand | before, unmerged (frozen) | 30 | 40 | 171 | 11 | 92 | 4 | 182 | 348 |
+| nightstand | before, frozen, merged | 30 | 33 | 151 | 11 | 91 | 4 | 162 | 320 |
+| nightstand | before, R057 excluded, merged | 30 | 33 | 151 | 11 | 91 | 4 | 162 | 320 |
+| nightstand | after, unmerged | 42 | 45 | 190 | 11 | 212 | 10 | 201 | 510 |
+| nightstand | after, merged | 36 | 38 | 167 | 11 | 210 | 10 | 178 | 472 |
+| bed | before, unmerged (frozen) | 30 | 40 | 171 | 11 | 92 | 4 | 182 | 348 |
+| bed | before, frozen, merged | 30 | 33 | 151 | 11 | 91 | 4 | 162 | 320 |
+| bed | before, R057 excluded, merged | 30 | 33 | 151 | 11 | 91 | 4 | 162 | 320 |
+| bed | after, unmerged | 42 | 45 | 190 | 11 | 212 | 10 | 201 | 510 |
+| bed | after, merged | 36 | 38 | 167 | 11 | 210 | 10 | 178 | 472 |
+| toilet | before, unmerged (frozen) | 30 | 40 | 171 | 11 | 92 | 4 | 182 | 348 |
+| toilet | before, frozen, merged | 30 | 33 | 151 | 11 | 91 | 4 | 162 | 320 |
+| toilet | before, R057 excluded, merged | 30 | 33 | 151 | 11 | 91 | 4 | 162 | 320 |
+| toilet | after, unmerged | 42 | 45 | 190 | 11 | 212 | 10 | 201 | 510 |
+| toilet | after, merged | 36 | 38 | 167 | 11 | 210 | 10 | 178 | 472 |
+
+### Movement of the patch total (merged sets)
+
+Definitions as in Addendum 4: removed = baseline patch rows with no after row of the class (gone) or outside its new binary (out of scope); scope in = baseline patch rows that now count and did not; inherited = rows of the class's own `countable.toml` that took their label through the reader (all in brackets); added = patch rows labelled by referee pass 2 or 3 and charged to the class; relabelled = retained rows whose patch status changes (R057). All on the merged sets, so a merged-away row appears in none of the columns.
+
+| class | version | before | removed (gone + out of scope) | scope in | inherited (all) | added | relabelled | reconstructed after | after | gap |
+|---|---|---|---|---|---|---|---|---|---|---|
+| chair | frozen | 136 | -112 (2 + 110) | +23 | +103 (193) | +28 | +0 | 178 | 178 | +0 |
+| chair | R057 excluded | 136 | -112 (2 + 110) | +23 | +103 (193) | +28 | +0 | 178 | 178 | +0 |
+| table | frozen | 152 | -1 (1 + 0) | +1 | +0 (0) | +5 | -1 | 156 | 156 | +0 |
+| table | R057 excluded | 151 | -1 (1 + 0) | +1 | +0 (0) | +5 | +0 | 156 | 156 | +0 |
+| refrigerator | frozen | 161 | -132 (2 + 130) | +18 | +103 (193) | +28 | +0 | 178 | 178 | +0 |
+| refrigerator | R057 excluded | 161 | -132 (2 + 130) | +18 | +103 (193) | +28 | +0 | 178 | 178 | +0 |
+| hood | frozen | 162 | -133 (2 + 131) | +18 | +103 (193) | +28 | +0 | 178 | 178 | +0 |
+| hood | R057 excluded | 162 | -133 (2 + 131) | +18 | +103 (193) | +28 | +0 | 178 | 178 | +0 |
+| nightstand | frozen | 162 | -16 (16 + 0) | +4 | +0 (0) | +28 | +0 | 178 | 178 | +0 |
+| nightstand | R057 excluded | 162 | -16 (16 + 0) | +4 | +0 (0) | +28 | +0 | 178 | 178 | +0 |
+| bed | frozen | 162 | -16 (16 + 0) | +4 | +0 (0) | +28 | +0 | 178 | 178 | +0 |
+| bed | R057 excluded | 162 | -16 (16 + 0) | +4 | +0 (0) | +28 | +0 | 178 | 178 | +0 |
+| toilet | frozen | 162 | -16 (16 + 0) | +4 | +0 (0) | +28 | +0 | 178 | 178 | +0 |
+| toilet | R057 excluded | 162 | -16 (16 + 0) | +4 | +0 (0) | +28 | +0 | 178 | 178 | +0 |
+
+Reconciliation gaps (shown, not forced): none, the gap is 0 in every class and both versions.
+
+Merged away per class (rows dropped from the count, patch ones in brackets), before | after:
+
+| class | before (frozen) | after |
+|---|---|---|
+| chair | 19 (15) | 38 (23) |
+| table | 24 (17) | 23 (16) |
+| refrigerator | 26 (19) | 38 (23) |
+| hood | 22 (18) | 38 (23) |
+| nightstand | 28 (20) | 38 (23) |
+| bed | 28 (20) | 38 (23) |
+| toilet | 28 (20) | 38 (23) |
+
+### Merges, same quantity at two literal sites (auro rulings)
+
+Before side (baseline ids):
+- chair kFlipClamp, one named constant used twice (chair_belief.cpp:257, :274): B0116 into B0114.
+- refrigerator front clamp: kFrontClamp 6.0f and the +-6.0f re-baseline literal (refrigerator_belief.cpp:694, :668): B0443 into B0442.
+- hood front clamp (hood_belief.cpp:753, :727): B0613 into B0612.
+- countable front clamp (countable_belief.cpp:1717, :1549): B1135 into B1134.
+- contour_edge control offsets (contour_edge_project.h:95, contour_edge_check.cpp:86): R291 into R290.
+- log-odds cap literals (existence_belief.h:483, :754, chair_instance.h:118): B1165, R022 into B1162.
+
+After side:
+- 3-sigma z-band edges (countable_fitter.cpp:1180, :1181): A2550 into A2288.
+- countable front clamp (countable_belief.cpp:1380 kFrontClamp, :1221 re-baseline literal): A2269 into A2268.
+- volatility memory 0.995 (countable_belief.cpp:268 kLambda, persistent_engine.h:116): A2464 into R256 (the after row matched to that baseline row).
+- log-odds cap literals (existence_belief.h:483, :754 and specificworker.h:250): B1165, A2565 into B1162 (the after row matched to that baseline row).
+- tol_sigma and gn_tol_sigma, one parameter (persistent_engine.h:98, countable_belief.h:332): A2463 into A2579.
+- Link*/GhostEvidenceGain: A2537-A2540 (struct defaults, `countable_config.h:454-457`) and A2594-A2597 (loader literals, `countable_config.cpp:431-434`, which replace A2533-A2536 of the cf65a471 map) into the per-class toml/hidden-default rows of `Tracker.LinkPiMove`, `LinkPiGone`, `LinkLambdaNew`, `GhostEvidenceGain`.
+
+### Merges, toml key / loader default literal / library struct default of one constant (new in this section)
+
+A library struct default that a class's loader overwrites from a toml key is one constant with that key and the key's loader default (rule i); the merged row takes the key row's label. A library row merges for a class only if that class's binary shows the assignment. Evidence is the assignment in the 17f13198 sources.
+
+| family (library rows) | baseline ids | key (countable loader) | evidence |
+|---|---|---|---|
+| CarveParams.sensor_sigma_m | B1160 | Model.ExistenceSensorSigmaM | countable_existence.cpp:63, table_existence.cpp:59, refrigerator_existence.cpp:60, hood_existence.cpp:60 |
+| CarveParams.detection_prob | B1161 | Model.ExistenceDetectionProb | countable_existence.cpp:64, table_existence.cpp:60 (and the same in refrigerator, hood) |
+| CarveParams.clutter_prob | R281 | Model.ExistenceClutterProb | countable_existence.cpp:65, table_existence.cpp:61 (and the same in refrigerator, hood) |
+| ExistenceBelief L_max default + RemovalPolicy.logodds_max | B1162, B1165 | Model.ExistenceLogoddsMax | countable_existence.cpp:79, specificworker_lifecycle.cpp:584-585, :602, specificworker_consumers.cpp:177 (set_max); chair_existence.cpp:66 |
+| RemovalPolicy.removal_prob | B1166 | Model.ExistenceRemovalProb | countable_existence.cpp:80, table_existence.cpp:76 (chair derives it from exist_remove_logodds: not a copy, not merged) |
+| RemovalPolicy.frame_correlation | B1167 | Model.ExistenceFrameCorrelation | countable_existence.cpp:81, table_existence.cpp:77 |
+| RemovalPolicy.remove_frames | B1168 | Model.ExistenceRemoveFrames | countable_existence.cpp:82, chair_existence.cpp:68 |
+| TrackerParams.gate_mahalanobis | B1179 | Tracker.GateMahalanobis | countable specificworker_lifecycle.cpp:156, chair specificworker.cpp:508 |
+| TrackerParams.gate_fallback_m | B1180 | Tracker.GateFallbackM | countable specificworker_lifecycle.cpp:157, chair specificworker.cpp:509 |
+| TrackerParams.detection_noise_m | B1181 | Tracker.DetectionNoiseM | countable specificworker_lifecycle.cpp:158, chair specificworker.cpp:510 |
+| TrackerParams.birth_frames | B1182 | Tracker.BirthFrames | countable specificworker_lifecycle.cpp:159, chair specificworker.cpp:511 |
+| TrackerParams.birth_min_sep_m | B1183 | Tracker.BirthMinSepM | countable specificworker_lifecycle.cpp:161, chair specificworker.cpp:520 |
+| support_bank height margin (library radius/height row, library below_m, class "support select below_m" rows) | B1210, B1211, B0123, B0274, B0451, B1148 | Concept.SupportSelectHeightMarginM | <class>_support_bank.h:31-32 (prm.height_margin_m = cfg.support_select_height_margin_m; below_m from the same field), countable_support_bank.h:32 |
+| support_bank.quantization_m | B1212 | Concept.SupportBankQuantizationM | <class>_support_bank.h (prm quantization from cfg.support_bank_quantization_m) |
+| DetectorEnvelope.min_fill | B1171 | Model.DetectMinFill | countable_card.h:34 (sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft}) and the other cards |
+| DetectorEnvelope.max_fill | B1172 | Model.DetectMaxFill | same init list |
+| DetectorEnvelope.soft | B1173 | Model.DetectSoft | same init list |
+| Detectability.periph_ref | B1175 | Model.AI2PeriphRef | countable specificworker_lifecycle.cpp:230, chair specificworker.cpp:566 (table builds the reference as a literal: not merged) |
+| Detectability.range_ref_m | B1176 | Model.ExistenceAbsenceRangeRefM | countable specificworker_lifecycle.cpp:231, table specificworker_lifecycle.cpp:143 (chair uses the literal 2.5f: not merged) |
+| lidar_select Weights.coverage_n0 default | B1194 | Model.LidarCoverageN0 | countable_lidar_range_channel.cpp:79, :172 |
+| lidar_select Weights.robust_c_m default | B1195 | Model.LidarRobustCM | countable_lidar_range_channel.cpp:79, :172 |
+| BeamRays.sigma_s default + beam staging sigma_s default (the composite row also holds rho_max, which stays its own constant) | R279, B1140 | Model.ModelSigmaM | countable_lidar_range_channel.cpp:174, countable_lidar_range_channel.h:78 (st.sigma_s / L.sigma_s = cfg_.model_sigma_m) |
+
+Triples merged, by side and class (library rows dropped into the key row):
+
+**Before side**
+- chair: 13 families, 16 library rows: ExistenceBelief L_max default + RemovalPolicy.logodds_max [B1162, B1165] into Existence.MaxLogodds; RemovalPolicy.remove_frames [B1168] into Existence.RemoveFrames; TrackerParams.gate_mahalanobis [B1179] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [B1180] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [B1181] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [B1182] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [B1183] into Tracker.BirthMinSepM; support_bank height margin [B1210, B1211, B0123] into ChairConcept.SupportSelectHeightMarginM; support_bank.quantization_m [B1212] into ChairConcept.SupportBankQuantizationM; DetectorEnvelope.min_fill [B1171] into ChairModel.DetectMinFill; DetectorEnvelope.max_fill [B1172] into ChairModel.DetectMaxFill; DetectorEnvelope.soft [B1173] into ChairModel.DetectSoft; Detectability.periph_ref [B1175] into ChairModel.AI2PeriphRef
+- table: 20 families, 23 library rows: CarveParams.sensor_sigma_m [B1160] into TableModel.ExistenceSensorSigmaM; CarveParams.detection_prob [B1161] into TableModel.ExistenceDetectionProb; CarveParams.clutter_prob [R281] into TableModel.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [B1162, B1165] into TableModel.ExistenceLogoddsMax; RemovalPolicy.removal_prob [B1166] into TableModel.ExistenceRemovalProb; RemovalPolicy.frame_correlation [B1167] into TableModel.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [B1168] into TableModel.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [B1179] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [B1180] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [B1181] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [B1182] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [B1183] into Tracker.BirthMinSepM; support_bank height margin [B1210, B1211, B0274] into TableConcept.SupportSelectHeightMarginM; support_bank.quantization_m [B1212] into TableConcept.SupportBankQuantizationM; DetectorEnvelope.min_fill [B1171] into TableModel.DetectMinFill; DetectorEnvelope.max_fill [B1172] into TableModel.DetectMaxFill; DetectorEnvelope.soft [B1173] into TableModel.DetectSoft; Detectability.range_ref_m [B1176] into TableModel.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [B1194] into TableModel.LidarCoverageN0; lidar_select Weights.robust_c_m default [B1195] into TableModel.LidarRobustCM
+- refrigerator: 21 families, 24 library rows: CarveParams.sensor_sigma_m [B1160] into RefrigeratorModel.ExistenceSensorSigmaM; CarveParams.detection_prob [B1161] into RefrigeratorModel.ExistenceDetectionProb; CarveParams.clutter_prob [R281] into RefrigeratorModel.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [B1162, B1165] into RefrigeratorModel.ExistenceLogoddsMax; RemovalPolicy.removal_prob [B1166] into RefrigeratorModel.ExistenceRemovalProb; RemovalPolicy.frame_correlation [B1167] into RefrigeratorModel.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [B1168] into RefrigeratorModel.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [B1179] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [B1180] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [B1181] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [B1182] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [B1183] into Tracker.BirthMinSepM; support_bank height margin [B1210, B1211, B0451] into RefrigeratorConcept.SupportSelectHeightMarginM; support_bank.quantization_m [B1212] into RefrigeratorConcept.SupportBankQuantizationM; DetectorEnvelope.min_fill [B1171] into RefrigeratorModel.DetectMinFill; DetectorEnvelope.max_fill [B1172] into RefrigeratorModel.DetectMaxFill; DetectorEnvelope.soft [B1173] into RefrigeratorModel.DetectSoft; Detectability.periph_ref [B1175] into RefrigeratorModel.AI2PeriphRef; Detectability.range_ref_m [B1176] into RefrigeratorModel.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [B1194] into RefrigeratorModel.LidarCoverageN0; lidar_select Weights.robust_c_m default [B1195] into RefrigeratorModel.LidarRobustCM
+- hood: 18 families, 20 library rows: CarveParams.sensor_sigma_m [B1160] into HoodModel.ExistenceSensorSigmaM; CarveParams.detection_prob [B1161] into HoodModel.ExistenceDetectionProb; CarveParams.clutter_prob [R281] into HoodModel.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [B1162, B1165] into HoodModel.ExistenceLogoddsMax; RemovalPolicy.removal_prob [B1166] into HoodModel.ExistenceRemovalProb; RemovalPolicy.frame_correlation [B1167] into HoodModel.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [B1168] into HoodModel.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [B1179] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [B1180] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [B1181] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [B1182] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [B1183] into Tracker.BirthMinSepM; support_bank height margin [B1210, B1211] into HoodConcept.SupportSelectHeightMarginM; support_bank.quantization_m [B1212] into HoodConcept.SupportBankQuantizationM; Detectability.periph_ref [B1175] into HoodModel.AI2PeriphRef; Detectability.range_ref_m [B1176] into HoodModel.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [B1194] into HoodModel.LidarCoverageN0; lidar_select Weights.robust_c_m default [B1195] into HoodModel.LidarRobustCM
+- nightstand: 22 families, 26 library rows: CarveParams.sensor_sigma_m [B1160] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [B1161] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [R281] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [B1162, B1165] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [B1166] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [B1167] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [B1168] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [B1179] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [B1180] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [B1181] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [B1182] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [B1183] into Tracker.BirthMinSepM; support_bank height margin [B1210, B1211, B1148] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [B1212] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [B1171] into Model.DetectMinFill; DetectorEnvelope.max_fill [B1172] into Model.DetectMaxFill; DetectorEnvelope.soft [B1173] into Model.DetectSoft; Detectability.periph_ref [B1175] into Model.AI2PeriphRef; Detectability.range_ref_m [B1176] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [B1194] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [B1195] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [R279, B1140] into Model.ModelSigmaM
+- bed: 22 families, 26 library rows: CarveParams.sensor_sigma_m [B1160] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [B1161] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [R281] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [B1162, B1165] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [B1166] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [B1167] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [B1168] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [B1179] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [B1180] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [B1181] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [B1182] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [B1183] into Tracker.BirthMinSepM; support_bank height margin [B1210, B1211, B1148] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [B1212] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [B1171] into Model.DetectMinFill; DetectorEnvelope.max_fill [B1172] into Model.DetectMaxFill; DetectorEnvelope.soft [B1173] into Model.DetectSoft; Detectability.periph_ref [B1175] into Model.AI2PeriphRef; Detectability.range_ref_m [B1176] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [B1194] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [B1195] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [R279, B1140] into Model.ModelSigmaM
+- toilet: 22 families, 26 library rows: CarveParams.sensor_sigma_m [B1160] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [B1161] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [R281] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [B1162, B1165] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [B1166] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [B1167] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [B1168] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [B1179] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [B1180] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [B1181] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [B1182] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [B1183] into Tracker.BirthMinSepM; support_bank height margin [B1210, B1211, B1148] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [B1212] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [B1171] into Model.DetectMinFill; DetectorEnvelope.max_fill [B1172] into Model.DetectMaxFill; DetectorEnvelope.soft [B1173] into Model.DetectSoft; Detectability.periph_ref [B1175] into Model.AI2PeriphRef; Detectability.range_ref_m [B1176] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [B1194] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [B1195] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [R279, B1140] into Model.ModelSigmaM
+
+**After side**
+- chair: 22 families, 25 library rows: CarveParams.sensor_sigma_m [A2314] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [A2315] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [A2316] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [A2317, A2320] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [A2321] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [A2322] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [A2323] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [A2337] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [A2338] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [A2339] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [A2340] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [A2341] into Tracker.BirthMinSepM; support_bank height margin [A2408, A2409] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [A2410] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [A2325] into Model.DetectMinFill; DetectorEnvelope.max_fill [A2326] into Model.DetectMaxFill; DetectorEnvelope.soft [A2327] into Model.DetectSoft; Detectability.periph_ref [A2333] into Model.AI2PeriphRef; Detectability.range_ref_m [A2334] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [A2372] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [A2373] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [A2306, A2281] into Model.ModelSigmaM
+- table: 20 families, 23 library rows: CarveParams.sensor_sigma_m [A2314] into TableModel.ExistenceSensorSigmaM; CarveParams.detection_prob [A2315] into TableModel.ExistenceDetectionProb; CarveParams.clutter_prob [A2316] into TableModel.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [A2317, A2320] into TableModel.ExistenceLogoddsMax; RemovalPolicy.removal_prob [A2321] into TableModel.ExistenceRemovalProb; RemovalPolicy.frame_correlation [A2322] into TableModel.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [A2323] into TableModel.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [A2337] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [A2338] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [A2339] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [A2340] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [A2341] into Tracker.BirthMinSepM; support_bank height margin [A2408, A2409, A2184] into TableConcept.SupportSelectHeightMarginM; support_bank.quantization_m [A2410] into TableConcept.SupportBankQuantizationM; DetectorEnvelope.min_fill [A2325] into TableModel.DetectMinFill; DetectorEnvelope.max_fill [A2326] into TableModel.DetectMaxFill; DetectorEnvelope.soft [A2327] into TableModel.DetectSoft; Detectability.range_ref_m [A2334] into TableModel.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [A2372] into TableModel.LidarCoverageN0; lidar_select Weights.robust_c_m default [A2373] into TableModel.LidarRobustCM
+- refrigerator: 22 families, 25 library rows: CarveParams.sensor_sigma_m [A2314] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [A2315] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [A2316] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [A2317, A2320] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [A2321] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [A2322] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [A2323] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [A2337] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [A2338] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [A2339] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [A2340] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [A2341] into Tracker.BirthMinSepM; support_bank height margin [A2408, A2409] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [A2410] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [A2325] into Model.DetectMinFill; DetectorEnvelope.max_fill [A2326] into Model.DetectMaxFill; DetectorEnvelope.soft [A2327] into Model.DetectSoft; Detectability.periph_ref [A2333] into Model.AI2PeriphRef; Detectability.range_ref_m [A2334] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [A2372] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [A2373] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [A2306, A2281] into Model.ModelSigmaM
+- hood: 22 families, 25 library rows: CarveParams.sensor_sigma_m [A2314] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [A2315] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [A2316] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [A2317, A2320] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [A2321] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [A2322] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [A2323] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [A2337] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [A2338] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [A2339] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [A2340] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [A2341] into Tracker.BirthMinSepM; support_bank height margin [A2408, A2409] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [A2410] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [A2325] into Model.DetectMinFill; DetectorEnvelope.max_fill [A2326] into Model.DetectMaxFill; DetectorEnvelope.soft [A2327] into Model.DetectSoft; Detectability.periph_ref [A2333] into Model.AI2PeriphRef; Detectability.range_ref_m [A2334] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [A2372] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [A2373] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [A2306, A2281] into Model.ModelSigmaM
+- nightstand: 22 families, 25 library rows: CarveParams.sensor_sigma_m [A2314] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [A2315] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [A2316] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [A2317, A2320] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [A2321] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [A2322] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [A2323] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [A2337] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [A2338] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [A2339] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [A2340] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [A2341] into Tracker.BirthMinSepM; support_bank height margin [A2408, A2409] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [A2410] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [A2325] into Model.DetectMinFill; DetectorEnvelope.max_fill [A2326] into Model.DetectMaxFill; DetectorEnvelope.soft [A2327] into Model.DetectSoft; Detectability.periph_ref [A2333] into Model.AI2PeriphRef; Detectability.range_ref_m [A2334] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [A2372] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [A2373] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [A2306, A2281] into Model.ModelSigmaM
+- bed: 22 families, 25 library rows: CarveParams.sensor_sigma_m [A2314] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [A2315] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [A2316] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [A2317, A2320] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [A2321] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [A2322] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [A2323] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [A2337] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [A2338] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [A2339] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [A2340] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [A2341] into Tracker.BirthMinSepM; support_bank height margin [A2408, A2409] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [A2410] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [A2325] into Model.DetectMinFill; DetectorEnvelope.max_fill [A2326] into Model.DetectMaxFill; DetectorEnvelope.soft [A2327] into Model.DetectSoft; Detectability.periph_ref [A2333] into Model.AI2PeriphRef; Detectability.range_ref_m [A2334] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [A2372] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [A2373] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [A2306, A2281] into Model.ModelSigmaM
+- toilet: 22 families, 25 library rows: CarveParams.sensor_sigma_m [A2314] into Model.ExistenceSensorSigmaM; CarveParams.detection_prob [A2315] into Model.ExistenceDetectionProb; CarveParams.clutter_prob [A2316] into Model.ExistenceClutterProb; ExistenceBelief L_max default + RemovalPolicy.logodds_max [A2317, A2320] into Model.ExistenceLogoddsMax; RemovalPolicy.removal_prob [A2321] into Model.ExistenceRemovalProb; RemovalPolicy.frame_correlation [A2322] into Model.ExistenceFrameCorrelation; RemovalPolicy.remove_frames [A2323] into Model.ExistenceRemoveFrames; TrackerParams.gate_mahalanobis [A2337] into Tracker.GateMahalanobis; TrackerParams.gate_fallback_m [A2338] into Tracker.GateFallbackM; TrackerParams.detection_noise_m [A2339] into Tracker.DetectionNoiseM; TrackerParams.birth_frames [A2340] into Tracker.BirthFrames; TrackerParams.birth_min_sep_m [A2341] into Tracker.BirthMinSepM; support_bank height margin [A2408, A2409] into Concept.SupportSelectHeightMarginM; support_bank.quantization_m [A2410] into Concept.SupportBankQuantizationM; DetectorEnvelope.min_fill [A2325] into Model.DetectMinFill; DetectorEnvelope.max_fill [A2326] into Model.DetectMaxFill; DetectorEnvelope.soft [A2327] into Model.DetectSoft; Detectability.periph_ref [A2333] into Model.AI2PeriphRef; Detectability.range_ref_m [A2334] into Model.ExistenceAbsenceRangeRefM; lidar_select Weights.coverage_n0 default [A2372] into Model.LidarCoverageN0; lidar_select Weights.robust_c_m default [A2373] into Model.LidarRobustCM; BeamRays.sigma_s default + beam staging sigma_s default [A2306, A2281] into Model.ModelSigmaM
+
+Examined and not merged: `angular_margin_rad` (`peripheral_channel.h`, set from two different keys in two paths), `BeamRays.rho_max` and the `rho_max` half of the beam staging row (set from the ray factor's `max_range_m`, no toml key), `B1137`/`B1138` (`class_p_label_true`, `headboard_t_m`: overridden from the class manifest, which is not a counted config), `RemovalPolicy.removal_prob` for the chair (derived from `exist_remove_logodds`), table's birth `periph_ref` and the chair's birth `range_ref_m` (literals in those binaries).
+
+### Label conflicts (kept row = the key row, or the first-named row for same-quantity merges)
+
+| side | class | dropped row | its label | kept row | its label |
+|---|---|---|---|---|---|
+| after | chair | A2281 beam staging rho_max / sigma_s | sensor | A0170 Model.ModelSigmaM | patch |
+| after | chair | A2322 RemovalPolicy.frame_correlation | patch | A0347 Model.ExistenceFrameCorrelation | sensor |
+| after | chair | A2463 tol_sigma | excluded | A2579 F1r9 cap switch: gn_tol_sigma, which now | patch |
+| before | table | B1167 RemovalPolicy.frame_correlation | patch | R038 TableModel.ExistenceFrameCorrelation | sensor |
+| after | table | A2322 RemovalPolicy.frame_correlation | patch | A0437 TableModel.ExistenceFrameCorrelation | sensor |
+| before | refrigerator | B1167 RemovalPolicy.frame_correlation | patch | R090 RefrigeratorModel.ExistenceFrameCorrelat | sensor |
+| after | refrigerator | A2281 beam staging rho_max / sigma_s | sensor | A0938 Model.ModelSigmaM | patch |
+| after | refrigerator | A2322 RemovalPolicy.frame_correlation | patch | A1112 Model.ExistenceFrameCorrelation | sensor |
+| after | refrigerator | A2463 tol_sigma | excluded | A2579 F1r9 cap switch: gn_tol_sigma, which now | patch |
+| before | hood | B1167 RemovalPolicy.frame_correlation | patch | R131 HoodModel.ExistenceFrameCorrelation | sensor |
+| after | hood | A2322 RemovalPolicy.frame_correlation | patch | A1321 Model.ExistenceFrameCorrelation | sensor |
+| after | hood | A2281 beam staging rho_max / sigma_s | sensor | A1330 Model.ModelSigmaM | patch |
+| after | hood | A2463 tol_sigma | excluded | A2579 F1r9 cap switch: gn_tol_sigma, which now | patch |
+| before | nightstand | B1140 beam staging rho_max / sigma_s | sensor | B0663 Model.ModelSigmaM | patch |
+| before | nightstand | B1167 RemovalPolicy.frame_correlation | patch | R191 Model.ExistenceFrameCorrelation | sensor |
+| after | nightstand | A2281 beam staging rho_max / sigma_s | sensor | A1538 Model.ModelSigmaM | patch |
+| after | nightstand | A2322 RemovalPolicy.frame_correlation | patch | A1715 Model.ExistenceFrameCorrelation | sensor |
+| after | nightstand | A2463 tol_sigma | excluded | A2579 F1r9 cap switch: gn_tol_sigma, which now | patch |
+| before | bed | B1140 beam staging rho_max / sigma_s | sensor | B0827 Model.ModelSigmaM | patch |
+| before | bed | B1167 RemovalPolicy.frame_correlation | patch | R223 Model.ExistenceFrameCorrelation | sensor |
+| after | bed | A2281 beam staging rho_max / sigma_s | sensor | A1748 Model.ModelSigmaM | patch |
+| after | bed | A2322 RemovalPolicy.frame_correlation | patch | A1925 Model.ExistenceFrameCorrelation | sensor |
+| after | bed | A2463 tol_sigma | excluded | A2579 F1r9 cap switch: gn_tol_sigma, which now | patch |
+| before | toilet | B1140 beam staging rho_max / sigma_s | sensor | B0991 Model.ModelSigmaM | patch |
+| before | toilet | B1167 RemovalPolicy.frame_correlation | patch | R255 Model.ExistenceFrameCorrelation | sensor |
+| after | toilet | A2281 beam staging rho_max / sigma_s | sensor | A1958 Model.ModelSigmaM | patch |
+| after | toilet | A2322 RemovalPolicy.frame_correlation | patch | A2135 Model.ExistenceFrameCorrelation | sensor |
+| after | toilet | A2463 tol_sigma | excluded | A2579 F1r9 cap switch: gn_tol_sigma, which now | patch |
+
+
+---
+
 ## After part 1 (shared engine, Task G1x, 2026-11-26)
 
 ### How this count was made

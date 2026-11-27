@@ -50,6 +50,24 @@ def ident(a, root):
     return ('scan', a['file'], a['key'], line_text(root, a['file'], row_line(a)) if a['file'] else '', a['note'][:12] if 'doc' in a['note'] else '')
 # The after-count doc rows carry the cf65a471 file:line of their constant. At 17f13198 that line may have moved: relocate such a row by the
 # text of its cf65a471 line; if the text is still in the file and a scanned row or a config row sits there, the doc row is an annotation of it.
+FUNC_RELOCATED = []
+def relocate_doc_rows_by_function():
+    """A doc row carries the cf65a471 line of its constant. If that line was inside a function, the same function at 17f13198
+    (same signature) gives the row's line at the same offset (a bare line number can land in another function after edits above it)."""
+    for a in nafter:
+        if a['kind'] != 'src' or 'after-count row (doc)' not in a['note'] or not a['file']: continue
+        old = next((o for o in oafter if o['file'] == a['file'] and o['key'] == a['key']), None)
+        if not old: continue
+        lo = row_line(old); fb = N['enclosing'](TCF, a['file'], lo)
+        if not fb: continue
+        cand = [fn for fn in N['functions'](T17, a['file']) if fn['sig'] == fb['sig']]
+        if not cand: continue
+        fa = min(cand, key=lambda fn: abs(fn['start'] - fb['start']))
+        l2 = fa['start'] + (lo - fb['start'])
+        if l2 != row_line(a):
+            FUNC_RELOCATED.append((a['key'], a['file'], row_line(a), l2))
+            a['where'] = '%s:%d' % (a['file'], l2)
+relocate_doc_rows_by_function()
 STALE = []
 def relocate_doc_rows():
     drop = []
@@ -157,7 +175,7 @@ with open(os.path.join(OUT, '2026-11-27-after-count-map-17f13198.tsv'), 'w', enc
     f.write('after_row_id\ttarget(s)\tkey\tvalue\twhere\tmatched_baseline_id\tfrozen_label\tinherited_via_reader\tnote\tstatus_vs_cf65a471\tcf65a471_id\n')
     for a in nafter:
         o = pair.get(a['aid'])
-        st = {'matched': 'same (baseline label)', 'pass2': 'same (pass-2 label stands)', 'unread': 'present but unread', 'packet': 'PACKET: ' + a.get('why', '')}[a['fstat']]
+        st = {'matched': 'same (baseline label)', 'pass2': 'matched, cf65a471 id %s (pass-2 label stands)%s' % (a.get('fid'), '; A2599 was sent to the referee by mistake (its enclosing function predict_theta_on is unchanged); referee label patch = pass-2 label' if a.get('fid') == 'A2580' else ''), 'unread': 'present but unread', 'packet': 'PACKET: ' + a.get('why', '')}[a['fstat']]
         lab = a['frozen'] if a['fstat'] in ('matched', 'unread') else (a.get('p2label', '') if a['fstat'] == 'pass2' else '')
         f.write('\t'.join(esc(x) for x in [a['fid'], tg(a), a['key'], a['value'], a['where'], a['mid'], lab, a['inherited'], a['note'], st, o['aid'] if o else '']) + '\n')
 # removed
@@ -201,7 +219,9 @@ for a in need:
     w = a['why']
     cnt['new at 17f13198' if w.startswith('new') else 'changed since cf65a471' if w.startswith('changed') else 'was matched, now unmatched'] += 1
     cnt['kind: ' + ('config/hidden' if a['kind'] in ('config', 'hidden') else 'src')] += 1
-with open(os.path.join(OUT, '2026-11-27-after-referee-packet-17f13198.md'), 'w', encoding='utf-8') as f:
+PKT_OUT = os.path.join(OUT, '2026-11-27-after-referee-packet-17f13198.md')
+PKT_FROZEN = os.path.exists(PKT_OUT)   # the packet the referee labelled stays as sent (A2599 was sent by mistake, see Addendum 4b)
+with open(PKT_OUT if not PKT_FROZEN else os.path.join(SCR, 'packet_regenerated.md'), 'w', encoding='utf-8') as f:
     f.write('# Blind referee packet 2: rows of the after-count at the graded-binary tree 17f13198\n\n')
     f.write('Source: active_inference commit %s (tree hash `%s`), the code the graded batch was built from; the batch commit %s is docs-only on top of it. The earlier after-count (cf65a471, tree `5c0029ab522691fb4747d2e7215493162f13f0b0`) stays recorded as an intermediate count; its pass-2 labels (A0001-A2588) stand for every row that is unchanged between the two trees. This packet holds only the rows that need a label: new rows, rows whose reading statement, consumers or enclosing function changed since cf65a471, and baseline-matched rows that stopped matching. Ids continue from A2589.\n\n' % (CODE_COMMIT, TREE_HASH_17, BATCH_COMMIT))
     f.write('No label, no proposed label. The role column quotes the code\'s own comment or the loader text, not a reading. "Why in this packet" says which test sent the row here.\n\n')
@@ -223,5 +243,6 @@ with open(os.path.join(OUT, '2026-11-27-after-referee-packet-17f13198.md'), 'w',
 print('rows at 17f13198:', len(nafter), ' packet:', len(need), dict(cnt), ' next id', next_id)
 print('doc rows relocated onto existing rows:', [a['key'] for a in DOC_DROPPED])
 print('stale doc rows dropped (code absent at 17f13198):', [a['key'] for a in STALE])
+print('doc rows relocated by function:', FUNC_RELOCATED)
 print('statuses', collections.Counter(a['fstat'] for a in nafter))
 print('removed at 17f13198:', len(removedN), ' at cf65a471:', len(removedO), ' cf65a471 rows gone:', len([o for o in oafter if id(o) not in paired_o and not o.get('unread')]))

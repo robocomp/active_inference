@@ -259,7 +259,7 @@ PENDING_BLOCK = '### Pending merges under rule (i) and the tree of the graded bi
 sec = '\n'.join(o) + '\n\n' + PENDING_BLOCK
 s = open(DOC, encoding='utf-8').read()
 a = s.index('## Addendum 4:') if '## Addendum 4:' in s else None
-b = s.index('## After part 1')
+b = s.index('## Addendum 4b:') if '## Addendum 4b:' in s else s.index('## After part 1')
 s = (s[:a] if a is not None else s[:b]) + sec + '---\n\n' + s[b:]
 open(DOC, 'w', encoding='utf-8').write(s)
 print('written; gaps:', gaps)
