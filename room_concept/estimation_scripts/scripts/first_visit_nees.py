@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """AuRo test (a), shared-engine part 1 grading: first-visit 6-DOF full-covariance NEES over tours.
     python3 -I first_visit_nees.py <tour_run_dir>... [--wbt W] [--replay BIN] [--cache DIR] [--smoke] [--classes a,b]
+                                    [--counterfactual] [--yaw-var=reported]
 Definitions pre-registered in .superpowers/sdd/2026-11-23-shared-engine/task-G1a-scorer-brief.md (not to be changed after a result is seen):
 
   statistic   per class, the mean over first visits of NEES/DOF = e^T P^-1 e / 6, e = graded quantity - mesh truth (6 DOF: cx cy H w h yaw),
@@ -36,6 +37,15 @@ Definitions pre-registered in .superpowers/sdd/2026-11-23-shared-engine/task-G1a
               graded visits, fixed seed: a computation, not a bound), per-DOF mean e^2/P_kk, PASS/FAIL. No other statistic, no
               outlier removal. PASS needs: n graded >= 10, no unmatched visit, no 'no full P' visit, mean in [0.5, 2].
 Every number is read with python float()/int() or struct-free text parsing, which does not read the locale.
+
+Opt-in, NOT the registered grade (task-F1; the default output is unchanged):
+  --counterfactual     grade a COUNTERFACTUAL replay (a replay binary that re-stages the frames with a changed rule, e.g. the replay
+                       tool's --f1-restage): skips ONLY the bit-identity gate (dth_live = dP_live = 0), which correctly rejects such a
+                       replay; every other gate stays. Every output line is prefixed "COUNTERFACTUAL replay — not the registered grade".
+  --yaw-var=reported   grade the engine's PUBLISHED covariance: the full 6x6 theta block with its yaw diagonal replaced by the
+                       reported marginal yaw variance (the replay's std_yaw column squared = yaw_marginal_var(), the S(5,5) of
+                       covariance_reported()), recomputed as a FULL-covariance NEES. The registered statistic uses the within-mode
+                       Sigma(5,5). Every output line is prefixed "engine-reported yaw variance — NOT the registered statistic".
 """
 import csv, hashlib, math, os, subprocess, sys
 from pathlib import Path
@@ -223,9 +233,10 @@ def instances(wbt):
     return out
 
 
-def score_tour(run, wbt, replay_bin, cache, smoke=False, only=None, runner=None, say=print):
+def score_tour(run, wbt, replay_bin, cache, smoke=False, only=None, runner=None, say=print, counterfactual=False, yaw_var='within'):
     """[dict]: one record per instance of the tour: status 'ok' | 'unmatched' | 'no full P' | 'duplicate' | 'not visited' | 'no room'.
-    runner(dump, replay_bin, cache) -> (rows, rc, stderr) is injectable (tests)."""
+    runner(dump, replay_bin, cache) -> (rows, rc, stderr) is injectable (tests). counterfactual / yaw_var: the opt-in statistics of
+    the module docstring (defaults = the registered grade)."""
     runner = runner or replay_rows
     run = R.run_path(run)
     series = room_series(read_gt_pose(run), polygons(wbt))
@@ -273,9 +284,12 @@ def score_tour(run, wbt, replay_bin, cache, smoke=False, only=None, runner=None,
                     if not (int(r['upd']) == k and int(r['cycle']) == cyc_k and int(r['gated']) == d['gated'] and int(r['lidar_only']) == d['lidar_only']):
                         why = f'update {k}: replay upd/cycle/gated/lidar_only differ from the ai2 log'
                     elif not smoke and rc != 0: why = f'replay tool exit {rc}: ' + (err.strip().splitlines() or ['?'])[-1][:120]
-                    elif not smoke and not (dth == 0.0 and dP == 0.0): why = f'replay not bit-identical to the live run at the draw (dth_live {dth:.3g}, dP_live {dP:.3g})'
+                    elif not smoke and not counterfactual and not (dth == 0.0 and dP == 0.0): why = f'replay not bit-identical to the live run at the draw (dth_live {dth:.3g}, dP_live {dP:.3g})'
                     else:
-                        est = [float(r[c]) for c in DOFS]; P = cov_from_row(r); sig = [math.sqrt(P[i, i]) for i in range(6)]
+                        est = [float(r[c]) for c in DOFS]; P = cov_from_row(r)
+                        if yaw_var == 'reported':
+                            rec['yaw_var_within'] = float(P[5, 5]); P[5, 5] = float(r['std_yaw']) ** 2
+                        sig = [math.sqrt(P[i, i]) for i in range(6)]
         else:
             why = f'{len(dumps)} replay dumps for {node}' if dumps else f'no replay dump for {node}'
         if P is None and cls == 'table' and not dumps:
@@ -379,12 +393,29 @@ def report(recs, classes=CLASSES, say=print):
             say(f"{base} {r['why']}" + (f" (nearest d2 {r['d2']:.1f})" if r['status'] == 'unmatched' and 'd2' in r else ''))
 
 
+COUNTERFACTUAL_LABEL = 'COUNTERFACTUAL replay — not the registered grade'
+REPORTED_YAW_LABEL = 'engine-reported yaw variance — NOT the registered statistic'
+
+
+def labelled(say, counterfactual, yaw_var):
+    """say() with the opt-in statistics' labels prefixed to every line (identity when both are off)."""
+    tags = ([COUNTERFACTUAL_LABEL] if counterfactual else []) + ([REPORTED_YAW_LABEL] if yaw_var == 'reported' else [])
+    if not tags: return say
+    pre = '[' + '; '.join(tags) + '] '
+    return lambda line: say(pre + line)
+
+
 def main(argv):
     wbt, replay_bin, cache, smoke, only, runs = DEFAULT_WBT, DEFAULT_REPLAY, os.path.expanduser('~/.cache/first_visit_nees'), False, None, []
+    counterfactual, yaw_var = False, 'within'
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == '--wbt': wbt = argv[i + 1]; i += 1
+        if a == '--counterfactual': counterfactual = True
+        elif a.startswith('--yaw-var='):
+            yaw_var = a.split('=', 1)[1]
+            if yaw_var not in ('within', 'reported'): print(f'--yaw-var must be within or reported, not {yaw_var}'); return 2
+        elif a == '--wbt': wbt = argv[i + 1]; i += 1
         elif a == '--replay': replay_bin = argv[i + 1]; i += 1
         elif a == '--cache': cache = argv[i + 1]; i += 1
         elif a == '--classes': only = set(argv[i + 1].split(',')); i += 1
@@ -392,10 +423,11 @@ def main(argv):
         else: runs.append(a)
         i += 1
     if not runs: print(__doc__); return 2
-    print(replay_identity(replay_bin))
+    say = labelled(print, counterfactual, yaw_var)
+    say(replay_identity(replay_bin))
     recs = []
-    for run in runs: recs += score_tour(run, wbt, replay_bin, cache, smoke, only)
-    report(recs, tuple(c for c in CLASSES if not only or c in only))
+    for run in runs: recs += score_tour(run, wbt, replay_bin, cache, smoke, only, counterfactual=counterfactual, yaw_var=yaw_var)
+    report(recs, tuple(c for c in CLASSES if not only or c in only), say=say)
     return 0
 
 

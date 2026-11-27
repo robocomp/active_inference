@@ -83,6 +83,25 @@ def integration():
         check('integration: replay not bit-identical -> no full P', r['status'] == 'no full P' and 'bit-identical' in r['why'], r['why'])
         r = go(lambda n: replay_rows(3, theta, sd, 1, dP=1e-3), smoke=True)['NIGHTSTAND_R']
         check('integration: --smoke waives the identity check', r['status'] == 'ok')
+        rc_ = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'nightstand'}, runner=stub(lambda n: replay_rows(3, theta, sd, 1, dP=1e-3)), counterfactual=True)}['NIGHTSTAND_R']
+        check('integration: --counterfactual skips only the identity gate', rc_['status'] == 'ok' and abs(rc_['nees'] - 1 / 6) < 1e-6, f"{rc_['status']} {rc_['why']}")
+        rc_ = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'nightstand'}, runner=stub(lambda n: (replay_rows(3, theta, sd, 1, dP=1e-3)[0], 1, 'boom')), counterfactual=True)}['NIGHTSTAND_R']
+        check('integration: --counterfactual keeps the exit-code gate', rc_['status'] == 'no full P' and 'exit 1' in rc_['why'], rc_['why'])
+        rc_ = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'nightstand'}, runner=stub(lambda n: replay_rows(2, theta, sd, 1, dP=1e-3)), counterfactual=True)}['NIGHTSTAND_R']
+        check('integration: --counterfactual keeps the alignment gate', rc_['status'] == 'no full P' and 'updates' in rc_['why'], rc_['why'])
+        # --yaw-var=reported: the yaw diagonal of P becomes std_yaw^2, the rest of P unchanged; yaw 2 cm-equivalent error, std_yaw 4x
+        def yaw_rows(n):
+            rows_, rc0, err0 = replay_rows(3, [est[0]] + est[1:5] + [est[5] + 0.02], sd, 1)
+            for r_ in rows_: r_['std_yaw'] = 0.08
+            return rows_, rc0, err0
+        r_w = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'nightstand'}, runner=stub(yaw_rows))}['NIGHTSTAND_R']
+        r_r = {x['key']: x for x in F.score_tour(run, wbt, 'replay', tmp + '/c', False, {'nightstand'}, runner=stub(yaw_rows), yaw_var='reported')}['NIGHTSTAND_R']
+        check('integration: default yaw variance = the within-mode S(5,5)', r_w['status'] == 'ok' and abs(r_w['nees'] - 1 / 6) < 1e-6, f"{r_w.get('nees')}")
+        check('integration: --yaw-var=reported grades e_yaw against std_yaw^2', r_r['status'] == 'ok' and abs(r_r['nees'] - (0.02 / 0.08) ** 2 / 6) < 1e-6 and abs(r_r['yaw_var_within'] - 0.02 ** 2) < 1e-15, f"{r_r.get('nees')}")
+        lines = []
+        F.labelled(lines.append, True, 'reported')('x')
+        F.labelled(lines.append, False, 'within')('y')
+        check('labels: opt-in statistics prefix every line, the default none', lines == ['[' + F.COUNTERFACTUAL_LABEL + '; ' + F.REPORTED_YAW_LABEL + '] x', 'y'], str(lines))
         r = go(lambda n: replay_rows(2, theta, sd, 1))['NIGHTSTAND_R']
         check('integration: alignment gate, row count', r['status'] == 'no full P' and 'updates' in r['why'], r['why'])
         r = go(lambda n: replay_rows(3, theta, sd, 5))['NIGHTSTAND_R']
