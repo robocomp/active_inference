@@ -532,20 +532,18 @@
 
 \begin{frame}{A concept has four dimensions, and one agent answers for all of them}
   \centering
-  \begin{tikzpicture}[x=1cm, y=1cm]
-    \chairside{-0.55,-1.05}{1.1}{0.95}{1.0}{line width=2pt, black}
-    \node[lab] at (0,-1.35) {one chair};
-    \node[dimcard=cool]   (g) at (-4.4,0.95)  {\textbf{Geometry}\\where it is, what shape it has,\\and how sure\\{\scriptsize\color{muted} Day 4}};
-    \node[dimcard=muted]  (l) at (4.4,0.95)   {\textbf{Life cycle}\\is it still there? born, missed,\\forgotten, back again\\{\scriptsize\color{muted} Day 4}};
-    \node[dimcard=good]   (a) at (-4.4,-0.95) {\textbf{Aspect}\\what it looks like,\\how you would imagine one\\{\scriptsize\color{muted} Day 4}};
-    \node[dimcard=accent] (f) at (4.4,-0.95)  {\textbf{Function}\\what it offers,\\what can be done with it\\{\scriptsize\color{muted} Day 4}};
-    \draw[flow, muted] (-0.8,0.35) -- (g.east);
-    \draw[flow, muted] (0.9,0.35) -- (l.west);
-    \draw[flow, muted] (-0.8,-0.5) -- (a.east);
-    \draw[flow, muted] (0.9,-0.5) -- (f.west);
-  \end{tikzpicture}
-
-  \vfill
+  \begin{tikzpicture}[x=1cm, y=1cm,
+      dl/.style={font=\footnotesize, align=center, text width=2.3cm}]
+    \node[inner sep=0] (g) at (-2.0,1.5)  {\includegraphics[width=3.8cm]{figures/d3_chair_geometry.png}};
+    \node[inner sep=0] (l) at (2.0,1.5)   {\includegraphics[width=3.8cm]{figures/d3_chair_lifecycle.png}};
+    \node[inner sep=0] (a) at (-2.0,-1.5) {\includegraphics[width=3.8cm]{figures/d3_kitchen_masks.png}};
+    \node[inner sep=0] (f) at (2.0,-1.5)  {\includegraphics[width=3.8cm]{figures/d3_chair_function.png}};
+    \node[dl, anchor=east, text=cool!80!black] at ([xshift=-2pt]g.west) {\textbf{geometry}\\ where it is, its shape, how sure};
+    \node[dl, anchor=west, text=black!70] at ([xshift=2pt]l.east) {\textbf{life cycle}\\ born, removed, moved, recalled};
+    \node[dl, anchor=east, text=good!60!black] at ([xshift=-2pt]a.west) {\textbf{aspect}\\ what it looks like to the camera: a mask, a class, a score};
+    \node[dl, anchor=west, text=accent] at ([xshift=2pt]f.east) {\textbf{function}\\ what it offers: ``come and look at me''};
+  \end{tikzpicture}\\[0.2em]
+  {\scriptsize\color{muted} simulated (Webots): one chair's box and $2\sigma$ ellipse, its belief and memory over a tour, the robot taking its offer; masks in a kitchen\par}
   \lesson{One agent per kind of thing answers for its geometry, life cycle, aspect and function.}
 \end{frame}
 

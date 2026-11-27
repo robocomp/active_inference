@@ -1,5 +1,6 @@
 \documentclass[10pt, aspectratio=169]{beamer}
 \input{preamble}
+\usepackage{multimedia}
 
 \title{A robot that acts to know}
 \subtitle{Day 4 --- One concept, from birth to action: the chair}
@@ -214,8 +215,8 @@ $\\[1.2em]
 \begin{frame}{The room supplies the likelihood: each laser return has a distance to a wall}
   \centering
   \begin{tikzpicture}[mstep/.style={->, very thick, draw=muted, shorten <=3pt, shorten >=3pt}]
-    \node[inner sep=0] (a) at (0,0)   {\includegraphics[width=4.2cm]{figures/d3_sdf_a.pdf}};
-    \node[inner sep=0] (b) at (6.2,0) {\includegraphics[width=4.2cm]{figures/d3_sdf_b.pdf}};
+    \node[inner sep=0] (a) at (0,0)   {\includegraphics[width=3.7cm]{figures/d3_sdf_a.pdf}};
+    \node[inner sep=0] (b) at (6.2,0) {\includegraphics[width=3.7cm]{figures/d3_sdf_b.pdf}};
     \draw[mstep] (a.east) -- node[above, lab] {place a scan} (b.west);
     \node[lab, anchor=north, align=center, text width=4.8cm] at ([yshift=-3pt]a.south)
       {\textbf{1. Once per room}: at every point $p$, $d(p)$ = distance to the nearest wall
@@ -224,7 +225,9 @@ $\\[1.2em]
       {\textbf{2. Every scan}: put its returns where pose $X$ says; return $n$ reads
        $d_n(X)$};
   \end{tikzpicture}\\[0.4em]
-  \small A return should sit on a wall: $d_n(X)=0$. So $d_n(X)$ \alert{is} the prediction error.
+  \small A return should sit on a wall: $d_n(X)=0$. So $d_n(X)$ \alert{is} the prediction error.\\[0.3em]
+  {\footnotesize $d(p) = \min_k \operatorname{dist}(p, \text{wall}_k)$: distance to the nearest wall; its slope $\nabla d$ shows which way to move $X$\par}
+  {\scriptsize\color{muted} the code calls it an SDF; on a room outline it is unsigned: it has no inside or outside\par}
   \lesson{The room is the model: it turns a pose into a prediction error, with no expected scan drawn.}
 \end{frame}
 
@@ -249,6 +252,77 @@ $\\[1.2em]
     \draw[arr] (p) -- (s); \draw[arr] (s) -- (c);
   \end{tikzpicture}
   \lesson{A solver lowers $F$ over the pose; the curvature of $F$ at the minimum is its covariance.}
+\end{frame}
+
+\begin{frame}{Inside $F(X)$: one cycle of the localiser, step by step}
+  \centering
+  \vspace{0pt plus 1filll}
+  \begin{tikzpicture}[st/.style={bx, minimum width=4.6cm, minimum height=1.35cm, text width=4.4cm},
+      num/.style={circle, fill=accent, text=white, font=\scriptsize\bfseries, inner sep=1pt, minimum size=0.42cm}]
+    \node[st, draw=muted, fill=muted!8] (a) at (0,1.5) {\textbf{predict} from the wheels\\[2pt]
+      $\bar X = f(X_{t-1}, u_t)$,\quad $\bar P = J P_{t-1} J^\top + J_u Q\, J_u^\top$};
+    \node[st, draw=cool, fill=cool!8] (b) at (5.6,1.5) {\textbf{place} each return at $X$\\[2pt]
+      $p_n(X) = R(\varphi)\,q_n + (x, y)$};
+    \node[st, draw=cool, fill=cool!8] (c) at (5.6,-0.4) {\textbf{measure} its distance to the room\\[2pt]
+      $d_n(X)$ = distance from $p_n(X)$ to the walls};
+    \node[st, draw=good!70!black, fill=good!8] (d) at (0,-0.4) {\textbf{weigh} each return\\[2pt]
+      $w_n$: near 1 on a wall, near 0 far from every wall};
+    \node[st, draw=accent, fill=accent!8, minimum width=10.2cm, text width=10cm] (e) at (2.8,-2.25) {\textbf{lower} $F(X) = \tfrac12 (X-\bar X)^{\!\top}\bar P^{-1}(X-\bar X) + \tfrac{1}{2\sigma^2}\sum_n w_n\, d_n(X)^2$\\[2pt]
+      the robot computes the bottom $X_t$ and its spread $P_t = \Hess^{-1}$ (Day~2's Laplace)};
+    \draw[arr] (a) -- (b); \draw[arr] (b) -- (c); \draw[arr] (c) -- (d); \draw[arr] (d.south) -- (d.south |- e.north);
+    \draw[arr, muted] (e.west) -- ++(-0.55,0) |- node[pos=0.25, left, font=\scriptsize, text=muted, align=right] {next\\step} (a.west);
+    \node[num] at (a.north west) {1}; \node[num] at (b.north west) {2}; \node[num] at (c.north west) {3};
+    \node[num] at (d.north west) {4}; \node[num] at (e.north west) {5};
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  {\scriptsize\color{muted} $q_n$: return $n$ in the robot's frame;\; $u_t$: the wheels' reading;\; $Q$: its noise;\; $J$, $J_u$: how the predicted pose moves with $X_{t-1}$ and $u_t$.\;
+   A return on a chair gets $w_n \approx 0$: a mixture of ``wall'' and ``clutter'', not a cutoff. Lab Exercise 12 writes steps 2--3.\par}
+  \vspace{0pt plus 1filll}
+  \ask{a chair stands between the robot and a wall. What do its returns do to the pose?}{Almost nothing: they are far from every wall, so $w_n \approx 0$ and they stop pulling on $X$.}
+\end{frame}
+
+\begin{frame}{The full loss: walls now, corners from the last poses, wheels between them}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm,
+      pose/.style={circle, draw=cool!80!black, thick, fill=cool!12, minimum size=0.75cm, font=\scriptsize, inner sep=0pt},
+      fac/.style={rectangle, draw=black!70, fill=black!70, minimum size=0.17cm, inner sep=0pt},
+      cor/.style={regular polygon, regular polygon sides=4, draw=good!70!black, fill=good!25, minimum size=0.42cm, inner sep=0pt}]
+    % the five strided poses
+    \foreach \k in {0,...,4} \node[pose] (x\k) at (2.0*\k,0) {$X_\k$};
+    \node[font=\scriptsize, text=muted, anchor=north] at (4.0,-0.75) {5 poses, each $\ge$ 10\,cm or $9^\circ$ from the last};
+    % wheels between consecutive poses
+    \foreach \a/\b in {0/1,1/2,2/3,3/4} {\node[fac] (m\a) at ($(x\a)!0.5!(x\b)$) {}; \draw (x\a) -- (m\a) -- (x\b);}
+    \node[font=\scriptsize, anchor=north] at (m1.south) {wheels};
+    % room corners, fixed: corner factors from every pose
+    \node[cor] (c1) at (2.0,1.75) {}; \node[cor] (c2) at (6.0,1.75) {};
+    \node[font=\scriptsize, text=good!50!black, anchor=south] at (4.0,1.95) {room corners (fixed: the room is given)};
+    \foreach \k/\c in {0/c1,1/c1,2/c1,2/c2,3/c2,4/c2,4/c1} {\draw[good!70!black] (x\k) -- ($(x\k)!0.55!(\c)$) node[fac, fill=good!70!black, draw=good!70!black] {} -- (\c);}
+    % walls: newest scan only
+    \node[fac, fill=accent, draw=accent] (w) at (9.1,0) {};
+    \draw[accent] (x4) -- (w);
+    \node[font=\scriptsize, text=accent, anchor=north, align=center] at (9.1,-0.2) {walls: newest\\ scan only};
+    % prior on the oldest
+    \node[fac, fill=muted, draw=muted] (b) at (-1.1,0) {};
+    \draw[muted] (b) -- (x0);
+    \node[font=\scriptsize, text=muted, anchor=north, align=center] at (-1.1,-0.2) {prior: what the\\ dropped poses left};
+  \end{tikzpicture}\\[0.5em]
+  {\small
+  $F = \underbrace{\textstyle\sum_n \rho\big(d_n(X_4)\big)}_{\text{walls}}
+   + \underbrace{\textstyle\sum_{k,j} \rho\big(\lVert \hat z_{kj} - c_j(X_k)\rVert_{\Lambda_{kj}}\big)}_{\text{corners, all 5 poses}}
+   + \underbrace{\textstyle\sum_k \lVert X_k - f(X_{k-1}, u_k)\rVert^2_{Q_k^{-1}}}_{\text{wheels}}
+   + \underbrace{\lVert X_0 - \mu_b\rVert^2_{\Lambda_b}}_{\text{prior}}$\par}
+  \vspace{0.3em}
+  {\footnotesize\textbf{Loops.} The cycles pose--corner--pose are not SLAM loops: the corners are fixed, so each ties a pose to the room. An old corner corrects $X_4$ only along the chain of wheel factors.\par}
+  \ask{why keep corners from past poses but walls from the newest scan only?}{A corner is a few numbers per pose, cheap to keep; a scan is thousands of points. Past corners still correct $X_4$ along the chain of wheel factors.}
+\end{frame}
+
+% the window of poses and corners growing and sliding as the robot drives (40 s, no sound);
+% click once in pympress to start. Made by figures/make_window_video.py.
+\begin{frame}[plain,noframenumbering]
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, showcontrols=false]{\includegraphics[width=\paperwidth]{pose_window_poster.png}}{media/pose_window.mp4}};
+  \end{tikzpicture}
 \end{frame}
 
 \begin{frame}{Example 1 in simulation: the pose stays within centimetres of the truth}

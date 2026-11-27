@@ -724,7 +724,7 @@ for b in beliefs[::6]:
 ax.set_aspect("equal"); ax.legend(); ax.set_title("localising against the estimated room (ellipses ×20)")
 
 # %% [markdown]
-# **Is the belief honest?** The normalised estimation error squared (NEES),
+# **Is the belief's spread right?** The normalised estimation error squared (NEES),
 # $e^\top\Sigma^{-1}e$, averages to the state dimension (3) when the covariance is right. It is
 # larger when the belief is over-confident, and smaller when it is pessimistic.
 #

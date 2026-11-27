@@ -132,5 +132,7 @@ kinova_controller/experiments/
 layouts/learnt/
 runs/
 *.mp4
+# course videos are part of the slides
+!montevideo/slides/media/*.mp4
 *.bak_*
 *.swp
