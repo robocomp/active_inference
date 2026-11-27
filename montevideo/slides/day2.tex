@@ -87,7 +87,7 @@
     \draw[-{Stealth[length=3mm]}, thick, muted!60, dashed] (s.north) to[out=50, in=130] node[pos=0.5, text=accent, font=\Large] {$\boldsymbol\times$} (q.north);
     \node[font=\small, muted] at (0,3.55) {no direct line from the world to the robot};
     \node[font=\small, text=good!60!black] at (0,1.45) {observation};
-    \node[font=\small, text=muted, anchor=west] at (0.8,-1.05) {evidence $p(o)$};
+    \node[font=\scriptsize, text=muted] at (0,-1.05) {evidence $p(o)$};
     \node[font=\small, text=cool!80!black, align=center] at (-3.4,-1.55) {hidden state\\prior $p(s)$};
     \draw[decorate, decoration={brace, mirror, amplitude=6pt}, thick, black!60] (-4.3,-2.45) -- (0.8,-2.45)
       node[midway, below=7pt, font=\small, align=center] {the model $p(s,o) = \textcolor{cool!80!black}{p(s)}\,\textcolor{good!70!black}{p(o\given s)}$\\{\itshape\color{black!70} we write it}};
@@ -205,7 +205,7 @@
   \includegraphics[width=0.84\textwidth]{d1_approx.pdf}
 
   {\small $q(s)$: a Gaussian, just a mean and a width. Slide it until it is \alert{closest} to the posterior.}\\[0.25em]
-  {\small Closeness $= \KL{q}{p(s\given o)} \ge 0$ \;--- but it needs $\textcolor{accent}{p(s\given o)}$, which we cannot compute:\\ its $p(o)$ is a sum over every $s$ (Day~1).}
+  {\small Closeness $= \KL{q}{p(s\given o)} \ge 0$ \;--- but it needs $\textcolor{accent}{p(s\given o)}$, which the robot cannot compute:\\ its $p(o)$ is a sum over every $s$ (Day~1).}
   \vfill
   \lesson{Find the $q$ with the smallest KL to the posterior.}
 \end{frame}
@@ -218,7 +218,7 @@
     &= \displaystyle\int q(s)\,\big[\ln q(s) - \ln \textcolor{accent}{p(s\given o)}\big]\,\mathrm{d}s & \text{\footnotesize\color{muted} log-ratio as a difference (frame~\ref{d2f:nats})}
   \end{array}$}
   \vfill
-  \lesson{The KL compares $q$ with $\ln p(s\given o)$, and that is the term we do not have.}
+  \lesson{The KL compares $q$ with $\ln p(s\given o)$, and that is the term the robot does not have.}
 \end{frame}
 
 \begin{frame}{Bayes in logs: the posterior is the model minus a constant}
@@ -419,18 +419,18 @@
     \draw[thick, dashed, accent, domain=0.6:3.8, samples=60] plot (\x, {0.35 + 0.55*(\x-2.2)^2});
     \fill[accent] (2.2,0.35) circle (2.2pt);
     \draw[muted, densely dotted] (2.2,0) -- (2.2,0.35) node[pos=0, below, lab, text=black] {$\mu$};
-    \node[lab, anchor=west] at (5.2,2.6) {$-\ln p(o\given s)\,p(s)$: the bowl};
+    \node[lab, anchor=west] at (5.2,2.6) {$-\ln\big[p(o\given s)\,p(s)\big]$: the bowl};
     \node[lab, anchor=east, text=accent] at (1.0,3.2) {parabola};
     \node[lab, anchor=west, text=accent] (hh) at (4.05,0.5) {$\Hess$: the curvature (Hessian) at $\mu$};
     \draw[-{Stealth[length=1.6mm]}, accent] (hh.west) to[out=180, in=-30] (2.75,0.47);
   \end{tikzpicture}\\[0.4em]
   {\normalsize Taylor approximation around $\mu$, up to the square:\par}
   \vspace{0.3em}
-  {\Large $-\ln \underbrace{p(o\given s)\,p(s)}_{\text{\normalsize $p(o,s)$}} \;\approx\; \underbrace{-\ln p(o,\mu)}_{\text{\normalsize height at the bottom}}
-   \;+\; \underbrace{\cancel{0\cdot(s-\mu)}}_{\text{\normalsize no slope at }\mu}
+  {\Large $\underbrace{-\ln p(o,s)}_{\text{\normalsize the bowl}} \;\approx\; \underbrace{-\ln p(o,\mu)}_{\text{\normalsize height at the bottom}}
+   \;+\; \underbrace{\cancel{0\cdot(s-\mu)}}_{\text{\normalsize no slope}}
    \;+\; \underbrace{\tfrac12\,\Hess\,(s-\mu)^2}_{\text{\normalsize bend around it}}$\par}
   \vspace{0.4em}
-  {\footnotesize\color{muted} $p(o,\mu)$: $p(o,s)$ at $s = \mu$\par}
+  {\footnotesize\color{muted} $p(o,s) = p(o\given s)\,p(s)$: the joint;\; $p(o,\mu)$: the joint at $s = \mu$\par}
   \vfill
   \lesson{Laplace keeps two numbers of the bowl: its height at the bottom and its bend there.}
 \end{frame}
@@ -449,8 +449,8 @@
   \begin{array}{r@{\;}l@{\quad}l}
     F &= \displaystyle\int q(s)\,\ln\frac{q(s)}{\textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}}\,\mathrm{d}s & \text{\footnotesize\color{muted} frame~\ref{d2f:fbox}}\\[0.8em]
     \uncover<2->{&= \displaystyle\underbrace{\int q(s)\ln q(s)\,\mathrm{d}s}_{\text{minus the entropy of } q} \;+\; \underbrace{\int q(s)\,\big[-\ln \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}\big]\,\mathrm{d}s}_{\text{average misfit under } q} & \text{\footnotesize\color{muted} split the log}}\\[3.2em]
-    \uncover<3->{&\approx \displaystyle \underbrace{-\tfrac12\ln(2\pi e\,\sigma^2)}_{\text{$-$entropy of a Gaussian (frame~\ref{d2f:16})}} \;+\; \E_q\big[\underbrace{-\ln p(o,\mu) + \tfrac12\Hess\,(s-\mu)^2}_{\text{misfit as a parabola at } \mu}\big] & \text{\footnotesize\color{muted} Laplace approximation (fr.~\ref{d2f:parabola})}}\\[2.6em]
-    \uncover<4->{&= \displaystyle \underbrace{-\ln p(o,\mu)}_{\text{misfit of the mean}} \;+\; \underbrace{\tfrac12\Hess\sigma^2}_{\text{cost of spreading}} \;-\; \underbrace{\tfrac12\ln(2\pi e\,\sigma^2)}_{\substack{\text{entropy of } q\text{: reward}\\ \text{for spreading}}} & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}$-\ln p(o,\mu)$ has no $s$: its average is itself\\ $\E_q[(s-\mu)^2] = \sigma^2$ (fr.~\ref{d2f:16})\end{tabular}}}
+    \uncover<3->{&\approx \displaystyle \underbrace{-\tfrac12\ln(2\pi e\,\sigma^2)}_{\text{$-$entropy of a Gaussian (frame~\ref{d2f:16})}} \;+\; \E_q\big[\underbrace{-\ln p(o,\mu) + b\,(s-\mu) + \tfrac12\Hess\,(s-\mu)^2}_{\text{misfit as a parabola at } \mu}\big] & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}Laplace approximation (fr.~\ref{d2f:parabola})\\ $b$: the slope of the bowl at $\mu$\end{tabular}}}\\[2.6em]
+    \uncover<4->{&= \displaystyle \underbrace{-\ln p(o,\mu)}_{\text{misfit of the mean}} \;+\; \underbrace{\tfrac12\Hess\sigma^2}_{\text{cost of spreading}} \;-\; \underbrace{\tfrac12\ln(2\pi e\,\sigma^2)}_{\substack{\text{entropy of } q\text{: reward}\\ \text{for spreading}}} & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}$-\ln p(o,\mu)$ has no $s$: its average is itself\\ $\E_q[s-\mu] = 0$: the slope term averages away\\ $\E_q[(s-\mu)^2] = \sigma^2$ (fr.~\ref{d2f:16})\end{tabular}}}
   \end{array}
   \]}
   \vfill
@@ -463,7 +463,7 @@
   \vspace{0pt plus 1filll}
   {\Large
   \tikz\node[draw=accent, very thick, rounded corners=6pt, inner sep=10pt, fill=accent!4]{$\displaystyle
-    F_{\text{Laplace}}(\mu,\sigma) \;=\; \underbrace{-\ln \textcolor{good!70!black}{p(o\given\mu)}\,\textcolor{cool!80!black}{p(\mu)}}_{\text{\normalsize misfit of the mean}}
+    F_{\text{Laplace}}(\mu,\sigma) \;=\; \underbrace{-\ln \big[\textcolor{good!70!black}{p(o\given\mu)}\,\textcolor{cool!80!black}{p(\mu)}\big]}_{\text{\normalsize misfit of the mean}}
     \;+\; \underbrace{\tfrac12\,\Hess\,\sigma^2}_{\text{\normalsize cost of spreading}}
     \;-\; \underbrace{\tfrac12\ln(2\pi e\,\sigma^2)}_{\substack{\text{\normalsize entropy of } q\text{\normalsize :}\\ \text{\normalsize reward for spreading}}}$};\par}
   \vspace{0.8em}
@@ -504,7 +504,7 @@
   \end{tikzpicture}
 
   \vspace{1.2em}
-  {\footnotesize\color{muted} $\eta$: the step size\par}
+  {\footnotesize\color{muted} $\eta$: the step size;\; $a$: the command the robot sends to its wheels (here, how far it drives)\par}
   \vspace{0pt plus 1filll}
   \lesson{The same $F$ is lowered by changing the belief or by changing the readings.}
 \end{frame}
@@ -535,19 +535,20 @@
 \begin{frame}{The Kalman update is free-energy minimisation}
   \centering
   \vspace{0pt plus 1filll}
-  {\normalsize with a linear sensor and a Gaussian prior, the bottom of $F$ is:\par}
+  {\normalsize with the sensor $h(s) = s$ and a Gaussian prior, the bottom of $F$ is:\par}
   \vspace{0.8em}
   \begin{tikzpicture}[box/.style={draw, thick, rounded corners, align=center, minimum width=5.6cm, minimum height=2.2cm}]
     \node[box, draw=accent, fill=accent!6] at (-3.2,0) {\textbf{the mean}\\[0.3em]
       $\mu = \dfrac{\textcolor{cool!80!black}{\pi_p}\,m + \textcolor{good!70!black}{\pi_o}\,o}{\textcolor{cool!80!black}{\pi_p} + \textcolor{good!70!black}{\pi_o}}$\\[0.3em]
       {\small prior and reading, weighted by precision}};
     \node[box, draw=accent, fill=accent!6] at (3.2,0) {\textbf{the spread}\\[0.3em]
-      $\dfrac{1}{\sigma^2} = \textcolor{cool!80!black}{\pi_p} + \textcolor{good!70!black}{\pi_o}$\\[0.3em]
-      {\small precisions add}};
+      $\dfrac{1}{\sigma^2} = \Hess = \textcolor{cool!80!black}{\pi_p} + \textcolor{good!70!black}{\pi_o}$\\[0.3em]
+      {\small precisions add (frame~\ref{d2f:sigma})}};
   \end{tikzpicture}
 
   \vspace{0.8em}
   {\normalsize this is Kalman's update; for a nonlinear $h$, the steps of frame~\ref{d2f:grad} get there\par}
+  {\footnotesize\color{muted} Day~1's names: $m = \mu_-$,\; $\pi_p = 1/\sigma_-^2$,\; $\pi_o = 1/\sigma_v^2$\par}
   \vspace{0pt plus 1filll}
   \lesson{Kalman jumps to the bottom of $F$ in one step; gradient descent walks there.}
 \end{frame}
@@ -579,14 +580,15 @@
   \renewcommand{\arraystretch}{2.4}
   \begin{tabular}{@{}r@{\quad}l@{}}
     {\small\color{muted} a proportional controller:} &
-      {\large $\Delta a \;=\; \textcolor{good!70!black}{K}\;\big(\,\textcolor{accent}{\text{set point}} - \text{measurement}\,\big)$} \\
+      {\large $\Delta a \;=\; \textcolor{good!70!black}{K_P}\;\big(\,\textcolor{accent}{\text{set point}} - \text{measurement}\,\big)$} \\
     {\small\color{muted} action under $F$:} &
-      {\large $\Delta a \;=\; \underbrace{\textcolor{good!70!black}{\eta\,\pi_o\,\partial o/\partial a}}_{\text{the gain } K}\;\big(\quad\underbrace{\textcolor{accent}{\mu}}_{\text{\makebox[0pt]{the prediction}}} \qquad-\qquad \underbrace{o}_{\text{\makebox[0pt]{the reading}}}\quad\big)$} \\
+      {\large $\Delta a \;=\; \underbrace{\textcolor{good!70!black}{\eta\,\pi_o\,\partial o/\partial a}}_{\text{the gain } K_P}\;\big(\quad\underbrace{\textcolor{accent}{\mu}}_{\text{\makebox[0pt]{the prediction}}} \qquad-\qquad \underbrace{o}_{\text{\makebox[0pt]{the reading}}}\quad\big)$} \\
   \end{tabular}
 
   \vspace{0.8em}
   {\normalsize the set point is the robot's own prediction $\mu$; if the prior holds what the robot wants,\\ the prediction becomes a desire, and action makes it come true (Day~4)\par}
-  {\footnotesize\color{muted} $\Delta a$: the change of the action in one step;\; a more precise reading ($\pi_o$ larger) gives a larger gain\par}
+  {\footnotesize\color{muted} $\Delta a$: the change of the action in one step;\; a more precise reading ($\pi_o$ larger) gives a larger gain\\
+  $\partial o/\partial a$ carries the sign: driving towards the wall shortens the range, so $\partial o/\partial a = -1$\par}
   \vspace{0pt plus 1filll}
   \lesson{Under $F$, action pushes the reading towards the robot's own prediction.}
 \end{frame}
@@ -617,6 +619,7 @@
 
   \vspace{1.0em}
   {\normalsize the robot runs its own model forward: no reading exists yet\par}
+  {\footnotesize\color{muted} $a_1$, $a_2$: options the robot could choose, here where to point the sensor\par}
   \vspace{0pt plus 1filll}
   \lesson{To choose an action, the robot predicts the readings it would bring, with its own model.}
 \end{frame}
@@ -655,21 +658,44 @@
   \lesson{A good action teaches something, brings the goal closer, or both.}
 \end{frame}
 
-\begin{frame}{The expected free energy $G$: the $F$ the robot expects after acting}
+\begin{frame}{The expected free energy $G$: built like $F$, averaged over imagined readings}
+  \label{d2f:gdef}
   \centering
-  {\small
+  \vspace{0pt plus 1filll}
+  {\normalsize
   \[
-  \begin{array}{r@{\;}l@{\quad}l}
-    F &= \displaystyle\int q(s)\ln\frac{q(s)}{p(o,s)}\,\mathrm{d}s = \E_{q(s)}\big[\ln q(s) - \ln p(o,s)\big] & \text{\footnotesize\color{muted} $F$, one reading (frame~\ref{d2f:fbox})}\\[1.6em]
-    G(a) &= \E_{q(o,s\given a)}\big[\ln q(s\given a) - \ln \tilde p(o,s)\big] & \text{\footnotesize\color{muted} average over the readings; goal $\tilde p$ as prior}\\[0.8em]
-    & \text{\small with}\;\; q(o,s\given a) = \underbrace{q(s\given a)}_{\substack{\text{where } a \text{ would}\\ \text{take the state}}}\qquad\underbrace{p(o\given s)}_{\substack{\text{the reading that}\\ \text{state would give}}} & \text{\footnotesize\color{muted} imagined with the robot's own model (frame~\ref{d2f:imagine})}\\[2.4em]
-    &= -\underbrace{\E\big[\ln q(s\given o,a) - \ln q(s\given a)\big]}_{\text{what the action would teach}} \underbrace{- \E\big[\ln \tilde p(o)\big]}_{\text{how far from the goal}} & \text{\footnotesize\color{muted} split, with $\tilde p(o,s) \approx q(s\given o,a)\,\tilde p(o)$}
+  \begin{array}{r@{\;}l@{\qquad}l}
+    F &= \E_{q(s)}\big[\ln q(s) - \ln p(o,s)\big] & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}$F$ for one reading $o$ the robot has\\ (frame~\ref{d2f:fbox})\end{tabular}}\\[2.2em]
+    G(a) &= \E_{q(o,s\given a)}\big[\ln q(s\given a) - \ln \tilde p(o,s)\big] & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}the same form, for readings\\ the robot only imagines\end{tabular}}
+  \end{array}
+  \]}
+  \vspace{0.8em}
+  \renewcommand{\arraystretch}{1.5}
+  \begin{tabular}{@{}r@{\quad}l@{}}
+    $q(s\given a)$: & the belief after action $a$, before any reading \\
+    $q(o,s\given a) = q(s\given a)\,p(o\given s)$: & states and readings imagined with the robot's own model (frame~\ref{d2f:imagine}) \\
+    $\tilde p(o,s)$: & the model, with the goal $\tilde p(o)$ as the prior over readings \\
+  \end{tabular}
+  \vspace{0pt plus 1filll}
+  \lesson{$G$ is $F$ averaged over the readings an action would bring, with the goal as prior.}
+\end{frame}
+
+\begin{frame}{Splitting $G$: what the action would teach, and how far it leaves the goal}
+  \centering
+  \vspace{0pt plus 1filll}
+  {\normalsize
+  \[
+  \begin{array}{r@{\;}l@{\qquad}l}
+    G(a) &= \E\big[\ln q(s\given a) - \ln \tilde p(o,s)\big] & \text{\footnotesize\color{muted} frame~\ref{d2f:gdef}}\\[1.2em]
+    \uncover<2->{&= \E\big[\ln q(s\given a) - \ln q(s\given o,a) - \ln \tilde p(o)\big] & \text{\footnotesize\color{muted}\begin{tabular}[t]{@{}l@{}}$\tilde p(o,s) \approx q(s\given o,a)\,\tilde p(o)$:\\ the belief after reading $\times$ the goal\end{tabular}}}\\[2.4em]
+    \uncover<3->{&= -\underbrace{\E\big[\ln q(s\given o,a) - \ln q(s\given a)\big]}_{\text{what the action would teach}} \;\underbrace{- \E\big[\ln \tilde p(o)\big]}_{\text{how far it leaves the goal}} & \text{\footnotesize\color{muted} regroup}}
   \end{array}
   \]}
   \vspace{0.6em}
-  {\footnotesize\color{muted} the sign of the learning term is chosen, not derived (Millidge, Tschantz \& Buckley, \emph{Neural Computation}, 2021)\par}
-  \vfill
-  \lesson{$G$ is the $F$ the robot expects after acting, with the goal as the prior over readings.}
+  {\footnotesize\color{muted} $q(s\given o,a)$: the belief after reading $o$;\; every $\E$ is over $q(o,s\given a)$\par}
+  \uncover<3->{{\footnotesize\color{muted} the learning term has a minus because $G$ uses the belief before the reading, $q(s\given a)$: a choice\\ (Millidge, Tschantz \& Buckley, \emph{Neural Computation}, 2021)\par}}
+  \vspace{0pt plus 1filll}
+  \uncover<3->{\lesson{$G$ splits into a learning term and a goal term, both in nats.}}
 \end{frame}
 
 \begin{frame}{To choose an action, score the readings it would bring}
@@ -686,7 +712,7 @@
   {\normalsize the robot picks the action with the lowest $G$\par}
   {\footnotesize\color{muted} $q(o\given a)$: the readings the robot predicts after $a$;\; $q(s\given a)$, $q(s\given o,a)$: its belief before and after reading;\; $\tilde p(o)$: the readings it prefers (the goal)\par}
   \vspace{0pt plus 1filll}
-  \lesson{$G$ adds what an action would teach and how far it would leave the goal, both in nats.}
+  \lesson{$G$ is low when an action teaches a lot and leaves the readings near the goal.}
 \end{frame}
 
 \begin{frame}[plain]
@@ -750,14 +776,14 @@
 \begin{frame}{Tomorrow}
   \begin{columns}[c]
     \begin{column}{0.55\textwidth}
-      Today there was one robot, one belief and one $F$. A real robot runs a dozen processes.
-      Tomorrow:
+      Today: one robot, one belief, one $F$.\\[0.6em]
+      Tomorrow: a dozen processes.
       \begin{itemize}
-        \item where each belief lives, and which process holds it;
-        \item how one free energy is divided among processes that never talk to each other.
+        \item where each belief lives;
+        \item how one $F$ is divided among them.
       \end{itemize}
-      And a rule for the rest of the week: \alert{no thresholds}. Where code would write
-      \texttt{if x > k}, we write a term in the model and let lowering $F$ decide.
+      \vspace{0.4em}
+      Rule for the week: \alert{no thresholds}.\\ A term in the model replaces \texttt{if x > k}.
     \end{column}
     \begin{column}{0.4\textwidth}
       \begin{block}{Reading for Day 3}\small
@@ -769,6 +795,8 @@
       \end{block}
     \end{column}
   \end{columns}
+  \vfill
+  \lesson{Tomorrow: one free energy, shared by the processes of a real robot.}
 \end{frame}
 
 \appendix

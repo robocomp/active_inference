@@ -51,16 +51,16 @@
 
 \begin{frame}{The cycle we will build this week}
   \centering
-  \begin{tikzpicture}[
+  \begin{tikzpicture}[scale=0.88, transform shape,
       stage/.style={draw=cool, very thick, rounded corners=4pt, fill=cool!8, align=center,
                     minimum width=3.3cm, minimum height=1.25cm, font=\small},
       day/.style={font=\scriptsize\bfseries, text=accent},
       arr/.style={-{Stealth[length=3mm]}, thick, color=muted}]
     \node[stage] (room) at (90:2.6)   {estimate the room\\[1pt] {\scriptsize\color{muted}walls, from LiDAR}};
-    \node[stage] (loc)  at (18:3.6)   {localise, learn the body\\[1pt] {\scriptsize\color{muted}pose, wheels, from LiDAR vs room}};
+    \node[stage] (loc)  at (18:4.1)   {localise, learn the body\\[1pt] {\scriptsize\color{muted}pose, wheels, from LiDAR vs room}};
     \node[stage] (obj)  at (-54:3.0)  {concepts fill the room\\[1pt] {\scriptsize\color{muted}objects, from masks, LiDAR}};
     \node[stage] (door) at (-126:3.0) {find the door, cross it\\[1pt] {\scriptsize\color{muted}door, open?, from free space}};
-    \node[stage] (mem)  at (162:3.6)  {new room, remember\\[1pt] {\scriptsize\color{muted}links, from all of it again}};
+    \node[stage] (mem)  at (162:4.1)  {new room, remember\\[1pt] {\scriptsize\color{muted}links, from all of it again}};
     \draw[arr] (room) to[bend left=15] (loc);
     \draw[arr] (loc)  to[bend left=15] (obj);
     \draw[arr] (obj)  to[bend left=15] (door);
@@ -376,7 +376,7 @@
 \begin{frame}{Conditioning: how a reading enters a belief}
   \begin{center}\large $\displaystyle p(S\given O) \mathrel{:=} \frac{p(S, O)}{p(O)}$\end{center}
   \centering
-  \begin{tikzpicture}[scale=1.15, lab/.style={font=\small}, tgt/.style={draw=accent, very thick}]
+  \begin{tikzpicture}[scale=1.05, lab/.style={font=\small}, tgt/.style={draw=accent, very thick}]
     % the joint, as in the marginal frame
     \mosaicbyO{accent!30}{muted!25}{accent!30}{muted!25}
     \draw[tgt] (0,0.82) rectangle (1.312,2.4);
@@ -776,7 +776,7 @@
   \vspace{0.3em}
   {\small an arrow $X \to Y$: the factor of $Y$ is conditioned on $X$\par}
   \vfill
-  \lesson{Both orders rebuild the same joint; only the generative one says what reading each door state produces.}
+  \lesson{Same joint either way; only the generative order says how each door state makes a reading.}
 \end{frame}
 
 \begin{frame}{Three variables: one joint, $3! = 6$ factorisations}
@@ -1186,6 +1186,7 @@
   \end{tikzpicture}
 
   \vspace{0.6em}
+  {\footnotesize\color{muted} $a_t$: the action at step $t$, what the robot commands;\; $o_{1:t-1}$: the readings from step 1 to $t-1$\par}
   {\footnotesize\color{muted} knowledge we inject (frame~\ref{d1f:inject}); it fails if something that persists is left out of $s$, like a wheel bias (Day~4)\par}
   \vfill
   \lesson{Markov: the next state needs only $s_{t-1}$ and $a_t$; a reading needs only $s_t$.}
@@ -1458,12 +1459,12 @@
   \centering
   {\large $\textcolor{muted}{p(o)} = \displaystyle\int \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}\,ds$\par}
   \vspace{0.3em}
-  {\small\color{accent} the evidence needs every possible $s$: this is the part that will be hard if $s$ is very large or continuous\par}
+  {\small\color{accent} the evidence needs every possible $s$: this is the part that will be hard if $s$ has many dimensions or is continuous\par}
   \vfill
   \lesson{The belief after the reading: likelihood times prior, divided by the evidence.}
 \end{frame}
 
-\begin{frame}{Why we cannot apply exact Bayes, $p(s\given o) = p(o\given s)\,p(s)\,/\,p(o)$}
+\begin{frame}{Why the robot cannot apply exact Bayes, $p(s\given o) = p(o\given s)\,p(s)\,/\,p(o)$}
   \begin{center}\large $\displaystyle \textcolor{muted}{p(o)} = \sum_{\text{every } s} \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$
   \quad{\normalsize one product per grid point, then add them all}\end{center}
   \centering
@@ -1574,8 +1575,8 @@
         \draw[good!70!black, thick] plot[domain=0.5:2.1, samples=50] (\x,{exp(-(\x-1.3)^2/(2*0.04))});
         \draw[good!70!black] (1.3,0) -- (1.3,-0.12) node[below, font=\scriptsize] {1.3};
         \node[font=\footnotesize, align=left, anchor=west] at (2.95,0.5) {LiDAR returns $o_t = 1.3$\,m\\
-          $p(o_t\given s) \propto \exp\!\big(-(o_t - \hat o(s))^2 / (2\cdot 0.2^2)\big)$\\
-          $\hat o(s) = s$: the reading the model predicts at $s$};
+          $p(o_t\given s) \propto \exp\!\big(-(o_t - h(s))^2 / (2\cdot 0.2^2)\big)$\\
+          $h(s) = s$: the reading the model predicts at $s$};
       \end{tikzpicture} & \textcolor{muted}{likelihood} \\
   \end{tabular}
   \vspace{0pt plus 1filll}
