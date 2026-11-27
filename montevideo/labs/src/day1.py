@@ -27,41 +27,41 @@ world = two_room_apartment()
 #
 # ## A1. The door table
 #
-# $D$: is the door open? $O$: does the LiDAR see a gap where the door is? We store a joint over
+# $S$: is the door open (the state)? $O$: does the LiDAR see a gap where the door is? We store a joint over
 # discrete variables as a numpy array with one axis per variable.
 
 # %%
-p_D = np.array([0.3, 0.7])                    # [open, closed]
-p_O_given_D = np.array([[0.9, 0.1],           # row d: p(O = [gap, wall] | D = d)
+p_S = np.array([0.3, 0.7])                    # [open, closed]
+p_O_given_S = np.array([[0.9, 0.1],           # row s: p(O = [gap, wall] | S = s)
                         [0.2, 0.8]])
 
 # %% [markdown]
-# **Exercise A1 — factorise, marginalise, condition.** Build the joint `joint[d, o]` with the
-# product rule $p(d, o) = p(o \mid d)\,p(d)$. Then compute the marginal $p(O)$ by summing out $D$,
-# and the posterior $p(D \mid O = \text{gap})$ by taking the gap column and dividing it by its sum.
+# **Exercise A1 — factorise, marginalise, condition.** Build the joint `joint[s, o]` with the
+# product rule $p(s, o) = p(o \mid s)\,p(s)$. Then compute the marginal $p(O)$ by summing out $S$,
+# and the posterior $p(S \mid O = \text{gap})$ by taking the gap column and dividing it by its sum.
 # (Check yourself: the joint is $0.27, 0.03, 0.14, 0.56$; $p(O=\text{gap}) = 0.41$;
 # $p(\text{open} \mid \text{gap}) \approx 0.66$.)
 
 # %%
 # BEGIN SOLUTION
-joint = p_O_given_D * p_D[:, None]
+joint = p_O_given_S * p_S[:, None]
 p_O = joint.sum(axis=0)
-p_D_given_gap = joint[:, 0] / p_O[0]
+p_S_given_gap = joint[:, 0] / p_O[0]
 # END SOLUTION
 print("joint:\n", joint, "\nsums to", joint.sum())
-print("p(O) =", p_O, "  p(D | gap) =", p_D_given_gap.round(3))
+print("p(O) =", p_O, "  p(S | gap) =", p_S_given_gap.round(3))
 
 # %% [markdown]
-# **Exercise A2 — the other factorisation.** Compute $p(D \mid O)$ for both values of $O$ and
-# check that $p(D \mid O)\,p(O)$ rebuilds the same joint. Bayes' rule is nothing but this identity:
+# **Exercise A2 — the other factorisation.** Compute $p(S \mid O)$ for both values of $O$ and
+# check that $p(S \mid O)\,p(O)$ rebuilds the same joint. Bayes' rule is nothing but this identity:
 # two factorisations of one joint.
 
 # %%
 # BEGIN SOLUTION
-p_D_given_O = joint / p_O[None, :]            # column o is p(D | O = o)
+p_S_given_O = joint / p_O[None, :]            # column o is p(S | O = o)
 # END SOLUTION
-print("each column of p(D|O) adds to 1:", p_D_given_O.sum(axis=0))
-print("rebuilt from p(D|O) p(O):", np.allclose(p_D_given_O * p_O[None, :], joint))
+print("each column of p(S|O) adds to 1:", p_S_given_O.sum(axis=0))
+print("rebuilt from p(S|O) p(O):", np.allclose(p_S_given_O * p_O[None, :], joint))
 
 # %% [markdown]
 # ## A2. The Gaussian wall
