@@ -38,6 +38,9 @@
 // the held front is side-on, 0.0002 rad INTO the staged wall (front·n = −2e−4), so the prior's half-turn is the MAP and the next
 // update turns it to yaw −1.5706: still side-on (the prior never touches the quarter turns), same w/h labels as BASE. Records
 // 0–32 are BASE's; 33–42 differ from BASE only by that half-turn of a side-on box (a near-tie, owner ruling I1: kept).
+// Re-recorded for CW1 (11-27): the persistent containment (no footprint corner past a room wall, in the GN energy on every
+// measured update, not in P; countable_containment.h). The fixture's truth nightstand is flush ON the staged wall (gap 0), so its
+// back corners sit at the term's boundary from record 0 and the trajectory moves from there; no other change enters.
 //
 // Run: ./engine_golden_test            (compare against golden/engine_golden.bin)
 //      ./engine_golden_test --record   (rewrite the golden file; only for a change that is MEANT to move the trajectory)
