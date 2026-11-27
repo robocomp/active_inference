@@ -11,6 +11,7 @@
  */
 
 #include "countable_belief.h"
+#include "countable_containment.h"
 
 #include <algorithm>
 #include <chrono>
@@ -651,7 +652,8 @@ void CountableBelief::accumulate_short_height(const CountableBeliefState& s, Eig
 //      residual = min(0, gap − margin) is driven to 0 with a precision that GROWS as the back penetrates
 //      further (λ = wall_no_cross_precision · how-far-past). Flush (gap≈0) feels ~nothing; a wall is a hard
 //      boundary so it is strong. Continuous (soft), no clamp. Inert when f.wall.ok==false.
-//      PERSISTENT θ-ONLY CHANNEL (fixed_precision, spec §7c.6): a one-sided Gaussian (censored) factor "the back face is not
+//      fixed_precision: NO CALLER since F1.4 (the persistent path's hinge was deleted, ruling 11-24; its containment is CW1's
+//      accumulate_containment on the footprint's corners). Kept as written for the record — the 7c.6 θ-only form was: a one-sided Gaussian (censored) factor "the back face is not
 //      beyond the wall, as known to σ_wall": E = ½·r²/σ_wall² on violation, λ = 1/f.wall.sigma_m² CONSTANT, exact Hessian
 //      λJJᵀ. Its restoring force is linear (k·r, not k·r²) and its Newton step on an active hinge is exact, so no
 //      half-Hessian overshoot on the unsaturated channel; zero on the legal side, so re-entering it every sweep cannot push a
@@ -873,6 +875,32 @@ void CountableEngineModel::accumulate_wall_prior(const State& s, const Frame& f,
             bd.noalias() += -lp * Jp * rp;
             if (E) *E += 0.5 * double(lp) * double(rp) * double(rp);
         }
+    }
+}
+
+// CW1: the prior's SUPPORT on the persistent path — no footprint corner past a room wall (countable_containment.h has the region,
+// the derivation of the one-sided form and the corner handling). Every object, attached or not, and every measured update: the
+// engine puts it in the energy its GN minimises (so the mode respects it) and leaves it out of the posterior covariance (a support
+// restriction is idempotent; its information must not accumulate — persistent_engine.h, update() step 4). It is exactly 0 while
+// every corner is inside, so a mid-room object and a back-on object at its stand-off are untouched.
+//   σ_s = Model.ModelSigmaM (the box surface's std about the real surface); σ_wall is the wall latent δ's (s = θ + B_w b), not here.
+//   The region: the frame's room polygon (all walls, any corner of the room), else the staged wall's half-plane (a dump recorded
+//   before CW1 carries no polygon), else nothing.
+void CountableEngineModel::accumulate_containment(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const
+{
+    const CountableBeliefParams& P = b->params_;
+    if (b->containment_off_for_test_ or not (P.model_sigma_m > 0.0f)) return;
+    if (f.room_polygon.size() < 3 and not f.wall.ok) return;
+    const float lam = 1.0f / (P.model_sigma_m * P.model_sigma_m);
+    namespace ct = rc::containment;
+    for (const auto& k : ct::corners(s.cx, s.cy, s.w, s.h, s.yaw))
+    {
+        const ct::Signed sd = ct::signed_distance(k.p, f.room_polygon, f.wall.ok, f.wall.p, f.wall.n);
+        if (not (sd.d < 0.0f)) continue;                                  // inside (or on the boundary): exactly 0
+        const Vec6 J = (sd.grad.transpose() * ct::corner_jacobian(k, s.w, s.h, s.yaw)).transpose();
+        Id.noalias() += lam * (J * J.transpose());
+        bd.noalias() += -lam * J * sd.d;
+        if (E) *E += 0.5 * double(lam) * double(sd.d) * double(sd.d);
     }
 }
 

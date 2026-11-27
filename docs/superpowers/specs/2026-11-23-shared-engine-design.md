@@ -238,6 +238,30 @@ Why:
 - For T14: `WallNoCrossPrecision` / `WallNoCrossMarginM` do not vanish — they remain the legacy path's terms; on the persistent
   path the wall's containment knowledge moved into the stand-off prior and the wall latent.
 
+## Amendment (CW1, 2026-11-27): containment on the persistent path is the prior's support, in the mode only
+
+The F1 amendment above assumed that the face nearest the wall is the back, so the stand-off would also keep the object inside the
+room. It does not: a body held side-on, or one whose far extent is held only by the class size prior, can put its corners past a
+wall while the back-face centre is legal. Live: chairfig_1127 chair_291 (91598c88) ended with two corners 0.22 m past the west
+wall. Its replay on that engine shows the cause was data-driven drift on LiDAR-only updates with nothing constraining the corners.
+The once-entered stand-off had entered back-on, at update 0.
+
+- **(i) Containment, every object.** E = Σ_k ½(min(0, d(p_k(θ + B_w b)))/σ_s)². Here p_k are the footprint's four corners and d is
+  the signed distance to the room polygon the frame carries; when the frame has none, the staged wall's half-plane is used.
+  σ_s = Model.ModelSigmaM, and the wall's error enters through δ only (B_w), so σ_wall is counted once.
+  - It is the profile likelihood of the box corner under the hard support "the real object is inside the true wall", with the
+    box surface = the real surface up to σ_s. No new constant. It is exactly 0 while every corner is inside.
+  - The corners are separate smooth terms. The support-function min of one wall is what the sum becomes while a single corner
+    penetrates. Past a convex room corner, the nearest boundary point is the vertex, which pushes the corner back across both walls.
+- **Entered on every measured update, in the GN energy only.** It is not in the posterior covariance and not in the move
+  statistic (persistent_engine.h `accumulate_containment`). The reason is that a support restriction is idempotent
+  (1[c]·1[c] = 1[c]), while a Gaussian factor re-entered n times is n·λJJᵀ. The latter is the hinge that pinned the parked toilet.
+  P therefore stays the data's covariance, which is conservative: a truncated posterior is narrower along g, never wider.
+  - Entering it once, like the attachment priors, would not work. The violation develops later (chair_291's did), and a
+    one-sided term is zero at an entry where the corners are inside.
+- **(ii) Attachment** (stand-off and parallel, `[prior.attachment]`, flush-weighted) is unchanged. It is still on the back face,
+  entered once per physical wall.
+
 ## Amendment (K3, 2026-11-26): G6 as built — one shared standpoint oracle
 
 G6 now reads (item 6 above): the offer's value is multiplied by **P(stand and turn)** from the shared oracle

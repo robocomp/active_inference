@@ -153,6 +153,7 @@ template <class V> void fields(V& v, CountableFrame& x)
     v("point_azim", x.point_azim); v("chain_cov_xx", x.chain_cov_xx); v("chain_cov_yy", x.chain_cov_yy);
     v("chain_cov_yaw", x.chain_cov_yaw); v("chain_cov_size", x.chain_cov_size); v("moment_extra_var", x.moment_extra_var);
     v("z_top_obs", x.z_top_obs); v("wall", x.wall); v("room_axis_ok", x.room_axis_ok); v("room_axis", x.room_axis);
+    v("room_polygon", x.room_polygon);
     v("lidar", x.lidar); v("lidar_extra", x.lidar_extra); v("lidar_only", x.lidar_only);
     v("rho_cam", x.rho_cam); v("rho_L", x.rho_L); v("rho_chain", x.rho_chain); v("sigma_pose", x.sigma_pose);
     v("chain_dr", x.chain_dr); v("robot_xy", x.robot_xy); v("camera_xy", x.camera_xy); v("view", x.view);

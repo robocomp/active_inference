@@ -235,9 +235,10 @@ struct CountableBeliefParams
     // WALL NO-CROSS (one-sided): resist the back face penetrating PAST the wall into the wall/exterior. Active only
     // when the gap goes negative (crossed) or within wall_no_cross_margin_m; precision GROWS with penetration
     // (λ = wall_no_cross_precision · how-far-past), leaving flush (gap≈0) untouched. Strong; continuous, no clamp.
-    // PERSISTENT PATH (persistent = true, spec §7c.6): the term is a one-sided Gaussian with FIXED precision
-    // λ = 1/σ_wall² (σ_wall = the staged wall's sigma_m), and wall_no_cross_precision > 0 is ONLY its on/off switch (its
-    // value is unused there); a wall with σ_wall ≤ 0 makes the term inert. The flag-off path keeps λ as above.
+    // LEGACY (flag-off) PATH ONLY. The persistent path (persistent = true) never reads these two members: its no-cross hinge was
+    // deleted (F1 amendment, coordinator ruling 11-24), and its containment is CW1's support term (CountableEngineModel::
+    // accumulate_containment, countable_containment.h): every footprint CORNER, not the back-face centre, kept inside the room
+    // polygon, scale Model.ModelSigmaM, the wall's error through the wall latent δ, in the mode only — no precision constant.
     float wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> wall_precision). 0 = OFF
     float wall_no_cross_margin_m  = 0.0f;     // interior margin (m) inside which the no-cross term activates
     // STAND-OFF (persistent path, F1.4): how far the back face of a real object of the class stands off its wall — the class
@@ -383,6 +384,9 @@ struct CountableFrame
     // The room's principal axis (rad, room frame; defined modulo 90°), from the room polygon's edges.
     bool  room_axis_ok = false;
     float room_axis    = 0.0f;
+    // CW1: the room polygon (room frame, the fitter's room_polygon_; the outline `wall` is the nearest edge of) — the region the
+    // persistent path's containment keeps the footprint inside (countable_containment.h). Empty: the staged `wall`'s half-plane.
+    std::vector<Eigen::Vector2f> room_polygon;
 
     // YOLO-INDEPENDENT LiDAR channel: range returns that fall on the box (room frame, sensor origin +
     // endpoints). Sphere-traced against THIS belief's own SDF by the shared factor. precision==0 ⇒ skipped.
@@ -487,6 +491,8 @@ struct CountableEngineModel
     static constexpr int kWallLatents = 1;
     rc::ai::engine::WallAnchor wall_anchor(const Frame& f) const;
     void accumulate_wall_prior(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
+    // CW1: the prior's support (no footprint corner past a room wall), every measured update, mode only (persistent_engine.h)
+    void accumulate_containment(const State& s, const Frame& f, Mat6& Id, Vec6& bd, double* E) const;
     // the 7c.7 first-crossing LiDAR channel (set_first_crossing_for_test only); false = the engine's beam channel
     bool accumulate_lidar_override(const State& s, const Frame& f, Mat6* Id, Vec6* bd, double* E) const;
     // the beam channel
@@ -836,6 +842,8 @@ public:
     // through the 7c.6 first-crossing factor with the 7c.7 (d) solver (b̄ restart, θ-only damping, ×4/÷4 λ) — "7c.7's update" —
     // instead of the beam set, so a test can compare the two on one frame.
     void    set_first_crossing_for_test(bool v) { first_crossing_for_test_ = v; }
+    // CW1: switch the persistent containment off (tests only: the BASE side of a before/after comparison on one build; off = BASE)
+    void    set_containment_for_test(bool on) { containment_off_for_test_ = not on; }
 
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
     // sdf_box: the whole fitted box (the envelope, every class); sdf_headboard: the panel; sdf_compound: the MODEL's solid
@@ -1078,6 +1086,7 @@ private:
     std::variant<Engine, EngineQ> engine_;   // the active engine, chosen at construction (I2)
     bool   axis_prior_added_ = false;   // the room axis has entered (T6-1)
     bool   first_crossing_for_test_ = false;   // see set_first_crossing_for_test
+    bool   containment_off_for_test_ = false;  // see set_containment_for_test
     mutable bool   beam_unready_logged_ = false;        // "BeamConfig not built by make" printed once per belief
     mutable bool   beam_inconsistent_logged_ = false;   // "ray-set refused (per-ray vectors misaligned)" printed once (N3)
 };

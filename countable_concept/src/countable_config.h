@@ -159,8 +159,8 @@ struct CountableConfig
     // active when gap = (back_centre − wall.p)·(inward normal) goes negative (crossed) or within WallNoCrossMarginM,
     // with a precision that GROWS with how far past — leaving flush (gap≈0) untouched. STRONG (a wall is a hard
     // physical boundary), continuous/soft (no clamp). wall.ok==false ⇒ inert. 0 = OFF.
-    // PERSISTENT PATH (spec §7c.6): fixed precision λ = 1/σ_wall² (the wall's own position std); WallNoCrossPrecision > 0
-    // is then ONLY the on/off switch (its value unused), and a wall with σ_wall ≤ 0 makes the term inert.
+    // LEGACY (flag-off) PATH ONLY: the persistent path does not read WallNoCrossPrecision / WallNoCrossMarginM (its hinge was
+    // deleted, F1 amendment 11-24); its containment is CW1's support term on the footprint's corners (countable_containment.h).
     float ai2_wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> the flush precision)
     float ai2_wall_no_cross_margin_m  = 0.0f;     // interior offset (m) inside which the constraint activates
     // [prior.attachment] stand-off (manifest; F1.4): the back face's typical real distance off its wall, mean and std (m).

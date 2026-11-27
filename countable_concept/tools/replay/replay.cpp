@@ -56,7 +56,11 @@
 //   result is a COUNTERFACTUAL replay — not the live run — so dth_live / dP_live then measure the change. Off: frames as recorded.
 //   --theta-cov appends, after dP_live, the 21 upper-triangle entries S_i_j (i <= j, i, j = 0..5 in the order cx cy H w h yaw) of the
 //   FULL 6x6 theta covariance the update left (b.covariance(); the yaw entry is the within-mode Sigma(5,5)), %.9g. Off by default: the
-//   default output is byte-identical to before. The full block is NOT in the dump (the live result stores only diag P), so replaying
+//   default output is byte-identical to before. --wall-geom (CW1) appends, after dP_live and before the covariance, corner_gap = the
+//   smallest gap of the footprint's four corners to the frame's STAGED wall line, min_k (p_k − wall.p)·n (< 0: a corner past it;
+//   NaN: no wall staged), corner_gap_true = the same against the TRUE wall (the staged line moved by the wall latent's mean δ̂ along n,
+//   where the engine evaluates the containment), and room_gap = the smallest signed distance of the corners to the frame's room polygon (< 0: a corner
+//   outside the room; NaN: the frame carries no polygon, e.g. a dump recorded before CW1). Off by default. The full block is NOT in the dump (the live result stores only diag P), so replaying
 //   is the only way to recover it (first_visit_nees.py, AuRo test (a)).
 // Exit status: 0 = the whole dump replayed; 1 = a stream error (truncated / malformed), or a field the code has was absent
 // from the dump (missing) or unreadable (bad) — the replay then ran with that field's DEFAULT, which is not the live run, so
@@ -83,6 +87,7 @@
 #include "../../common/concept_manifest/permanence.h"
 #include "../../common/concept_manifest/shape_parts.h"
 #include "countable_replay.h"
+#include "countable_containment.h"
 
 namespace
 {
@@ -105,13 +110,13 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--placement DIR] [--rebirth FILE] [--permanence DIR] [--parts DIR] [--seed-h-rule] [--theta-cov] [--f1-restage GAP]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--placement DIR] [--rebirth FILE] [--permanence DIR] [--parts DIR] [--seed-h-rule] [--theta-cov] [--wall-geom] [--f1-restage GAP]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
     std::string neighbour_manifests, standoff_manifests, permanence_manifests, parts_manifests, placement_manifests, rebirth_file;
-    bool seed_h_rule = false, theta_cov = false;
+    bool seed_h_rule = false, theta_cov = false, wall_geom = false;
     bool f1_restage = false;
     float f1_gap = 0.0f;
     long neighbours_without_class = 0;
@@ -128,6 +133,7 @@ int main(int argc, char** argv)
         if (k == "--parts" and i + 1 < argc) { parts_manifests = argv[++i]; continue; }
         if (k == "--seed-h-rule") { seed_h_rule = true; continue; }
         if (k == "--theta-cov") { theta_cov = true; continue; }
+        if (k == "--wall-geom") { wall_geom = true; continue; }
         if (k == "--f1-restage" and i + 1 < argc)
         {
             const std::string_view a = argv[++i];
@@ -158,17 +164,19 @@ int main(int argc, char** argv)
     std::printf("upd,cycle,gated,npts,lidar_only,beam_staged,cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                 "std_yaw_within,gn_it,gn_conv,gn_lambda,omega_cx,omega_cy,omega_H,omega_w,omega_h,omega_yaw,fe_upd,"
                 "pstd_cx,pstd_cy,pstd_H,pstd_w,pstd_h,pstd_yaw,wall_in,back_gap,gn_cap,range_m,jump_p,q,std_q,dth_live,dP_live");
+    if (wall_geom) std::printf(",corner_gap,corner_gap_true,room_gap");
     if (theta_cov)
         for (int i = 0; i < 6; ++i)
             for (int j = i; j < 6; ++j) std::printf(",S_%d_%d", i, j);
     std::printf("\n");
 
+    std::string geom_tail; // --wall-geom: corner_gap, room_gap of the update (CW1)
     std::string cov_tail;  // --theta-cov: the update's 21 covariance entries, printed after the live comparison columns
     std::string pending;   // the row of the last update, printed once its live result (if any) is known
     const auto flush = [&](double dth, double dP)
     {
         if (pending.empty()) return;
-        std::printf("%s,%.9g,%.9g%s\n", pending.c_str(), dth, dP, cov_tail.c_str());
+        std::printf("%s,%.9g,%.9g%s%s\n", pending.c_str(), dth, dP, geom_tail.c_str(), cov_tail.c_str());
         pending.clear();
     };
     rc::CountableBelief belief;
@@ -307,6 +315,29 @@ int main(int argc, char** argv)
                           b.last_jump_p(), b.proportion_value(0), b.params().shape_proportions.empty()
                                                               ? std::numeric_limits<double>::quiet_NaN() : b.proportion_std(0));
             pending = row;
+            geom_tail.clear();
+            if (wall_geom)
+            {
+                namespace ct = rc::containment;
+                const auto& fw = ev.frame.wall;
+                const double nan = std::numeric_limits<double>::quiet_NaN();
+                double cg = nan, ct_true = nan, rg = nan;
+                if (fw.ok)
+                {
+                    cg = ct_true = std::numeric_limits<double>::infinity();
+                    const double dl = b.wall_offset_mean(fw);   // the TRUE wall is the staged line + δ̂·n (the engine's θ + B_w b)
+                    for (const auto& k : ct::corners(s.cx, s.cy, s.w, s.h, s.yaw))
+                    {
+                        cg = std::min(cg, double((k.p - fw.p).dot(fw.n)));
+                        ct_true = std::min(ct_true, double((k.p - fw.p).dot(fw.n)) - dl);
+                    }
+                }
+                if (ev.frame.room_polygon.size() >= 3)
+                    rg = ct::min_corner_distance(s.cx, s.cy, s.w, s.h, s.yaw, ev.frame.room_polygon, false, fw.p, fw.n);
+                char g[96];
+                std::snprintf(g, sizeof g, ",%.6g,%.6g,%.6g", cg, ct_true, rg);
+                geom_tail = g;
+            }
             cov_tail.clear();
             if (theta_cov)
                 for (int i = 0; i < 6; ++i)

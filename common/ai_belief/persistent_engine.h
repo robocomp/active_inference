@@ -186,6 +186,12 @@ struct GnTraceFd
 //   kWallLatents = 1, wall_anchor(f) -> WallAnchor, accumulate_wall_prior(s, f, I, b, E)   the wall latent and the wall priors
 //                                              it carries (see WallAnchor; absent: no wall latent, K unchanged);
 //   accumulate_lidar_override(s, f, I*, b*, E*) -> bool   route the LiDAR channel elsewhere (a test hook; absent: never).
+//   accumulate_containment(s, f, I, b, E)      CW1: the SUPPORT of the prior (no part of the object past a room wall), a term
+//                                              that is exactly 0 on the legal side. Evaluated at θ + B_w b (the object relative
+//                                              to the TRUE wall) on EVERY measured update, in the energy the GN minimises, so the
+//                                              posterior MODE respects it; NOT in the posterior covariance nor in the move
+//                                              statistic: a support restriction is idempotent (1[c]·1[c] = 1[c]), so it carries no
+//                                              information that may accumulate update after update (absent: none). See update().
 // The camera channel's flag is FrameLatents::camera_measured alone: it gates both the camera's accumulation (information and
 // energy) and its channel in the joint step, so G and J cannot disagree about whether the camera measured.
 template <class M>
@@ -419,6 +425,10 @@ public:
     using VecXd = Eigen::Matrix<double, N + K, 1>;
     using VecPd = Eigen::Matrix<double, NP, 1>;
     using Chan  = rc::ai::persistent::Channel<N, K, NP>;
+    // CW1: the model states the prior's support (accumulate_containment, see the hooks above)
+    static constexpr bool kContainment = requires(const M& cm, const State& s, const Frame& f, MatNf& I, VecNf& b, double* E) {
+        cm.accumulate_containment(s, f, I, b, E);
+    };
     // A sensor channel's information on q (NP > 0): the (u, q) cross block, the q block, and the q gradient (bd's sign convention).
     struct QInfo
     {
@@ -839,6 +849,7 @@ public:
         const auto S = [](const VecNd& v) { return State::from_vec(v.template cast<float>()); };
 
         std::vector<Chan> channels;
+        std::size_t n_info = 0;                                            // channels[0, n_info): information the posterior keeps
         pu::FreshInfo<N> theta_only;
         MatN Id_cam, Id_L, Id_th; VecN bd_cam, bd_L, bd_th;
         QInfo q_cam, q_L;
@@ -858,6 +869,14 @@ public:
                     m.accumulate_wall_prior(S(th + B_w * bb), f, Iw, bw, nullptr);
                     Chan c; c.info = pu::marginalise_fresh<N>(Iw, bw, MatN::Zero()); c.B = B_w; channels.push_back(c);
                 }
+            n_info = channels.size();                                      // the channels whose information the posterior keeps
+            if constexpr (kContainment)
+            {   // CW1: the prior's support, LAST, so chans_info() can leave it out (see the hook's note and Step 4)
+                MatN Ic = MatN::Zero(); VecN bc = VecN::Zero();
+                m.accumulate_containment(S(th + B_w * bb), f, Ic, bc, nullptr);
+                if (not Ic.isZero(0.0f) or not bc.isZero(0.0f))
+                { Chan c; c.info = pu::marginalise_fresh<N>(Ic, bc, MatN::Zero()); c.B = B_w; channels.push_back(c); }
+            }
         };
 
         // Step 3, damped GN (spec 7c.7 d, rev 3.3.7). Each step: (𝟙 + P̄(W + λM))δ = P̄G − (x̃_k − x̄), M = diag W over θ and b;
@@ -877,6 +896,11 @@ public:
                     MatN Iw = MatN::Zero(); VecN bw = VecN::Zero();
                     m.accumulate_wall_prior(S(th + B_w * bb), f, Iw, bw, &E);
                 }
+            if constexpr (kContainment)
+            {
+                MatN Ic = MatN::Zero(); VecN bc = VecN::Zero();
+                m.accumulate_containment(S(th + B_w * bb), f, Ic, bc, &E);
+            }
             return E;
         };
         const auto wrapped = [](VecXd d) { if constexpr (kYaw >= 0) d(kYaw) = std::remainder(d(kYaw), 2.0 * M_PI); return d; };
@@ -900,6 +924,8 @@ public:
             return wrapped(xn - x_tilde).template head<N>();
         };
         const auto chans = [&] { return std::span<const Chan>(channels); };
+        // Step 4's view: every channel but the prior's support (CW1), whose information is not the posterior's
+        const auto chans_info = [&] { return std::span<const Chan>(channels).first(n_info); };
         VecNd theta = m.state().vec().template cast<double>();            // θ₀ = the current mean (at birth: the data seed)
         VecKd b_post = b_;
         const VecNd theta0 = theta;                                        // GnTrace: the FD check at θ₀, b̄
@@ -1045,12 +1071,16 @@ public:
         // stayed fit frees them inside its own prior (the LiDAR's ego-motion latent u_L, σ 6 cm / 4°): at x̂ the same factor gives
         // log BF −3.3 / −2.5.
         MatJd Lambda_data; VecXd eta_data;
-        pu::detail::information<N, K, NP>(chans(), theta_only, Lambda_data, eta_data);
+        // CW1: the prior's support (accumulate_containment) is left out of Λ̂ / η̂ and of P below. It moved the mode x̂ (it is in J);
+        // its information is not data and must not be absorbed: 1[g ≥ δ] re-applied is 1[g ≥ δ], but a Gaussian factor λJJᵀ re-applied
+        // on every update is n·λJJᵀ — the hinge that pinned the parked toilet (design doc, F1 amendment). P stays the data's
+        // covariance (conservative: the truncated posterior is narrower along g, never wider).
+        pu::detail::information<N, K, NP>(chans_info(), theta_only, Lambda_data, eta_data);
         {
             VecXd x_hat; x_hat << theta_post, (consistent ? b_post : b_);
             eta_data += Lambda_data * wrapped(x_hat - x_bar);
         }
-        P_ = pu::joint_cov<N, K, NP>(P_bar, chans(), theta_only);
+        P_ = pu::joint_cov<N, K, NP>(P_bar, chans_info(), theta_only);
         // F1 round 9 (b): an update that did NOT reach a mode carries the PRIOR moment, not the Laplace one. joint_cov's P is
         // (𝟙 + P̄W)⁻¹P̄, the inverse curvature of the energy AT THE POINT REACHED; it is a posterior covariance only where that
         // point is the energy's minimum (the stop rule's condition, `converged`). At an unconverged point (the iteration cap) it

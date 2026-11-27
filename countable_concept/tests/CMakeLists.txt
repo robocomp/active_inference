@@ -325,6 +325,14 @@ target_compile_options(toilet_wall_test PRIVATE -O2)
 target_link_libraries(toilet_wall_test PRIVATE Eigen3::Eigen)
 add_test(NAME toilet_wall_test COMMAND toilet_wall_test)
 
+# CW1: the persistent containment (no footprint corner past a room wall; countable_containment.h) — side-on, back-on, room corner,
+# mid-room, each with the term off (= BASE) and on. Run: ./containment_test
+add_executable(containment_test containment_test.cpp ../src/countable_belief.cpp)
+target_include_directories(containment_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(containment_test PRIVATE -O2)
+target_link_libraries(containment_test PRIVATE Eigen3::Eigen)
+add_test(NAME containment_test COMMAND containment_test)
+
 # F1 round 6.2: the birth seed's H is the class-prior MAP with the top of the points the BOX explains (box-vs-headboard shares),
 # not the p95 of a cloud holding the headboard. Run: ./birth_seed_headboard_test
 add_executable(birth_seed_headboard_test birth_seed_headboard_test.cpp ../src/countable_belief.cpp)

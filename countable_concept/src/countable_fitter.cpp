@@ -1540,6 +1540,7 @@ float CountableFitter::run_inference(CountableInstance& inst, const CountableObs
             frame.wall = nearest_wall(inst.ai2_belief.params().symmetric ? Eigen::Vector2f(bs_now.cx, bs_now.cy)
                                                                          : inst.ai2_belief.back_centre(bs_now));
             if (const auto ax = room_axis(); ax) { frame.room_axis_ok = true; frame.room_axis = *ax; }
+            frame.room_polygon = room_polygon_;   // CW1: the region the persistent containment keeps the footprint in
         }
     };
 
