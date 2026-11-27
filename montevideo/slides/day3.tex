@@ -760,6 +760,131 @@
   \lesson{Each thing the robot undertook is one record, hung from the root in time order.}
 \end{frame}
 
+\begin{frame}{Long-term object memory recognises this chair, again}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm, pcap/.style={font=\scriptsize\bfseries, anchor=south}, pan/.style={draw=muted, rounded corners=3pt}]
+    \foreach \x/\t in {0/seen in room 1, 3.5/the robot leaves, 7/it comes back, 10.5/seen again} {
+      \draw[pan] (\x,0) rectangle ++(2.95,2.1);
+      \node[pcap] at (\x+1.47,2.12) {\t};
+    }
+    % 1: seen
+    \draw[thick, accent] (0.2,0.2) rectangle (2.75,1.45);
+    \robot{0.8,0.8}{0}
+    \fill[cool!45, draw=cool, thick] (2.1,0.8) circle (0.2);
+    \node[lab] at (2.1,1.2) {chair\_22};
+    \node[lab, text=muted] at (1.47,1.78) {on the working graph};
+    % 2: kept
+    \node[draw, thick, rounded corners=3pt, fill=cool!10, align=left, font=\tiny, inner sep=4pt] at (4.97,1.03)
+      {\textbf{kept in the repertory}\\identity, class, size\\its lives, how each ended\\where last seen, per room};
+    % 3: offer
+    \draw[thick, accent] (7.2,0.2) rectangle (9.75,1.45);
+    \robot{7.8,0.8}{0}
+    \draw[cool, thick, densely dashed] (9.1,0.8) circle (0.2);
+    \node[lab] at (9.0,1.2) {an offer};
+    \node[lab, text=muted, align=center] at (8.47,1.78) {nothing appears yet};
+    % 4: comparison
+    \node[lab, align=center] at (11.97,1.6) {the agent compares:};
+    \node[draw=good, very thick, rounded corners=2pt, fill=good!18, font=\tiny, align=center, minimum width=1.2cm] at (11.25,0.85) {the one\\remembered};
+    \node[draw=muted, thick, rounded corners=2pt, font=\tiny, align=center, minimum width=1.1cm] at (12.72,0.85) {a new\\one};
+    \node[lab, font=\tiny] at (11.97,0.28) {same identity};
+    \foreach \x in {3.0,6.5,10.0} \draw[flow, muted] (\x,1.05) -- (\x+0.45,1.05);
+  \end{tikzpicture}
+
+  \vspace{0.55em}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \small The memory only \textbf{offers}. The concept agent \textbf{decides}, and the object
+      appears only once it is detected. The chair's look is the missing term.
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \begin{measured}{in simulation}
+        \small Room 1, room 2, room 1: two chairs came back with their own identities (belief 0.945
+        and 0.969). After a restart: 14 objects remembered, 11 back with their own identity, none wrong.
+      \end{measured}
+    \end{column}
+  \end{columns}
+  \lesson{The memory offers and the concept agent decides; today the comparison uses position alone.}
+\end{frame}
+
+\begin{frame}{The object memory is an agent: it watches, it keeps, it offers}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1cm,
+      bx/.style={draw=cool, thick, rounded corners=3pt, fill=cool!8, align=center, font=\scriptsize, inner sep=4pt},
+      st/.style={font=\scriptsize\bfseries, text=accent}]
+    % working memory
+    \node[bx, minimum width=2.4cm, minimum height=2.4cm] (wm) at (-0.4,0) {\textbf{working memory}\\[3pt] chair\_22 born\\seen, seen, seen\\removed: the robot left};
+    % the agent and its repertory
+    \node[bx, draw=good, fill=good!8, text width=4.6cm, align=left, minimum height=3.3cm] (rep) at (5.0,0) {%
+      \textbf{one entry in the repertory}\\[2pt]
+      identity: \texttt{chair\_22}, unique for ever\\
+      class, size, colour\\
+      its lives: born, last seen, how it ended\\
+      where it was, per room: pose and variance\\
+      the best view from each of 12 directions};
+    \draw[flow, muted] (wm.east) -- node[below, lab, align=center] {it\\watches} (rep.west);
+    % the offer
+    \node[bx, draw=accent, densely dashed, fill=white, minimum width=2.4cm, minimum height=2.4cm] (off) at (10.5,0) {\textbf{an offer}\\[3pt] a recall node\\on the working graph,\\never an object};
+    \draw[flow, muted] (rep.east) -- node[below, lab, align=center] {back in\\the room} (off.west);
+    \node[bx, minimum width=2.4cm] (ca) at (10.5,-2.45) {\textbf{chair agent}\\decides at its next birth};
+    \draw[flow, muted] (off.south) -- (ca.north);
+    \node[bx, fill=muted!8, draw=muted, minimum width=3.4cm] (la) at (5.0,-2.45) {\textbf{language agent}\\``last seen in room\_1, 15 h ago''};
+    \draw[flow, muted] (rep.south) -- (la.north);
+    \node[st] at (-0.4,1.55) {now};
+    \node[st] at (5.0,1.95) {across missions, on disk};
+  \end{tikzpicture}
+  \vspace{0.3em}
+  {\footnotesize Offered: every remembered object not on the graph now whose last place is the room just entered.\par}
+  \ask{Why does the memory not put chair\_22 back on the graph itself?}{Only the chair agent owns chairs (one owner per node), and the chair may have moved: only a detection can say it is there.}
+\end{frame}
+
+\begin{frame}{The object memory as a graph: each room, and what was last seen in it}
+  \centering
+  \begin{tikzpicture}
+    \node[anchor=south west, inner sep=0pt] (im) at (0,0) {\includegraphics[width=11.2cm]{d3_ltom_graph.png}};
+    \begin{scope}[x={(im.south east)}, y={(im.north west)}]
+      \node[lab, text=cool, font=\scriptsize\bfseries, align=center] at (0.86,0.62) {one node per room};
+      \node[lab, text=cool, font=\scriptsize\bfseries, align=center] at (0.88,0.25) {the objects last\\seen in that room};
+      \node[lab, text=accent, font=\scriptsize\bfseries, align=center] at (0.06,0.30) {a person,\\told: owns a chair};
+    \end{scope}
+  \end{tikzpicture}\\[0.2em]
+  {\footnotesize A capture of the memory's own graph, in simulation, after visits to three rooms. It is a view for people and for the language agent; the robot's agents read the offers.\par}
+  \lesson{The object memory files each remembered object under the room where it was last seen.}
+\end{frame}
+
+\begin{frame}{A newborn chair is the remembered one, or a new one: Bayes decides}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \small
+      A chair is detected at $x$. Two hypotheses:\\[0.4em]
+      \textbf{remembered}: it stayed, or it moved anywhere
+      \[ p(x\given\text{rem}) = (1-\pi)\,\N(x;\,\mu,\ \Sigma+R) + \pi\,\tfrac1A \]
+      \textbf{new}: it could be anywhere in the room
+      \[ p(x\given\text{new}) = \tfrac1A \]
+      Posterior $\propto$ prior $\times$ likelihood; the larger wins, a tie goes to new.\\[0.4em]
+      {\footnotesize $\mu,\Sigma$: where the memory last saw it;\; $R$: the detection's noise;\;
+      $\pi$: the chance it moved (0.5, a guess);\; $A$: the room's area.\par}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}[x=4.2cm, y=3.0cm,
+          declare function={c(\d)=0.5*4.897*exp(-\d*\d/0.065)+0.025; P(\d)=c(\d)/(c(\d)+0.05);}]
+        \draw[->] (0,0) -- (1.25,0); \node[lab, below=10pt] at (0.6,0) {distance from where it was remembered (m)};
+        \draw[->] (0,0) -- (0,1.1) node[above, lab] {$P(\text{remembered}\given x)$};
+        \foreach \x in {0,0.5,1} \draw (\x,0.02) -- (\x,-0.02) node[below, lab] {\x};
+        \foreach \y in {0.5,1} \draw (0.02,\y) -- (-0.02,\y) node[left, lab] {\y};
+        \draw[muted, densely dashed] (0,0.5) -- (1.2,0.5);
+        \draw[very thick, cool, domain=0:1.2, samples=80, smooth] plot (\x,{P(\x)});
+        \draw[accent, thick, densely dashed] (0.546,0) -- (0.546,0.5);
+        \node[lab, text=accent, align=center] at (0.8,0.72) {beyond 0.55\,m:\\a new chair};
+        \node[lab, text=cool, align=center] at (0.95,0.22) {far away: 1/3, a chair\\that moved anywhere};
+        \fill[cool] (0,0.98) circle (1.3pt); \node[lab, anchor=west] at (0.12,1.05) {0.98 on the spot};
+      \end{tikzpicture}\\[0.2em]
+      {\scriptsize illustrative: $\Sigma = 0.15^2 I$, $R = 0.10^2 I$, $A = 20\,\text{m}^2$\par}
+    \end{column}
+  \end{columns}
+  \ask{With equal priors, does the guess $\pi$ change which hypothesis wins?}{No: remembered wins exactly where $\N(x;\mu,\Sigma+R) > 1/A$; $\pi$ only changes how sure the answer is.}
+\end{frame}
+
 \begin{frame}{Long-term spatial memory keeps the rooms the robot has left}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
@@ -1277,51 +1402,6 @@
   \lesson{Every reader shares one copy of the image: the cost does not grow with readers.}
 \end{frame}
 
-\begin{frame}{Backup: Long-term object memory recognises this chair, again \wip}
-  \centering
-  \begin{tikzpicture}[x=1cm, y=1cm, pcap/.style={font=\scriptsize\bfseries, anchor=south}, pan/.style={draw=muted, rounded corners=3pt}]
-    \foreach \x/\t in {0/seen in room 1, 3.5/the robot leaves, 7/it comes back, 10.5/seen again} {
-      \draw[pan] (\x,0) rectangle ++(2.95,2.1);
-      \node[pcap] at (\x+1.47,2.12) {\t};
-    }
-    % 1: seen
-    \draw[thick, accent] (0.2,0.2) rectangle (2.75,1.45);
-    \robot{0.8,0.8}{0}
-    \fill[cool!45, draw=cool, thick] (2.1,0.8) circle (0.2);
-    \node[lab] at (2.1,1.2) {chair\_22};
-    \node[lab, text=muted] at (1.47,1.78) {on the working graph};
-    % 2: kept
-    \node[draw, thick, rounded corners=3pt, fill=cool!10, align=left, font=\tiny, inner sep=4pt] at (4.97,1.03)
-      {\textbf{kept in the repertory}\\identity, class, size\\its lives, how each ended\\where last seen, per room};
-    % 3: offer
-    \draw[thick, accent] (7.2,0.2) rectangle (9.75,1.45);
-    \robot{7.8,0.8}{0}
-    \draw[cool, thick, densely dashed] (9.1,0.8) circle (0.2);
-    \node[lab] at (9.0,1.2) {an offer};
-    \node[lab, text=muted, align=center] at (8.47,1.78) {nothing appears yet};
-    % 4: comparison
-    \node[lab, align=center] at (11.97,1.6) {the agent compares:};
-    \node[draw=good, very thick, rounded corners=2pt, fill=good!18, font=\tiny, align=center, minimum width=1.2cm] at (11.25,0.85) {the one\\remembered};
-    \node[draw=muted, thick, rounded corners=2pt, font=\tiny, align=center, minimum width=1.1cm] at (12.72,0.85) {a new\\one};
-    \node[lab, font=\tiny] at (11.97,0.28) {same identity};
-    \foreach \x in {3.0,6.5,10.0} \draw[flow, muted] (\x,1.05) -- (\x+0.45,1.05);
-  \end{tikzpicture}
-
-  \vspace{0.55em}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \small The memory only \textbf{offers}. The concept agent \textbf{decides}, and the object
-      appears only once it is detected. The chair's look is the missing term.
-    \end{column}
-    \begin{column}{0.44\textwidth}
-      \begin{measured}{chairs only, so far}
-        \small Room 1, room 2, room 1: two chairs came back with their own identities, with belief
-        0.945 and 0.969 that each is the same chair.
-      \end{measured}
-    \end{column}
-  \end{columns}
-  \lesson{The memory offers and the concept agent decides; today the comparison uses position alone.}
-\end{frame}
 
 \begin{frame}{Backup: the whole scene, in causal order}
   \centering
