@@ -1,7 +1,6 @@
 # Part 1 grading: shared estimation engine (AuRo tests a–d)
 
-> **Status: GRADED (Parts A and B of the batch, 2026-11-26 21:29–23:41, room session, g1x-live @ 91598c88).** Part C (C3
-> non-regression) is reported by the room session. The graded columns of §3 and the section "Graded results" below are the
+> **Status: GRADED (Parts A, B and C of the batch, 2026-11-26 21:29 – 11-27 01:30, room session, g1x-live @ 91598c88).** The graded columns of §3 and the section "Graded results" below are the
 > result; the other columns are the earlier single runs, kept for context.
 
 - Branch feat/shared-engine. Build commit for the batch: **91598c88** (code = fix wave 17f13198), tree `2d0c2d5107011e10da553ad8ac569535b7b33c48`.
@@ -140,6 +139,24 @@ fridge's 1.343-nat promise that delivered 0.136 (the P(detect) gap of §4).
 
 Registered A/B/A checks: bed 6/6, 6/6 PASS; chair 6/6, 6/6 PASS; refrigerator 4/6, 4/6 FAIL; nightstand NO VERDICT, 5/6
 FAIL; toilet NO VERDICT ×2; hood NO VERDICT ×2.
+
+### Part C: C3 non-regression (room session, 23:43–01:30; numbers as reported by room, its own scripts at 91598c88)
+
+Runs: `crossing/g1x_c3a_{1,2,3}` (c3a_grade.txt each), `crossing/g1x_c3b_{on,off}_r{1,2,3}` (g1x_c3b_report.txt/.csv).
+
+| | this build | v1 (8a133295) |
+|---|---|---|
+| C3a held (of 15; cabinet not run) | 8 / 10 / 12 | — |
+| C3a phantoms | 3 / 4 / 4 | — |
+| C3a median planar error | 0.09 / 0.11 / 0.09 m | 0.17 / 0.15 / 0.25 m (c3a_w2) |
+| C3b world-frame corrected, ON | 3/3 | 1/4 valid |
+| C3b world-frame corrected, OFF | 3/3 | 2/5 |
+
+- Per class (C3a): bed, toilet, fridge held 3/3; chair 4, 5, 6 of 6; nightstand 1, 2, 2 of 2 (v1 2/2 each); **hood 0/3, never
+  born** (v1 1/3); table 0, 0, 1 of 4 (v1 0, 1, 1); bottle never born.
+- C3b: all six corrections are a new node born on sight, none by the chair's own offer, so the v1 mechanism is unchanged (no
+  belief, no offer until seen). ON arms still claim one room_2 chair offer 3×, as in v1.
+- Regressions against v1: the nightstand in one run (1 of 2) and the hood (0/3 vs 1/3). Planar error and C3b improve.
 
 ## 4. Cut, failing, ungraded
 
