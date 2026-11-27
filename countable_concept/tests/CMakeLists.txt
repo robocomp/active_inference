@@ -288,6 +288,28 @@ target_include_directories(replay PRIVATE ../src ../../common ../../common/media
 target_compile_options(replay PRIVATE -O3)
 target_link_libraries(replay PRIVATE Eigen3::Eigen)
 
+# CB1: the chair's birth placement from the first view (render-predicted cloud middle, derived σ, the free hypothesis's room-span
+# prior) on reconstructed G1x first views, and the yaw-mode prior's wall-side face + adoption. Run: LANG=es_ES.UTF-8 ./birth_view_placement_test
+add_executable(birth_view_placement_test birth_view_placement_test.cpp ../src/countable_belief.cpp ../src/countable_config.cpp
+               $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp)
+target_include_directories(birth_view_placement_test PRIVATE manifest_stub ../src ../../common ../../common/concept_manifest
+                           ../../common/config_report ../../common/media_transport $ENV{ROBOCOMP}/classes)
+target_compile_definitions(birth_view_placement_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+target_compile_options(birth_view_placement_test PRIVATE -O2)
+target_link_libraries(birth_view_placement_test PRIVATE Eigen3::Eigen)
+add_test(NAME birth_view_placement_test COMMAND birth_view_placement_test)
+set_tests_properties(birth_view_placement_test PROPERTIES ENVIRONMENT "LANG=es_ES.UTF-8")
+
+# CB1: re-derive a countable birth from a replay dump's first camera frame (BASE vs view-conditional placement) and replay the
+# belief from it through the current engine (COUNTERFACTUAL). Not a ctest test (it reads tour data).
+# Run: ./birth_placement ../../../chair_concept etc/countable.toml ../../../common/concept_manifest DUMP.bin [DUMP.bin ...]
+add_executable(birth_placement ../tools/replay/birth_placement.cpp ../src/countable_belief.cpp ../src/countable_config.cpp
+               $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp)
+target_include_directories(birth_placement PRIVATE manifest_stub ../src ../../common ../../common/concept_manifest
+                           ../../common/config_report ../../common/media_transport $ENV{ROBOCOMP}/classes)
+target_compile_options(birth_placement PRIVATE -O3)
+target_link_libraries(birth_placement PRIVATE Eigen3::Eigen)
+
 # F1.7 (plan rev 2): a neighbour's size std until the published attribute (S1) — its class from the node name, Δ_w/√12 and
 # Δ_h/√12 from that class's manifest. Run: ./neighbour_size_test ../../../common/concept_manifest
 add_executable(neighbour_size_test neighbour_size_test.cpp)

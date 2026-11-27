@@ -158,6 +158,7 @@ public:
     std::optional<float> room_axis() const;   // the room's principal axis (rad, mod 90°)
     const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
     WallRef nearest_wall(const Eigen::Vector2f& q) const;
+    float   room_span(const WallRef& w) const;   // CB1: the room's extent along w's inward normal (0 = unknown)
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) to each instance, read by the scene-graph's RT-cov write.
     void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame);

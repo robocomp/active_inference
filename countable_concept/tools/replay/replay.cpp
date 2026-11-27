@@ -33,6 +33,14 @@
 //   --standoff DIR sets the seed's wall stand-off (F1.4) from the manifest of the dumped node's class in DIR
 //   (rc::manifest::wall_standoff), as a dump recorded before the stand-off existed lacks it. --permanence DIR does the same for
 //   the class permanence prior (F1 round 6; predict_period_s then keeps its default 0.1 s, the configs' AI2AgeNominalDtS).
+//   --placement DIR sets the seed's placement prior P(against a wall) (CB1) from the manifest of the dumped node's class in DIR
+//   ([prior.placement] p_against_wall; −1 when the class declares none), as a dump recorded before CB1 lacks it.
+//   --rebirth FILE (CB1, COUNTERFACTUAL) replaces the recorded seed state of this dump with the one FILE gives for its stem (written
+//   by tools/replay/birth_placement: the birth re-derived from the dump's first camera frame with the view-conditional placement),
+//   and sets that birth's position covariance, and sets the seed's placement_p_against_wall to the birth's placement posterior. One
+//   line per dump: stem changed p_wall cx cy H w h yaw c00 c01 c11 (decimal points, from_chars); the state and covariance are used
+//   only when changed = 1 (a FREE -> WALL change: the recorded stream then holds no birth covariance to supersede). A dump not in
+//   FILE is as recorded.
 //   --parts DIR sets the seed's solid (K2a: params.shape_parts and params.solid_parts, common/ai_belief/parts_geometry.h) from the
 //   manifest of the dumped node's class in DIR ([[shape.part]] and [shape] solid), as a dump recorded before K2a lacks it (and ran
 //   the one-box solid). The dumped FRAMES are unchanged: what the live agent staged with its own θ trajectory (see the K2a report).
@@ -62,6 +70,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <set>
@@ -96,12 +105,12 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--permanence DIR] [--parts DIR] [--seed-h-rule] [--theta-cov] [--f1-restage GAP]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s DUMP.bin [--from N] [--to N] [--allow-defaults] [--sig2-cam-measured] [--neighbour-size-std DIR] [--standoff DIR] [--placement DIR] [--rebirth FILE] [--permanence DIR] [--parts DIR] [--seed-h-rule] [--theta-cov] [--f1-restage GAP]\n", argv[0]);
         return 2;
     }
     long from = 0, to = std::numeric_limits<long>::max();
     bool allow_defaults = false, sig2_cam_measured = false;
-    std::string neighbour_manifests, standoff_manifests, permanence_manifests, parts_manifests;
+    std::string neighbour_manifests, standoff_manifests, permanence_manifests, parts_manifests, placement_manifests, rebirth_file;
     bool seed_h_rule = false, theta_cov = false;
     bool f1_restage = false;
     float f1_gap = 0.0f;
@@ -113,6 +122,8 @@ int main(int argc, char** argv)
         if (k == "--sig2-cam-measured") { sig2_cam_measured = true; continue; }
         if (k == "--neighbour-size-std" and i + 1 < argc) { neighbour_manifests = argv[++i]; continue; }
         if (k == "--standoff" and i + 1 < argc) { standoff_manifests = argv[++i]; continue; }
+        if (k == "--placement" and i + 1 < argc) { placement_manifests = argv[++i]; continue; }
+        if (k == "--rebirth" and i + 1 < argc) { rebirth_file = argv[++i]; continue; }
         if (k == "--permanence" and i + 1 < argc) { permanence_manifests = argv[++i]; continue; }
         if (k == "--parts" and i + 1 < argc) { parts_manifests = argv[++i]; continue; }
         if (k == "--seed-h-rule") { seed_h_rule = true; continue; }
@@ -223,6 +234,39 @@ int main(int argc, char** argv)
         f1.rho_cam = rho_cam; f1.rho_lat = rho_lat; f1.rho_H = rho_H;
         f1.pending = true;
     };
+    std::optional<std::array<float, 11>> rebirth;   // CB1: changed p_wall cx cy H w h yaw c00 c01 c11 for this dump's stem
+    if (not rebirth_file.empty())
+    {
+        std::ifstream rf(rebirth_file);
+        if (not rf) { std::fprintf(stderr, "replay: cannot open --rebirth %s\n", rebirth_file.c_str()); return 2; }
+        std::string stem = argv[1];
+        if (const auto sl = stem.find_last_of('/'); sl != std::string::npos) stem = stem.substr(sl + 1);
+        if (const auto dot = stem.rfind(".bin"); dot != std::string::npos) stem = stem.substr(0, dot);
+        std::string line;
+        while (std::getline(rf, line))
+        {
+            std::vector<std::string_view> tok;
+            for (std::size_t a = 0; a < line.size();)
+            {
+                const std::size_t b = line.find(' ', a);
+                const std::size_t e = b == std::string::npos ? line.size() : b;
+                if (e > a) tok.emplace_back(line.data() + a, e - a);
+                a = e + 1;
+            }
+            if (tok.size() != 12 or tok[0] != stem) continue;
+            std::array<float, 11> v{};
+            bool good = true;
+            for (int j = 0; j < 11; ++j)
+            {
+                const auto t = tok[std::size_t(j + 1)];
+                const auto [p, ec] = std::from_chars(t.data(), t.data() + t.size(), v[std::size_t(j)]);
+                good = good and ec == std::errc{} and p == t.data() + t.size();
+            }
+            if (not good) { std::fprintf(stderr, "replay: malformed --rebirth line for %s\n", stem.c_str()); return 2; }
+            rebirth = v;
+        }
+        std::fprintf(stderr, "replay: rebirth %s\n", rebirth ? "from the re-derived birth (COUNTERFACTUAL)" : "none for this dump (as recorded)");
+    }
     double worst_th = 0.0, worst_P = 0.0;
     long compared = 0, gn_total = 0;
     std::array<double, 6> sd_max{};
@@ -314,6 +358,12 @@ int main(int argc, char** argv)
         },
         [&](rc::replay::SeedEv& seed)
         {
+            if (rebirth)
+            {
+                const auto& r = *rebirth;
+                seed.params.placement_p_against_wall = r[1];
+                if (r[0] != 0.0f) seed.state = rc::CountableBeliefState{r[2], r[3], r[4], r[5], r[6], r[7]};
+            }
             if (seed_h_rule)
             {   // F1 round 6.2's rule on the first camera frame (the birth cloud is not in the dump), at the recorded born pose
                 const auto pts = rc::replay::first_camera_points(argv[1]);
@@ -337,6 +387,12 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "replay: solid %s (%zu part(s)) from %s\n", seed.params.solid_parts ? "parts" : "box",
                              seed.params.shape_parts.size(), path.c_str());
             }
+            if (not placement_manifests.empty())
+            {   // CB1: the class's placement mixture (a dump recorded before CB1 lacks placement_p_against_wall)
+                const std::string path = placement_manifests + "/" + rc::node_class(seed.node) + ".concept.toml";
+                seed.params.placement_p_against_wall = rc::manifest::placement_p_against_wall(path).value_or(-1.0f);
+                std::fprintf(stderr, "replay: placement p_against_wall %.2f from %s\n", seed.params.placement_p_against_wall, path.c_str());
+            }
             if (standoff_manifests.empty()) return;
             const std::string path = standoff_manifests + "/" + rc::node_class(seed.node) + ".concept.toml";
             if (const auto so = rc::manifest::wall_standoff(path))
@@ -346,7 +402,15 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "replay: stand-off %.3f +- %.3f m from %s\n", so->mean_m, so->std_m, path.c_str());
             }
         },
-        [&](const rc::CountableBelief&) { f1.restored = true; });
+        [&](const rc::CountableBelief&) { f1.restored = true; },
+        [&](rc::CountableBelief& b)
+        {
+            if (not rebirth or (*rebirth)[0] == 0.0f) return;
+            const auto& r = *rebirth;
+            Eigen::Matrix2f C;
+            C << r[8], r[9], r[9], r[10];
+            b.set_birth_position_cov(C);
+        });
     flush(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN());
 
     print_set("missing (default kept)", reader.diag().missing);

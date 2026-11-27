@@ -259,6 +259,12 @@ struct CountableBeliefParams
     // pointing straight INTO the room over one pointing straight into the wall. Scaled by the flush mixture
     // weight, so it vanishes for a genuine mid-room bed. 0 = OFF. A precision, not a gate.
     float door_clearance_gain = 3.0f;
+    // CB1: this instance's P(against a wall) for the yaw-mode prior: the birth's placement POSTERIOR P(against the wall | first
+    // view) when the class declares a placement mixture ([prior.placement]; rc::seed_birth), else that class prior p_against_wall;
+    // < 0 = no mixture (every p = 1 class). With it the clearance weight is the posterior that the body stands against the staged
+    // wall with π in place of BASE's even prior, π f / (π f + (1 − π)(1 − f)) (f the flush weight of its wall-side face; = f at
+    // π = 1/2); without, the weight is f, as before. A chair the birth found free (π → 0) gets no mode prior at all.
+    float placement_p_against_wall = -1.0f;
     // SYMMETRY (K2c, manifest [shape] symmetry = "c2v"): the class has no front and no labelled sides (a table), so the four
     // discrete yaw modes {0, π/2, π, 3π/2} of the front resolver (with the w↔h relabel on the quarter turns) are the SAME body —
     // group elements, not hypotheses. The mode posterior is then a point mass on the held mode: the reported yaw variance is the

@@ -99,7 +99,7 @@ template <class V> void fields(V& v, CountableBeliefParams& x)
     v("wall_standoff_m", x.wall_standoff_m); v("wall_standoff_std_m", x.wall_standoff_std_m);
     v("move_rate_per_day", x.move_rate_per_day); v("move_scale_m", x.move_scale_m); v("move_scale_rad", x.move_scale_rad);
     v("predict_period_s", x.predict_period_s);
-    v("door_clearance_gain", x.door_clearance_gain);
+    v("door_clearance_gain", x.door_clearance_gain); v("placement_p_against_wall", x.placement_p_against_wall);
     v("volatility_infer", x.volatility_infer); v("volatility_lr", x.volatility_lr);
     v("volatility_sigma", x.volatility_sigma); v("volatility_omega_min", x.volatility_omega_min);
     v("wall_explain_frac", x.wall_explain_frac); v("wall_explain_sigma_m", x.wall_explain_sigma_m);
@@ -578,17 +578,20 @@ struct NoFrame  { void operator()(CountableFrame&) const {} };
 struct NoSeed   { void operator()(SeedEv&) const {} };
 // on_seed(SeedEv&), when given, may rewrite the recorded seed (its params) before the belief is built from it.
 // on_restore(const CountableBelief&), when given, runs after a RestoreEv (the last update was rejected and undone).
+// on_seeded(CountableBelief&), when given, runs once on the belief just built from the seed (before any other event): a tool that
+// re-derives the birth (CB1's counterfactual rebirth) sets the birth position covariance the recorded stream does not hold.
+struct NoSeeded { void operator()(CountableBelief&) const {} };
 template <class OnUpdate, class OnResult, class OnChange = NoChange, class OnFrame = NoFrame, class OnSeed = NoSeed,
-          class OnRestore = NoChange>
+          class OnRestore = NoChange, class OnSeeded = NoSeeded>
 bool play(Reader& reader, CountableBelief& b, OnUpdate&& on_update, OnResult&& on_result, OnChange&& on_change = {},
-          OnFrame&& on_frame = {}, OnSeed&& on_seed = {}, OnRestore&& on_restore = {})
+          OnFrame&& on_frame = {}, OnSeed&& on_seed = {}, OnRestore&& on_restore = {}, OnSeeded&& on_seeded = {})
 {
     bool seeded = false;
     CountableBelief pre;   // the belief before the last update (RestoreEv)
     Event e;
     while (reader.next(e))
     {
-        if (auto* s = std::get_if<SeedEv>(&e)) { on_seed(*s); b = CountableBelief(s->state, s->params); seeded = true; continue; }
+        if (auto* s = std::get_if<SeedEv>(&e)) { on_seed(*s); b = CountableBelief(s->state, s->params); on_seeded(b); seeded = true; continue; }
         if (not seeded) return false;
         std::visit([&]<class E>(E& ev)
         {
