@@ -31,7 +31,9 @@
 //      centre within its σ of the truth.
 //  (f) fix round 1 (I1/I2): a side-on chair whose points push it 3 cm past the staged wall, parked 200 updates, the move statistic on:
 //      δ̂ does not travel toward D after the attachment's entry, the move statistic gives no evidence of moving (max jump_p ≤ the
-//      prior P(moved)), the term holds it. Fix round 2 (N2): update 1 caps; the attachment's entry is then committed on update 2.
+//      prior P(moved)), the term holds it. Fix round 2: run with the parallel term off (M5). With it ON, update 1 caps (the
+//      parallel residual at its maximum on a side-on body, with the active term: a concave energy the Gauss–Newton model cannot
+//      follow) and, since N2, the attachment's entry is committed on update 2 instead of being lost.
 //  (g) finite differences: the corner Jacobian, the polygon gradient, and (fix round 2, M-a) the FULL term E(θ) against −bd at a
 //      convex room vertex where λ varies with θ.
 //  (h) fix round 2 (N1, the reviewer's case): back-on flush objects whose points put the back D past the staged wall, the
