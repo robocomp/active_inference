@@ -1,0 +1,258 @@
+\documentclass[11pt]{article}
+\input{handout_preamble}
+\graphicspath{{../slides/figures/}}
+\setlength{\parskip}{0.28em}\linespread{0.94}
+\setlist{nosep}
+\emergencystretch=2em
+\tcbuselibrary{breakable}
+\tcbset{breakable,left=5pt,right=5pt,top=3pt,bottom=3pt}
+\usepackage{longtable,array}
+\newcommand{\slt}[1]{\emph{#1}}   % slide title
+
+\title{\textbf{A robot that acts to know}\\[0.3em]\large Day 5 handout --- A vision-language model and a language agent on the same beliefs}
+\author{}
+\date{Friday 4 December}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\noindent
+For four days the robot built beliefs: the room, its own pose, the doors, the chairs and tables, and the memories that keep them. Each belief is held by one agent on the shared graph, and each is a number with a covariance or a probability. Today a person talks to the robot. Two kinds of language model take part. A \emph{vision-language model} reads a camera frame and writes words. The \emph{language agent} is a language model that reads the beliefs through tools, answers the person, and proposes plans that the controller runs. The thread of the day is one rule: \textbf{language adds no belief of its own}. It reads the beliefs built this week, and it changes them only through a check and the person's ``yes''. Every exchange quoted here is copied from a log of the language agent (October--November 2026, in simulation).
+
+Section~1 follows the slides in order and adds what the slides only show. The backup slides are in blue boxes. Section~2 is a guide to the seven lab exercises, with the numbers you should find. Section~3 is a glossary. Slide titles are in italics.
+
+\paragraph{Notation used in this handout.} $P(\text{open})$: a door agent's probability that its door is open, computed from the leaf angle it observes. $P(\text{exists})$: an object agent's probability that its object is there. $\mathbf v$: a place where the robot would stand. $P(\text{see}\given\mathbf v)$: the probability that the robot would see an object from $\mathbf v$. $x$: a detected position on the floor; $\mu_k$: the remembered position of chair $k$; $\Sigma$: the covariance of the position error; $A$: the floor area of the room, in m$^2$; $\pi$: the probability that a remembered chair was moved. $a$: a vector that summarises one view of a chair; $m_k$: chair $k$'s own look; $c$: the class look (the average chair). $r_k$: the nats by which chair $k$'s look explains a view better than the class does. A \emph{nat} is the unit of $-\ln p$: a difference of $k$ nats is odds of $e^k$ to 1.
+
+%=====================================================================================
+\section{The lecture}
+%=====================================================================================
+
+\subsection{What the day adds}
+
+\paragraph{Three parts.} \slt{Today language reads and changes the beliefs we already have.} The day has three parts: a vision-language model that reads a picture and writes words; the language agent, which reads beliefs, answers and proposes plans; and a discussion of what a language model gives a robot and what it cannot give.
+
+\paragraph{The beliefs are already there.} \slt{Four days built beliefs that agents hold on one graph.} The room's outline and corners, the robot's pose and body, each door's $P(\text{open})$, and the chairs and tables (born, tracked and removed) are held by their agents on the CORTEX graph, together with the working, episodic and long-term memories of Day 3. Each of them could already answer a question in numbers. What was missing is a way for a person to ask, and a way for a person to say what to do.
+
+\subsection{Seeing with a vision-language model}
+
+\paragraph{Hypotheses, not beliefs.} \slt{A vision-language model gives the robot hypotheses, not beliefs.} A vision-language model takes a picture and a question and writes text. What it says is useful in three ways: \emph{where to look} (``something yellow, there''), \emph{new words} (``a bedroom'', ``a mirror''), and \emph{common sense} (what rooms and things are for). None of these is a measurement. Size, colour, ``is it open?'' and ``since when?'' need a model of the object and many frames. So every sentence from the model is a hypothesis that an agent must test: it goes and looks, measures over many frames with its own model, and ends with a belief, or with nothing.
+
+\paragraph{One frame, one question, some words.} \slt{A vision-language model turns a picture and a question into words.} On the robot the vision-language model is the same model that talks. When a question needs the picture, the model calls a tool, \texttt{look}, which sends it one frame from the front camera. Asked ``what do you see?'', it answered: ``I see a green door with a silver handle, slightly ajar, leading into room\_2.'' The sentence is a reading of one picture; nothing in it is a belief yet.
+
+\paragraph{The picture can hold what no agent holds.} \slt{The picture can hold what the beliefs do not.} In one log the model described ``a bedroom with a black bed and white pillows''. Asked next whether the bed was for one or two people, the agent answered from the beliefs: ``I have not perceived any bed in the current room.'' Both statements are correct in their own terms: the bed is in the picture, but no agent holds a bed belief. The robot gives the beliefs' answer. The picture only suggests what to look for.
+
+\paragraph{A colour depends on the question.} \slt{A colour read from one frame depends on what was asked.} Asked ``go to the yellow chair'', the agent answered from the beliefs that it perceived chair\_34 and chair\_35, and no yellow chair. Asked ``can't you see colours?'', it called \texttt{look} and answered ``I see a yellow chair in front of me''. After it approached, it reported that neither chair appeared to be yellow. In the comparable simulation frame on the slide, a magenta chair stands in front of a yellow one, so which one is ``the chair'' depends on what was asked. A colour read from one frame is a hypothesis. A colour belief needs measurements over many looks, by the agent that owns the chair.
+
+\paragraph{Who should answer what.} \slt{The model describes; the beliefs measure.}
+\begin{center}\small
+\begin{tabular}{@{}p{2.6cm} p{4.6cm} p{6.4cm}@{}}
+\toprule
+ & the model, from one frame & the belief, from many frames\\\midrule
+``what is there?'' & a scene, in free words & the objects it holds, each with an identity\\
+``how big?'' & a guess from the image & $0.80\times0.74$ m, with its covariance\\
+``is it open?'' & ``slightly ajar'' & $P(\text{open})$ from the leaf angle\\
+``since when?'' & cannot know & last seen in room\_1, 15 h ago\\
+\bottomrule
+\end{tabular}
+\end{center}
+The table size must come from the table agent. In the log of 18 October the model only repeated the number it had been given.
+
+\subsection{The language agent: how the model meets the beliefs}
+
+\paragraph{Only through tools.} \slt{The language model acts only through tools.} The language model runs locally, on the robot's computer. It never reads the graph. It reads a text \emph{digest} of the graph, refreshed every 0.5 s, and it calls \emph{tools}. Each tool touches one belief: it reads it, or it posts an intention for the controller. The tools fall into three groups.
+\begin{itemize}
+\item \textbf{read}: \texttt{where\_is}, \texttt{where\_was}, \texttt{can\_see}, \texttt{find\_objects}, \texttt{look};
+\item \textbf{imagine}: \texttt{imagine}, \texttt{imagine\_view};
+\item \textbf{act}: \texttt{plan\_mission}, \texttt{approach\_object}, \texttt{cross\_door}, \texttt{route\_to}, \texttt{stop}.
+\end{itemize}
+Notes on missions, doors and exploring are loaded into the model's context only when it asks for them.
+
+\paragraph{The digest.} \slt{The model reads a text digest of the beliefs, refreshed every 0.5 s.} A digest from a log:
+\begin{lstlisting}[language={}]
+current room: room_1
+robot pose in room_1: x=-1.09 m, y=-0.97 m, yaw=34 deg
+controller target now: explore the room
+doors of the current room (2):
+  - door_1: 5.6 m away, bearing -39 deg, P(open)=0.04,
+      behind it: remembered room_2
+  - door_22: 3.9 m away, bearing -59 deg, P(open)=0.14,
+      behind it: remembered room_3 [nearest]
+objects perceived in the current room (only this room is perceived): none
+\end{lstlisting}
+Three things to read in it. $P(\text{open})$ is the door agent's belief, copied. ``Remembered room\_2'' comes from the long-term spatial map, not from a look. ``None'' means no object is perceived \emph{in this room}; it does not mean there is none. Whatever the model says about the robot must be a line of this digest, or the result of a tool.
+
+\subsection{Answering from the beliefs}
+
+\paragraph{The number is the belief's.} \slt{Questions about the scene are answered from a belief.} ``Do you see a door?'' got ``Yes. It is door\_1, 2.6 meters away [\ldots] probably shut, with a P(open) of 0.03.'' ``Is the table square or round?'' got ``rectangular, with dimensions of 0.80 m by 0.74 m''. The language model chose which belief to ask for; the numbers 0.03 and 0.80 come from the door agent and the table agent.
+
+\paragraph{Each question goes to its owner.} \slt{Each question goes to the agent that holds the belief.} ``Where is my chair?'' goes to the long-term object memory of Day 3, which returns the last room and pose, copied, not rephrased. ``Is door\_1 open?'' goes to the door agent. ``Can you see the fridge from the door?'' needs every concept agent to publish how it detects. The answer is
+\[
+P(\text{see}\given\mathbf v)=P(\text{notice}\given\mathbf v)\cdot P(\text{recognise}\given\mathbf v).
+\]
+\emph{Notice}: enough of the object is in view from $\mathbf v$, past walls and doors. \emph{Recognise}: the detector names the object at that distance. It is the same $P(\text{detect}\given\mathbf v)$ that priced a view on Day 4.
+
+\paragraph{A fact about the past is sent as it is.} \slt{A fact about the past is repeated, not rephrased.} The tool \texttt{where\_is(chair)} returned: ``Remembered, NOT perceived now (it may have moved): chair\_34 (room\_1, 15 h ago) [\ldots] chair\_39 (room\_2, 15 h ago)''. In the first run the model rewrote it as ``I last saw chair\_34, chair\_35, chair\_37, and chair\_39 in room\_1'': the warning ``may have moved'' was lost, and chair\_39 changed room. The fix is in code, not in the prompt: when the tool's text already answers the question, the code sends it to the person as it is. The second run shows the result.
+
+\paragraph{An empty memory.} \slt{When the memory is empty the robot says so.} In one run, ``what did you do today?'' got ``Today, I completed 42 missions, with 35 of them succeeding.'' In another, when the episodic memory held no record of the day, the answer was ``I do not remember doing anything today'', and again after ``try again''. The episodic memory of Day 3 keeps records of episodes (start, end, what happened, consequences); when it holds none, the robot does not make up a day.
+
+\subsection{Acting through the controller}
+
+\paragraph{A gate in code.} \slt{A gate in code decides which commands wait for a yes.} ``Back up a bit'' calls \texttt{move\_relative($-0.3$ m)}, which runs at once. ``Cross door\_1'' calls \texttt{cross\_door(door\_1)}, which does not run: it shows a \emph{card} in the controller's window, with buttons to run or cancel, and waits for the person. Which commands wait is decided by code, not by the model.
+
+\paragraph{The model proposes, the controller acts.} \slt{The language model proposes; the controller acts.} The person speaks, the language model writes a plan, the plan is checked and shown as a card, and after ``yes'' the controller runs it. ``Stop'' and ``pause'' are read by code, with no model in the loop. Plans are written in a small mission language of steps, conditions and watches:
+\begin{lstlisting}[language={}]
+mission "go to room_3 and tell me the colour of every chair on the way"
+  watch seen(chair) continue each=c
+    report "the colour of $c"
+  cross door_22 expect=room_3 retry=2
+\end{lstlisting}
+A \emph{watch} reacts to something seen while the mission runs; \texttt{continue} keeps going after it fires, \texttt{stop} ends the mission. The language model writes plans; it never drives the robot.
+
+\paragraph{Two reports of one mission.} \slt{One request, one plan, two reports.} ``Go to chair\_34'' (seen 15 h ago, not in view) became the plan: go to the pose where chair\_34 was last seen, approach chair\_34, report whether it is still there. After ``yes'', the model said: ``I have arrived at the location where I last saw chair\_34, but I do not perceive any chair here.'' The controller's report said otherwise: \texttt{go\_to} was skipped (no route) and the approach was skipped (chair\_34 offers no approach side). The second report, from the controller, corrects the first. \slt{The same request on another run} shows the window when the mission worked: the plan waits for ``yes'', then each of the four steps (move, wait, approach chair\_34, report) is reported by the controller, not written by the model.
+
+\paragraph{A condition reads a belief when it runs.} \slt{A condition in a mission reads a belief.} Three requests and their plans:
+\begin{itemize}
+\item ``Go to room\_3 and tell me the colour of every chair on the way'': a watch on \texttt{seen(chair)} that reports each chair, then a crossing of door\_22.
+\item ``Explore and stop as soon as you see a bottle'': a watch on \texttt{seen(bottle)} that stops the mission, then \texttt{explore room\_1} with a budget of 300 s.
+\item ``Go through door\_1, opening it if it is shut'': \texttt{if door\_open(door\_1)<0.5}, open it; then cross it.
+\end{itemize}
+``If it is shut'' becomes $P(\text{open})<0.5$, read from the door agent \emph{when the mission reaches that step}, not when the plan was written. Lab Exercise~7 builds this.
+
+\subsection{Imagining, and naming}
+
+\paragraph{Imagining is predicting on a changed copy.} \slt{Imagining: the same model, run on a changed copy of the world.} To answer a ``what if'', the robot copies its beliefs, changes one thing (for example \texttt{door\_2 := open}), and runs the model it acts with on the copy. The answer comes with its assumptions.
+\begin{center}\small
+\begin{tabular}{@{}p{6.0cm} p{8.0cm}@{}}
+\toprule
+question & what answers it\\\midrule
+``Would I fit through door\_2?'' & the controller's own fitting model and the robot's footprint\\
+``Would I see the fridge if door\_2 were open?'' & $P(\text{see}\given\mathbf v)$ on the changed copy\\
+``Would I get through door\_1?'' & the robot's past crossings of that door, counted\\
+\bottomrule
+\end{tabular}
+\end{center}
+To imagine is to predict observations under a change, which is what expected free energy $G$ needs (Day 4).
+
+\paragraph{An imagined chair needs a placement.} \slt{Two answers about an imagined chair, each with its reason.} ``How do you imagine a chair?'' called \texttt{imagine\_view(chair)} twice and got two answers. In one, 8 chairs were placed ``wherever such things usually stand'', and the robot would notice one with probability 0.00, mostly because they were outside the field of view. In the other, 8 typical chairs stood on the floor 2.5 m in front of the robot, and it would notice one with probability 0.97. The figure on the slide is the tool's output for a run with the same numbers: the camera view with the 8 sampled chairs in red, and the LiDAR from above. The two numbers differ because the imagined chairs stood in different places, and each answer states its placement. Both answers add that the chair detector is not calibrated yet, so the numbers are rough.
+
+\paragraph{No room, no imagining.} \slt{A ``what if'' needs a place in the world.} ``What if the refrigerator had a servo motor, so you could ask it to open?'' called \texttt{imagine}, which answered: ``I do not know which room I am in, so I cannot imagine what I would see.'' Without a room the robot says it cannot imagine; it does not invent one.
+
+\paragraph{A name said in the chat.} \slt{A name given in words lived only in the chat.} The person said ``can we call it `front door' from now on?'', and the model agreed. Then ``cross front door'' failed at the gate: ``front door'' is not a door of room\_1; the known door is door\_19. The name lived only in the chat, not on the door. The design (not built for use): ``that chair is mine'' produces a card, \emph{chair\_34 is yours?}, and the name is written on the object only after ``yes''. A name is a belief about one object; until it is written on the object it is only words.
+
+\subsection{Claims and failures}
+
+\paragraph{A claim with no tool.} \slt{``The crossing is complete'' had no tool behind it.} ``Cross the door\_5 and go back'' produced a crossing card, waiting for the person. The person typed ``go'', the model called \texttt{move\_relative($-0.35$ m)}, and said: ``I have moved backward 0.35 meters. The door crossing is complete, and I am now positioned in the new room.'' No tool reported a crossing. The sentence is the model's own, and no belief supports it.
+
+\paragraph{The rule.} \slt{Every claim must come from a tool that read a belief.} Two checks follow. The person's words become a belief only after a card and a ``yes'' (``that chair is mine'' $\to$ \emph{chair\_34 belongs to you?} $\to$ stored only on ``yes''). The model's words, when no tool ran, are not kept: if the model says ``I have planned the mission'' and no tool was called, it is asked once more to plan it or to say that nothing was planned; if it still has not, the history keeps ``nothing was planned or sent, and the robot did not move'' instead of the false sentence. The reason is that a model copies its own history: a false sentence left there comes back in the next answer. The language model is not the robot's belief; it may only report what a tool returned.
+
+\paragraph{Failures that were stopped.} \slt{Three failures, each stopped by a different part.} ``Go to chair\_34'' with the plan \emph{approach chair\_34}: the controller refused it, because chair\_34 offers no approach; nothing ran. ``Go to room 3'' with the plan \emph{cross door\_21}: door\_21 is not in the graph, and the reply offered the route through passage\_2. ``Go to the other door \ldots\ no, the other one'': the model's server stopped, and the robot did nothing. In each case the part that knew why refused the plan before the robot moved.
+
+\paragraph{Failures that were not stopped.} \slt{Three failures that nothing stopped.} ``You ARE moving'': the model repeated that it was not moving, because the digest said ``stationary''; the person was right, and a tool that reports motion would settle it. ``What is the camera frame rate?'': ``30 FPS for the ZED and 15 FPS for the Ricoh''; no tool and no digest line holds these numbers, and the claim check catches sentences about actions, not yet numbers about sensors. ``Yes'' typed three times in the chat: the same question came back each time, because the confirmation is the card's button, not a word in the chat. The failures that reached the person were the ones where the model spoke without a tool.
+
+\paragraph{What is measured.} \slt{What is measured, and what is not.} With a 26-billion-parameter open model running on the robot's computer: the right tool in 307 of 315 cases (105 requests, 3 runs each), 0.9 s per call; a correct mission in 99 of 102 (34 requests, 3 runs each). In one simulated run a watch reacted while the robot crossed a door, and a ``stop'' watch ended an exploration at a new chair. \textbf{Not established:} any run on the physical robot (every log is a simulation, or does not say); behaviour with users, since the test set was written by the authors; false claims in languages other than English and Spanish, since the phrase lists cover only those two.
+
+\subsection{Discussion}
+
+The three discussion slides have no single answer. Prepare a view on each.
+\begin{itemize}
+\item \slt{What does a language model give a robot?} A way to ask (any person, any wording, two languages; ``cross it'' means the door in front); a way to compose (steps, conditions and watches written from one sentence, and checked before they run); knowledge from outside (what a kitchen is for, what a bed is). Only the third is something the beliefs cannot give by themselves: they hold what was seen here, and what rooms and objects are for comes from outside and has to be turned into probabilities the agents can use.
+\item \slt{What can it not give?} A measurement (the bed, the colour, the table's size), a memory (``I do not remember anything today''), the present (``you ARE moving''), a decision (the card's yes, the controller's refusal). In today's examples, every wrong sentence came where no tool stood behind it.
+\item \slt{Where must the beliefs stay grounded?} Sensors measure and build beliefs; language reads the beliefs openly, but writes to them only through a check and a ``yes''. If the model could write a belief directly, a wrong sentence would become a belief, and every agent would act on it.
+\end{itemize}
+
+\subsection{Close}
+
+\paragraph{Open directions.} \slt{Open directions: what this week left unbuilt.} The inner voice (questions the robot puts to itself about its own surprises); procedural memory (missions distilled into reusable skills); amortisation (learning to skip the optimisation each agent redoes every frame); a speaker model (``that chair is mine'': who is talking?); when to act (let $G$ decide when to start, not a fixed level); rates as a state (each agent's rate and delay, estimated like any belief); and common sense as a prior (what rooms and objects are for, compiled outside the robot in a vision-language model and turned into probabilities the agents can use). Each is a belief nobody holds yet, or a choice still made by a rule.
+
+\paragraph{The week.} Day 1: the challenge, and the grammar of probability. Day 2: free energy, perception and action. Day 3: who holds a belief, concepts and memories. Day 4: one concept from birth to action, the chair. Day 5: language reads and changes the beliefs. The robot acts to make its beliefs better, and language is one more way to read and change them. The language agent is one more agent on the same graph: whatever it says, it can show where it came from, a belief, the model that built it, and the look that paid for it.
+
+\begin{backupbox}{Backup: \emph{A second sight is a comparison, and ``new'' is on the list}}
+The robot comes back to a room and detects a chair. Is it chair 22, chair 23, or a chair it has never met? Each answer is a model, and the one that explains the detection in fewer nats wins. Where it is: a remembered chair stayed, or was moved with probability $\pi$ and could then be anywhere in the room of area $A$,
+\[
+p(x\given k)=(1-\pi)\,\N(x;\mu_k,\Sigma)+\pi/A,\qquad p(x\given\text{new})=1/A .
+\]
+What it looks like: $r_k$, the nats by which chair $k$'s stored views explain this view better than the class does. Chair $k$ scores $\ln p(x\given k)+r_k$; ``new'' scores $\ln(1/A)$. The long-term memory only offers candidates; the chair agent decides, a candidate must beat ``new'', and a tie goes to ``new''. On position alone a moved chair cannot win, because far from $\mu_k$ its score is $\ln(\pi/A)<\ln(1/A)$: it is born again under a new name. This is the Bayes match of Day 3, and Lab part A.
+\end{backupbox}
+
+\begin{backupbox}{Backup: \emph{Second sight: what the toy says, what the robot does} (work in progress)}
+In the toy of the lab (percentage identified correctly): a chair that stayed, 98 by position, 100 with the look, 99 with the look when all chairs are the same model; a moved chair, 6, 100 and 33; a new chair, 81, 100 and 0. With views twice as noisy as the model assumes, the look keeps only 42\% of the chairs that never moved, where position alone kept 98\%. On the robot, in simulated tours, recall uses position only: back in the room, chairs return under their old identity with probability 0.92--0.98, also across a restart of the system. The chair is absent for about 35 s after the return, until it is detected again. A \emph{moved} chair is not established (replaying the atlas offline, 15 of 53 right). Other classes: merged, never run. Renaming and learned permanence: designed only.
+\end{backupbox}
+
+\begin{backupbox}{Backup: \emph{From speech between people to speech inside}; \emph{an inner question is a small active-inference loop} (work in progress)}
+Vygotsky: a function appears first between people, then inside the individual (speech with another person, then private speech aloud, then silent inner speech); children talk aloud to themselves more when the task is harder. The robot's path would be: chat with the person, then a robot event that wakes the model during a mission (today it may look, query, stop or propose, and may not act), then questions the robot puts to itself. An inner question would be a small active-inference loop: a surprise (an object no agent explains), hypotheses each with what it predicts, a test (a motion that separates them), the robot measures, the posterior moves, and the loop stops when the expected gain no longer pays the cost. Illustrative, not a run: bag, robot vacuum or moved chair? The vision-language model proposes ``approach to 1 m: a vacuum is under 0.15 m tall and moves''; the robot measures 0.12 m and sees it move. The model only sets what each hypothesis predicts; only the robot's own measurement moves the posterior.
+\end{backupbox}
+
+%=====================================================================================
+\section{Lab guide}
+%=====================================================================================
+
+The notebook is \texttt{labs/day5.ipynb}. Part A is about second sight (Exercises 1--4); part B builds a toy language agent (Exercises 5--7, and an optional part with a real local model). \textbf{In class} (about fifty minutes): A, then B up to the claim check (Exercise 6). \textbf{At home:} Exercise 7 and the questions. \textbf{Optional:} B5. The notebook needs only \texttt{numpy}; B5 needs a local model server and does nothing without one.
+
+\subsection*{Part A: is this the chair I saw? (Exercises 1--4). Backup slides: \emph{A second sight is a comparison}; \emph{what the toy says}}
+A room of $6\times4$ m ($A=24$ m$^2$) held three chairs. A chair is detected at $x$ with look $a$ (16 numbers). The constants: position error $\sigma_p=0.15$ m, so the comparison of a remembered and a new position has covariance $2\sigma_p^2I$ (both carry the error); $\pi=0.5$; each chair's look $m\sim\N(c,\tau^2I)$ with $\tau=1$; a view scatters $a\sim\N(m,\sigma_a^2I)$ with $\sigma_a=0.5$.
+\begin{itemize}
+\item \textbf{Exercise 1.} \texttt{log\_location(x, mu)} $=\ln\big[(1-\pi)\N(x;\mu,2\sigma_p^2I)+\pi/A\big]$; add the two terms with \texttt{np.logaddexp}, never by exponentiating. \texttt{decide} scores each chair with $\ln p(x\given k)$ (plus $r_k$ if the look is used) and returns the best only if it is strictly above $\ln(1/A)$; otherwise it returns ``new''.
+\item \textbf{Exercise 2.} $r_k=\ln\N(a;m_k,\sigma_a^2I)-\ln\N(a;c,(\tau^2+\sigma_a^2)I)$. The second term is what a stranger of the class would look like: its variance adds the spread of chairs $\tau^2$ to the view noise.
+\item \textbf{Exercise 3.} Predict, then run. You should find (percentage right, 4000 trials):
+\begin{center}\small
+\begin{tabular}{@{}l rrr c rrr@{}}
+\toprule
+ & \multicolumn{3}{c}{chairs that look different} & & \multicolumn{3}{c}{three of the same model}\\
+\cmidrule{2-4}\cmidrule{6-8}
+ & nearest & position & pos.\ + look & & nearest & position & pos.\ + look\\\midrule
+stayed & 98.4 & 98.4 & 100.0 & & 98.6 & 98.6 & 98.6\\
+moved & 32.8 & 6.4 & 100.0 & & 32.6 & 5.9 & 32.6\\
+new & 0.0 & 80.8 & 99.7 & & 0.0 & 80.2 & 0.1\\
+\bottomrule
+\end{tabular}
+\end{center}
+Read it against the equations. ``Nearest'' has no ``new'' on its list, so it is never right about a new chair. On position alone a moved chair scores $\ln(\pi/A)<\ln(1/A)$ and loses to ``new'' unless it lands near a remembered place. The look separates the cases only if the chairs differ; with three chairs of one model it gives nothing, and a new chair of that model is confidently taken for an old one.
+\item \textbf{Exercise 4.} A chair seen from the other side does not look like the stored view. Model it by making the true view scatter \texttt{inflate} times $\sigma_a$. You should find: $\times1.0$: stayed 100.0, moved 100.0, new 99.7; $\times1.5$: 91.0, 77.8, 99.8; $\times2.0$: 41.9, 25.8, 99.9; $\times3.0$: 1.9, 0.8, 100.0. At twice the assumed scatter the look throws away more than half of the chairs that never moved, which position alone kept (98.4\%). Evidence that is too sure of itself vetoes the right answer. So a look must be stored per viewing direction, compared only with views from a similar direction, and given a variance that matches its real scatter before it may count.
+\end{itemize}
+
+\subsection*{Part B: a toy language agent (Exercises 5--7). Slides: \emph{The language model acts only through tools}; \emph{Every claim must come from a tool that read a belief}; \emph{A condition in a mission reads a belief}}
+The graph has two rooms (living, kitchen), two doors with the door agent's $P(\text{open})$ (door\_1 0.92, door\_2 0.15), the robot, and three chairs with the chair agent's pose, standard deviation and $P(\text{exists})$ (chair\_22 0.97, chair\_23 0.88, chair\_34 0.41). The ``model'' is a script, so the lab needs no network and gives the same answer every time.
+\begin{itemize}
+\item \textbf{Exercise 5: tools.} Each tool returns a record \texttt{\{node, attr, value\}}, so the source travels with the number. \texttt{where\_is("chair\_23")} gives \texttt{('kitchen', [1.5, 1.2])}; \texttt{door\_open("door\_2")} gives 0.15; \texttt{find("chair")} gives \texttt{['chair\_22', 'chair\_23']}: chair\_34 is on the graph, but at $P(\text{exists})=0.41$ the robot does not believe it is there.
+\item \textbf{Exercise 6: the claim check.} \texttt{unbacked(claims, transcript)} returns every claim $(\text{node},\text{attr},\text{value})$ that no tool record of this turn supports (same node and attribute, same value to within 0.005). You should find: the careful model passes all three questions (``door\_2 is probably closed (P = 0.15)''; ``chair\_23 is in the kitchen''; ``I see 2 chairs: chair\_22, chair\_23''). The sloppy model's ``Yes, door\_2 is open'' and ``I see 3 chairs'' are each marked \emph{not kept: 1 claim no tool supports}. The second is refused although three chair nodes exist: counting nodes reads the graph's bookkeeping, not the robot's belief. After a refusal the history should keep a sentence saying that nothing was checked, not the false sentence, because the model copies its own history into the next answer.
+\item \textbf{Exercise 7: a plan whose condition reads a belief.} \texttt{run(plan)} walks the steps; an \texttt{if} step reads the door's $P(\text{open})$ \emph{when it runs}. With door\_2 at 0.15 the route is \texttt{['door\_1', 'kitchen']} (round by the open door); after the door agent revises door\_2 to 0.85 the same plan gives \texttt{['door\_2', 'kitchen']}. The plan did not change; the belief did.
+\item \textbf{B5 (optional): a real local model.} If a local model server runs (for example \texttt{ollama serve} with \texttt{qwen2.5:3b} pulled), the cell asks it to reply only with a JSON tool request, runs the tool, and applies the same check. Without a server it prints ``no local model available'' and does nothing.
+\end{itemize}
+
+%=====================================================================================
+\section{Glossary}
+%=====================================================================================
+
+Each entry has a plain definition and the slide where the word first appears (slide titles are shortened; ``Backup'' is a backup slide).
+
+\footnotesize
+\setlength{\LTpre}{2pt}\setlength{\LTpost}{2pt}
+\renewcommand{\arraystretch}{1.03}
+\begin{longtable}{@{}>{\raggedright\bfseries}p{2.8cm} p{8.9cm} >{\raggedright\arraybackslash}p{4.2cm}@{}}
+\toprule
+Term & Meaning & Slide\\\midrule\endhead
+vision-language model & A model that takes a picture and a question and writes text. Its output is a hypothesis, not a measurement. & A vision-language model gives the robot hypotheses\ldots\\
+language model & A model that reads and writes text. On the robot it runs locally and is the same model that reads pictures. & The language model acts only through tools\\
+language agent & The agent that hosts the language model, gives it the digest and the tools, and checks its replies. & Today language reads and changes\ldots\\
+hypothesis & A statement an agent must still test by looking and measuring before it can become a belief. & A vision-language model gives the robot hypotheses\ldots\\
+digest & A text summary of the graph (room, pose, doors, objects, today), refreshed every 0.5 s; all the model sees of the beliefs. & The model reads a text digest\ldots\\
+tool & A function the model may call; each reads one belief or posts one intention, and returns a record with its source. & The language model acts only through tools\\
+\texttt{look} & The tool that sends one camera frame to the model. & A vision-language model turns a picture\ldots\\
+$P(\text{open})$ & The door agent's probability that its door is open, from the leaf angle it observes. & The model reads a text digest\ldots\\
+$P(\text{see}\given\mathbf v)$ & Probability of seeing an object from place $\mathbf v$: $P(\text{notice}\given\mathbf v)\cdot P(\text{recognise}\given\mathbf v)$. & Each question goes to the agent\ldots\\
+card & A plan or command shown in the controller's window with run and cancel buttons; it runs only after the person's ``yes''. & A gate in code decides\ldots\\
+gate & Code that decides which commands run at once (a short move) and which wait for a card (a crossing, a long move). & A gate in code decides\ldots\\
+mission & A plan in the mission language: steps, conditions and watches, checked before it runs. & The language model proposes; the controller acts\\
+condition & A test in a mission on a belief, such as \texttt{door\_open(door\_1)<0.5}, read when the step runs. & A condition in a mission reads a belief\\
+watch & A rule in a mission that reacts to something seen while it runs; \texttt{continue} keeps going, \texttt{stop} ends the mission. & A condition in a mission reads a belief\\
+imagine & Run the model the robot acts with on a copy of its beliefs with one thing changed; the answer states its assumptions. & Imagining: the same model\ldots\\
+claim & A statement in the model's reply about the robot or the world; kept only if a tool record of this turn supports it. & Every claim must come from a tool\ldots\\
+claim check & Code that compares each claim with the tool records and refuses the unsupported ones. & Every claim must come from a tool\ldots\\
+second sight & Deciding whether a detected object is a remembered one or a new one, with ``new'' always on the list. & Backup: A second sight is a comparison\\
+$\pi$ & Probability that a remembered object was moved; then its position is uniform over the room. & Backup: A second sight is a comparison\\
+$r_k$ & Nats by which chair $k$'s stored look explains a view better than the class look does. & Backup: A second sight is a comparison\\
+\bottomrule
+\end{longtable}
+
+\end{document}
