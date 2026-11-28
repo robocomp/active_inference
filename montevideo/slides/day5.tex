@@ -31,6 +31,7 @@
 \newcommand{\from}[1]{\par\vspace{2pt}{\scriptsize\color{muted}#1}}
 
 \begin{document}
+\metroset{subsectionpage=progressbar}
 
 \maketitle
 
@@ -187,6 +188,8 @@
 \section{The language agent}
 % =================================================================================================
 
+\subsection{How the model meets the beliefs}
+
 \begin{frame}{The language model acts only through tools}
   \centering
   \begin{tikzpicture}[s/.style={box4, minimum height=1.0cm}]
@@ -235,6 +238,8 @@
   \end{columns}
   \lesson{Whatever the model says about the robot must be a line of this digest or the result of a tool.}
 \end{frame}
+
+\subsection{Answering from the beliefs}
 
 \begin{frame}{Questions about the scene are answered from a belief}
   \begin{columns}[T]
@@ -307,7 +312,16 @@
       \end{tikzpicture}
     \end{column}
   \end{columns}
-  \vspace{0.3em}\small On the left, ``may have moved'' is lost and chair\_39 changes room.
+  \vspace{0.2em}
+  \begin{columns}[c]
+    \begin{column}{0.3\textwidth}\centering
+      \includegraphics[height=1.9cm]{d3_ltom_graph.png}
+    \end{column}
+    \begin{column}{0.66\textwidth}\small
+      \texttt{where\_is} reads the object memory of Day 3. On the left, ``may have moved'' is lost
+      and chair\_39 changes room.
+    \end{column}
+  \end{columns}
   \lesson{When the tool's text already answers, the code sends it as it is: the rule is in code, not in the prompt.}
 \end{frame}
 
@@ -332,8 +346,20 @@
       \end{tikzpicture}
     \end{column}
   \end{columns}
+  \vspace{0.2em}
+  \begin{columns}[c]
+    \begin{column}{0.55\textwidth}\centering
+      \includegraphics[height=2.1cm]{d5_em_record_crop.png}
+    \end{column}
+    \begin{column}{0.41\textwidth}\small
+      The question reads the episodic memory of Day 3, which keeps records like this one (a run of 22 November).
+      On the right it held none for the day.
+    \end{column}
+  \end{columns}
   \ask{what should the robot answer when its memory holds nothing about today?}{That it holds nothing, as it did. It does not make up a day.}
 \end{frame}
+
+\subsection{Acting through the controller}
 
 \begin{frame}{A gate in code decides which commands wait for a yes}
   \begin{columns}[T]
@@ -415,6 +441,20 @@
   \lesson{The second report, from the controller, corrects the first.}
 \end{frame}
 
+\begin{frame}{The same request on another run: a card, a ``yes'', four steps from the controller}
+  \begin{columns}[c]
+    \begin{column}{0.6\textwidth}\centering
+      \includegraphics[height=0.6\textheight]{d5_mission_card_crop.png}\par
+      {\scriptsize the language agent's window: the plan waits for ``yes'', then each step is reported by the controller\par}
+    \end{column}
+    \begin{column}{0.38\textwidth}\centering
+      \includegraphics[height=0.6\textheight]{d5_mission_sim.png}\par
+      {\scriptsize the simulated flat seen from above, same run, an earlier moment; chairs in magenta\par}
+    \end{column}
+  \end{columns}
+  \lesson{The steps in the chat are the controller's reports, not the model's words.}
+\end{frame}
+
 \begin{frame}{A condition in a mission reads a belief}
   \centering
   \begin{tikzpicture}[m/.style={draw=accent, fill=accent!6, thick, rounded corners=3pt, font=\scriptsize\ttfamily, text width=4.0cm, align=left, inner sep=4pt},
@@ -429,6 +469,8 @@
 
   \lesson{``If it is shut'' is $P(\text{open})<0.5$, read from the door agent when the mission reaches it.}
 \end{frame}
+
+\subsection{Imagining, and naming}
 
 \begin{frame}[t]{Imagining: the same model, run on a changed copy of the world}
   \centering
@@ -475,10 +517,13 @@
         \toolb{t1}{u1}{imagine\_view(chair)}
         \botb{b1}{t1}{8 typical chairs on the floor 2.5 m in front of me. I would notice something with P 0.97 [...] it is too close for the sensor.}
       \end{tikzpicture}
+      \centering
+      \includegraphics[width=0.95\linewidth]{d5_imagine_chair_crop.png}\par
+      {\scriptsize \texttt{imagine\_view} output, a run with the same numbers: camera view (red: chair in the 8 samples) and LiDAR from above\par}
     \end{column}
   \end{columns}
   \vspace{0.2em}\small Both add: ``my detector for chairs isn't calibrated yet, so treat the numbers as rough''.
-  \ask{why did the same question give $P=0.00$ once and $0.97$ once?}{The imagined chairs stood in different places: outside the view in one run, 2.5 m ahead in the other. The answer is about the placement, and it states it.}
+  \ask{why did the same question give $P=0.00$ once and $0.97$ once?}{The imagined chairs stood elsewhere: out of view once, 2.5 m ahead once. Each answer states its placement.}
 \end{frame}
 
 \begin{frame}{A ``what if'' needs a place in the world}
@@ -510,11 +555,14 @@
     \end{column}
     \begin{column}{0.4\textwidth}
       \centering\small
-      \textbf{Designed, not built for use}\\[0.5em]
+      \includegraphics[width=0.7\linewidth]{d5_door19.png}\par
+      {\scriptsize door\_19, the door called ``front door'', from the front camera 13 s later\par}
+      \vspace{0.4em}
+      \textbf{Designed, not built for use}\\[0.3em]
       \begin{tikzpicture}[s/.style={box4, minimum width=3.4cm}]
         \node[s, fill=muted!10] (a) at (0,0) {``that chair is mine''};
-        \node[s, fill=cool!10] (b) at (0,-1.1) {card: \emph{chair\_34 is yours?}};
-        \node[s, fill=good!12] (c) at (0,-2.2) {name on the chair, only after ``yes''};
+        \node[s, fill=cool!10] (b) at (0,-0.8) {card: \emph{chair\_34 is yours?}};
+        \node[s, fill=good!12] (c) at (0,-1.6) {name on the chair, only after ``yes''};
         \draw[arr4] (a) -- (b); \draw[arr4] (b) -- (c);
       \end{tikzpicture}
     \end{column}
@@ -611,11 +659,15 @@
 \begin{frame}{What is measured, and what is not}
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
-      \begin{measured}{a local model, on the robot's computer}
-        \small
-        With a 26-billion-parameter open model: the right tool in 307 of 315 cases (105 requests,
-        3 runs each), 0.9 s per call; a correct mission in 99 of 102 (34 requests, 3 runs each).
-      \end{measured}
+      \centering\small\textbf{A 26-billion-parameter open model, on the robot's computer}\par\vspace{0.4em}
+      \begin{tikzpicture}[x=5cm]
+        \foreach \y/\n/\k/\lab in {0/307/315/right tool, -1.1/99/102/right mission}{
+          \fill[muted!30] (0,\y) rectangle (1,\y+0.55);
+          \fill[good] (0,\y) rectangle ({\n/\k},\y+0.55);
+          \node[anchor=south west, font=\footnotesize, inner sep=1pt] at (0,\y+0.58) {\lab: \textbf{\n\ of \k}};
+        }
+      \end{tikzpicture}\par\vspace{0.2em}
+      {\scriptsize tool: 105 requests $\times$ 3 runs, 0.9 s per call; mission: 34 requests $\times$ 3 runs\par}
       \small
       In one simulated run a watch reacted while the robot crossed a door, and a ``stop'' watch ended
       an exploration at a new chair.
@@ -739,12 +791,24 @@
 \end{frame}
 
 \begin{frame}{The last result of the week}
-  \centering
-  \vspace{1em}
-  \raggedright
-  \alert{The robot acts to make its beliefs better, and language is one more way to read and change
-  those beliefs.} Whatever it says, it can show where it came from: a belief, the model that built it,
-  and the look that paid for it.
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}\centering
+      \begin{tikzpicture}
+        \node[anchor=south west, inner sep=0pt] (im) at (0,0) {\includegraphics[height=0.8\textheight]{cortex_overview_nosem.png}};
+        \begin{scope}[x={(im.south east)}, y={(im.north west)}]
+          \node[draw=accent, fill=accent!15, very thick, rounded corners, font=\scriptsize\bfseries, align=center,
+                minimum width=1.4cm] (lang) at (0.17,0.47) {Language\\Agent};
+          \draw[<->, very thick, accent] (lang.east) -- (0.47,0.55);
+        \end{scope}
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \alert{The robot acts to make its beliefs better, and language is one more way to read and change
+      those beliefs.}\par\vspace{0.8em}
+      \small The language agent is one more agent on the same graph. Whatever it says, it can show where it
+      came from: a belief, the model that built it, and the look that paid for it.
+    \end{column}
+  \end{columns}
 \end{frame}
 
 % =================================================================================================

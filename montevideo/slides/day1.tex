@@ -84,7 +84,7 @@
 
   \small Two rooms, one door, three objects, a LiDAR, and a robot whose wheel odometry drifts a little.
   \vfill
-  \lesson{Everything you build this week runs on this toy, in \texttt{numpy}, on your laptop.}
+  \lesson{Days 1, 2 and 4 use this toy, Days 3 and 5 a small graph of beliefs: all \texttt{numpy}, on your laptop.}
 \end{frame}
 
 \begin{frame}{How this course is built}
@@ -128,6 +128,49 @@
 
   \vspace{0.9em}
   \lesson{The third step is not optional: most of what we learned, we learned there.}
+\end{frame}
+
+\newcommand{\refbook}[4]{\begin{tabular}[t]{@{}c@{}}\includegraphics[height=#1]{#2}\\[0.2em]
+    {\small\textbf{#3}}\\[-0.1em] {\footnotesize #4}\end{tabular}}
+
+\begin{frame}{Reference books for the course: the mind}
+  \centering
+  \refbook{3.8cm}{book_hohwy.jpg}{Hohwy, 2013}{a mind that predicts}\hfill
+  \refbook{3.8cm}{book_clark.jpg}{Clark, 2016}{prediction and action}\hfill
+  \refbook{3.8cm}{book_parr.jpg}{Parr, Pezzulo, Friston, 2022}{active inference}\hfill
+  \refbook{3.8cm}{book_prescott.jpg}{Prescott, 2024}{minds, natural and artificial}
+  \vfill
+  \lesson{These books read perception and action as inference: the idea the robot is built on.}
+\end{frame}
+
+\begin{frame}{Reference books for the course: probability and inference}
+  \centering
+  \refbook{2.25cm}{book_jaynes.jpg}{Jaynes, 2003}{probability as logic}\hfill
+  \refbook{2.25cm}{book_pearl.jpg}{Pearl, 1988}{beliefs as networks}\hfill
+  \refbook{2.25cm}{book_bolstad.jpg}{Bolstad, 2007}{Bayes' rule, step by step}\par\vspace{0.15em}
+  \refbook{2.25cm}{book_mackay.jpg}{MacKay, 2003}{information and inference}\hfill
+  \refbook{2.25cm}{book_bishop.jpg}{Bishop, 2006}{learning as inference}\hfill
+  \refbook{2.25cm}{book_koller.jpg}{Koller, Friedman, 2009}{graphical models}
+  \lesson{Every belief in the robot is written in the language of probability.}
+\end{frame}
+
+\begin{frame}{Reference books for the course: robotics}
+  \centering
+  \refbook{3.8cm}{book_thrun.jpg}{Thrun, Burgard, Fox, 2005}{a robot's beliefs}\hspace{1.2cm}
+  \refbook{3.8cm}{book_corke.jpg}{Corke, 2017}{robots, cameras, control}\hspace{1.2cm}
+  \refbook{3.8cm}{book_lynch_park.jpg}{Lynch, Park, 2017}{robot motion}
+  \vfill
+  \lesson{A robot's beliefs are about its body, its sensors and the space it moves in.}
+\end{frame}
+
+\begin{frame}{Reference books for the course: software}
+  \centering
+  \refbook{3.8cm}{book_martinrico_asr.jpg}{Martín Rico et al., 2026}{software architectures for robots}\hfill
+  \refbook{3.8cm}{book_stroustrup.jpg}{Stroustrup, 2013}{C++: the agents}\hfill
+  \refbook{3.8cm}{book_lutz.jpg}{Lutz, 2013}{Python: the labs}\hfill
+  \refbook{3.8cm}{book_coulouris.jpg}{Coulouris et al., 2011}{agents on a network}
+  \vfill
+  \lesson{The beliefs live in programs: C++ agents on a network, Python in the labs.}
 \end{frame}
 
 % =================================================================================================
