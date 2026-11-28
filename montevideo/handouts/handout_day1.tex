@@ -21,7 +21,7 @@ and to update the belief when a reading arrives. In the lab you run these operat
 The rest of the week reuses exactly these operations: Day 2 explains what the robot does when they cannot be computed exactly,
 and Days 3--5 apply them to rooms, objects and doors.
 
-\textbf{How to use this handout.} It follows the lecture in order (Parts 1--6), then gives the lab guide (Part 7) and a symbol glossary (Part 8).
+\textbf{How to use this handout.} It follows the lecture in order (Parts 1--6), then gives the lab guide (Part 7), a symbol glossary (Part 8) and the reference books for the course (Part 9).
 Every derivation is written out. The numpy idioms are in the cheatsheet (\cs{1} arrays and broadcasting, \cs{2} the three operations, \cs{3} Gaussians); they are not repeated here.
 Slides are named by their title.
 
@@ -481,5 +481,44 @@ evidence & $p(o)$: the denominator of Bayes' rule, the area of likelihood$\times
 \bottomrule
 \end{tabular}
 \end{center}
+
+
+\section{Reference books for the course}
+The books shown on the slides \slide{Reference books for the course}, grouped by theme. After each, what the course takes from it.
+
+\newcommand{\rb}[2]{\item #1\\{\small\itshape #2}}
+\subsection*{The mind}
+\begin{itemize}\setlength{\itemsep}{0.15em}
+\rb{J.~Hohwy (2013). \emph{The Predictive Mind}. Oxford University Press.}{a mind that predicts its own input}
+\rb{A.~Clark (2016). \emph{Surfing Uncertainty: Prediction, Action, and the Embodied Mind}. Oxford University Press.}{prediction and action as one loop}
+\rb{T.~Parr, G.~Pezzulo, K.~J.~Friston (2022). \emph{Active Inference: The Free Energy Principle in Mind, Brain, and Behavior}. MIT Press (open access).}{active inference: the framework of Days 2 and 4}
+\rb{T.~J.~Prescott (2024). \emph{The Psychology of Artificial Intelligence}. Routledge.}{minds, natural and artificial}
+\end{itemize}
+
+\subsection*{Probability and inference}
+\begin{itemize}\setlength{\itemsep}{0.15em}
+\rb{E.~T.~Jaynes (2003). \emph{Probability Theory: The Logic of Science}. Cambridge University Press.}{probability as the logic of plausible reasoning}
+\rb{J.~Pearl (1988). \emph{Probabilistic Reasoning in Intelligent Systems: Networks of Plausible Inference}. Morgan Kaufmann.}{beliefs as networks of variables}
+\rb{W.~M.~Bolstad (2007). \emph{Introduction to Bayesian Statistics}, 2nd ed. Wiley.}{Bayes' rule worked step by step}
+\rb{D.~J.~C.~MacKay (2003). \emph{Information Theory, Inference, and Learning Algorithms}. Cambridge University Press (free online).}{information, entropy and inference}
+\rb{C.~M.~Bishop (2006). \emph{Pattern Recognition and Machine Learning}. Springer.}{learning as inference; Gaussians and the Laplace approximation}
+\rb{D.~Koller, N.~Friedman (2009). \emph{Probabilistic Graphical Models: Principles and Techniques}. MIT Press.}{factorisation of a joint as a graph}
+\end{itemize}
+
+\subsection*{Robotics}
+\begin{itemize}\setlength{\itemsep}{0.15em}
+\rb{S.~Thrun, W.~Burgard, D.~Fox (2005). \emph{Probabilistic Robotics}. MIT Press.}{a robot's beliefs: filters, localisation, mapping}
+\rb{P.~Corke (2017). \emph{Robotics, Vision and Control: Fundamental Algorithms in MATLAB}, 2nd ed. Springer.}{robots, cameras and control}
+\rb{K.~M.~Lynch, F.~C.~Park (2017). \emph{Modern Robotics: Mechanics, Planning, and Control}. Cambridge University Press.}{rigid-body motion, planning and control}
+\end{itemize}
+
+\subsection*{Software}
+\begin{itemize}\setlength{\itemsep}{0.15em}
+\rb{F.~Martín Rico, R.~Pérez Rodríguez (2026). \emph{Arquitecturas Software para Robots}, v27.0.0. Intelligent Robotics Lab, CC BY-NC-ND 4.0.
+  \url{https://intelligentroboticslab.gsyc.urjc.es/web_libro_arquitecturas_software_robots/}}{software architectures for robots}
+\rb{B.~Stroustrup (2013). \emph{The C++ Programming Language}, 4th ed. Addison-Wesley.}{C++: the language of the robot's agents}
+\rb{M.~Lutz (2013). \emph{Learning Python}, 5th ed. O'Reilly.}{Python: the language of the labs}
+\rb{G.~Coulouris, J.~Dollimore, T.~Kindberg, G.~Blair (2011). \emph{Distributed Systems: Concepts and Design}, 5th ed. Addison-Wesley.}{agents that share one graph over a network}
+\end{itemize}
 
 \end{document}

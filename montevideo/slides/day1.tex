@@ -32,6 +32,11 @@
 \colorlet{cross}{cool!50!good!85!black}   % s-with-o terms: between the colour of s and of o
 \definecolor{prob}{HTML}{E08E0B}          % a probability read off a picture (area / volume)
 
+\author{Pablo Bustos}
+\titlegraphic{\begin{tikzpicture}[remember picture, overlay]
+  \node[anchor=south east, inner sep=0pt] at ([xshift=-1.6cm, yshift=0.5cm]current page.south east)
+    {\includegraphics[height=1.0cm]{logo_robolab.png}\hspace{0.5cm}\includegraphics[height=1.5cm]{logo_uex.png}};
+\end{tikzpicture}}
 \begin{document}
 
 \maketitle
@@ -42,9 +47,9 @@
 % =================================================================================================
 
 \begin{frame}{A robot is put down in an apartment it has never seen}
-  % Robolab: Actionable Scene Graphs (3 min 26 s). Click once in pympress to start.
+  % general.mp4 (57 s, 2560x1440). Click once in pympress to start.
   \centering
-  \movie[width=9.6cm, height=5.4cm, showcontrols=true]{\includegraphics[width=9.6cm]{actionable_scene_graphs_poster.png}}{media/actionable_scene_graphs.mp4}
+  \movie[width=10.2cm, height=5.74cm, showcontrols=true]{\includegraphics[width=10.2cm]{general_poster.png}}{media/general.mp4}
   \vfill
   \lesson{Nothing in this video was programmed as a sequence of steps.}
 \end{frame}
